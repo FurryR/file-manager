@@ -1,0 +1,29 @@
+# Android build artifacts
+.gradle/
+gradle/
+build/
+app/build/
+*.apk
+*.aar
+app/src/main/jniLibs/*
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+
+# Agent files
+.omo/
+
+# Rust build artifacts
+/native/target/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local environment
+.env

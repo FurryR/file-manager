@@ -1,0 +1,12 @@
+[package]
+name = "file_daemon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+prost = "0.13"
+tokio = { version = "1.41", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
+
+[build-dependencies]
+prost-build = "0.13"

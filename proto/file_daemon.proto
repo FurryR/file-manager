@@ -1,0 +1,197 @@
+syntax = "proto3";
+
+package filedaemon;
+
+option java_package = "io.furryr.file.proto";
+option java_multiple_files = true;
+
+message Request {
+  uint64 id = 100;
+  oneof command {
+    ListRequest list = 1;
+    CreateFileRequest create_file = 2;
+    StatRequest stat = 3;
+    RenameRequest rename = 6;
+    DeleteRequest delete = 7;
+    CreateDirRequest create_dir = 8;
+    CopyRequest copy = 9;
+    SpawnPTYRequest spawn_pty = 13;
+    ResizePTYRequest resize_pty = 14;
+    ClosePTYRequest close_pty = 15;
+    OpenHandleRequest open_handle = 16;
+    ReadHandleRequest read_handle = 17;
+    WriteHandleRequest write_handle = 18;
+    CloseHandleRequest close_handle = 19;
+    GetHandleSizeRequest get_handle_size = 20;
+    SeekHandleRequest seek_handle = 21;
+    DupHandleRequest dup_handle = 22;
+    TruncateHandleRequest truncate_handle = 23;
+  }
+}
+
+message ListRequest {
+  string path = 1;
+}
+
+message CreateFileRequest {
+  string path = 1;
+}
+
+message StatRequest {
+  string path = 1;
+}
+
+message RenameRequest {
+  string path = 1;
+  string new_name = 2;
+}
+
+message DeleteRequest {
+  string path = 1;
+}
+
+message CreateDirRequest {
+  string path = 1;
+}
+
+// ── Streaming copy (event-driven, no polling) ────────────────────
+
+message CopyRequest {
+  string from = 1;
+  string to = 2;
+}
+
+message StreamProgress {
+  bool finished = 1;
+  uint64 total_bytes = 2;
+  uint64 copied_bytes = 3;
+  string current_name = 4;
+}
+
+message Response {
+  uint64 id = 100;
+  bool ok = 1;
+  string error = 2;
+  repeated FileEntry entries = 3;
+  optional Stat stat = 4;
+  optional StreamProgress stream_progress = 5;
+  uint64 pty_id = 7;
+  PTYEvent pty_event = 8;
+  optional OpenHandleResponse open_handle = 9;
+  optional ReadHandleResponse read_handle = 10;
+  optional GetHandleSizeResponse get_handle_size = 11;
+  optional DupHandleResponse dup_handle = 12;
+}
+
+message FileEntry {
+  string name = 1;
+  string path = 2;
+  bool is_directory = 3;
+  int64 modified_at_ms = 4;
+  bool is_symlink = 5;
+  string real_path = 6;
+  uint32 mode = 7;
+  int64 size = 8;
+}
+
+message Stat {
+  int64 usable_bytes = 1;
+  int64 total_bytes = 2;
+  bool exists = 3;
+  bool is_directory = 4;
+}
+
+message SpawnPTYRequest {
+  string command = 1;
+  repeated string args = 2;
+  map<string, string> env = 3;
+  string term_type = 4;
+  uint32 rows = 5;
+  uint32 cols = 6;
+  string cwd = 7;
+  bool use_root = 8;
+}
+
+message ResizePTYRequest {
+  uint64 pty_id = 1;
+  uint32 rows = 2;
+  uint32 cols = 3;
+}
+
+message PTYEvent {
+  uint64 pty_id = 1;
+  oneof event {
+    uint32 exit_code = 2;
+    string error = 3;
+  }
+}
+
+message ClosePTYRequest {
+  uint64 pty_id = 1;
+}
+
+// ── Virtual file handle protocol ───────────────────────────────────
+
+enum HandleMode {
+  READ = 0;
+  WRITE = 1;
+  READ_WRITE = 2;
+}
+
+message OpenHandleRequest {
+  string path = 1;
+  HandleMode mode = 2;
+}
+
+message OpenHandleResponse {
+  uint64 handle_id = 1;
+  uint64 size = 2;
+}
+
+message ReadHandleRequest {
+  uint64 handle_id = 1;
+  uint64 offset = 2;
+  uint32 length = 3;
+}
+
+message ReadHandleResponse {
+  bytes data = 1;
+  bool eof = 2;
+}
+
+message WriteHandleRequest {
+  uint64 handle_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+}
+
+message CloseHandleRequest {
+  uint64 handle_id = 1;
+}
+
+message GetHandleSizeRequest {
+  uint64 handle_id = 1;
+}
+
+message GetHandleSizeResponse {
+  uint64 size = 1;
+}
+
+message SeekHandleRequest {
+  uint64 handle_id = 1;
+  uint64 position = 2;
+}
+
+message DupHandleRequest {
+  uint64 handle_id = 1;
+}
+
+message DupHandleResponse {
+  uint64 handle_id = 1;
+  uint64 size = 2;
+}
+
+message TruncateHandleRequest {
+  uint64 handle_id = 1;
+  uint64 new_size = 2;
+}

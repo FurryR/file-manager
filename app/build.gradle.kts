@@ -1,4 +1,15 @@
+import com.android.build.api.instrumentation.AsmClassVisitorFactory
+import com.android.build.api.instrumentation.ClassContext
+import com.android.build.api.instrumentation.ClassData
+import com.android.build.api.instrumentation.FramesComputationMode
+import com.android.build.api.instrumentation.InstrumentationParameters
+import com.android.build.api.instrumentation.InstrumentationScope
+import com.android.build.api.variant.ApplicationAndroidComponentsExtension
 import com.google.protobuf.gradle.proto
+import org.objectweb.asm.ClassVisitor
+import org.objectweb.asm.MethodVisitor
+import org.objectweb.asm.Opcodes
+import org.objectweb.asm.Type
 
 plugins {
     id("com.android.application")
@@ -50,6 +61,19 @@ android {
 
     packaging {
         jniLibs.useLegacyPackaging = true
+        jniLibs.excludes.add("**/libtermux.so")
+    }
+}
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.instrumentation.transformClassesWith(
+            JniStripClassVisitorFactory::class.java,
+            InstrumentationScope.ALL
+        ) {}
+        variant.instrumentation.setAsmFramesComputationMode(
+            FramesComputationMode.COMPUTE_FRAMES_FOR_INSTRUMENTED_METHODS
+        )
     }
 }
 
@@ -92,4 +116,55 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     testImplementation("junit:junit:4.13.2")
+}
+
+// ── ASM Bytecode Instrumentation ─────────────────────────────────────
+// Strips JNI native methods from com.termux.terminal.JNI and redirects
+// calls to io.furryr.file.util.ProcessHelper (daemon-backed).
+
+abstract class JniStripClassVisitorFactory :
+    AsmClassVisitorFactory<InstrumentationParameters.None> {
+
+    override fun createClassVisitor(
+        classContext: ClassContext,
+        nextClassVisitor: ClassVisitor
+    ): ClassVisitor = JniClassVisitor(nextClassVisitor)
+
+    override fun isInstrumentable(classData: ClassData): Boolean =
+        classData.className == "com.termux.terminal.JNI"
+}
+
+class JniClassVisitor(next: ClassVisitor) : ClassVisitor(Opcodes.ASM9, next) {
+
+    override fun visitMethod(
+        access: Int, name: String, descriptor: String,
+        signature: String?, exceptions: Array<String>?
+    ): MethodVisitor? {
+        if (name == "<clinit>") return null
+        if (access and Opcodes.ACC_NATIVE == 0) {
+            return super.visitMethod(access, name, descriptor, signature, exceptions)
+        }
+
+        val newAccess = access and Opcodes.ACC_NATIVE.inv()
+        val mv = super.visitMethod(newAccess, name, descriptor, signature, exceptions)
+        mv.visitCode()
+
+        val argTypes = Type.getArgumentTypes(descriptor)
+        var idx = 0
+        for (t in argTypes) {
+            mv.visitVarInsn(t.getOpcode(Opcodes.ILOAD), idx)
+            idx += t.size
+        }
+        mv.visitMethodInsn(
+            Opcodes.INVOKESTATIC,
+            "io/furryr/file/util/ProcessHelper",
+            name,
+            descriptor,
+            false
+        )
+        mv.visitInsn(Type.getReturnType(descriptor).getOpcode(Opcodes.IRETURN))
+        mv.visitMaxs(0, 0)
+        mv.visitEnd()
+        return null
+    }
 }

@@ -19,8 +19,8 @@ object DaemonProtocol {
         output.flush()
     }
 
-    /** Read a framed response + optional ancillary fd from the socket. */
-    fun readResponse(socket: LocalSocket): DaemonResponse {
+    /** Read a raw framed response + optional ancillary fd without checking ok. */
+    fun readFrame(socket: LocalSocket): DaemonResponse {
         val input = socket.inputStream
         val sizeBytes = ByteArray(4)
         readFully(input, sizeBytes)
@@ -28,25 +28,19 @@ object DaemonProtocol {
                 ((sizeBytes[1].toInt() and 0xFF) shl 16) or
                 ((sizeBytes[2].toInt() and 0xFF) shl 8) or
                 (sizeBytes[3].toInt() and 0xFF)
-
         val payload = ByteArray(size)
         readFully(input, payload)
-
         val fd = socket.ancillaryFileDescriptors?.firstOrNull()
-
-        val response = Response.parseFrom(payload)
-        if (!response.ok) {
-            throw PermissionDeniedException(response.error.ifBlank { "daemon returned error" })
-        }
-        return DaemonResponse(response, fd)
+        return DaemonResponse(Response.parseFrom(payload), fd)
     }
 
-    /** Read a raw response frame without checking ok — for streaming. */
-    fun readResponseRaw(input: DataInputStream): Response? {
-        val size = runCatching { input.readInt() }.getOrNull() ?: return null
-        val payload = ByteArray(size)
-        input.readFully(payload)
-        return Response.parseFrom(payload)
+    /** Read a framed response + optional ancillary fd, throwing on ok=false. */
+    fun readResponse(socket: LocalSocket): DaemonResponse {
+        val resp = readFrame(socket)
+        if (!resp.response.ok) {
+            throw PermissionDeniedException(resp.response.error.ifBlank { "daemon returned error" })
+        }
+        return resp
     }
 
     private fun readFully(input: InputStream, buffer: ByteArray) {

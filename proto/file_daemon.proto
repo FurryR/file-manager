@@ -26,6 +26,8 @@ message Request {
     SeekHandleRequest seek_handle = 21;
     DupHandleRequest dup_handle = 22;
     TruncateHandleRequest truncate_handle = 23;
+    WaitPtyRequest wait_pty = 24;
+    KillPtyRequest kill_pty = 25;
   }
 }
 
@@ -81,6 +83,8 @@ message Response {
   optional ReadHandleResponse read_handle = 10;
   optional GetHandleSizeResponse get_handle_size = 11;
   optional DupHandleResponse dup_handle = 12;
+  uint32 child_pid = 13;
+  int32 exit_code = 14;
 }
 
 message FileEntry {
@@ -127,6 +131,14 @@ message PTYEvent {
 }
 
 message ClosePTYRequest {
+  uint64 pty_id = 1;
+}
+
+message WaitPtyRequest {
+  uint64 pty_id = 1;
+}
+
+message KillPtyRequest {
   uint64 pty_id = 1;
 }
 

@@ -27,7 +27,6 @@ async fn main() -> io::Result<()> {
     let socket_name = parse_socket_arg()?;
     let listener = socket::create_abstract_server(&socket_name)?;
     unsafe {
-        libc::signal(libc::SIGCHLD, libc::SIG_IGN);
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     };
 

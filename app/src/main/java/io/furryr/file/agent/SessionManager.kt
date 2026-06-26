@@ -42,6 +42,9 @@ object SessionManager {
     /** Listeners notified when a session finishes. */
     private val sessionFinishedListeners = mutableSetOf<(TerminalSession) -> Unit>()
 
+    /** Listeners notified when the session map changes (create/destroy). */
+    private val sessionChangeListeners = mutableSetOf<() -> Unit>()
+
     // =================================================================
     //  Public types
     // =================================================================
@@ -96,6 +99,14 @@ object SessionManager {
 
     fun removeSessionFinishedListener(listener: (TerminalSession) -> Unit) {
         synchronized(mutex) { sessionFinishedListeners.remove(listener) }
+    }
+
+    fun addSessionChangeListener(listener: () -> Unit) {
+        synchronized(mutex) { sessionChangeListeners.add(listener) }
+    }
+
+    fun removeSessionChangeListener(listener: () -> Unit) {
+        synchronized(mutex) { sessionChangeListeners.remove(listener) }
     }
 
     fun notifyTerminalUpdated(session: TerminalSession) {
@@ -169,6 +180,7 @@ object SessionManager {
 
                 synchronized(mutex) {
                     sessions[sessionId] = info
+                    sessionChangeListeners.forEach { it() }
                 }
 
                 Log.d(TAG, "createSession: success id=$sessionId")
@@ -235,7 +247,9 @@ object SessionManager {
         Log.d(TAG, "destroySession: id=$sessionId")
 
         val info: SessionInfo = synchronized(mutex) {
-            sessions.remove(sessionId)
+            val removed = sessions.remove(sessionId)
+            sessionChangeListeners.forEach { it() }
+            removed
         } ?: throw IllegalArgumentException("Session not found: $sessionId")
 
         // Stop I/O bridge first.

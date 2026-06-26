@@ -11,9 +11,10 @@ use crate::list;
 use crate::proto::request::Command;
 use crate::proto::{
     CloseHandleRequest, ClosePtyRequest, CopyRequest, CreateDirRequest, CreateFileRequest,
-    DeleteRequest, DupHandleRequest, GetHandleSizeRequest, ListRequest,
+    DeleteRequest, DupHandleRequest, GetHandleSizeRequest, KillPtyRequest, ListRequest,
     OpenHandleRequest, RenameRequest, Request, ResizePtyRequest, Response,
-    SeekHandleRequest, StatRequest, TruncateHandleRequest,
+    SeekHandleRequest, StatRequest, TruncateHandleRequest, WaitPtyRequest,
+    PtyEvent,
 };
 use crate::protocol::write_response_with_fd;
 use crate::pty::PtyManager;
@@ -107,13 +108,15 @@ pub async fn handle_streaming(
         Some(Command::SpawnPty(req)) => {
             let mut mgr = pty_manager.lock().await;
             match mgr.spawn_pty(req) {
-                Ok((pty_id, master_fd)) => {
-                    let resp = Response { id: req_id, ok: true, pty_id, ..Response::default() };
+                Ok((pty_id, master_fd, child_pid)) => {
+                    let resp = Response {
+                        id: req_id, ok: true, pty_id, child_pid,
+                        ..Response::default()
+                    };
                     if let Err(e) = write_response_with_fd(write_fd, &resp, master_fd) {
                         let _ = tx.send(error_response(req_id, e));
+                        unsafe { libc::close(master_fd); }
                     }
-                    // close our copy after sending
-                    unsafe { libc::close(master_fd); }
                 }
                 Err(error) => {
                     let _ = tx.send(error_response(req_id, error));
@@ -129,6 +132,69 @@ pub async fn handle_streaming(
             let _ = tx.send(resp);
         }
         Some(Command::ClosePty(ClosePtyRequest { pty_id })) => {
+            let mut mgr = pty_manager.lock().await;
+            let resp = match mgr.close_pty(pty_id) {
+                Ok(()) => ok_response(req_id),
+                Err(error) => error_response(req_id, error),
+            };
+            let _ = tx.send(resp);
+        }
+        Some(Command::WaitPty(WaitPtyRequest { pty_id })) => {
+            let pm = pty_manager.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let child_pid = {
+                    let mgr = pm.lock().await;
+                    mgr.get_child_pid(pty_id)
+                };
+                match child_pid {
+                    Ok(pid) => {
+                        let result = tokio::task::spawn_blocking(move || {
+                            let mut status: i32 = 0;
+                            unsafe {
+                                libc::waitpid(pid as i32, &mut status as *mut i32, 0);
+                            }
+                            status
+                        }).await;
+
+                        let exit_code = match result {
+                            Ok(status) => {
+                                if libc::WIFEXITED(status) {
+                                    libc::WEXITSTATUS(status) as i32
+                                } else if libc::WIFSIGNALED(status) {
+                                    -(libc::WTERMSIG(status) as i32)
+                                } else {
+                                    -1
+                                }
+                            }
+                            Err(_) => -1,
+                        };
+
+                        // Clean up after child has been reaped
+                        let mut mgr = pm.lock().await;
+                        let _ = mgr.remove_pty(pty_id);
+
+                        let _ = tx.send(Response {
+                            id: req_id, ok: true,
+                            exit_code,
+                            pty_event: Some(PtyEvent {
+                                pty_id,
+                                event: Some(crate::proto::pty_event::Event::ExitCode(exit_code as u32)),
+                            }),
+                            ..Response::default()
+                        });
+                    }
+                    Err(_) => {
+                        // PTY already cleaned up by closePty — return 0
+                        let _ = tx.send(Response {
+                            id: req_id, ok: true, exit_code: 0,
+                            ..Response::default()
+                        });
+                    }
+                }
+            });
+        }
+        Some(Command::KillPty(KillPtyRequest { pty_id })) => {
             let mut mgr = pty_manager.lock().await;
             let resp = match mgr.close_pty(pty_id) {
                 Ok(()) => ok_response(req_id),

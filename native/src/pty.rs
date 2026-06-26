@@ -30,9 +30,9 @@ impl PtyManager {
     }
 
     /// Spawn a new PTY. Forks a child, sets up session/terminal, execs the
-    /// requested command, and returns the master fd and pty_id.
+    /// requested command, and returns the master fd, pty_id, and child_pid.
     /// The caller is responsible for sending the master fd to the client.
-    pub fn spawn_pty(&mut self, req: SpawnPtyRequest) -> io::Result<(u64, RawFd)> {
+    pub fn spawn_pty(&mut self, req: SpawnPtyRequest) -> io::Result<(u64, RawFd, u32)> {
         // 1. Open a PTY master
         let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
         if master_fd < 0 {
@@ -168,17 +168,18 @@ impl PtyManager {
 
         // ── PARENT ────────────────────────────────────────────────────
         // Allocate PTY id and store handle
+        let child_pid = pid as u32;
         let pty_id = NEXT_PTY_ID.fetch_add(1, Ordering::SeqCst);
         self.ptys.insert(
             pty_id,
             PtyHandle {
                 master_fd,
-                child_pid: pid as u32,
+                child_pid,
                 container_name: None,
             },
         );
 
-        Ok((pty_id, master_fd))
+        Ok((pty_id, master_fd, child_pid))
     }
 
     /// Resize the terminal window. Sends SIGWINCH to the child process group
@@ -230,6 +231,25 @@ impl PtyManager {
         }
 
         Ok(())
+    }
+    /// Get the child pid for a PTY without removing the handle.
+    pub fn get_child_pid(&self, pty_id: u64) -> io::Result<u32> {
+        self.ptys.get(&pty_id).map(|h| h.child_pid).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("pty {} not found", pty_id),
+            )
+        })
+    }
+
+    /// Remove a PTY handle and close the master fd.
+    /// Called after the child has already been reaped.
+    pub fn remove_pty(&mut self, pty_id: u64) -> Option<RawFd> {
+        self.ptys.remove(&pty_id).map(|h| {
+            let fd = h.master_fd;
+            unsafe { libc::close(fd); }
+            fd
+        })
     }
 }
 

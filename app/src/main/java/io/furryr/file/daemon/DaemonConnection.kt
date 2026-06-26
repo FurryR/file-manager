@@ -11,6 +11,7 @@ import io.furryr.file.proto.CreateFileRequest
 import io.furryr.file.proto.DeleteRequest
 import io.furryr.file.proto.DupHandleRequest
 import io.furryr.file.proto.HandleMode
+import io.furryr.file.proto.KillPtyRequest
 import io.furryr.file.proto.ListRequest
 import io.furryr.file.proto.OpenHandleRequest
 import io.furryr.file.proto.RenameRequest
@@ -21,17 +22,23 @@ import io.furryr.file.proto.SpawnPTYRequest
 import io.furryr.file.proto.StatRequest
 import io.furryr.file.proto.CopyRequest
 import io.furryr.file.proto.TruncateHandleRequest
+import io.furryr.file.proto.WaitPtyRequest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.consumeAsFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.EOFException
 import java.io.FileDescriptor
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.atomic.AtomicLong
 
 data class StatResult(
     val usableBytes: Long,
@@ -42,7 +49,8 @@ data class StatResult(
 
 data class PtyFd(
     val fileDescriptor: FileDescriptor,
-    val ptyId: Long
+    val ptyId: Long,
+    val childPid: Int
 )
 
 data class OpenHandleResult(val handleId: Long, val size: Long)
@@ -53,23 +61,92 @@ class DaemonConnection internal constructor(
 ) {
     private val input = DataInputStream(socket.inputStream)
     private val output = DataOutputStream(socket.outputStream)
-    private val ioLock = Any()
-    private val writeLock = Any()
     internal val daemonProcess: Process? = process
 
     @Volatile
     private var isClosed = false
 
+    // ── Async request dispatch ──────────────────────────────────────
+
+    private val requestIdCounter = AtomicLong(1)
+
+    private sealed class PendingRequest {
+        class Single(val future: CompletableFuture<DaemonResponse>) : PendingRequest()
+        class Stream(val channel: Channel<DaemonResponse>) : PendingRequest()
+    }
+
+    private val pendingRequests = HashMap<Long, PendingRequest>()
+    private val pendingLock = Any()
+    private val writeLock = Any()
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    init {
+        scope.launch { readerLoop() }
+    }
+
+    private fun readerLoop() {
+        try {
+            while (true) {
+                val resp = DaemonProtocol.readFrame(socket)
+                dispatchResponse(resp)
+            }
+        } catch (_: EOFException) {
+            // normal shutdown
+        } catch (e: Exception) {
+            if (!isClosed) {
+                Log.w(TAG, "reader error", e)
+                failAllPending(e)
+            }
+        }
+    }
+
+    private fun dispatchResponse(resp: DaemonResponse) {
+        val id = resp.response.id
+        synchronized(pendingLock) {
+            val pending = pendingRequests[id] ?: return
+            when (pending) {
+                is PendingRequest.Single -> {
+                    pendingRequests.remove(id)
+                    pending.future.complete(resp)
+                }
+                is PendingRequest.Stream -> {
+                    val prog = resp.response.streamProgress
+                    if (prog != null && prog.finished) {
+                        pendingRequests.remove(id)
+                        pending.channel.close()
+                    } else {
+                        pending.channel.trySend(resp)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun failAllPending(cause: Exception) {
+        synchronized(pendingLock) {
+            val err = IllegalStateException("daemon connection lost", cause)
+            pendingRequests.values.forEach {
+                when (it) {
+                    is PendingRequest.Single -> it.future.completeExceptionally(err)
+                    is PendingRequest.Stream -> it.channel.close(err)
+                }
+            }
+            pendingRequests.clear()
+        }
+    }
+
     fun isAlive(): Boolean = !isClosed && runCatching { socket.isConnected }.getOrDefault(false)
 
     fun close() {
-        synchronized(ioLock) {
+        synchronized(writeLock) {
             if (isClosed) return
             isClosed = true
         }
+        failAllPending(EOFException("connection closed"))
+        runCatching { socket.close() }
+        scope.cancel()
         runCatching { input.close() }
         runCatching { output.close() }
-        runCatching { socket.close() }
         daemonProcess?.let { p ->
             if (p.isAlive) {
                 runCatching { p.destroy() }
@@ -78,56 +155,60 @@ class DaemonConnection internal constructor(
         }
     }
 
+    private val TAG = "DaemonConnection"
+
     // ── Core I/O ──────────────────────────────────────────────────────
 
-    /** Send a request and receive a response + optional ancillary fd. */
-    fun request(request: Request): DaemonResponse = synchronized(ioLock) {
-        var lastError: Exception? = null
-        for (attempt in 0 until 2) {
-            if (attempt > 0) {
-                lastError = null
-            }
+    /** Send a request and wait for the matching response. */
+    fun request(request: Request): DaemonResponse {
+        val id = requestIdCounter.getAndIncrement()
+        val req = request.toBuilder().setId(id).build()
+        val future = CompletableFuture<DaemonResponse>()
+
+        synchronized(pendingLock) { pendingRequests[id] = PendingRequest.Single(future) }
+        synchronized(writeLock) {
             if (isClosed) throw IllegalStateException("connection closed")
-            try {
-                DaemonProtocol.writeRequest(output, request)
-                return DaemonProtocol.readResponse(socket)
-            } catch (e: PermissionDeniedException) {
-                throw e
-            } catch (e: Exception) {
-                lastError = e
-                if (attempt == 0) continue
-            }
+            DaemonProtocol.writeRequest(output, req)
         }
-        throw lastError ?: IllegalStateException("daemon request failed")
+
+        val resp = try {
+            future.get()
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw IllegalStateException("interrupted", e)
+        } catch (e: ExecutionException) {
+            throw e.cause as? Exception ?: IllegalStateException("daemon request failed", e)
+        }
+
+        if (!resp.response.ok) {
+            throw PermissionDeniedException(resp.response.error.ifBlank { "daemon returned error" })
+        }
+        return resp
     }
 
     /** Send a streaming request, returning a Flow of CopyProgress. */
     fun requestStream(request: Request): Flow<CopyProgress> = flow {
-        val channel = Channel<CopyProgress>(Channel.UNLIMITED)
-        CoroutineScope(Dispatchers.IO).launch {
-            synchronized(writeLock) {
-                if (isClosed) {
-                    channel.close()
-                    return@launch
-                }
-                try {
-                    DaemonProtocol.writeRequest(output, request)
-                    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
-                    while (!channel.isClosedForSend) {
-                        val resp = DaemonProtocol.readResponseRaw(input) ?: break
-                        val p = resp.streamProgress
-                        channel.trySend(CopyProgress(
-                            totalBytes = p.totalBytes, copiedBytes = p.copiedBytes,
-                            currentName = p.currentName, finished = p.finished, isCopy = true,
-                        ))
-                        if (p.finished || !resp.ok) break
-                    }
-                } catch (_: Exception) {
-                    channel.close()
-                }
-            }
+        val id = requestIdCounter.getAndIncrement()
+        val req = request.toBuilder().setId(id).build()
+        val channel = Channel<DaemonResponse>(Channel.UNLIMITED)
+
+        synchronized(pendingLock) { pendingRequests[id] = PendingRequest.Stream(channel) }
+        synchronized(writeLock) {
+            if (isClosed) throw IllegalStateException("connection closed")
+            DaemonProtocol.writeRequest(output, req)
         }
-        channel.consumeAsFlow().collect { emit(it) }
+
+        for (resp in channel) {
+            if (!resp.response.ok) break
+            val p = resp.response.streamProgress ?: break
+            emit(CopyProgress(
+                totalBytes = p.totalBytes, copiedBytes = p.copiedBytes,
+                currentName = p.currentName, finished = p.finished, isCopy = true,
+            ))
+            if (p.finished) break
+        }
+
+        synchronized(pendingLock) { pendingRequests.remove(id) }
     }.flowOn(Dispatchers.IO)
 
     // ── File operations ──────────────────────────────────────────────
@@ -255,7 +336,11 @@ class DaemonConnection internal constructor(
         val resp = request(req)
         val fd = resp.attachedFd
             ?: throw IllegalStateException("no ancillary fd received from daemon")
-        PtyFd(fileDescriptor = fd, ptyId = resp.response.ptyId)
+        PtyFd(
+            fileDescriptor = fd,
+            ptyId = resp.response.ptyId,
+            childPid = resp.response.childPid.toInt()
+        )
     }
 
     fun resizePty(ptyId: Long, rows: Int, cols: Int): Result<Unit> = runCatching {
@@ -267,6 +352,19 @@ class DaemonConnection internal constructor(
     fun closePty(ptyId: Long): Result<Unit> = runCatching {
         request(Request.newBuilder()
             .setClosePty(ClosePTYRequest.newBuilder().setPtyId(ptyId))
+            .build())
+    }
+
+    fun waitPty(ptyId: Long): Result<Int> = runCatching {
+        val resp = request(Request.newBuilder()
+            .setWaitPty(WaitPtyRequest.newBuilder().setPtyId(ptyId))
+            .build())
+        resp.response.exitCode.toInt()
+    }
+
+    fun killPty(ptyId: Long): Result<Unit> = runCatching {
+        request(Request.newBuilder()
+            .setKillPty(KillPtyRequest.newBuilder().setPtyId(ptyId))
             .build())
     }
 }

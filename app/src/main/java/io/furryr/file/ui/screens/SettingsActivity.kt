@@ -126,7 +126,7 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
     var dockerHubKey by remember { mutableStateOf(prefs.getString("docker_hub_key", "") ?: "") }
     var terminalFont by remember { mutableStateOf(prefs.getString("terminal_font", "") ?: "") }
     var showTerminalFontSizeDialog by remember { mutableStateOf(false) }
-    var terminalFontSize by remember { mutableStateOf(prefs.getInt("terminal_font_size", 24).toString()) }
+    var terminalFontSize by remember { mutableStateOf(prefs.getInt("terminal_font_size", 9).toString()) }
     val scope = rememberCoroutineScope()
 
     fun updateRootEnabled(enabled: Boolean) {
@@ -528,7 +528,7 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
             confirmButton = {
                 TextButton(
                     onClick = {
-                        val size = dialogSize.toIntOrNull()?.coerceIn(8, 128) ?: 24
+                        val size = dialogSize.toIntOrNull()?.coerceIn(8, 128) ?: 9
                         terminalFontSize = size.toString()
                         prefs.edit().putInt("terminal_font_size", size).apply()
                         showTerminalFontSizeDialog = false

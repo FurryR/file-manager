@@ -53,7 +53,7 @@ object ProotRunner {
         context: Context,
         container: Container,
     ): List<String> {
-        val args = mutableListOf("-r", container.rootfsPath)
+        val args = mutableListOf("-0", "-r", container.rootfsPath)
         args.addAll(buildBindMountArgs(container))
         args.add("-w")
         args.add("/")

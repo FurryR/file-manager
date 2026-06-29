@@ -1,5 +1,7 @@
 package io.furryr.file.agent
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.util.Log
 import com.termux.terminal.TerminalSession
@@ -41,6 +43,12 @@ object SessionManager {
 
     /** Listeners notified when a session finishes. */
     private val sessionFinishedListeners = mutableSetOf<(TerminalSession) -> Unit>()
+
+    /** Listeners notified when the session map changes (create/destroy). */
+    private val sessionChangeListeners = mutableSetOf<() -> Unit>()
+
+    /** Application context for clipboard access; set on first session creation. */
+    private var appContext: Context? = null
 
     // =================================================================
     //  Public types
@@ -98,6 +106,14 @@ object SessionManager {
         synchronized(mutex) { sessionFinishedListeners.remove(listener) }
     }
 
+    fun addSessionChangeListener(listener: () -> Unit) {
+        synchronized(mutex) { sessionChangeListeners.add(listener) }
+    }
+
+    fun removeSessionChangeListener(listener: () -> Unit) {
+        synchronized(mutex) { sessionChangeListeners.remove(listener) }
+    }
+
     fun notifyTerminalUpdated(session: TerminalSession) {
         synchronized(mutex) {
             textChangedListeners.forEach { it(session) }
@@ -122,6 +138,7 @@ object SessionManager {
      */
     suspend fun createSession(type: SessionType, context: Context): Result<TerminalSession> =
         withContext(Dispatchers.Main) {
+            if (appContext == null) appContext = context.applicationContext
             try {
                 val sessionId = UUID.randomUUID().toString()
                 Log.d(TAG, "createSession: id=$sessionId type=$type")
@@ -169,6 +186,7 @@ object SessionManager {
 
                 synchronized(mutex) {
                     sessions[sessionId] = info
+                    sessionChangeListeners.forEach { it() }
                 }
 
                 Log.d(TAG, "createSession: success id=$sessionId")
@@ -235,7 +253,9 @@ object SessionManager {
         Log.d(TAG, "destroySession: id=$sessionId")
 
         val info: SessionInfo = synchronized(mutex) {
-            sessions.remove(sessionId)
+            val removed = sessions.remove(sessionId)
+            sessionChangeListeners.forEach { it() }
+            removed
         } ?: throw IllegalArgumentException("Session not found: $sessionId")
 
         // Stop I/O bridge first.
@@ -353,8 +373,22 @@ object SessionManager {
                 sessionFinishedListeners.forEach { it(session) }
             }
         }
-        override fun onCopyTextToClipboard(session: TerminalSession, text: String) {}
-        override fun onPasteTextFromClipboard(session: TerminalSession) {}
+        override fun onCopyTextToClipboard(session: TerminalSession, text: String) {
+            val ctx = appContext ?: return
+            val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("terminal", text))
+        }
+        override fun onPasteTextFromClipboard(session: TerminalSession) {
+            val ctx = appContext ?: return
+            val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = clipboard.primaryClip
+            if (clip != null && clip.itemCount > 0) {
+                val paste = clip.getItemAt(0).coerceToText(ctx)
+                if (paste.isNotEmpty()) {
+                    session.emulator?.paste(paste.toString())
+                }
+            }
+        }
         override fun onBell(session: TerminalSession) {}
         override fun onColorsChanged(session: TerminalSession) {}
         override fun onTerminalCursorStateChange(state: Boolean) {}

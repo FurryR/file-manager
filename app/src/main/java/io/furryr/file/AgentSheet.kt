@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -55,6 +56,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -64,7 +66,9 @@ import com.termux.terminal.TerminalSession
 import io.furryr.file.agent.SessionManager
 import io.furryr.file.agent.TerminalViewComposable
 import io.furryr.file.daemon.DaemonLauncher
+import android.app.Activity
 import android.util.Log
+import android.view.ViewTreeObserver
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -100,6 +104,7 @@ fun AgentSheet(
     val smallTargetPx = screenHeightPx * SmallRatio
     val largeTargetPx = screenHeightPx * LargeRatio
     val sheetHeightPx = remember { Animatable(0f) }
+    var imeBottomPx by remember { mutableIntStateOf(0) }
 
     BackHandler(enabled = visible) { onDismiss() }
 
@@ -128,6 +133,21 @@ fun AgentSheet(
             } else {
                 activeTabIndex = idx.coerceAtMost(tabs.lastIndex)
             }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        val decorView = (context as? Activity)?.window?.decorView
+        val layoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+            if (decorView != null) {
+                val rect = android.graphics.Rect()
+                decorView.getWindowVisibleDisplayFrame(rect)
+                imeBottomPx = (decorView.rootView.height - rect.bottom).coerceAtLeast(0)
+            }
+        }
+        decorView?.viewTreeObserver?.addOnGlobalLayoutListener(layoutListener)
+        onDispose {
+            decorView?.viewTreeObserver?.removeOnGlobalLayoutListener(layoutListener)
         }
     }
 
@@ -271,8 +291,11 @@ fun AgentSheet(
                 }
 
                 // Content: terminal + overlay drawer
+                val isFullHeight = sheetHeightPx.value >= (smallTargetPx + largeTargetPx) / 2
+
                 ContentWithDrawer(
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    modifier = Modifier.weight(1f).fillMaxWidth().imePadding(),
+                    imeBottomPx = if (isFullHeight) imeBottomPx else 0,
                     showDrawer = showDrawer,
                     sessionError = sessionError,
                     tabs = tabs,
@@ -319,17 +342,20 @@ private fun ContentWithDrawer(
     sessionError: String?,
     tabs: List<TerminalTab>,
     activeTabIndex: Int,
+    imeBottomPx: Int = 0,
     onSwitchTab: (Int) -> Unit,
     onCloseTab: (TerminalTab) -> Unit,
     onDismissDrawer: () -> Unit,
     onOpenDrawer: () -> Unit,
     onNewTab: () -> Unit,
 ) {
+    val density = LocalDensity.current
     Box(modifier = modifier) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 4.dp)
+                .padding(bottom = with(density) { imeBottomPx.toDp() })
                 .pointerInput(Unit) {
                     detectHorizontalDragGestures(
                         onDragEnd = { },

@@ -8,6 +8,7 @@ import io.furryr.file.util.Path
 
 import io.furryr.file.agent.ContainerWizardActivity
 import io.furryr.file.agent.ContainerManager
+import io.furryr.file.agent.SessionManager
 import io.furryr.file.provider.SafDatabase
 import io.furryr.file.provider.SafLocation
 import android.app.Activity
@@ -422,6 +423,13 @@ fun FileManagerApp(
                 }
             }
         }
+    }
+
+    // Refresh container running status when terminal sessions change.
+    DisposableEffect(Unit) {
+        val listener: () -> Unit = { containerRefreshKey++ }
+        SessionManager.addSessionChangeListener(listener)
+        onDispose { SessionManager.removeSessionChangeListener(listener) }
     }
 
     LaunchedEffect(Unit) {

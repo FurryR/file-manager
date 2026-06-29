@@ -25,7 +25,7 @@
         android = pkgs.androidenv.composeAndroidPackages {
           platformVersions = [ "35" ];
           buildToolsVersions = [ buildToolsVersion "35.0.0" ];
-          includeNDK = false;
+          includeNDK = true;
           includeEmulator = false;
           includeSources = false;
           includeSystemImages = false;
@@ -39,6 +39,8 @@
           packages = [
             gradlePkg
             jdkPkg
+            pkgs.rustup
+            pkgs.protobuf
             android.androidsdk
             pkgs.android-tools
             pkgs.usbutils
@@ -60,7 +62,13 @@
           shellHook = ''
             export GRADLE_USER_HOME="''${XDG_CACHE_HOME:-$HOME/.cache}/gradle"
             export ANDROID_USER_HOME="''${XDG_STATE_HOME:-$HOME/.local/state}/android"
+            export PATH="$HOME/.cargo/bin:$PATH"
             export PATH="${androidSdkRoot}/platform-tools:${buildToolsDir}:$PATH"
+
+            if ! rustup toolchain list | grep -q '^stable '; then
+              rustup toolchain install stable --profile minimal
+            fi
+            rustup default stable >/dev/null
 
             echo "Android SDK: $ANDROID_SDK_ROOT"
             echo "JDK: $JAVA_HOME"

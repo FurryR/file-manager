@@ -40,6 +40,8 @@
             gradlePkg
             jdkPkg
             android.androidsdk
+            pkgs.android-tools
+            pkgs.usbutils
             pkgs.git
             pkgs.curl
             pkgs.python3

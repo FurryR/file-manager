@@ -30,6 +30,13 @@ android {
         versionName = "1.0"
     }
 
+    // HiddenApiBypass (LSPosed) is used to reach android.system.Os.recvmsg so we
+    // can read SCM_RIGHTS frames ourselves. Play would reject that.
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -103,10 +110,11 @@ dependencies {
     implementation("com.google.protobuf:protobuf-javalite:4.28.2")
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
+    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
     implementation("com.termux.termux-app:terminal-view:0.118.0")
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("androidx.documentfile:documentfile:1.0.1")
-    implementation("com.google.code.gson:gson:2.11.0")
+    implementation("commons-net:commons-net:3.13.0")
+    implementation("com.github.mwiede:jsch:2.28.5")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("io.mockk:mockk:1.13.13")
     testImplementation("org.robolectric:robolectric:4.13")

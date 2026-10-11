@@ -21,6 +21,17 @@ data class PtyConnection(
 object AgentPTYClient {
     private const val TAG = "AgentPTYClient"
 
+    /** Which daemon owns each live PTY: `true` = root daemon. */
+    private val ptyOwners = mutableMapOf<Long, Boolean>()
+
+    /** Root PTYs must be spawned (and later resized/closed) on a root daemon. */
+    private fun connectionFor(useRoot: Boolean): DaemonConnection =
+        if (useRoot && DaemonLauncher.canStartRootDaemon()) {
+            DaemonLauncher.getConnection(appDaemon = false)
+        } else {
+            DaemonLauncher.getConnection(appDaemon = true)
+        }
+
     suspend fun spawnPty(
         command: String = "/system/bin/sh",
         args: List<String> = emptyList(),
@@ -33,11 +44,13 @@ object AgentPTYClient {
     ): Result<PtyConnection> = withContext(Dispatchers.IO) {
         runCatching {
             Log.d(TAG, "spawnPty: command=$command rows=$rows cols=$cols useRoot=$useRoot")
-            val conn = DaemonLauncher.getConnection(appDaemon = true)
+            val rooted = useRoot && DaemonLauncher.canStartRootDaemon()
+            val conn = connectionFor(useRoot)
             val ptyFd: PtyFd = conn.spawnPty(
                 command = command, args = args, env = env,
                 termType = termType, rows = rows, cols = cols, cwd = cwd, useRoot = useRoot
             ).getOrThrow()
+            synchronized(ptyOwners) { ptyOwners[ptyFd.ptyId] = rooted }
             wrapPtyFd(ptyFd)
         }
     }
@@ -46,7 +59,8 @@ object AgentPTYClient {
         withContext(Dispatchers.IO) {
             runCatching {
                 Log.d(TAG, "resizePty: ptyId=$ptyId rows=$rows cols=$cols")
-                DaemonLauncher.getConnection(appDaemon = true).resizePty(ptyId, rows, cols).getOrThrow()
+                val rooted = synchronized(ptyOwners) { ptyOwners[ptyId] } ?: false
+                connectionFor(rooted).resizePty(ptyId, rows, cols).getOrThrow()
             }
         }
 
@@ -54,7 +68,8 @@ object AgentPTYClient {
         withContext(Dispatchers.IO) {
             runCatching {
                 Log.d(TAG, "closePty: ptyId=$ptyId")
-                DaemonLauncher.getConnection(appDaemon = true).closePty(ptyId).getOrThrow()
+                val rooted = synchronized(ptyOwners) { ptyOwners.remove(ptyId) } ?: false
+                connectionFor(rooted).closePty(ptyId).getOrThrow()
             }
         }
 

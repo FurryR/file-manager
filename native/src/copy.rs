@@ -1,12 +1,19 @@
 use std::io;
+use std::collections::HashMap;
+use std::os::fd::{FromRawFd, RawFd};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::proto::{Response, StreamProgress};
+use crate::proto::{ReadSourceResponse, Response, StreamProgress};
+use crate::protocol::OutboundResponse;
+
+pub type SourceReadBroker = Arc<Mutex<HashMap<u64, oneshot::Sender<ReadSourceResponse>>>>;
+
+static NEXT_SOURCE_READ_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Streaming copy with progress events. Sends [StreamProgress] for each
 /// chunk via [tx]. Cancelled by setting [cancel_flag] to true.
@@ -14,7 +21,7 @@ pub async fn copy(
     from: &str,
     to: &str,
     req_id: u64,
-    tx: &mpsc::UnboundedSender<Response>,
+    tx: &mpsc::UnboundedSender<OutboundResponse>,
     cancel_flag: &Arc<AtomicBool>,
 ) -> io::Result<()> {
     if cancel_flag.load(Ordering::Relaxed) {
@@ -54,11 +61,126 @@ pub async fn copy(
     Ok(())
 }
 
+pub async fn copy_from_fd(
+    source_fd: RawFd,
+    to: &str,
+    req_id: u64,
+    source_size: u64,
+    tx: &mpsc::UnboundedSender<OutboundResponse>,
+    cancel_flag: &Arc<AtomicBool>,
+) -> io::Result<u64> {
+    let source = unsafe { std::fs::File::from_raw_fd(source_fd) };
+    let source = tokio::fs::File::from_std(source);
+    copy_reader(source, to, req_id, source_size, tx, cancel_flag).await
+}
+
+pub async fn copy_from_virtual(
+    to: &str,
+    req_id: u64,
+    source_size: u64,
+    tx: &mpsc::UnboundedSender<OutboundResponse>,
+    cancel_flag: &Arc<AtomicBool>,
+    broker: &SourceReadBroker,
+) -> io::Result<u64> {
+    let dst_path = Path::new(to);
+    if let Some(parent) = dst_path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    let mut dst = fs::File::create(dst_path).await?;
+    let mut offset = 0u64;
+    let mut copied = 0u64;
+
+    loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let read_id = NEXT_SOURCE_READ_ID.fetch_add(1, Ordering::Relaxed);
+        let (response_tx, response_rx) = oneshot::channel();
+        broker.lock().await.insert(read_id, response_tx);
+        let request = Response {
+            id: req_id,
+            ok: true,
+            read_source_request: Some(crate::proto::ReadSourceRequest {
+                request_id: read_id,
+                offset,
+                length: 256 * 1024,
+            }),
+            ..Response::default()
+        };
+        if tx.send(OutboundResponse::plain(request)).is_err() {
+            broker.lock().await.remove(&read_id);
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "response channel closed"));
+        }
+        let response = response_rx.await.map_err(|_| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "source read response missing")
+        })?;
+        if !response.error.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::Other, response.error));
+        }
+        let data = response.data;
+        if data.is_empty() {
+            break;
+        }
+        dst.write_all(&data).await?;
+        offset += data.len() as u64;
+        copied += data.len() as u64;
+        let _ = tx.send(progress(req_id, source_size, copied, to));
+        if response.eof {
+            break;
+        }
+    }
+    Ok(copied)
+}
+
+async fn copy_reader<R: tokio::io::AsyncRead + Unpin>(
+    mut source: R,
+    to: &str,
+    req_id: u64,
+    total: u64,
+    tx: &mpsc::UnboundedSender<OutboundResponse>,
+    cancel_flag: &Arc<AtomicBool>,
+) -> io::Result<u64> {
+    let dst_path = Path::new(to);
+    if let Some(parent) = dst_path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    let mut dst = fs::File::create(dst_path).await?;
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut copied = 0u64;
+    loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let n = source.read(&mut buf).await?;
+        if n == 0 { break; }
+        dst.write_all(&buf[..n]).await?;
+        copied += n as u64;
+        let _ = tx.send(progress(req_id, total, copied, to));
+    }
+    Ok(copied)
+}
+
+fn progress(req_id: u64, total: u64, copied: u64, name: &str) -> OutboundResponse {
+    OutboundResponse::plain(Response {
+        id: req_id,
+        ok: true,
+        stream_progress: Some(StreamProgress {
+            finished: false,
+            total_bytes: total,
+            copied_bytes: copied,
+            current_name: Path::new(name).file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_else(|| name.to_string()),
+        }),
+        ..Response::default()
+    })
+}
+
 async fn copy_file(
     src: &Path,
     dst: &Path,
     req_id: u64,
-    tx: &mpsc::UnboundedSender<Response>,
+    tx: &mpsc::UnboundedSender<OutboundResponse>,
     cancel_flag: &Arc<AtomicBool>,
     display_name: &str,
 ) -> io::Result<()> {
@@ -81,7 +203,7 @@ async fn copy_file(
         dst_file.write_all(&buf[..n]).await?;
         copied += n as u64;
 
-        let _ = tx.send(Response {
+        let _ = tx.send(OutboundResponse::plain(Response {
             id: req_id, ok: true,
             stream_progress: Some(StreamProgress {
                 finished: false,
@@ -90,7 +212,7 @@ async fn copy_file(
                 current_name: display_name.to_string(),
             }),
             ..Response::default()
-        });
+        }));
     }
 
     Ok(())
@@ -102,5 +224,46 @@ pub async fn delete_recursive(path: &str) -> io::Result<()> {
         fs::remove_dir_all(p).await
     } else {
         fs::remove_file(p).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{copy_from_virtual, SourceReadBroker};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn virtual_copy_pulls_source_data_from_broker() {
+        let path = std::env::temp_dir().join(format!(
+            "file-daemon-virtual-copy-test-{}",
+            std::process::id(),
+        ));
+        let broker = SourceReadBroker::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let path_string = path.to_string_lossy().into_owned();
+
+        let task = tokio::spawn({
+            let broker = broker.clone();
+            let cancel = cancel.clone();
+            let tx = tx.clone();
+            async move { copy_from_virtual(&path_string, 7, 5, &tx, &cancel, &broker).await }
+        });
+
+        let outbound = rx.recv().await.expect("destination should request source data");
+        let read = outbound.response.read_source_request.expect("source read request");
+        let sender = broker.lock().await.remove(&read.request_id).expect("pending broker request");
+        sender.send(crate::proto::ReadSourceResponse {
+            request_id: read.request_id,
+            data: b"hello".to_vec(),
+            eof: true,
+            error: String::new(),
+        }).expect("destination should receive source data");
+
+        task.await.expect("copy task should finish").expect("virtual copy should succeed");
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+        std::fs::remove_file(path).unwrap();
     }
 }

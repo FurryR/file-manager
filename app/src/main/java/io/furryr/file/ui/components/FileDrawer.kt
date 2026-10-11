@@ -44,7 +44,9 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.SdCard
+import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
@@ -79,6 +81,8 @@ import io.furryr.file.agent.ContainerManager
 import kotlin.math.abs
 import io.furryr.file.provider.SafDatabase
 import io.furryr.file.provider.SafLocation
+import io.furryr.file.provider.FtpServer
+import io.furryr.file.provider.SftpServer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -93,6 +97,7 @@ fun FileDrawer(
     onSettingsClick: () -> Unit,
     onContainerRename: (oldName: String, newName: String) -> Unit = { _, _ -> },
     onContainerDelete: (name: String) -> Unit = {},
+    onContainerKill: (name: String) -> Unit = {},
     sortMode: Boolean = false,
     onToggleSortMode: () -> Unit = {},
     containerOrder: List<String> = emptyList(),
@@ -106,6 +111,22 @@ fun FileDrawer(
     onSafDelete: (hexId: String) -> Unit = {},
     safOrder: List<String> = emptyList(),
     onSafReorder: (from: Int, to: Int) -> Unit = { _, _ -> },
+    ftpLocations: List<FtpServer> = emptyList(),
+    ftpRefreshKey: Int = 0,
+    onAddFtp: (host: String, name: String, port: Int, username: String, password: String) -> Unit = { _, _, _, _, _ -> },
+    onFtpSave: (oldHost: String, newHost: String, name: String, port: Int, username: String, password: String) -> Unit = { _, _, _, _, _, _ -> },
+    onFtpClick: (host: String) -> Unit = {},
+    onFtpDelete: (host: String) -> Unit = {},
+    ftpOrder: List<String> = emptyList(),
+    onFtpReorder: (from: Int, to: Int) -> Unit = { _, _ -> },
+    sftpLocations: List<SftpServer> = emptyList(),
+    sftpRefreshKey: Int = 0,
+    onAddSftp: (host: String, name: String, port: Int, username: String, password: String) -> Unit = { _, _, _, _, _ -> },
+    onSftpSave: (oldHost: String, newHost: String, name: String, port: Int, username: String, password: String) -> Unit = { _, _, _, _, _, _ -> },
+    onSftpClick: (host: String) -> Unit = {},
+    onSftpDelete: (host: String) -> Unit = {},
+    sftpOrder: List<String> = emptyList(),
+    onSftpReorder: (from: Int, to: Int) -> Unit = { _, _ -> },
 ) {
     val configuration = LocalConfiguration.current
     val context = LocalContext.current
@@ -129,6 +150,22 @@ fun FileDrawer(
     var draggedSafHex by remember { mutableStateOf<String?>(null) }
     var safDragOffsetDp by remember { mutableStateOf(0f) }
 
+    // FTP dialog states
+    var showAddFtpDialog by remember { mutableStateOf(false) }
+    var ftpContextMenuTarget by remember { mutableStateOf<String?>(null) }
+    var ftpEditTarget by remember { mutableStateOf<String?>(null) }
+    var ftpDeleteTarget by remember { mutableStateOf<String?>(null) }
+    var draggedFtpHost by remember { mutableStateOf<String?>(null) }
+    var ftpDragOffsetDp by remember { mutableStateOf(0f) }
+
+    // SFTP dialog states
+    var showAddSftpDialog by remember { mutableStateOf(false) }
+    var sftpContextMenuTarget by remember { mutableStateOf<String?>(null) }
+    var sftpEditTarget by remember { mutableStateOf<String?>(null) }
+    var sftpDeleteTarget by remember { mutableStateOf<String?>(null) }
+    var draggedSftpHost by remember { mutableStateOf<String?>(null) }
+    var sftpDragOffsetDp by remember { mutableStateOf(0f) }
+
     // Display order: root and home fixed first, then SAF items in order
     val displaySafLocations = remember(safLocations, safOrder, sortMode) {
         if (sortMode && safOrder.isNotEmpty()) {
@@ -138,11 +175,33 @@ fun FileDrawer(
         }
     }
 
+    // Display order for FTP locations (sortable among themselves)
+    val displayFtpLocations = remember(ftpLocations, ftpOrder, sortMode) {
+        if (sortMode && ftpOrder.isNotEmpty()) {
+            ftpOrder.mapNotNull { host -> ftpLocations.find { it.host == host } }
+        } else {
+            ftpLocations.sortedBy { it.sortOrder }
+        }
+    }
+
+    // Display order for SFTP locations (sortable among themselves)
+    val displaySftpLocations = remember(sftpLocations, sftpOrder, sortMode) {
+        if (sortMode && sftpOrder.isNotEmpty()) {
+            sftpOrder.mapNotNull { host -> sftpLocations.find { it.host == host } }
+        } else {
+            sftpLocations.sortedBy { it.sortOrder }
+        }
+    }
+
     // Stable references for drag gesture handlers
     val currentContainerOrder by rememberUpdatedState(containerOrder)
     val currentOnReorder by rememberUpdatedState(onContainerReorder)
     val currentSafOrder by rememberUpdatedState(safOrder)
     val currentOnSafReorder by rememberUpdatedState(onSafReorder)
+    val currentFtpOrder by rememberUpdatedState(ftpOrder)
+    val currentOnFtpReorder by rememberUpdatedState(onFtpReorder)
+    val currentSftpOrder by rememberUpdatedState(sftpOrder)
+    val currentOnSftpReorder by rememberUpdatedState(onSftpReorder)
 
     // Ordered container list for sort mode
     val displayContainers = remember(containers, containerOrder, sortMode) {
@@ -233,6 +292,22 @@ fun FileDrawer(
                                 onClick = {
                                     showDrawerMenu = false
                                     onAddLocation()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.drawer_add_ftp)) },
+                                leadingIcon = { Icon(Icons.Default.Cloud, null) },
+                                onClick = {
+                                    showDrawerMenu = false
+                                    showAddFtpDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.drawer_add_sftp)) },
+                                leadingIcon = { Icon(Icons.Default.Cloud, null) },
+                                onClick = {
+                                    showDrawerMenu = false
+                                    showAddSftpDialog = true
                                 }
                             )
                             DropdownMenuItem(
@@ -382,13 +457,171 @@ fun FileDrawer(
                 )
             }
             if (1 !in collapsedGroups) {
-                item {
-                    Text(
-                        text = stringResource(R.string.drawer_network_placeholder),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                    )
+                if (displayFtpLocations.isEmpty()) {
+                    item {
+                        Text(
+                            text = stringResource(R.string.no_ftp_servers),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                        )
+                    }
+                } else {
+                    itemsIndexed(
+                        displayFtpLocations,
+                        key = { _, server -> "ftp_${server.host}" }
+                    ) { _, server ->
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            RemoteLocationItem(
+                                name = server.name,
+                                scheme = "ftp",
+                                host = server.host,
+                                onClick = { onFtpClick(server.host) },
+                                onLongClick = { ftpContextMenuTarget = server.host },
+                                sortMode = sortMode,
+                                isDragging = draggedFtpHost == server.host,
+                                dragOffsetDp = if (draggedFtpHost == server.host) ftpDragOffsetDp else 0f,
+                                dragHandleModifier = if (sortMode) {
+                                    Modifier.pointerInput(server.host) {
+                                        detectVerticalDragGestures(
+                                            onDragStart = { draggedFtpHost = server.host },
+                                            onVerticalDrag = { change, dragAmount ->
+                                                change.consume()
+                                                ftpDragOffsetDp += dragAmount.toDp().value
+                                            },
+                                            onDragEnd = {
+                                                val host = draggedFtpHost
+                                                if (host != null) {
+                                                    val from = currentFtpOrder.indexOf(host)
+                                                    if (from >= 0) {
+                                                        val itemH = 56f
+                                                        val steps = (ftpDragOffsetDp / itemH).toInt()
+                                                        val to = (from + steps).coerceIn(currentFtpOrder.indices)
+                                                        if (to != from) currentOnFtpReorder(from, to)
+                                                    }
+                                                }
+                                                draggedFtpHost = null
+                                                ftpDragOffsetDp = 0f
+                                            },
+                                            onDragCancel = { draggedFtpHost = null; ftpDragOffsetDp = 0f },
+                                        )
+                                    }
+                                } else Modifier,
+                            )
+                            DropdownMenu(
+                                expanded = ftpContextMenuTarget == server.host,
+                                onDismissRequest = { ftpContextMenuTarget = null }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.drawer_rename)) },
+                                    leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
+                                    onClick = {
+                                        ftpEditTarget = server.host
+                                        ftpContextMenuTarget = null
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.drawer_delete)) },
+                                    leadingIcon = { Icon(Icons.Default.Delete, null) },
+                                    onClick = {
+                                        ftpDeleteTarget = server.host
+                                        ftpContextMenuTarget = null
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.drawer_sort)) },
+                                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
+                                    onClick = {
+                                        ftpContextMenuTarget = null
+                                        onToggleSortMode()
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    if (displaySftpLocations.isEmpty()) {
+                        item {
+                            Text(
+                                text = stringResource(R.string.no_sftp_servers),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                            )
+                        }
+                    } else {
+                        itemsIndexed(
+                            displaySftpLocations,
+                            key = { _, server -> "sftp_${server.host}" }
+                        ) { _, server ->
+                            Box(modifier = Modifier.fillMaxWidth()) {
+                                RemoteLocationItem(
+                                    name = server.name,
+                                    scheme = "sftp",
+                                    host = server.host,
+                                    onClick = { onSftpClick(server.host) },
+                                    onLongClick = { sftpContextMenuTarget = server.host },
+                                    sortMode = sortMode,
+                                    isDragging = draggedSftpHost == server.host,
+                                    dragOffsetDp = if (draggedSftpHost == server.host) sftpDragOffsetDp else 0f,
+                                    dragHandleModifier = if (sortMode) {
+                                        Modifier.pointerInput(server.host) {
+                                            detectVerticalDragGestures(
+                                                onDragStart = { draggedSftpHost = server.host },
+                                                onVerticalDrag = { change, dragAmount ->
+                                                    change.consume()
+                                                    sftpDragOffsetDp += dragAmount.toDp().value
+                                                },
+                                                onDragEnd = {
+                                                    val host = draggedSftpHost
+                                                    if (host != null) {
+                                                        val from = currentSftpOrder.indexOf(host)
+                                                        if (from >= 0) {
+                                                            val itemH = 56f
+                                                            val steps = (sftpDragOffsetDp / itemH).toInt()
+                                                            val to = (from + steps).coerceIn(currentSftpOrder.indices)
+                                                            if (to != from) currentOnSftpReorder(from, to)
+                                                        }
+                                                    }
+                                                    draggedSftpHost = null
+                                                    sftpDragOffsetDp = 0f
+                                                },
+                                                onDragCancel = { draggedSftpHost = null; sftpDragOffsetDp = 0f },
+                                            )
+                                        }
+                                    } else Modifier,
+                                )
+                                DropdownMenu(
+                                    expanded = sftpContextMenuTarget == server.host,
+                                    onDismissRequest = { sftpContextMenuTarget = null }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.drawer_rename)) },
+                                        leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
+                                        onClick = {
+                                            sftpEditTarget = server.host
+                                            sftpContextMenuTarget = null
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.drawer_delete)) },
+                                        leadingIcon = { Icon(Icons.Default.Delete, null) },
+                                        onClick = {
+                                            sftpDeleteTarget = server.host
+                                            sftpContextMenuTarget = null
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.drawer_sort)) },
+                                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
+                                        onClick = {
+                                            sftpContextMenuTarget = null
+                                            onToggleSortMode()
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -468,6 +701,14 @@ fun FileDrawer(
                                         dialogTargetName = contextMenuTarget?.name
                                         contextMenuTarget = null
                                         showDeleteDialog = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.drawer_kill)) },
+                                    leadingIcon = { Icon(Icons.Default.PowerSettingsNew, null) },
+                                    onClick = {
+                                        contextMenuTarget?.name?.let { onContainerKill(it) }
+                                        contextMenuTarget = null
                                     }
                                 )
                                 DropdownMenuItem(
@@ -624,6 +865,120 @@ fun FileDrawer(
             },
         )
     }
+
+    // ── FTP add dialog ────────────────────────────────────────────────────
+    if (showAddFtpDialog) {
+        RemoteServerDialog(
+            initialPort = 21,
+            title = stringResource(R.string.ftp_add_title),
+            onDismiss = { showAddFtpDialog = false },
+            onConfirm = { host, name, port, username, password ->
+                onAddFtp(host, name, port, username, password)
+                showAddFtpDialog = false
+            },
+        )
+    }
+
+    // ── FTP edit dialog ───────────────────────────────────────────────────
+    ftpEditTarget?.let { oldHost ->
+        val server = ftpLocations.find { it.host == oldHost }
+        if (server != null) {
+            RemoteServerDialog(
+                initialName = server.name,
+                initialHost = server.host,
+                initialPort = server.port,
+                initialUsername = server.username,
+                initialPassword = server.password,
+                title = stringResource(R.string.ftp_edit_title),
+                onDismiss = { ftpEditTarget = null },
+                onConfirm = { host, name, port, username, password ->
+                    onFtpSave(oldHost, host, name, port, username, password)
+                    ftpEditTarget = null
+                },
+            )
+        }
+    }
+
+    // ── FTP delete dialog ─────────────────────────────────────────────────
+    if (ftpDeleteTarget != null) {
+        val host = ftpDeleteTarget
+        val server = ftpLocations.find { it.host == host }
+        AlertDialog(
+            onDismissRequest = { ftpDeleteTarget = null },
+            title = { Text(stringResource(R.string.drawer_delete)) },
+            text = { Text(stringResource(R.string.delete_ftp_confirm, server?.name ?: host ?: "")) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        host?.let { onFtpDelete(it) }
+                        ftpDeleteTarget = null
+                    }
+                ) { Text(stringResource(R.string.delete)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { ftpDeleteTarget = null }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
+
+    // ── SFTP add dialog ───────────────────────────────────────────────────
+    if (showAddSftpDialog) {
+        RemoteServerDialog(
+            initialPort = 22,
+            title = stringResource(R.string.sftp_add_title),
+            onDismiss = { showAddSftpDialog = false },
+            onConfirm = { host, name, port, username, password ->
+                onAddSftp(host, name, port, username, password)
+                showAddSftpDialog = false
+            },
+        )
+    }
+
+    // ── SFTP edit dialog ──────────────────────────────────────────────────
+    sftpEditTarget?.let { oldHost ->
+        val server = sftpLocations.find { it.host == oldHost }
+        if (server != null) {
+            RemoteServerDialog(
+                initialName = server.name,
+                initialHost = server.host,
+                initialPort = server.port,
+                initialUsername = server.username,
+                initialPassword = server.password,
+                title = stringResource(R.string.sftp_edit_title),
+                onDismiss = { sftpEditTarget = null },
+                onConfirm = { host, name, port, username, password ->
+                    onSftpSave(oldHost, host, name, port, username, password)
+                    sftpEditTarget = null
+                },
+            )
+        }
+    }
+
+    // ── SFTP delete dialog ────────────────────────────────────────────────
+    if (sftpDeleteTarget != null) {
+        val host = sftpDeleteTarget
+        val server = sftpLocations.find { it.host == host }
+        AlertDialog(
+            onDismissRequest = { sftpDeleteTarget = null },
+            title = { Text(stringResource(R.string.drawer_delete)) },
+            text = { Text(stringResource(R.string.delete_sftp_confirm, server?.name ?: host ?: "")) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        host?.let { onSftpDelete(it) }
+                        sftpDeleteTarget = null
+                    }
+                ) { Text(stringResource(R.string.delete)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { sftpDeleteTarget = null }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
 }
 
 
@@ -721,6 +1076,12 @@ private fun ContainerItem(
         ContainerState.FAILED -> MaterialTheme.colorScheme.error
         ContainerState.DELETED -> MaterialTheme.colorScheme.onSurfaceVariant
     }
+    val backendLabel = stringResource(
+        when (container.backend) {
+            ContainerBackend.CHROOT -> R.string.container_backend_chroot
+            ContainerBackend.PROOT -> R.string.container_backend_proot
+        }
+    )
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -748,7 +1109,7 @@ private fun ContainerItem(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = "${container.distroId} · $stateLabel",
+                text = "${container.distroId} ($backendLabel) · $stateLabel",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -811,6 +1172,151 @@ private fun SafLocationItem(
             )
             Text(
                 text = "saf://$hexId/",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (sortMode) {
+            Spacer(Modifier.width(8.dp))
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(36.dp)
+                    .then(dragHandleModifier),
+            ) {
+                Icon(
+                    Icons.Default.Menu,
+                    contentDescription = "Drag to reorder",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RemoteServerDialog(
+    initialName: String = "",
+    initialHost: String = "",
+    initialPort: Int = 21,
+    initialUsername: String = "",
+    initialPassword: String = "",
+    title: String,
+    onDismiss: () -> Unit,
+    onConfirm: (host: String, name: String, port: Int, username: String, password: String) -> Unit,
+) {
+    var name by remember { mutableStateOf(initialName) }
+    var host by remember { mutableStateOf(initialHost) }
+    var port by remember { mutableStateOf(initialPort.toString()) }
+    var username by remember { mutableStateOf(initialUsername) }
+    var password by remember { mutableStateOf(initialPassword) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.ftp_name_label)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = host,
+                    onValueChange = { host = it },
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.ftp_host_label)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row {
+                    OutlinedTextField(
+                        value = port,
+                        onValueChange = { port = it.filter(Char::isDigit) },
+                        singleLine = true,
+                        label = { Text(stringResource(R.string.ftp_port_label)) },
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                OutlinedTextField(
+                    value = username,
+                    onValueChange = { username = it },
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.ftp_username_label)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.ftp_password_label)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onConfirm(
+                        host.trim(),
+                        name.ifBlank { host.trim() },
+                        port.toIntOrNull() ?: 21,
+                        username,
+                        password,
+                    )
+                },
+                enabled = host.isNotBlank(),
+            ) { Text("OK") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+        },
+    )
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun RemoteLocationItem(
+    name: String,
+    scheme: String,
+    host: String,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
+    sortMode: Boolean = false,
+    isDragging: Boolean = false,
+    dragOffsetDp: Float = 0f,
+    dragHandleModifier: Modifier = Modifier,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (isDragging) Modifier.offset(y = dragOffsetDp.dp) else Modifier)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+            )
+            .padding(horizontal = 20.dp, vertical = 8.dp),
+    ) {
+        Icon(
+            Icons.Default.Cloud,
+            contentDescription = null,
+            modifier = Modifier.width(24.dp)
+        )
+        Spacer(Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = "$scheme://$host/",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,

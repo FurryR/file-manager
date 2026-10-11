@@ -3,10 +3,20 @@ use std::io;
 use std::mem;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 use tokio::fs;
 
 use crate::proto::{FileEntry, Stat};
+
+/// True when the daemon runs inside a container (chroot/proot). Container paths
+/// are real paths in the container, so the Android `/Android/data` UID trick
+/// must not be applied.
+static CONTAINER_MODE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_container_mode(enabled: bool) {
+    CONTAINER_MODE.store(enabled, Ordering::Relaxed);
+}
 
 pub async fn list_files(path: &str) -> io::Result<Vec<FileEntry>> {
     let list_path = maybe_android_data_path(path);
@@ -79,6 +89,9 @@ pub fn stat_path(path: &str) -> io::Result<Stat> {
 }
 
 pub fn maybe_android_data_path(path: &str) -> String {
+    if CONTAINER_MODE.load(Ordering::Relaxed) {
+        return path.to_string();
+    }
     if unsafe { libc::getuid() } == 0 {
         return path.to_string();
     }

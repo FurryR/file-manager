@@ -1,23 +1,110 @@
 use prost::Message;
 use std::io;
 use std::mem;
-use std::os::fd::RawFd;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::os::fd::{AsRawFd, RawFd};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, Interest};
 use tokio::net::UnixStream;
 
 use crate::proto::{Request, Response};
 
-pub async fn read_frame(stream: &mut UnixStream) -> io::Result<Option<Request>> {
-    let mut size_bytes = [0u8; 4];
-    if stream.read_exact(&mut size_bytes).await.is_err() {
-        return Ok(None);
+pub struct OutboundResponse {
+    pub response: Response,
+    pub attached_fd: Option<RawFd>,
+}
+
+impl OutboundResponse {
+    pub fn plain(response: Response) -> Self {
+        Self { response, attached_fd: None }
     }
-    let size = u32::from_be_bytes(size_bytes) as usize;
-    let mut payload = vec![0u8; size];
-    stream.read_exact(&mut payload).await?;
-    Request::decode(payload.as_slice())
-        .map(Some)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+
+    pub fn with_fd(response: Response, fd: RawFd) -> Self {
+        Self { response, attached_fd: Some(fd) }
+    }
+}
+
+pub struct IncomingRequest {
+    pub request: Request,
+    pub attached_fd: Option<RawFd>,
+}
+
+/// Reads framed requests while retaining SCM_RIGHTS descriptors attached to
+/// the beginning of their frame. Plain AsyncRead cannot observe ancillary data.
+pub struct FrameReader {
+    header: [u8; 4],
+    header_len: usize,
+    attached_fd: Option<RawFd>,
+}
+
+impl FrameReader {
+    pub fn new() -> Self {
+        Self { header: [0; 4], header_len: 0, attached_fd: None }
+    }
+
+    pub async fn read_frame(&mut self, stream: &mut UnixStream) -> io::Result<Option<IncomingRequest>> {
+        while self.header_len < self.header.len() {
+            stream.readable().await?;
+            let control_size = unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) as usize };
+            let mut control = vec![0u8; control_size];
+            let mut iov = libc::iovec {
+                iov_base: self.header[self.header_len..].as_mut_ptr() as *mut libc::c_void,
+                iov_len: self.header.len() - self.header_len,
+            };
+            let mut msg: libc::msghdr = unsafe { mem::zeroed() };
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+            msg.msg_controllen = control.len() as _;
+
+            let received = match stream.try_io(Interest::READABLE, || {
+                let received = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, libc::MSG_DONTWAIT) };
+                if received < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(received)
+                }
+            }) {
+                Ok(received) => received,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Err(error),
+            };
+            if received == 0 {
+                if self.header_len == 0 {
+                    return Ok(None);
+                }
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated request header"));
+            }
+
+            self.header_len += received as usize;
+            let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+            while !cmsg.is_null() {
+                let header = unsafe { &*cmsg };
+                if header.cmsg_level == libc::SOL_SOCKET && header.cmsg_type == libc::SCM_RIGHTS {
+                    let data_len = (header.cmsg_len as usize)
+                        .saturating_sub(unsafe { libc::CMSG_LEN(0) as usize });
+                    let count = data_len / mem::size_of::<RawFd>();
+                    let data_ptr = unsafe { libc::CMSG_DATA(cmsg) as *const RawFd };
+                    if count > 0 {
+                        if let Some(previous) = self.attached_fd.replace(unsafe { *data_ptr }) {
+                            unsafe { libc::close(previous); }
+                        }
+                    }
+                }
+                cmsg = unsafe { libc::CMSG_NXTHDR(&msg, cmsg) };
+            }
+        }
+
+        let size = u32::from_be_bytes(self.header) as usize;
+        if size > 64 * 1024 * 1024 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "request frame too large"));
+        }
+        let mut payload = vec![0u8; size];
+        stream.read_exact(&mut payload).await?;
+        let attached_fd = self.attached_fd.take();
+        self.header_len = 0;
+        let request = Request::decode(payload.as_slice())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        Ok(Some(IncomingRequest { request, attached_fd }))
+    }
 }
 
 pub async fn write_frame(stream: &mut UnixStream, response: Response) -> io::Result<()> {
@@ -28,47 +115,76 @@ pub async fn write_frame(stream: &mut UnixStream, response: Response) -> io::Res
     stream.write_all(&payload).await
 }
 
-/// Write a response with an attached file descriptor via SCM_RIGHTS.
-/// Uses raw fd operations (not tokio) to attach ancillary data.
+/// Write a length-prefixed response with an attached file descriptor via
+/// SCM_RIGHTS. The fd rides the frame's first bytes; the peer reads the whole
+/// frame with an ancillary buffer, so the descriptor is delivered either way.
 pub fn write_response_with_fd(write_fd: RawFd, response: &Response, fd_to_send: RawFd) -> io::Result<()> {
     let payload = response.encode_to_vec();
-    let header = (payload.len() as u32).to_be_bytes();
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&payload);
+    send_all_with_fd(write_fd, &frame, Some(fd_to_send))
+}
 
-    let iov = [
-        libc::iovec {
-            iov_base: header.as_ptr() as *mut libc::c_void,
-            iov_len: header.len(),
-        },
-        libc::iovec {
-            iov_base: payload.as_ptr() as *mut libc::c_void,
-            iov_len: payload.len(),
-        },
-    ];
-
+/// Send `data` in full via `sendmsg`, attaching `fd` to the first chunk only.
+/// Handles partial writes and `EAGAIN` (the socket is non-blocking: tokio owns
+/// it and `dup` shares O_NONBLOCK).
+fn send_all_with_fd(write_fd: RawFd, data: &[u8], fd: Option<RawFd>) -> io::Result<()> {
     let cmsg_space: libc::c_uint = unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) };
     let mut cmsg_buf: Vec<u8> = vec![0u8; cmsg_space as usize];
 
-    let mut msg: libc::msghdr = unsafe { mem::zeroed() };
-    msg.msg_iov = iov.as_ptr() as *mut libc::iovec;
-    msg.msg_iovlen = iov.len() as _;
-    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-    msg.msg_controllen = cmsg_space as _;
+    let mut sent = 0usize;
+    let mut fd_to_attach = fd;
+    while sent < data.len() {
+        let mut iov = libc::iovec {
+            iov_base: data[sent..].as_ptr() as *mut libc::c_void,
+            iov_len: data.len() - sent,
+        };
+        let mut msg: libc::msghdr = unsafe { mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        if let Some(fd) = fd_to_attach {
+            msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+            msg.msg_controllen = cmsg_space as _;
+            let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+            if cmsg.is_null() {
+                return Err(io::Error::new(io::ErrorKind::Other, "CMSG_FIRSTHDR returned null"));
+            }
+            unsafe {
+                (*cmsg).cmsg_level = libc::SOL_SOCKET;
+                (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+                (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<RawFd>() as u32) as _;
+                let data_ptr = libc::CMSG_DATA(cmsg) as *mut RawFd;
+                *data_ptr = fd;
+            }
+        }
 
-    let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
-    if cmsg.is_null() {
-        return Err(io::Error::new(io::ErrorKind::Other, "CMSG_FIRSTHDR returned null"));
-    }
-    unsafe {
-        (*cmsg).cmsg_level = libc::SOL_SOCKET;
-        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<RawFd>() as u32) as _;
-        let data_ptr = libc::CMSG_DATA(cmsg) as *mut RawFd;
-        *data_ptr = fd_to_send;
-    }
-
-    let sent = unsafe { libc::sendmsg(write_fd, &msg, libc::MSG_NOSIGNAL) };
-    if sent < 0 {
-        return Err(io::Error::last_os_error());
+        let n = unsafe { libc::sendmsg(write_fd, &msg, libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT) };
+        if n < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::WouldBlock {
+                let mut poll_fd = libc::pollfd {
+                    fd: write_fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let ready = unsafe { libc::poll(&mut poll_fd, 1, 30_000) };
+                if ready < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if ready == 0 {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "fd response write timed out"));
+                }
+                continue;
+            }
+            return Err(error);
+        }
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "sendmsg wrote zero bytes"));
+        }
+        sent += n as usize;
+        // The fd must be attached to exactly one chunk.
+        fd_to_attach = None;
     }
     Ok(())
 }

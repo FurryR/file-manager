@@ -1,88 +1,126 @@
 package io.furryr.file.agent
 
 import android.content.Context
+import android.net.ConnectivityManager
+import java.io.File
 
 /**
- * Builds proot command-line arguments for running commands inside containers.
+ * Builds the proot command line used to launch a **container daemon**.
  *
- * The proot binary is expected at `filesDir/proot-aarch64` (installed by [ProotInstaller]).
- * Default bind mounts (sdcard, system, app data) are always included first,
- * followed by any user-configured mounts from [Container.bindMounts].
+ * The daemon is started *through* proot, so the daemon process itself lives
+ * inside the container. From then on it can spawn the container shell directly
+ * and own the whole process tree. This is why `/data` must be bound: the
+ * daemon binary (and proot) live under `/data/app/...`.
  *
- * Proot command format:
- *   proot -r rootfs [-b src:dst]... [-w workdir] command [args...]
+ * Bind mount policy mirrors the native chroot backend: individual device nodes
+ * instead of the whole `/dev`, plus `/dev/pts`, `/dev/shm`, `/proc`, `/sys`,
+ * `/system`, `/vendor`, `/sdcard`, `/data`, a writable `/tmp` and a generated
+ * `/etc/resolv.conf`.
  */
 object ProotRunner {
-    private const val DEFAULT_SHELL = "/bin/sh"
+
+    /** Every bind mount used by the proot backend, in order. */
+    fun bindMounts(context: Context, container: Container): List<BindMount> =
+        standardMounts() + runtimeMounts(context, container) + container.bindMounts
 
     /**
-     * Builds a full proot command line including the binary path from
-     * [ProotInstaller.expectedPath].
-     *
-     * If [command] is non-empty, the command is executed via `/bin/sh -c <command>`.
-     * If [command] is empty, an interactive `/bin/sh` shell is started.
-     *
-     * Output format (command mode):
-     *   [proot-binary, -r, rootfsPath, -b, src:dst, ..., -w, /, /bin/sh, -c, command...]
-     *
-     * Output format (interactive mode):
-     *   [proot-binary, -r, rootfsPath, -b, src:dst, ..., -w, /, /bin/sh]
+     * Binds passed to the native chroot backend via `--bind`. The chroot daemon
+     * mounts `/tmp` as tmpfs itself, so only the resolver and user mounts are
+     * forwarded.
      */
-    fun buildProotCommand(
+    fun chrootBinds(context: Context, container: Container): List<Pair<String, String>> =
+        (listOf(resolverMount(context, container)) + container.bindMounts)
+            .filter { File(it.srcAndroidPath).exists() }
+            .map { it.srcAndroidPath to it.dstContainerPath }
+
+    /**
+     * Full argv to launch the container daemon under proot:
+     *   proot -l -0 -r rootfs -b ... -w / <daemon> --socket <name> --proot
+     */
+    fun buildProotDaemonCommand(
         context: Context,
         container: Container,
-        command: List<String>,
+        prootPath: String,
+        daemonPath: String,
+        socketName: String,
     ): List<String> {
-        val binaryPath = ProotInstaller.expectedPath(context).absolutePath
-        val args = buildProotArgs(context, container).toMutableList()
-        if (command.isNotEmpty()) {
-            args.add("-c")
-            args.addAll(command)
+        // `-l` (--link2symlink) is required: Android's app data is mounted
+        // with SELinux policies that forbid hard links, so any hardlink(2)
+        // inside the container fails with EACCES. apk-tools publishes files
+        // atomically via O_TMPFILE + linkat("/proc/self/fd/N"), so without
+        // this every `apk` index/database write fails with "Permission denied".
+        val args = mutableListOf(prootPath, "-l", "-0", "-r", container.rootfsPath)
+        for (mount in bindMounts(context, container)) {
+            if (!File(mount.srcAndroidPath).exists()) continue
+            args.add("-b")
+            args.add("${mount.srcAndroidPath}:${mount.dstContainerPath}")
         }
-        return listOf(binaryPath) + args
-    }
-
-    /**
-     * Builds proot arguments only (without the binary path), suitable for an
-     * interactive shell session.
-     *
-     * Output format:
-     *   [-r, rootfsPath, -b, src:dst, ..., -w, /, /bin/sh]
-     */
-    fun buildProotArgs(
-        context: Context,
-        container: Container,
-    ): List<String> {
-        val args = mutableListOf("-0", "-r", container.rootfsPath)
-        args.addAll(buildBindMountArgs(container))
         args.add("-w")
         args.add("/")
-        args.add(DEFAULT_SHELL)
+        args.add(daemonPath)
+        args.add("--socket")
+        args.add(socketName)
+        args.add("--proot")
         return args
     }
 
-    /**
-     * Generates bind mount arguments (`-b src:dst`) for proot.
-     *
-     * Default mounts (always present, in this order):
-     *   1. /storage/emulated/0/   → /android/sdcard
-     *   2. /system/               → /android/system
-     *   3. /data/data/io.furryr.file/ → /android/data
-     *
-     * User-configured mounts from [Container.bindMounts] are appended after defaults.
-     */
-    private fun buildBindMountArgs(container: Container): List<String> {
-        val defaultMounts = listOf(
-            BindMount("/storage/emulated/0/", "/sdcard"),
-            BindMount("/system/", "/system"),
-            BindMount("/vendor/", "/vendor")
-        )
-        val allMounts = defaultMounts + container.bindMounts
-        val result = mutableListOf<String>()
-        for (mount in allMounts) {
-            result.add("-b")
-            result.add("${mount.srcAndroidPath}:${mount.dstContainerPath}")
+    private fun standardMounts(): List<BindMount> = listOf(
+        BindMount("/dev/null", "/dev/null"),
+        BindMount("/dev/zero", "/dev/zero"),
+        BindMount("/dev/random", "/dev/random"),
+        BindMount("/dev/urandom", "/dev/urandom"),
+        BindMount("/dev/tty", "/dev/tty"),
+        BindMount("/dev/ptmx", "/dev/ptmx"),
+        BindMount("/dev/pts", "/dev/pts"),
+        BindMount("/dev/shm", "/dev/shm"),
+        BindMount("/proc", "/proc"),
+        BindMount("/sys", "/sys"),
+        BindMount("/system", "/system"),
+        // Android 10+ keeps the dynamic linker and bionic in /apex, with its
+        // config in /linkerconfig. Needed so the Android-built daemon binary can
+        // be exec'd under proot.
+        BindMount("/apex", "/apex"),
+        BindMount("/linkerconfig", "/linkerconfig"),
+        BindMount("/vendor", "/vendor"),
+        BindMount("/storage/emulated/0", "/sdcard"),
+        BindMount("/data", "/data"),
+    )
+
+    private fun runtimeMounts(context: Context, container: Container): List<BindMount> =
+        listOf(tmpMount(context, container), resolverMount(context, container))
+
+    /** Host directory proot uses for its own temporary files (`PROOT_TMP_DIR`). */
+    fun prootTmpDir(context: Context, container: Container): File {
+        val tmpDir = File(runtimeDir(context, container), "tmp")
+        if (!tmpDir.exists() && !tmpDir.mkdirs()) {
+            throw IllegalStateException("Failed to create container temp directory: ${tmpDir.absolutePath}")
         }
-        return result
+        return tmpDir
+    }
+
+    private fun tmpMount(context: Context, container: Container): BindMount =
+        BindMount(prootTmpDir(context, container).absolutePath, "/tmp")
+
+    private fun resolverMount(context: Context, container: Container): BindMount {
+        val resolverFile = File(runtimeDir(context, container), "resolv.conf")
+        val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
+        val dnsServers = connectivityManager?.activeNetwork
+            ?.let { network -> connectivityManager.getLinkProperties(network)?.dnsServers }
+            ?.map { address -> "nameserver ${address.hostAddress}" }
+            ?.distinct()
+            .orEmpty()
+        resolverFile.writeText(dnsServers.joinToString(separator = "\n", postfix = "\n"))
+        return BindMount(resolverFile.absolutePath, "/etc/resolv.conf")
+    }
+
+    private fun runtimeDir(context: Context, container: Container): File {
+        val id = container.name.map { c ->
+            if (c.isLetterOrDigit() || c == '-' || c == '_') c else '_'
+        }.joinToString("").ifEmpty { "container" }
+        val dir = File(context.cacheDir, "container/$id")
+        if (!dir.exists() && !dir.mkdirs()) {
+            throw IllegalStateException("Failed to create container runtime directory: ${dir.absolutePath}")
+        }
+        return dir
     }
 }

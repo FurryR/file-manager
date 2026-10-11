@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::fs::File;
@@ -100,7 +101,11 @@ impl HandleTable {
 
         let file = match mode {
             HandleMode::Read => File::open(&path).await?,
-            HandleMode::Write => File::create(&path).await?,
+            HandleMode::Write => {
+                let mut opts = tokio::fs::File::options();
+                opts.write(true);
+                opts.open(&path).await?
+            }
             HandleMode::ReadWrite => {
                 let mut opts = tokio::fs::File::options();
                 opts.read(true).write(true);
@@ -126,7 +131,42 @@ impl HandleTable {
         else { Err(io::Error::new(io::ErrorKind::NotFound, "handle not found")) }
     }
 
+    pub fn duplicate_fd(&self, handle_id: u64) -> io::Result<RawFd> {
+        let state = self.handles.get(&handle_id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "handle not found"))?;
+        let fd = unsafe { libc::dup(state.file.as_raw_fd()) };
+        if fd < 0 { Err(io::Error::last_os_error()) } else { Ok(fd) }
+    }
+
     pub fn get_size(&self, handle_id: u64) -> Option<u64> {
         self.handles.get(&handle_id).map(|s| s.size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HandleTable;
+    use crate::proto::HandleMode;
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+
+    #[tokio::test]
+    async fn duplicated_handle_fd_reads_file_contents() {
+        let path = std::env::temp_dir().join(format!(
+            "file-daemon-handle-test-{}",
+            std::process::id(),
+        ));
+        std::fs::write(&path, b"handle data").unwrap();
+
+        let mut handles = HandleTable::new();
+        let handle = handles.open(path.to_str().unwrap(), HandleMode::Read).await.unwrap();
+        let fd = handles.duplicate_fd(handle.handle_id).unwrap();
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents).unwrap();
+
+        assert_eq!(contents, b"handle data");
+        handles.close(handle.handle_id).await.unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 }

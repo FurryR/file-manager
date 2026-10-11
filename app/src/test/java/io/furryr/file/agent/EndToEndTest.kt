@@ -2,6 +2,7 @@ package io.furryr.file.agent
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import io.furryr.file.provider.ContainerDaemonProvider
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -27,7 +28,7 @@ import java.io.IOException
  * End-to-end tests for the Container → Session → Command execution flow.
  *
  * These tests cover ContainerManager (create, delete, rename, list, execInContainer)
- * with mocked external dependencies (DistroFetcher, ProotInstaller, ProotRunner).
+ * with mocked external dependencies (DistroFetcher, ProotInstaller, ContainerDaemonProvider).
  *
  * Container processes are managed via [SessionManager] — the container lifecycle
  * (RUNNING/STOPPED) is derived from [SessionManager.hasContainerSession].
@@ -58,7 +59,7 @@ class EndToEndTest {
     fun tearDown() {
         runCatching { unmockkObject(ProotInstaller) }
         runCatching { unmockkObject(DistroFetcher) }
-        runCatching { unmockkObject(ProotRunner) }
+        runCatching { unmockkObject(ContainerDaemonProvider) }
         runCatching { unmockkObject(ContainerManager) }
     }
 
@@ -151,10 +152,10 @@ class EndToEndTest {
         unmockkObject(ProotInstaller)
         unmockkObject(DistroFetcher)
 
-        mockkObject(ProotRunner)
-        every {
-            ProotRunner.buildProotCommand(any(), any(), any())
-        } returns listOf("echo", "hello world from container")
+        mockkObject(ContainerDaemonProvider)
+        coEvery {
+            ContainerDaemonProvider.execContainer(any(), any())
+        } returns "hello world from container"
 
         val execResult = ContainerManager.execInContainer(
             context,
@@ -165,17 +166,14 @@ class EndToEndTest {
         assertTrue("execInContainer should succeed", execResult.isSuccess)
         assertEquals("hello world from container", execResult.getOrThrow())
 
-        verify(exactly = 1) {
-            ProotRunner.buildProotCommand(
-                any(),
-                match { it.name == "alpine-dev" },
-                match { commandList ->
-                    commandList.size == 1 && commandList[0] == "echo 'hello world from container'"
-                },
+        coVerify(exactly = 1) {
+            ContainerDaemonProvider.execContainer(
+                "alpine-dev",
+                "echo 'hello world from container'",
             )
         }
 
-        unmockkObject(ProotRunner)
+        unmockkObject(ContainerDaemonProvider)
     }
 
     @Test
@@ -192,10 +190,10 @@ class EndToEndTest {
         unmockkObject(ProotInstaller)
         unmockkObject(DistroFetcher)
 
-        mockkObject(ProotRunner)
-        every {
-            ProotRunner.buildProotCommand(any(), any(), any())
-        } returns listOf("false")
+        mockkObject(ContainerDaemonProvider)
+        coEvery {
+            ContainerDaemonProvider.execContainer(any(), any())
+        } throws RuntimeException("Command exited with code 1")
 
         val execResult = ContainerManager.execInContainer(
             context,
@@ -210,7 +208,7 @@ class EndToEndTest {
             exception!!.message!!.contains("exit"),
         )
 
-        unmockkObject(ProotRunner)
+        unmockkObject(ContainerDaemonProvider)
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -321,10 +319,10 @@ class EndToEndTest {
         mockkObject(DistroFetcher)
         mockDownloadRootfs()
 
-        mockkObject(ProotRunner)
-        every {
-            ProotRunner.buildProotCommand(any(), any(), match { it.isNotEmpty() })
-        } returns listOf("echo", "e2e-success")
+        mockkObject(ContainerDaemonProvider)
+        coEvery {
+            ContainerDaemonProvider.execContainer(any(), any())
+        } returns "e2e-success"
 
         val containerName = "e2e-container"
 
@@ -335,7 +333,7 @@ class EndToEndTest {
         assertEquals(ContainerState.CREATED, container.state)
         assertEquals("alpine", container.distroId)
 
-        // Step 2: Execute command (uses ProotRunner directly, managed by SessionManager)
+        // Step 2: Execute command through the daemon
         val execResult = ContainerManager.execInContainer(
             context,
             containerName,
@@ -344,18 +342,13 @@ class EndToEndTest {
         assertTrue("Step 2 - exec should succeed", execResult.isSuccess)
         assertEquals("e2e-success", execResult.getOrThrow())
 
-        // Verify ProotRunner was called for the exec
-        verify(exactly = 1) {
-            ProotRunner.buildProotCommand(
-                any(),
-                match { it.name == containerName },
-                match { it.isNotEmpty() },
-            )
+        coVerify(exactly = 1) {
+            ContainerDaemonProvider.execContainer(containerName, "echo e2e-success")
         }
 
         unmockkObject(ProotInstaller)
         unmockkObject(DistroFetcher)
-        unmockkObject(ProotRunner)
+        unmockkObject(ContainerDaemonProvider)
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -407,10 +400,10 @@ class EndToEndTest {
         unmockkObject(ProotInstaller)
         unmockkObject(DistroFetcher)
 
-        mockkObject(ProotRunner)
-        every {
-            ProotRunner.buildProotCommand(any(), any(), any())
-        } returns listOf("sh", "-c", "ls -la /tmp")
+        mockkObject(ContainerDaemonProvider)
+        coEvery {
+            ContainerDaemonProvider.execContainer(any(), any())
+        } returns "total 0"
 
         val execResult = ContainerManager.execInContainer(
             context,
@@ -422,7 +415,7 @@ class EndToEndTest {
         val output = execResult.getOrThrow()
         assertTrue(output.isNotEmpty())
 
-        unmockkObject(ProotRunner)
+        unmockkObject(ContainerDaemonProvider)
     }
 
 }

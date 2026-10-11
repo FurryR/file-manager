@@ -13,20 +13,21 @@ import android.net.Uri
 import androidx.core.content.FileProvider
 import io.furryr.file.ProviderAuthority
 import io.furryr.file.model.FileEntry
+import io.furryr.file.provider.ForwardFileProvider
+import io.furryr.file.util.PrimaryStorage
 import java.io.File
 
 import android.widget.Toast
 import java.util.ArrayList
 
 fun openFile(context: Context, entry: FileEntry) {
-    val file = File(entry.path)
-    val uri = runCatching { FileProvider.getUriForFile(context, ProviderAuthority, file) }.getOrNull()
+    val uri = shareableUri(context, entry.path)
     if (uri == null) {
         Toast.makeText(context, context.getString(R.string.toast_cannot_open, entry.name), Toast.LENGTH_SHORT).show()
         return
     }
     val intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(uri, mimeType(file))
+        setDataAndType(uri, mimeType(File(entry.path)))
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
     runCatching { context.startActivity(Intent.createChooser(intent, entry.name)) }.onFailure {
@@ -35,18 +36,16 @@ fun openFile(context: Context, entry: FileEntry) {
 }
 
 fun shareEntries(context: Context, entries: List<FileEntry>) {
-    val files = entries.filterNot { it.isDirectory }.map { File(it.path) }
+    val files = entries.filterNot { it.isDirectory }
     if (files.isEmpty()) return
-    val uris = files.mapNotNull { file ->
-        runCatching { FileProvider.getUriForFile(context, ProviderAuthority, file) }.getOrNull()
-    }
+    val uris = files.mapNotNull { shareableUri(context, it.path) }
     if (uris.isEmpty()) {
         Toast.makeText(context, context.getString(R.string.toast_failed), Toast.LENGTH_SHORT).show()
         return
     }
     val intent = if (uris.size == 1) {
         Intent(Intent.ACTION_SEND).apply {
-            type = mimeType(files.first())
+            type = mimeType(File(files.first().path))
             putExtra(Intent.EXTRA_STREAM, uris.first())
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
@@ -59,4 +58,21 @@ fun shareEntries(context: Context, entries: List<FileEntry>) {
     }
     runCatching { context.startActivity(Intent.createChooser(intent, context.getString(R.string.share))) }
         .onFailure { Toast.makeText(context, context.getString(R.string.toast_failed), Toast.LENGTH_SHORT).show() }
+}
+
+/**
+ * Resolve a shareable `content://` URI for [path].
+ *
+ * Paths under the primary shared storage are handed to the platform
+ * FileProvider; anything else (root-only locations, other volumes, …) is
+ * forwarded through [ForwardFileProvider], which streams the bytes via the
+ * privileged daemon so the receiving app can read them.
+ */
+private fun shareableUri(context: Context, path: String): Uri? {
+    if (PrimaryStorage.contains(path)) {
+        runCatching { FileProvider.getUriForFile(context, ProviderAuthority, File(path)) }
+            .getOrNull()
+            ?.let { return it }
+    }
+    return ForwardFileProvider.buildUri(path)
 }

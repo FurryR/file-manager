@@ -4,8 +4,6 @@ import android.net.Uri
 import io.furryr.file.copy.CopyProgress
 import io.furryr.file.copy.FileSource
 import io.furryr.file.copy.OpenMode
-import io.furryr.file.daemon.DaemonLauncher
-import io.furryr.file.daemon.StatResult
 import io.furryr.file.model.DirectoryInfo
 import io.furryr.file.model.FileEntry
 import io.furryr.file.provider.FileProvider
@@ -88,13 +86,15 @@ object FileRepository {
     fun delete(path: String): Result<Unit> =
         dispatch(path) { p, ip -> runBlocking { p.delete(ip) } }
 
-    fun info(path: String, entries: List<FileEntry>): DirectoryInfo {
-        val stat = DaemonLauncher.getConnection().stat(path).getOrDefault(StatResult(0, 0, false, false))
+    suspend fun info(path: String, entries: List<FileEntry>): DirectoryInfo {
+        val stat = resolve(path).getOrNull()?.let { resolved ->
+            resolved.provider.stat(resolved.innerPath).getOrNull()
+        }
         return DirectoryInfo(
             folderCount = entries.count { it.isDirectory },
             fileCount = entries.count { !it.isDirectory },
-            usableBytes = stat.usableBytes,
-            totalBytes = stat.totalBytes,
+            usableBytes = stat?.usableBytes ?: 0,
+            totalBytes = stat?.totalBytes ?: 0,
         )
     }
 
@@ -116,10 +116,10 @@ object FileRepository {
 
         if (stat.isDirectory) {
             runBlocking(Dispatchers.IO) {
-                runCatching { dst.provider.createDirectory(dst.innerPath) }
+                dst.provider.createDirectory(dst.innerPath).getOrThrow()
             }
             val entries = runBlocking(Dispatchers.IO) {
-                src.provider.list(src.innerPath).getOrDefault(emptyList())
+                src.provider.list(src.innerPath).getOrThrow()
             }
             for (entry in entries) {
                 val childSrcPath = src.path.child(entry.name).toString()

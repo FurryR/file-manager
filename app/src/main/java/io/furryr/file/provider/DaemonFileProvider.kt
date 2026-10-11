@@ -1,10 +1,11 @@
 package io.furryr.file.provider
 
 import io.furryr.file.copy.CopyProgress
+import io.furryr.file.copy.FdFileSource
 import io.furryr.file.copy.FileSource
 import io.furryr.file.copy.HandleFileSource
 import io.furryr.file.copy.OpenMode
-import io.furryr.file.copy.toProto
+import io.furryr.file.copy.openDaemonSource
 import io.furryr.file.daemon.DaemonLauncher
 import io.furryr.file.model.FileEntry
 import kotlinx.coroutines.Dispatchers
@@ -50,20 +51,17 @@ class DaemonFileProvider : FileProvider, PtyCapable {
         DaemonLauncher.getConnection().renameEntry(path, newName)
 
     override suspend fun open(path: String, mode: OpenMode): Result<FileSource> = runCatching {
-        val r = DaemonLauncher.getConnection().openHandle(path, mode.toProto()).getOrThrow()
-        HandleFileSource(handleId = r.handleId, size = r.size, absolutePath = path, mode = mode)
+        openDaemonSource(path, mode) { DaemonLauncher.getConnection() }
     }
 
     override fun copy(from: String, to: String, isCopy: Boolean): Flow<CopyProgress> =
-        DaemonLauncher.getConnection().copy(from, to)
+        DaemonLauncher.getConnection().copy(from, to, isCopy)
 
     override fun copy(src: FileSource, destPath: String, isCopy: Boolean): Flow<CopyProgress> {
-        val srcAbs = src.absolutePath
-        return if (srcAbs != null) {
-            DaemonLauncher.getConnection().copy(srcAbs, destPath)
-        } else {
-            chunkedCopyFallback(src, destPath, isCopy)
-        }
+        val connection = DaemonLauncher.getConnection()
+        return if (src is HandleFileSource || src is FdFileSource) {
+            connection.copyFromSource(src, destPath, isCopy)
+        } else chunkedCopyFallback(connection, src, destPath, isCopy)
     }
 
     // ── PtyCapable ─────────────────────────────────────────────────
@@ -92,8 +90,12 @@ class DaemonFileProvider : FileProvider, PtyCapable {
 }
 
 // Chunked copy fallback for stream-based sources (no direct path)
-private fun chunkedCopyFallback(src: FileSource, destPath: String, isCopy: Boolean): Flow<CopyProgress> = flow {
-    val conn = DaemonLauncher.getConnection()
+private fun chunkedCopyFallback(
+    conn: io.furryr.file.daemon.DaemonConnection,
+    src: FileSource,
+    destPath: String,
+    isCopy: Boolean,
+): Flow<CopyProgress> = flow {
     val dstHandle = conn.openHandle(destPath, io.furryr.file.proto.HandleMode.WRITE).getOrThrow()
     try {
         var offset = 0L
@@ -105,12 +107,9 @@ private fun chunkedCopyFallback(src: FileSource, destPath: String, isCopy: Boole
             conn.writeHandle(dstHandle.handleId, offset, data).getOrThrow()
             offset += data.size
             copied += data.size
-            emit(CopyProgress(src.size, copied, src.absolutePath ?: "", copied >= src.size, isCopy))
-            if (copied >= src.size) break
+            emit(CopyProgress(src.size, copied, src.absolutePath ?: "", false, isCopy))
         }
-        if (copied >= src.size && src.size == 0L) {
-            emit(CopyProgress(0, 0, src.absolutePath ?: "", true, isCopy))
-        }
+        emit(CopyProgress(src.size, copied, src.absolutePath ?: "", true, isCopy))
     } finally {
         runCatching { conn.closeHandle(dstHandle.handleId) }
     }

@@ -220,12 +220,9 @@ object SAFProvider : FileProvider {
                         outputStream.write(data)
                         offset += data.size
                         copied += data.size
-                        emit(CopyProgress(src.size, copied, destPath, copied >= src.size, isCopy))
-                        if (copied >= src.size) break
+                        emit(CopyProgress(src.size, copied, destPath, false, isCopy))
                     }
-                    if (copied >= src.size && src.size == 0L) {
-                        emit(CopyProgress(0, 0, destPath, true, isCopy))
-                    }
+                    emit(CopyProgress(src.size, copied, destPath, true, isCopy))
                 }
             }.flowOn(Dispatchers.IO)
 

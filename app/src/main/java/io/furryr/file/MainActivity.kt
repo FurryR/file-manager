@@ -16,10 +16,7 @@ import androidx.compose.ui.Modifier
 import io.furryr.file.daemon.DaemonLauncher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import io.furryr.file.provider.ContainerDaemonProvider
-import io.furryr.file.provider.DaemonFileProvider
-import io.furryr.file.provider.DocumentFileProvider
-import io.furryr.file.provider.SAFProvider
+import io.furryr.file.provider.installFileProviders
 import io.furryr.file.ui.theme.FileManagerTheme
 import io.furryr.file.ui.util.OperationNotification
 
@@ -41,18 +38,7 @@ class MainActivity : ComponentActivity() {
         }
 
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-        DaemonLauncher.init(this)
-        DaemonLauncher.setRootEnabled(prefs.getBoolean("root_enabled", false))
-        DaemonLauncher.setShellEnabled(prefs.getBoolean("shell_enabled", false))
-        DaemonLauncher.setSuPath(prefs.getString("su_path", "") ?: "")
-
-        FileRepository.setDefault(DaemonFileProvider())
-        ContainerDaemonProvider.init(this)
-        FileRepository.register("container", ContainerDaemonProvider)
-        DocumentFileProvider.init(this)
-        FileRepository.register("document", DocumentFileProvider)
-        SAFProvider.init(this)
-        FileRepository.register("saf", SAFProvider)
+        installFileProviders(this)
 
         // Pre-start the daemon off the main thread. Failure is logged and
         // observable via DaemonLauncher.daemonState; the lazy-init in

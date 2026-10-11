@@ -2,9 +2,13 @@ package io.furryr.file.daemon
 
 import android.content.Context
 import android.content.pm.PackageManager
-import android.net.LocalSocket
-import android.net.LocalSocketAddress
 import android.util.Log
+import io.furryr.file.agent.Container
+import io.furryr.file.agent.ContainerBackend
+import io.furryr.file.agent.ContainerManager
+import io.furryr.file.agent.ProotInstaller
+import io.furryr.file.agent.ProotRunner
+import io.furryr.file.util.HiddenApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,6 +25,9 @@ object DaemonLauncher {
     private val connectionLock = Any()
     @Volatile private var cachedConnection: DaemonConnection? = null
     @Volatile private var appCachedConnection: DaemonConnection? = null
+
+    /** One dedicated daemon per container, keyed by container name. */
+    private val containerConnections = mutableMapOf<String, DaemonConnection>()
 
     @Volatile private var _readyGeneration: Int = 0
     val readyGeneration: Int get() = _readyGeneration
@@ -39,13 +46,82 @@ object DaemonLauncher {
     private var shellEnabled = false
     private var suPath = ""
 
+    /** Set once a root daemon has actually connected. */
+    @Volatile private var rootDaemonActive = false
+
     fun setRootEnabled(enabled: Boolean) { rootEnabled = enabled }
     fun setShellEnabled(enabled: Boolean) { shellEnabled = enabled }
-    fun setSuPath(path: String) { suPath = path }
+
+    fun setSuPath(path: String) {
+        // Auto-detect when unset so root availability is not reported as
+        // "missing" merely because no custom su path was saved.
+        suPath = path.ifBlank { detectSuPath() }
+    }
+
+    /** Config says we may start a root daemon. */
+    fun canStartRootDaemon(): Boolean = rootEnabled && suPath.isNotBlank()
+
+    /**
+     * Root is actually usable: either it is configured, or a root daemon is
+     * already running (e.g. started before the current configuration).
+     */
+    fun isRootAvailable(): Boolean = canStartRootDaemon() || rootDaemonActive
+
+    /**
+     * Get (or start) the dedicated daemon for [container].
+     *
+     * - chroot: launched as root via `su -c '<daemon> --socket … --chroot <rootfs> --bind …'`.
+     *   The daemon isolates the mount tree and chroots itself.
+     * - proot: launched as the app UID through proot, so the daemon process
+     *   itself lives inside the container.
+     */
+    fun connectContainer(container: Container): DaemonConnection = synchronized(connectionLock) {
+        containerConnections[container.name]?.takeIf { it.isAlive() }?.let {
+            return@connectContainer it
+        }
+        containerConnections.remove(container.name)?.close()
+        val conn = when (container.backend) {
+            ContainerBackend.CHROOT -> {
+                if (!canStartRootDaemon()) {
+                    throw IllegalStateException(
+                        "Container '${container.name}' uses the chroot backend but root is unavailable"
+                    )
+                }
+                startChrootContainerDaemon(container)
+            }
+            ContainerBackend.PROOT -> startProotContainerDaemon(container)
+        }
+        containerConnections[container.name] = conn
+        conn
+    }
+
+    /** [connectContainer] resolved by container name. */
+    fun connectContainerByName(name: String): DaemonConnection {
+        val container = ContainerManager.getContainer(appContext, name)
+            ?: throw IllegalStateException("Container '$name' not found")
+        return connectContainer(container)
+    }
+
+    /** Kill every container daemon (and its process tree) and forget them. */
+    fun closeContainerConnections() = synchronized(connectionLock) {
+        containerConnections.values.forEach { it.close() }
+        containerConnections.clear()
+    }
+
+    /**
+     * Kill a single container's dedicated daemon (and its process tree) and
+     * forget it. The next access to the container starts a fresh daemon.
+     */
+    fun closeContainerConnection(name: String) = synchronized(connectionLock) {
+        containerConnections.remove(name)?.close()
+    }
 
     /** Locate the native daemon binary and ensure it is executable. */
     @Synchronized fun init(context: Context) {
         appContext = context.applicationContext
+        // Lift the hidden-API restriction (needed for android.system.Os.recvmsg)
+        // before any daemon I/O starts.
+        HiddenApi.ensure()
         val nativeLib = File(appContext.applicationInfo.nativeLibraryDir, NativeLibName)
         if (!nativeLib.exists()) {
             Log.w(TAG, "Daemon binary not found at ${nativeLib.absolutePath}")
@@ -86,6 +162,9 @@ object DaemonLauncher {
         cachedConnection = null
         appCachedConnection?.close()
         appCachedConnection = null
+        containerConnections.values.forEach { it.close() }
+        containerConnections.clear()
+        rootDaemonActive = false
         _daemonState.value = DaemonState.Idle
     }
 
@@ -140,10 +219,55 @@ object DaemonLauncher {
     private fun startRootDaemon(): DaemonConnection {
         val socketName = "file-daemon-${UUID.randomUUID()}"
         val executable = getExecutable()
-        Log.i(TAG, "Starting root daemon: $suPath -c ${executable.absolutePath} --socket $socketName")
-        val cmd = "${shellQuote(executable.absolutePath)} --socket $socketName"
+        val cmd = "${shellQuote(executable.absolutePath)} --socket ${shellQuote(socketName)}"
+        Log.i(TAG, "Starting root daemon: $suPath -c $cmd")
         val process = ProcessBuilder(suPath, "-c", cmd)
             .directory(appContext.filesDir).redirectErrorStream(true).start()
+        val socket = connectWithRetry(socketName)
+        rootDaemonActive = true
+        return DaemonConnection(socket, process)
+    }
+
+    private fun startChrootContainerDaemon(container: Container): DaemonConnection {
+        val socketName = "file-daemon-${UUID.randomUUID()}"
+        val executable = getExecutable()
+        val binds = ProotRunner.chrootBinds(appContext, container)
+        val tokens = mutableListOf(
+            shellQuote(executable.absolutePath),
+            "--socket", shellQuote(socketName),
+            "--chroot", shellQuote(container.rootfsPath),
+        )
+        for ((source, target) in binds) {
+            tokens.add("--bind")
+            tokens.add(shellQuote("$source:$target"))
+        }
+        val cmd = tokens.joinToString(" ")
+        Log.i(TAG, "Starting chroot daemon for '${container.name}': $suPath -c $cmd")
+        val process = ProcessBuilder(suPath, "-c", cmd)
+            .directory(appContext.filesDir).redirectErrorStream(true).start()
+        val socket = connectWithRetry(socketName)
+        return DaemonConnection(socket, process)
+    }
+
+    private fun startProotContainerDaemon(container: Container): DaemonConnection {
+        val socketName = "file-daemon-${UUID.randomUUID()}"
+        val executable = getExecutable()
+        val proot = ProotInstaller.install(appContext).getOrThrow()
+        val cmd = ProotRunner.buildProotDaemonCommand(
+            context = appContext,
+            container = container,
+            prootPath = proot.absolutePath,
+            daemonPath = executable.absolutePath,
+            socketName = socketName,
+        )
+        Log.i(TAG, "Starting proot daemon for '${container.name}': ${cmd.joinToString(" ")}")
+        val process = ProcessBuilder(cmd)
+            .directory(appContext.filesDir).redirectErrorStream(true)
+            .apply {
+                // proot needs a writable host temp dir; Android has no /tmp.
+                environment()["PROOT_TMP_DIR"] = ProotRunner.prootTmpDir(appContext, container).absolutePath
+            }
+            .start()
         val socket = connectWithRetry(socketName)
         return DaemonConnection(socket, process)
     }
@@ -158,13 +282,11 @@ object DaemonLauncher {
         return DaemonConnection(socket, process)
     }
 
-    internal fun connectWithRetry(socketName: String): LocalSocket {
-        val address = LocalSocketAddress(socketName, LocalSocketAddress.Namespace.ABSTRACT)
+    internal fun connectWithRetry(socketName: String): OsSocket {
         var lastError: Exception? = null
         for (i in 0 until 50) {
             try {
-                val sock = LocalSocket()
-                sock.connect(address)
+                val sock = OsSocket.connect(socketName)
                 Log.i(TAG, "Connected via abstract socket: $socketName")
                 return sock
             } catch (e: Exception) { lastError = e; Thread.sleep(100) }

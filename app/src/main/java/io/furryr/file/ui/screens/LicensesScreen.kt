@@ -41,6 +41,11 @@ fun LicensesScreen(modifier: Modifier = Modifier) {
             )
 
             LicenseEntry(
+                name = "File Manager",
+                url = "https://www.gnu.org/licenses/gpl-3.0.html",
+                license = "GNU GPLv3"
+            )
+            LicenseEntry(
                 name = "Kotlin",
                 url = "https://kotlinlang.org",
                 license = "Apache License 2.0"
@@ -58,6 +63,21 @@ fun LicensesScreen(modifier: Modifier = Modifier) {
             LicenseEntry(
                 name = "Protocol Buffers",
                 url = "https://protobuf.dev",
+                license = "BSD 3-Clause License"
+            )
+            LicenseEntry(
+                name = "Shizuku",
+                url = "https://github.com/RikkaApps/Shizuku",
+                license = "Apache License 2.0"
+            )
+            LicenseEntry(
+                name = "Termux Terminal View",
+                url = "https://github.com/termux/termux-app",
+                license = "GNU GPLv3"
+            )
+            LicenseEntry(
+                name = "AndroidX DocumentFile",
+                url = "https://developer.android.com/reference/androidx/documentfile",
                 license = "Apache License 2.0"
             )
             LicenseEntry(
@@ -74,6 +94,11 @@ fun LicensesScreen(modifier: Modifier = Modifier) {
                 name = "Rust",
                 url = "https://www.rust-lang.org",
                 license = "Apache License 2.0 / MIT"
+            )
+            LicenseEntry(
+                name = "PRoot",
+                url = "https://github.com/termux/proot",
+                license = "GNU GPLv2"
             )
         }
     }

@@ -1,9 +1,11 @@
 package io.furryr.file.daemon
 
-import android.net.LocalSocket
 import android.util.Log
 import io.furryr.file.copy.CopyProgress
+import io.furryr.file.copy.FdFileSource
 import io.furryr.file.model.FileEntry
+import io.furryr.file.copy.FileSource
+import io.furryr.file.copy.HandleFileSource
 import io.furryr.file.proto.ClosePTYRequest
 import io.furryr.file.proto.CloseHandleRequest
 import io.furryr.file.proto.CreateDirRequest
@@ -21,8 +23,10 @@ import io.furryr.file.proto.SeekHandleRequest
 import io.furryr.file.proto.SpawnPTYRequest
 import io.furryr.file.proto.StatRequest
 import io.furryr.file.proto.CopyRequest
+import io.furryr.file.proto.CopyFromSourceRequest
 import io.furryr.file.proto.TruncateHandleRequest
 import io.furryr.file.proto.WaitPtyRequest
+import io.furryr.file.proto.ReadSourceResponse
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -32,13 +36,16 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
-import java.io.DataInputStream
-import java.io.DataOutputStream
 import java.io.EOFException
 import java.io.FileDescriptor
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicLong
+
+/** Default bound for control requests that should never take long (open/stat/list/…). */
+const val OPEN_TIMEOUT_MS = 20_000L
 
 data class StatResult(
     val usableBytes: Long,
@@ -53,14 +60,25 @@ data class PtyFd(
     val childPid: Int
 )
 
-data class OpenHandleResult(val handleId: Long, val size: Long)
+data class OpenHandleResult(
+    val handleId: Long,
+    val size: Long,
+    val fileDescriptor: FileDescriptor? = null,
+)
+
+data class ExecResult(
+    val exitCode: Int,
+    val stdout: ByteArray,
+    val stderr: ByteArray,
+) {
+    val stdoutText: String get() = String(stdout, Charsets.UTF_8)
+    val stderrText: String get() = String(stderr, Charsets.UTF_8)
+}
 
 class DaemonConnection internal constructor(
-    internal val socket: LocalSocket,
-    process: Process?
+    internal val socket: OsSocket,
+    process: Process?,
 ) {
-    private val input = DataInputStream(socket.inputStream)
-    private val output = DataOutputStream(socket.outputStream)
     internal val daemonProcess: Process? = process
 
     @Volatile
@@ -76,18 +94,30 @@ class DaemonConnection internal constructor(
     }
 
     private val pendingRequests = HashMap<Long, PendingRequest>()
+    private val sourceReaders = HashMap<Long, FileSource>()
     private val pendingLock = Any()
     private val writeLock = Any()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     init {
         scope.launch { readerLoop() }
+        // Surface daemon/proot stderr in logcat — invaluable when a container
+        // daemon fails to come up.
+        daemonProcess?.let { process ->
+            scope.launch(Dispatchers.IO) {
+                runCatching {
+                    process.inputStream.bufferedReader().forEachLine { line ->
+                        Log.d("DaemonConnection/proc", line)
+                    }
+                }
+            }
+        }
     }
 
     private fun readerLoop() {
         try {
             while (true) {
-                val resp = DaemonProtocol.readFrame(socket)
+                val resp = socket.readFrame()
                 dispatchResponse(resp)
             }
         } catch (_: EOFException) {
@@ -101,6 +131,25 @@ class DaemonConnection internal constructor(
     }
 
     private fun dispatchResponse(resp: DaemonResponse) {
+        resp.response.readSourceRequest?.let { readRequest ->
+            val source = synchronized(pendingLock) { sourceReaders[resp.response.id] }
+            if (source != null) {
+                scope.launch(Dispatchers.IO) {
+                    val result = runCatching { source.readChunk(readRequest.offset, readRequest.length) }
+                    val response = ReadSourceResponse.newBuilder()
+                        .setRequestId(readRequest.requestId)
+                    result.onSuccess { data ->
+                        response.setData(com.google.protobuf.ByteString.copyFrom(data))
+                            .setEof(data.isEmpty() || readRequest.offset + data.size >= source.size)
+                    }.onFailure { error ->
+                        response.setError(error.message ?: "source read failed")
+                    }
+                    runCatching {
+                        request(Request.newBuilder().setReadSourceResponse(response).build())
+                    }
+                }
+            }
+        }
         val id = resp.response.id
         synchronized(pendingLock) {
             val pending = pendingRequests[id] ?: return
@@ -113,6 +162,7 @@ class DaemonConnection internal constructor(
                     val prog = resp.response.streamProgress
                     if (prog != null && prog.finished) {
                         pendingRequests.remove(id)
+                        pending.channel.trySend(resp)
                         pending.channel.close()
                     } else {
                         pending.channel.trySend(resp)
@@ -135,7 +185,7 @@ class DaemonConnection internal constructor(
         }
     }
 
-    fun isAlive(): Boolean = !isClosed && runCatching { socket.isConnected }.getOrDefault(false)
+    fun isAlive(): Boolean = !isClosed && socket.isOpen
 
     fun close() {
         synchronized(writeLock) {
@@ -143,14 +193,18 @@ class DaemonConnection internal constructor(
             isClosed = true
         }
         failAllPending(EOFException("connection closed"))
+        // Closing the socket makes the daemon read EOF and exit its loop, which
+        // tears down its whole process tree (close_all). Give it a moment, then
+        // force-kill if it is still around.
         runCatching { socket.close() }
         scope.cancel()
-        runCatching { input.close() }
-        runCatching { output.close() }
         daemonProcess?.let { p ->
-            if (p.isAlive) {
-                runCatching { p.destroy() }
-                runCatching { p.destroyForcibly() }
+            // Shizuku's remote Process throws from isAlive()/exitValue() when
+            // the process has not exited, so guard the whole teardown.
+            runCatching {
+                if (p.isAlive && !p.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                    p.destroyForcibly()
+                }
             }
         }
     }
@@ -160,7 +214,15 @@ class DaemonConnection internal constructor(
     // ── Core I/O ──────────────────────────────────────────────────────
 
     /** Send a request and wait for the matching response. */
-    fun request(request: Request): DaemonResponse {
+    fun request(request: Request): DaemonResponse = request(request, 0L)
+
+    /**
+     * Send a request and wait for the matching response.
+     *
+     * @param timeoutMillis 0 means wait indefinitely; a positive value bounds
+     *        the wait so a wedged daemon cannot hang the caller forever.
+     */
+    fun request(request: Request, timeoutMillis: Long): DaemonResponse {
         val id = requestIdCounter.getAndIncrement()
         val req = request.toBuilder().setId(id).build()
         val future = CompletableFuture<DaemonResponse>()
@@ -168,14 +230,18 @@ class DaemonConnection internal constructor(
         synchronized(pendingLock) { pendingRequests[id] = PendingRequest.Single(future) }
         synchronized(writeLock) {
             if (isClosed) throw IllegalStateException("connection closed")
-            DaemonProtocol.writeRequest(output, req)
+            socket.writeFrame(req.toByteArray())
         }
 
         val resp = try {
-            future.get()
+            if (timeoutMillis > 0L) future.get(timeoutMillis, TimeUnit.MILLISECONDS)
+            else future.get()
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
             throw IllegalStateException("interrupted", e)
+        } catch (e: TimeoutException) {
+            synchronized(pendingLock) { pendingRequests.remove(id) }
+            throw IllegalStateException("daemon request timed out after ${timeoutMillis}ms", e)
         } catch (e: ExecutionException) {
             throw e.cause as? Exception ?: IllegalStateException("daemon request failed", e)
         }
@@ -187,7 +253,7 @@ class DaemonConnection internal constructor(
     }
 
     /** Send a streaming request, returning a Flow of CopyProgress. */
-    fun requestStream(request: Request): Flow<CopyProgress> = flow {
+    fun requestStream(request: Request, isCopy: Boolean = true): Flow<CopyProgress> = flow {
         val id = requestIdCounter.getAndIncrement()
         val req = request.toBuilder().setId(id).build()
         val channel = Channel<DaemonResponse>(Channel.UNLIMITED)
@@ -195,15 +261,17 @@ class DaemonConnection internal constructor(
         synchronized(pendingLock) { pendingRequests[id] = PendingRequest.Stream(channel) }
         synchronized(writeLock) {
             if (isClosed) throw IllegalStateException("connection closed")
-            DaemonProtocol.writeRequest(output, req)
+            socket.writeFrame(req.toByteArray())
         }
 
         for (resp in channel) {
-            if (!resp.response.ok) break
-            val p = resp.response.streamProgress ?: break
+            if (!resp.response.ok) {
+                throw IllegalStateException(resp.response.error.ifBlank { "daemon stream request failed" })
+            }
+            val p = resp.response.streamProgress ?: continue
             emit(CopyProgress(
                 totalBytes = p.totalBytes, copiedBytes = p.copiedBytes,
-                currentName = p.currentName, finished = p.finished, isCopy = true,
+                currentName = p.currentName, finished = p.finished, isCopy = isCopy,
             ))
             if (p.finished) break
         }
@@ -262,21 +330,75 @@ class DaemonConnection internal constructor(
 
     // ── Copy with progress ─────────────────────────────────────────
 
-    fun copy(from: String, to: String): Flow<CopyProgress> {
+    fun copy(from: String, to: String, isCopy: Boolean = true): Flow<CopyProgress> {
         val req = Request.newBuilder()
             .setCopy(CopyRequest.newBuilder().setFrom(from).setTo(to))
             .build()
-        return requestStream(req)
+        return requestStream(req, isCopy)
     }
+
+    /** Destination-driven copy. Real FDs travel as SCM_RIGHTS; virtual handles are pulled. */
+    fun copyFromSource(source: FileSource, to: String, isCopy: Boolean = true): Flow<CopyProgress> = flow {
+        val id = requestIdCounter.getAndIncrement()
+        val req = Request.newBuilder()
+            .setId(id)
+            .setCopyFromSource(CopyFromSourceRequest.newBuilder()
+                .setTo(to)
+                .setSourceSize(source.size)
+                .setVirtualSource(source is HandleFileSource))
+            .build()
+        val channel = Channel<DaemonResponse>(Channel.UNLIMITED)
+        if (source !is FdFileSource && source !is HandleFileSource) {
+            throw UnsupportedOperationException("source cannot be sent to daemon")
+        }
+        synchronized(pendingLock) {
+            pendingRequests[id] = PendingRequest.Stream(channel)
+            if (source is HandleFileSource) sourceReaders[id] = source
+        }
+        try {
+            synchronized(writeLock) {
+                if (isClosed) throw IllegalStateException("connection closed")
+                socket.writeFrame(req.toByteArray(), (source as? FdFileSource)?.fileDescriptor)
+            }
+            for (resp in channel) {
+                if (!resp.response.ok) {
+                    throw IllegalStateException(resp.response.error.ifBlank { "daemon copy failed" })
+                }
+                val progress = resp.response.streamProgress ?: continue
+                emit(CopyProgress(
+                    totalBytes = progress.totalBytes,
+                    copiedBytes = progress.copiedBytes,
+                    currentName = progress.currentName,
+                    finished = progress.finished,
+                    isCopy = isCopy,
+                ))
+                if (progress.finished) break
+            }
+        } finally {
+            synchronized(pendingLock) {
+                pendingRequests.remove(id)
+                sourceReaders.remove(id)
+            }
+        }
+    }.flowOn(Dispatchers.IO)
 
     // ── Handle operations ────────────────────────────────────────────
 
-    fun openHandle(path: String, mode: HandleMode): Result<OpenHandleResult> = runCatching {
-        val resp = request(Request.newBuilder()
-            .setOpenHandle(OpenHandleRequest.newBuilder().setPath(path).setMode(mode))
-            .build()).response
-        val h = resp.openHandle
-        OpenHandleResult(handleId = h.handleId, size = h.size)
+    fun openHandle(
+        path: String,
+        mode: HandleMode,
+        timeoutMillis: Long = OPEN_TIMEOUT_MS,
+        wantFd: Boolean = true,
+    ): Result<OpenHandleResult> = runCatching {
+        val daemonResponse = request(Request.newBuilder()
+            .setOpenHandle(OpenHandleRequest.newBuilder().setPath(path).setMode(mode).setWantFd(wantFd))
+            .build(), timeoutMillis)
+        val h = daemonResponse.response.openHandle
+        OpenHandleResult(
+            handleId = h.handleId,
+            size = h.size,
+            fileDescriptor = daemonResponse.attachedFd,
+        )
     }
 
     fun readHandle(handleId: Long, offset: Long, length: Int) = runCatching {
@@ -367,4 +489,24 @@ class DaemonConnection internal constructor(
             .setKillPty(KillPtyRequest.newBuilder().setPtyId(ptyId))
             .build())
     }
+
+    // ── Non-PTY exec ──────────────────────────────────────────────────
+
+    fun exec(
+        command: String,
+        args: List<String> = emptyList(),
+        cwd: String? = null,
+        env: Map<String, String> = emptyMap(),
+    ): Result<ExecResult> = runCatching {
+        val execReq = io.furryr.file.proto.ExecRequest.newBuilder()
+            .setCommand(command).addAllArgs(args).putAllEnv(env)
+        if (cwd != null) execReq.cwd = cwd
+        val resp = request(Request.newBuilder().setExec(execReq).build()).response.exec
+        ExecResult(
+            exitCode = resp.exitCode,
+            stdout = resp.stdout.toByteArray(),
+            stderr = resp.stderr.toByteArray(),
+        )
+    }
+
 }

@@ -1,13 +1,16 @@
 package io.furryr.file.agent
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,6 +28,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -43,6 +47,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.furryr.file.R
+import io.furryr.file.daemon.DaemonLauncher
 import io.furryr.file.ui.theme.FileManagerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -77,8 +82,15 @@ private fun ContainerWizardScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    val rootAvailable = remember { DaemonLauncher.isRootAvailable() }
+
     var imageRef by rememberSaveable { mutableStateOf("library/alpine:latest") }
     var containerName by rememberSaveable { mutableStateOf("") }
+    // Backend is chosen here and fixed for the container's lifetime. Default to
+    // chroot when root is available (better performance and no proot quirks),
+    // otherwise proot.
+    var useChrootBackend by rememberSaveable { mutableStateOf(rootAvailable) }
+    val backend = if (useChrootBackend && rootAvailable) ContainerBackend.CHROOT else ContainerBackend.PROOT
     var state by remember { mutableStateOf<WizardState>(WizardState.Input) }
     var downloadedBytes by remember { mutableLongStateOf(0L) }
     var totalBytes by remember { mutableLongStateOf(0L) }
@@ -149,6 +161,74 @@ private fun ContainerWizardScreen(onBack: () -> Unit) {
 
                         Spacer(Modifier.height(24.dp))
 
+                        Text(
+                            stringResource(R.string.wizard_backend_label),
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        Spacer(Modifier.height(4.dp))
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = rootAvailable) { useChrootBackend = true }
+                                .padding(vertical = 4.dp)
+                        ) {
+                            RadioButton(
+                                selected = backend == ContainerBackend.CHROOT,
+                                onClick = { if (rootAvailable) useChrootBackend = true },
+                                enabled = rootAvailable,
+                            )
+                            Column {
+                                Text(
+                                    stringResource(R.string.wizard_backend_chroot),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = if (rootAvailable) MaterialTheme.colorScheme.onSurface
+                                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Text(
+                                    stringResource(R.string.wizard_backend_chroot_desc),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { useChrootBackend = false }
+                                .padding(vertical = 4.dp)
+                        ) {
+                            RadioButton(
+                                selected = backend == ContainerBackend.PROOT,
+                                onClick = { useChrootBackend = false },
+                            )
+                            Column {
+                                Text(
+                                    stringResource(R.string.wizard_backend_proot),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                                Text(
+                                    stringResource(R.string.wizard_backend_proot_desc),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+
+                        if (!rootAvailable) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                stringResource(R.string.wizard_backend_no_root),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+
+                        Spacer(Modifier.height(24.dp))
+
                         Button(
                             onClick = {
                                 val name = containerName.trim()
@@ -163,7 +243,7 @@ private fun ContainerWizardScreen(onBack: () -> Unit) {
                                         state = WizardState.Creating("Downloading image layers...")
                                         val result = withContext(Dispatchers.IO) {
                                             ContainerManager.createContainer(
-                                                activity, name, img
+                                                activity, name, img, backend
                                             )
                                         }
                                         val container = result.getOrThrow()

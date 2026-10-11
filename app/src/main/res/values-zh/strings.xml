@@ -99,8 +99,27 @@
     <string name="rename_container_title">重命名容器</string>
     <string name="drawer_group_saf">本地位置</string>
     <string name="drawer_add_location">添加本地位置</string>
+    <string name="drawer_add_ftp">添加 FTP 位置</string>
+    <string name="ftp_add_title">添加 FTP 位置</string>
+    <string name="ftp_edit_title">编辑 FTP 位置</string>
+    <string name="ftp_name_label">名称</string>
+    <string name="ftp_host_label">主机</string>
+    <string name="ftp_port_label">端口</string>
+    <string name="ftp_username_label">用户名</string>
+    <string name="ftp_password_label">密码</string>
+    <string name="no_ftp_servers">暂无 FTP 位置</string>
+    <string name="delete_ftp_confirm">确定要删除 FTP 位置 \'%1$s\' 吗？</string>
+    <string name="drawer_add_sftp">添加 SFTP 位置</string>
+    <string name="sftp_add_title">添加 SFTP 位置</string>
+    <string name="sftp_edit_title">编辑 SFTP 位置</string>
+    <string name="no_sftp_servers">暂无 SFTP 位置</string>
+    <string name="delete_sftp_confirm">确定要删除 SFTP 位置 \'%1$s\' 吗？</string>
     <string name="drawer_rename">重命名</string>
     <string name="drawer_delete">删除</string>
+    <string name="drawer_kill">杀死</string>
+    <string name="container_backend_chroot">chroot</string>
+    <string name="container_backend_proot">proot</string>
+    <string name="toast_killed">已杀死 %1$s</string>
     <string name="container_state_failed">失败</string>
     <string name="container_state_deleted">已删除</string>
     <string name="terminal_drawer_title">终端</string>
@@ -108,6 +127,12 @@
     <string name="wizard_pull_desc">输入 Docker 镜像引用以创建容器。</string>
     <string name="wizard_image_placeholder">library/alpine:latest</string>
     <string name="wizard_name_placeholder">my-alpine</string>
+    <string name="wizard_backend_label">容器后端</string>
+    <string name="wizard_backend_chroot">chroot（root）</string>
+    <string name="wizard_backend_chroot_desc">以 root 运行，需要 root 权限；创建后不可更改。</string>
+    <string name="wizard_backend_proot">proot（应用用户）</string>
+    <string name="wizard_backend_proot_desc">以应用用户身份运行，无需 root；创建后不可更改。</string>
+    <string name="wizard_backend_no_root">未检测到 root 权限——仅可使用 proot。</string>
     <string name="settings_container">容器</string>
     <string name="settings_docker_hub_url">Docker Hub 地址</string>
     <string name="settings_docker_hub_key">Docker Hub 密钥</string>
@@ -118,4 +143,12 @@
     <string name="settings_docker_hub_key_desc">可选认证令牌</string>
     <string name="settings_terminal_font_desc">字体文件路径（TTF/OTF）</string>
     <string name="settings_terminal_font_size_desc">默认终端文字大小</string>
+
+    <!-- 终端前台通知 -->
+    <string name="terminal_notification_channel_name">终端会话</string>
+    <string name="terminal_notification_title">终端</string>
+    <string name="terminal_notification_text">%1$d 个终端正在运行</string>
+    <string name="terminal_wakelock_hold">保持唤醒</string>
+    <string name="terminal_wakelock_release">释放唤醒</string>
+    <string name="terminal_notification_exit">退出</string>
 </resources>

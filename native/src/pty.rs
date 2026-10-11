@@ -32,6 +32,9 @@ impl PtyManager {
     /// Spawn a new PTY. Forks a child, sets up session/terminal, execs the
     /// requested command, and returns the master fd, pty_id, and child_pid.
     /// The caller is responsible for sending the master fd to the client.
+    ///
+    /// For container daemons the daemon already lives inside the container
+    /// (chroot/proot), so the command resolves there directly.
     pub fn spawn_pty(&mut self, req: SpawnPtyRequest) -> io::Result<(u64, RawFd, u32)> {
         // 1. Open a PTY master
         let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
@@ -231,6 +234,13 @@ impl PtyManager {
         }
 
         Ok(())
+    }
+
+    pub fn close_all(&mut self) {
+        let pty_ids = self.ptys.keys().copied().collect::<Vec<_>>();
+        for pty_id in pty_ids {
+            let _ = self.close_pty(pty_id);
+        }
     }
     /// Get the child pid for a PTY without removing the handle.
     pub fn get_child_pid(&self, pty_id: u64) -> io::Result<u32> {

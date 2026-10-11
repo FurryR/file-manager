@@ -58,5 +58,5 @@ private fun triplet(bits: Int): String {
 }
 
 fun isInternalStoragePath(realPath: String): Boolean {
-    return realPath.startsWith("/storage/emulated/") || realPath.startsWith("/sdcard/")
+    return io.furryr.file.util.PrimaryStorage.contains(realPath)
 }

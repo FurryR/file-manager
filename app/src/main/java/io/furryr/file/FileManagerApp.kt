@@ -11,6 +11,10 @@ import io.furryr.file.agent.ContainerManager
 import io.furryr.file.agent.SessionManager
 import io.furryr.file.provider.SafDatabase
 import io.furryr.file.provider.SafLocation
+import io.furryr.file.provider.FtpProvider
+import io.furryr.file.provider.FtpServer
+import io.furryr.file.provider.SftpProvider
+import io.furryr.file.provider.SftpServer
 import android.app.Activity
 import android.Manifest
 import android.content.Context
@@ -145,7 +149,7 @@ fun FileManagerApp(
     var operationHidden by remember { mutableStateOf(false) }
     var highlightPath by remember { mutableStateOf<String?>(null) }
     var pendingScrollPath by remember { mutableStateOf<String?>(null) }
-    var showAgentSheet by remember { mutableStateOf(false) }
+    var showTerminalSheet by remember { mutableStateOf(false) }
     var containerRefreshKey by remember { mutableIntStateOf(0) }
     var drawerSortMode by remember { mutableStateOf(false) }
     var containerNameOrder by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -178,6 +182,22 @@ fun FileManagerApp(
 
     LaunchedEffect(safRefreshKey) {
         safLocations = withContext(Dispatchers.IO) { safDb.getAll() }
+    }
+
+    val ftpDb = remember { FtpProvider.getDatabase() }
+    var ftpLocations by remember { mutableStateOf<List<FtpServer>>(emptyList()) }
+    var ftpRefreshKey by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(ftpRefreshKey) {
+        ftpLocations = withContext(Dispatchers.IO) { ftpDb.getAll() }
+    }
+
+    val sftpDb = remember { SftpProvider.getDatabase() }
+    var sftpLocations by remember { mutableStateOf<List<SftpServer>>(emptyList()) }
+    var sftpRefreshKey by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(sftpRefreshKey) {
+        sftpLocations = withContext(Dispatchers.IO) { sftpDb.getAll() }
     }
 
     LaunchedEffect(operationHidden, operationJob) {
@@ -266,6 +286,28 @@ fun FileManagerApp(
         if (tabs.size <= 1) return
         tabs.removeAt(index)
         selectedTabIndex = selectedTabIndex.coerceAtMost(tabs.lastIndex)
+    }
+
+    /**
+     * Close every tab pointing into `container://<name>/...`.
+     *
+     * Called when a container is killed: its filesystem disappears, so any
+     * lingering tab would only show errors. When the last tab is closed a
+     * fresh home tab is opened so the app never ends up with zero tabs.
+     */
+    fun closeTabsForContainer(name: String) {
+        val matches = tabs.indices.filter { index ->
+            val parsed = Path.parse(tabs[index].path)
+            parsed.scheme == "container" && parsed.host == name
+        }
+        if (matches.isEmpty()) return
+        matches.sortedDescending().forEach { tabs.removeAt(it) }
+        if (tabs.isEmpty()) {
+            tabs.add(FileTab(path = DefaultPath))
+            selectedTabIndex = 0
+        } else {
+            selectedTabIndex = selectedTabIndex.coerceAtMost(tabs.lastIndex)
+        }
     }
 
     fun selectedEntries(): List<FileEntry> = currentEntries.filter { it.path in currentTab().selectedPaths }
@@ -551,6 +593,25 @@ fun FileManagerApp(
                         containerRefreshKey++
                     }
                 },
+                onContainerKill = { name ->
+                    scope.launch {
+                        // Close every terminal session of the container first,
+                        // then tear down its dedicated daemon (kills the process tree).
+                        SessionManager.destroyContainerSessions(name)
+                        withContext(Dispatchers.IO) {
+                            DaemonLauncher.closeContainerConnection(name)
+                        }
+                        // Any tab browsing into the killed container is now
+                        // invalid; drop it (and reopen home if none remain).
+                        closeTabsForContainer(name)
+                        containerRefreshKey++
+                        Toast.makeText(
+                            context,
+                            context.getString(R.string.toast_killed, name),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                },
                 sortMode = drawerSortMode,
                 onToggleSortMode = {
                     drawerSortMode = !drawerSortMode
@@ -610,6 +671,114 @@ fun FileManagerApp(
                                 safDb.reorder(mutable.map { it.hexId })
                             }
                             safRefreshKey++
+                        }
+                    }
+                },
+                ftpLocations = ftpLocations,
+                ftpRefreshKey = ftpRefreshKey,
+                onAddFtp = { host, name, port, username, password ->
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching { ftpDb.insert(host, name, port, username, password) }
+                        }
+                        Toast.makeText(
+                            context,
+                            if (result.isSuccess) "Added FTP location"
+                            else result.exceptionOrNull()?.message ?: "Failed to add",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        ftpRefreshKey++
+                    }
+                },
+                onFtpSave = { oldHost, newHost, name, port, username, password ->
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching { ftpDb.update(oldHost, newHost, name, port, username, password) }
+                        }
+                        Toast.makeText(
+                            context,
+                            if (result.isSuccess) "Updated FTP location"
+                            else result.exceptionOrNull()?.message ?: "Failed to update",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        ftpRefreshKey++
+                    }
+                },
+                onFtpClick = { host ->
+                    navigateTo("ftp://$host/")
+                    scope.launch { drawerState.close() }
+                },
+                onFtpDelete = { host ->
+                    scope.launch {
+                        withContext(Dispatchers.IO) { ftpDb.delete(host) }
+                        ftpRefreshKey++
+                    }
+                },
+                ftpOrder = ftpLocations.map { it.host },
+                onFtpReorder = { from, to ->
+                    val mutable = ftpLocations.toMutableList()
+                    if (from in mutable.indices && to in mutable.indices) {
+                        val item = mutable.removeAt(from)
+                        mutable.add(to, item)
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                ftpDb.reorder(mutable.map { it.host })
+                            }
+                            ftpRefreshKey++
+                        }
+                    }
+                },
+                sftpLocations = sftpLocations,
+                sftpRefreshKey = sftpRefreshKey,
+                onAddSftp = { host, name, port, username, password ->
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching { sftpDb.insert(host, name, port, username, password) }
+                        }
+                        Toast.makeText(
+                            context,
+                            if (result.isSuccess) "Added SFTP location"
+                            else result.exceptionOrNull()?.message ?: "Failed to add",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        sftpRefreshKey++
+                    }
+                },
+                onSftpSave = { oldHost, newHost, name, port, username, password ->
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching { sftpDb.update(oldHost, newHost, name, port, username, password) }
+                        }
+                        Toast.makeText(
+                            context,
+                            if (result.isSuccess) "Updated SFTP location"
+                            else result.exceptionOrNull()?.message ?: "Failed to update",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        sftpRefreshKey++
+                    }
+                },
+                onSftpClick = { host ->
+                    navigateTo("sftp://$host/")
+                    scope.launch { drawerState.close() }
+                },
+                onSftpDelete = { host ->
+                    scope.launch {
+                        withContext(Dispatchers.IO) { sftpDb.delete(host) }
+                        sftpRefreshKey++
+                    }
+                },
+                sftpOrder = sftpLocations.map { it.host },
+                onSftpReorder = { from, to ->
+                    val mutable = sftpLocations.toMutableList()
+                    if (from in mutable.indices && to in mutable.indices) {
+                        val item = mutable.removeAt(from)
+                        mutable.add(to, item)
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                sftpDb.reorder(mutable.map { it.host })
+                            }
+                            sftpRefreshKey++
                         }
                     }
                 },
@@ -731,7 +900,7 @@ fun FileManagerApp(
                     onBack = ::goBack,
                     onForward = ::goForward,
                     onCreateFile = { showCreateDialog = true },
-                    onAgent = { showAgentSheet = true },
+                    onTerminal = { showTerminalSheet = true },
                     onParent = ::goParent,
                     copyMoveActive = copyMoveState != null,
                     onCopyMoveConfirm = { showCopyMovePlaceDialog = true },
@@ -1015,9 +1184,9 @@ fun FileManagerApp(
         )
     }
 
-    AgentSheet(
-        visible = showAgentSheet,
-        onDismiss = { showAgentSheet = false },
+    TerminalSheet(
+        visible = showTerminalSheet,
+        onDismiss = { showTerminalSheet = false },
         currentPath = currentTab().path
     )
 

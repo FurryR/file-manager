@@ -1,19 +1,19 @@
 # AGENTS.md — app/.../io/furryr/file/
 
-**59 files** — Kotlin + Compose UI in a flat package with subpackages for agent/daemon/provider.
+**61 files** — Kotlin + Compose UI in a flat package with subpackages for agent/daemon/provider.
 
 ## STRUCTURE
 
 | Directory | Contents |
 |-----------|----------|
 | `.` (root) | `MainActivity.kt`, `FileManagerApp.kt`, `Constants.kt`, `FileRepository.kt` |
-| `agent/` | Session, container, PTY, terminal, AI, wizard, distro, proot — all agent/container logic |
-| `daemon/` | `FileDaemonClient.kt`, `DaemonLauncher.kt`, `DaemonConnection.kt`, `DaemonProtocol.kt`, `RootUtils.kt`, `FileErrors.kt` |
+| `agent/` | Session, container, PTY, terminal, wizard, distro, proot — all agent/container logic |
+| `daemon/` | `FileDaemonClient.kt`, `DaemonLauncher.kt`, `DaemonConnection.kt`, `DaemonProtocol.kt`, `OsSocket.kt`, `RootUtils.kt`, `FileErrors.kt` |
 | `model/` | `Models.kt`, `ErrorState.kt` |
-| `provider/` | SAF, container, daemon, document file providers |
+| `provider/` | SAF, container, daemon, document, forward, FTP, SFTP file providers |
 | `copy/` | `FileSource.kt`, `CopyProgress.kt` |
 | `ui/components/` | `BottomToolbar.kt`, `TopBarContent.kt`, `FileDrawer.kt`, `Dialogs.kt` |
-| `ui/screens/` | `FileListScreen.kt`, `SettingsActivity.kt`, `AgentSheet.kt`, `LicensesScreen.kt` |
+| `ui/screens/` | `FileListScreen.kt`, `SettingsActivity.kt`, `LicensesScreen.kt` |
 | `ui/theme/` | `FileManagerTheme.kt` (Material3 dark/light) |
 | `ui/util/` | `Formatters.kt`, `FileIcons.kt`, `FileOpen.kt`, `OperationNotification.kt` |
 
@@ -25,7 +25,7 @@
 - **Selection logic**: `FileManagerApp.kt` lines 200-218 (`toggleSelection`, `rangeSelectTo`)
 - **Terminal sessions**: `agent/SessionManager.kt` — session lifecycle, container session cleanup
 - **Container management**: `agent/ContainerManager.kt` — process tracking, kill
-- **Agent/AI panel**: `AgentSheet.kt` — bottom sheet with drawer overlay
+- **Terminal panel**: `TerminalSheet.kt` — bottom sheet with terminals; `TerminalForegroundService.kt` keeps sessions alive
 - **Native daemon entry**: `daemon/DaemonLauncher.kt` — starts `libfiledaemon.so` from `nativeLibraryDir`
 
 ## CONVENTIONS

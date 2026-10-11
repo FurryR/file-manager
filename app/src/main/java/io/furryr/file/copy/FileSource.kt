@@ -1,6 +1,6 @@
 package io.furryr.file.copy
 
-import io.furryr.file.daemon.DaemonLauncher
+import io.furryr.file.daemon.DaemonConnection
 import io.furryr.file.proto.HandleMode as ProtoHandleMode
 import java.io.FileDescriptor
 import java.io.FileInputStream
@@ -56,8 +56,15 @@ sealed class FileSource : Closeable {
         return buf
     }
 
-    fun readChunk(offset: Long, chunkSize: Int): ByteArray =
-        readAt(offset, minOf(chunkSize.toLong(), (size - offset).coerceAtLeast(0)).toInt())
+    fun readChunk(offset: Long, chunkSize: Int): ByteArray {
+        require(chunkSize > 0) { "chunkSize must be positive" }
+        val length = if (seekable) {
+            minOf(chunkSize.toLong(), (size - offset).coerceAtLeast(0)).toInt()
+        } else {
+            chunkSize
+        }
+        return readAt(offset, length)
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -69,6 +76,7 @@ class HandleFileSource(
     val handleId: Long,
     override val size: Long,
     override val absolutePath: String?,
+    internal val connection: DaemonConnection,
     private val mode: OpenMode,
     private val onClose: () -> Unit = {},
 ) : FileSource() {
@@ -80,13 +88,13 @@ class HandleFileSource(
 
     override fun readAt(offset: Long, len: Int): ByteArray {
         check(!closed) { "handle closed" }
-        val r = DaemonLauncher.getConnection().readHandle(handleId, offset, len).getOrThrow()
+        val r = connection.readHandle(handleId, offset, len).getOrThrow()
         return r.data.toByteArray()
     }
 
     override fun writeAt(offset: Long, data: ByteArray) {
         check(!closed) { "handle closed" }
-        DaemonLauncher.getConnection().writeHandle(handleId, offset, data).getOrThrow()
+        connection.writeHandle(handleId, offset, data).getOrThrow()
     }
 
     override fun seek(position: Long) {
@@ -95,27 +103,27 @@ class HandleFileSource(
 
     override fun truncate(newSize: Long) {
         check(!closed) { "handle closed" }
-        DaemonLauncher.getConnection().truncateHandle(handleId, newSize).getOrThrow()
+        connection.truncateHandle(handleId, newSize).getOrThrow()
     }
 
     override fun close() {
         if (closed) return
         closed = true
-        runCatching { DaemonLauncher.getConnection().closeHandle(handleId) }
+        runCatching { connection.closeHandle(handleId) }
         onClose()
     }
 
     override fun borrow(): FileSource? {
         check(!closed) { "handle closed" }
-        return DaemonLauncher.getConnection().dupHandle(handleId).getOrNull()?.let { (dupId, sz) ->
-            HandleFileSource(dupId, sz, absolutePath, mode)
+        return connection.dupHandle(handleId).getOrNull()?.let { result ->
+            HandleFileSource(result.handleId, result.size, absolutePath, connection, mode)
         }
     }
 
     override fun detach(): FileSource {
         check(!closed) { "handle closed" }
         closed = true
-        return HandleFileSource(handleId, size, absolutePath, mode)
+        return HandleFileSource(handleId, size, absolutePath, connection, mode)
     }
 }
 
@@ -125,17 +133,23 @@ class FdFileSource(
     override val size: Long,
     override val absolutePath: String?,
     private val mode: OpenMode,
+    private val onClose: () -> Unit = {},
 ) : FileSource() {
     override val readable get() = mode == OpenMode.READ || mode == OpenMode.READ_WRITE
     override val writable get() = mode == OpenMode.WRITE || mode == OpenMode.READ_WRITE
     override val seekable get() = false // can't seek on Android without JNI
     private var closed = false
+    private var position = 0L
+    private val inputStream = FileInputStream(fileDescriptor)
 
-    override fun readAt(offset: Long, _len: Int): ByteArray {
+    override fun readAt(offset: Long, len: Int): ByteArray {
         check(!closed) { "fd closed" }
-        // Sequential-read only; offset is ignored.
-        val stream = FileInputStream(fileDescriptor)
-        return stream.use { it.readBytes() }
+        require(offset == position) { "fd source only supports sequential reads" }
+        val buffer = ByteArray(len)
+        val read = inputStream.read(buffer)
+        if (read <= 0) return ByteArray(0)
+        position += read
+        return buffer.copyOf(read)
     }
 
     override fun writeAt(offset: Long, data: ByteArray) {
@@ -154,13 +168,8 @@ class FdFileSource(
     override fun close() {
         if (closed) return
         closed = true
-        runCatching { fileDescriptor.let { /* no explicit close needed for received fds */ } }
-    }
-
-    override fun detach(): FileSource {
-        check(!closed) { "fd closed" }
-        closed = true
-        return FdFileSource(fileDescriptor, size, absolutePath, mode)
+        runCatching { inputStream.close() }
+        onClose()
     }
 }
 
@@ -174,14 +183,16 @@ class StreamFileSource(
     override val writable get() = false
     override val seekable get() = false
     private var closed = false
+    private var position = 0L
 
-    override fun readAt(offset: Long, _len: Int): ByteArray {
+    override fun readAt(offset: Long, len: Int): ByteArray {
         check(!closed) { "stream closed" }
-        return if (offset == 0L && !closed) {
-            inputStream.use { it.readBytes() }
-        } else {
-            throw UnsupportedOperationException("stream does not support positional read")
-        }
+        require(offset == position) { "stream source only supports sequential reads" }
+        val buffer = ByteArray(len)
+        val read = inputStream.read(buffer)
+        if (read <= 0) return ByteArray(0)
+        position += read
+        return buffer.copyOf(read)
     }
 
     override fun writeAt(offset: Long, data: ByteArray) =
@@ -206,4 +217,30 @@ internal fun OpenMode.toProto(): ProtoHandleMode = when (this) {
     OpenMode.READ -> ProtoHandleMode.READ
     OpenMode.WRITE -> ProtoHandleMode.WRITE
     OpenMode.READ_WRITE -> ProtoHandleMode.READ_WRITE
+}
+
+/**
+ * Open [path] on a daemon, preferring a real kernel descriptor but falling back
+ * to a virtual handle.
+ *
+ * Whether an fd can be received depends on the *file's* SELinux label relative
+ * to the receiving app's context — something the client cannot predict. A denied
+ * hand-off only truncates the SCM_RIGHTS list, so the reply arrives without a
+ * descriptor; we then use [HandleFileSource] (reads proxied on demand) instead.
+ */
+internal fun openDaemonSource(
+    path: String,
+    mode: OpenMode,
+    openConnection: () -> DaemonConnection,
+): FileSource {
+    val connection = openConnection()
+    val result = connection.openHandle(path, mode.toProto(), wantFd = true).getOrThrow()
+    val fd = result.fileDescriptor?.takeIf { mode == OpenMode.READ }
+    return if (fd != null) {
+        FdFileSource(fd, result.size, path, mode) {
+            runCatching { connection.closeHandle(result.handleId) }
+        }
+    } else {
+        HandleFileSource(result.handleId, result.size, path, connection, mode)
+    }
 }

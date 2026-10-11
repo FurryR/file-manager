@@ -34,6 +34,9 @@ if [[ ! -x "$LINKER" ]]; then
 fi
 
 rustup target add aarch64-linux-android
+# NOTE: keep the daemon dynamically linked. proot crashes (SIGSEGV) on static
+# binaries; the dynamic daemon runs under proot as long as /apex (bionic) and
+# /system are bound into the guest.
 CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$LINKER" \
   cargo build --manifest-path "$NATIVE_DIR/Cargo.toml" --release --target aarch64-linux-android
 

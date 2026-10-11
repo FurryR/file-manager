@@ -18,13 +18,27 @@ enum class ContainerState {
 }
 
 /**
- * A container instance running under the app-managed proot environment.
+ * Backend used to run a container. Fixed at creation time and immutable:
+ * a container is always entered with the same privilege level, so on-disk
+ * file ownership never mixes between root and the app UID.
+ *
+ * - [PROOT]  — unprivileged, runs as the app UID via proot.
+ * - [CHROOT] — requires root, runs as root via a chroot daemon.
+ */
+enum class ContainerBackend {
+    PROOT,
+    CHROOT,
+}
+
+/**
+ * A container instance running under the app-managed proot/chroot environment.
  *
  * @property name Unique container name (e.g., "alpine-dev").
  * @property distroId Identifies the distro from which this container was created.
  * @property state Current lifecycle state.
  * @property createdAt Unix-millis timestamp when the container was created.
  * @property rootfsPath Absolute path to the container's rootfs on Android filesystem.
+ * @property backend Fixed execution backend chosen at creation time.
  * @property bindMounts List of bind mounts mapping Android paths into the container.
  */
 data class Container(
@@ -33,6 +47,7 @@ data class Container(
     val state: ContainerState,
     val createdAt: Long,
     val rootfsPath: String,
+    val backend: ContainerBackend = ContainerBackend.PROOT,
     val bindMounts: List<BindMount> = emptyList(),
 )
 

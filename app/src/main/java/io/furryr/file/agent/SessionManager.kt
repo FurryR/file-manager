@@ -4,6 +4,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.util.Log
+import io.furryr.file.TerminalForegroundService
+import io.furryr.file.daemon.DaemonLauncher
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import kotlinx.coroutines.Dispatchers
@@ -21,7 +23,7 @@ import java.util.UUID
  *
  * Thread safety is provided via [synchronized] on [mutex] for all map access.
  *
- * Used by [AgentScreen] (Task 27) for block-model terminal sessions.
+ * Used by [io.furryr.file.TerminalSheet] to drive terminal sessions.
  */
 object SessionManager {
     private const val TAG = "SessionManager"
@@ -129,8 +131,8 @@ object SessionManager {
      * For [SessionType.RootPty] a daemon-backed PTY is spawned via
      * [PtyManager.createPty] and bridged to the [TerminalSession].
      *
-     * For [SessionType.Container] the proot binary is run directly as
-     * the PTY shell process via [ProotRunner].
+     * For [SessionType.Container] the native daemon spawns the container
+     * process (chroot or proot) and its PTY is bridged to the terminal.
      *
      * @param type    The kind of session to create.
      * @param context Android [Context] (needed for container operations).
@@ -160,20 +162,7 @@ object SessionManager {
                         Pair(ts, bridge)
                     }
 
-                    is SessionType.Container -> {
-                        val container = ContainerManager.getContainer(context, type.containerName)
-                            ?: throw IllegalStateException("Container '${type.containerName}' not found")
-                        ProotInstaller.install(context).getOrThrow()
-                        val binaryPath = ProotInstaller.expectedPath(context).absolutePath
-                        val prootArgs = ProotRunner.buildProotArgs(context, container)
-                        val ts = createTerminalSession(
-                            shell = binaryPath,
-                            context = context,
-                            args = prootArgs,
-                            customCwd = container.rootfsPath,
-                        )
-                        Pair(ts, null)
-                    }
+                    is SessionType.Container -> createContainerTerminal(type.containerName, context)
                 }
 
                 val info = SessionInfo(
@@ -188,6 +177,10 @@ object SessionManager {
                     sessions[sessionId] = info
                     sessionChangeListeners.forEach { it() }
                 }
+
+                // Show the terminal foreground notification while any session
+                // is alive (also keeps the process alive in the background).
+                appContext?.let { TerminalForegroundService.start(it) }
 
                 Log.d(TAG, "createSession: success id=$sessionId")
                 Result.success(terminalSession)
@@ -254,9 +247,9 @@ object SessionManager {
 
         val info: SessionInfo = synchronized(mutex) {
             val removed = sessions.remove(sessionId)
-            sessionChangeListeners.forEach { it() }
+            if (removed != null) sessionChangeListeners.forEach { it() }
             removed
-        } ?: throw IllegalArgumentException("Session not found: $sessionId")
+        } ?: return@runCatching
 
         // Stop I/O bridge first.
         info.ptyBridge?.stop()
@@ -266,7 +259,29 @@ object SessionManager {
             runCatching { info.session.finishIfRunning() }
         }
 
+        // Hide the foreground notification once nothing is left running.
+        if (synchronized(mutex) { sessions.isEmpty() }) {
+            appContext?.let { TerminalForegroundService.stop(it) }
+        }
+
         Log.d(TAG, "destroySession: done id=$sessionId")
+    }
+
+    /**
+     * Destroy every active session belonging to [containerName].
+     *
+     * Used by the sidebar "kill" action to close all terminals of a container.
+     */
+    fun destroyContainerSessions(containerName: String) {
+        val ids = synchronized(mutex) {
+            sessions.values
+                .filter {
+                    it.type is SessionType.Container &&
+                        (it.type as SessionType.Container).containerName == containerName
+                }
+                .map { it.id }
+        }
+        ids.forEach { runCatching { destroySession(it) } }
     }
 
     /**
@@ -324,12 +339,38 @@ object SessionManager {
             sessions.clear()
         }
 
+        appContext?.let { TerminalForegroundService.stop(it) }
+
         Log.d(TAG, "destroyAll: done")
     }
 
     // =================================================================
     //  Internal helpers
     // =================================================================
+
+    /**
+     * Create the terminal for a container session.
+     *
+     * The daemon owns the container setup (mount namespace + chroot, or proot)
+     * for both backends. The container's fixed backend determines which daemon
+     * is used; chroot containers fail if root is unavailable.
+     */
+    private suspend fun createContainerTerminal(
+        containerName: String,
+        context: Context,
+    ): Pair<TerminalSession, PtyBridge?> {
+        // Fail early with a clear message. The shell itself is spawned by
+        // ProcessHelper on the container's dedicated daemon via the marker
+        // command, so the TerminalSession owns the container PTY fd directly
+        // (input/output go straight to the container shell).
+        ContainerManager.getContainer(context, containerName)
+            ?: throw IllegalStateException("Container '$containerName' not found")
+        // Warm the container daemon off the main thread so the synchronous
+        // spawn inside TerminalSession is fast.
+        withContext(Dispatchers.IO) { DaemonLauncher.connectContainerByName(containerName) }
+        val ts = createTerminalSession("container://$containerName", context, customCwd = "/")
+        return ts to null
+    }
 
     /**
      * Construct a [TerminalSession] with sensible defaults.

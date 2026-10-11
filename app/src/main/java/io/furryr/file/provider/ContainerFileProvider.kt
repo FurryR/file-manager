@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
 
 /**
  * [FileProvider] for proot containers.
@@ -25,6 +26,7 @@ import java.io.FileInputStream
  */
 object ContainerFileProvider : FileProvider {
     private const val TAG = "ContainerFileProvider"
+    private const val COPY_BUFFER_SIZE = 256 * 1024
     private lateinit var appContext: Context
 
     override val scheme: String get() = "container"
@@ -34,7 +36,7 @@ object ContainerFileProvider : FileProvider {
         ProviderFeature.LIST, ProviderFeature.STAT,
         ProviderFeature.CREATE_FILE, ProviderFeature.CREATE_DIR,
         ProviderFeature.DELETE,
-        ProviderFeature.RENAME, ProviderFeature.OPEN,
+        ProviderFeature.RENAME, ProviderFeature.OPEN, ProviderFeature.STREAM_COPY,
     )
 
     fun init(context: Context) {
@@ -120,11 +122,38 @@ object ContainerFileProvider : FileProvider {
         StreamFileSource(inputStream = FileInputStream(file), size = file.length(), absolutePath = file.absolutePath)
     }
 
-    override fun copy(from: String, to: String, isCopy: Boolean): Flow<CopyProgress> =
-        flow<CopyProgress> { throw UnsupportedOperationException("ContainerFileProvider copy not implemented") }.flowOn(Dispatchers.IO)
+    override fun copy(from: String, to: String, isCopy: Boolean): Flow<CopyProgress> = flow {
+        val source = resolveFile(containerSegments(from))
+            ?: throw java.io.FileNotFoundException("Not found: $from")
+        val destination = resolveFile(containerSegments(to))
+            ?: throw java.io.FileNotFoundException("Invalid destination: $to")
+        destination.parentFile?.mkdirs()
+        FileInputStream(source).use { input ->
+            FileOutputStream(destination).use { output ->
+                copyStream(input, source.length(), from, isCopy) { data -> output.write(data) }
+                    .collect { emit(it) }
+            }
+        }
+    }.flowOn(Dispatchers.IO)
 
-    override fun copy(src: FileSource, destPath: String, isCopy: Boolean): Flow<CopyProgress> =
-        flow<CopyProgress> { throw UnsupportedOperationException("ContainerFileProvider copy not implemented") }.flowOn(Dispatchers.IO)
+    override fun copy(src: FileSource, destPath: String, isCopy: Boolean): Flow<CopyProgress> = flow {
+        val destination = resolveFile(containerSegments(destPath))
+            ?: throw java.io.FileNotFoundException("Invalid destination: $destPath")
+        destination.parentFile?.mkdirs()
+        FileOutputStream(destination).use { output ->
+            var offset = 0L
+            var copied = 0L
+            while (true) {
+                val data = src.readChunk(offset, COPY_BUFFER_SIZE)
+                if (data.isEmpty()) break
+                output.write(data)
+                offset += data.size
+                copied += data.size
+                emit(CopyProgress(src.size, copied, destPath, false, isCopy))
+            }
+            emit(CopyProgress(src.size, copied, destPath, true, isCopy))
+        }
+    }.flowOn(Dispatchers.IO)
 
     // ── Internal ───────────────────────────────────────────────────
 
@@ -134,6 +163,31 @@ object ContainerFileProvider : FileProvider {
         val rootfs = File(container.rootfsPath)
         val relativePath = segments.drop(1).joinToString("/")
         return if (relativePath.isEmpty()) rootfs else File(rootfs, relativePath)
+    }
+
+    private fun containerSegments(path: String): List<String> {
+        val segments = Path.parse(path).segmentList
+        if (segments.isEmpty()) throw IllegalStateException("Cannot operate at container root")
+        return segments
+    }
+
+    private fun copyStream(
+        input: java.io.InputStream,
+        totalSize: Long,
+        sourcePath: String,
+        isCopy: Boolean,
+        write: (ByteArray) -> Unit,
+    ): Flow<CopyProgress> = flow {
+        val buffer = ByteArray(COPY_BUFFER_SIZE)
+        var copied = 0L
+        while (true) {
+            val read = input.read(buffer)
+            if (read <= 0) break
+            write(buffer.copyOf(read))
+            copied += read
+            emit(CopyProgress(totalSize, copied, sourcePath, false, isCopy))
+        }
+        emit(CopyProgress(totalSize, copied, sourcePath, true, isCopy))
     }
 
     private fun resolveDir(segments: List<String>): File? {

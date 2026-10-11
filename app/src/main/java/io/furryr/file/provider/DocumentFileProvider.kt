@@ -46,7 +46,8 @@ object DocumentFileProvider : FileProvider {
     override val features: Set<ProviderFeature> get() = setOf(
         ProviderFeature.LIST, ProviderFeature.STAT,
         ProviderFeature.CREATE_FILE, ProviderFeature.CREATE_DIR,
-        ProviderFeature.DELETE, ProviderFeature.OPEN,
+        ProviderFeature.DELETE, ProviderFeature.RENAME, ProviderFeature.OPEN,
+        ProviderFeature.STREAM_COPY,
     )
 
     fun init(context: Context) {
@@ -150,19 +151,40 @@ object DocumentFileProvider : FileProvider {
     }
 
     override suspend fun open(path: String, mode: OpenMode): Result<FileSource> = runCatching {
+        if (mode != OpenMode.READ) throw UnsupportedOperationException("DocumentFileProvider supports READ only")
         val docFile = resolve(path) ?: throw FileNotFoundException("Not found: $path")
         val uri = docFile.uri
         val size = docFile.length()
         val stream = appContext.contentResolver.openInputStream(uri)
             ?: throw FileNotFoundException("Cannot open: $path")
-        StreamFileSource(inputStream = stream, size = size, absolutePath = path)
+        StreamFileSource(inputStream = stream, size = size)
     }
 
-    override fun copy(from: String, to: String, isCopy: Boolean): Flow<CopyProgress> =
-        flow<CopyProgress> { throw UnsupportedOperationException("SAF copy not implemented") }.flowOn(Dispatchers.IO)
+    override fun copy(from: String, to: String, isCopy: Boolean): Flow<CopyProgress> = flow {
+        val source = resolve(from) ?: throw FileNotFoundException("Not found: $from")
+        val input = appContext.contentResolver.openInputStream(source.uri)
+            ?: throw FileNotFoundException("Cannot open: $from")
+        input.use { copyStreamToDocument(it, source.length(), from, to, isCopy) { emit(it) } }
+    }.flowOn(Dispatchers.IO)
 
-    override fun copy(src: FileSource, destPath: String, isCopy: Boolean): Flow<CopyProgress> =
-        flow<CopyProgress> { throw UnsupportedOperationException("SAF copy not implemented") }.flowOn(Dispatchers.IO)
+    override fun copy(src: FileSource, destPath: String, isCopy: Boolean): Flow<CopyProgress> = flow {
+        val destination = createDestination(destPath)
+        val output = appContext.contentResolver.openOutputStream(destination.uri)
+            ?: throw IllegalStateException("Cannot open destination: $destPath")
+        output.use { outputStream ->
+            var offset = 0L
+            var copied = 0L
+            while (true) {
+                val data = src.readChunk(offset, COPY_BUFFER_SIZE)
+                if (data.isEmpty()) break
+                outputStream.write(data)
+                offset += data.size
+                copied += data.size
+                emit(CopyProgress(src.size, copied, destPath, false, isCopy))
+            }
+            emit(CopyProgress(src.size, copied, destPath, true, isCopy))
+        }
+    }.flowOn(Dispatchers.IO)
 
     override fun isAvailable(): Boolean = true
 
@@ -179,7 +201,8 @@ object DocumentFileProvider : FileProvider {
         val (treeUri, relativePath) = parseDocumentPath(uriPath)
         val treeDoc = DocumentFile.fromTreeUri(appContext, treeUri) ?: return null
         if (relativePath.isEmpty() || relativePath == "/") return treeDoc
-        return treeDoc.findFile(relativePath.trimStart('/'))
+        return relativePath.trimStart('/').split('/').filter { it.isNotEmpty() }
+            .fold(treeDoc) { parent, segment -> parent.findFile(segment) ?: return null }
     }
 
     private fun resolveParent(uriPath: String): DocumentFile {
@@ -200,6 +223,40 @@ object DocumentFileProvider : FileProvider {
         return Uri.parse(treeUriStr) to relativePath
     }
 
-}
+    private suspend fun copyStreamToDocument(
+        input: java.io.InputStream,
+        totalSize: Long,
+        sourcePath: String,
+        destPath: String,
+        isCopy: Boolean,
+        emitProgress: suspend (CopyProgress) -> Unit,
+    ) {
+        val destination = createDestination(destPath)
+        val output = appContext.contentResolver.openOutputStream(destination.uri)
+            ?: throw IllegalStateException("Cannot open destination: $destPath")
+        output.use { outputStream ->
+            val buffer = ByteArray(COPY_BUFFER_SIZE)
+            var copied = 0L
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                outputStream.write(buffer, 0, read)
+                copied += read
+                emitProgress(CopyProgress(totalSize, copied, sourcePath, false, isCopy))
+            }
+            emitProgress(CopyProgress(totalSize, copied, sourcePath, true, isCopy))
+        }
+    }
 
+    private fun createDestination(path: String): DocumentFile {
+        val parent = resolveParent(path)
+        val name = path.substringAfterLast('/')
+        parent.findFile(name)?.delete()
+        return parent.createFile("*/*", name)
+            ?: throw IllegalStateException("Failed to create destination: $path")
+    }
+
+    private const val COPY_BUFFER_SIZE = 256 * 1024
+
+}
 

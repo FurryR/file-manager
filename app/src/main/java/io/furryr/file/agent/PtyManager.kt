@@ -12,7 +12,7 @@ import java.io.OutputStream
  *
  * Used by:
  * - [io.furryr.file.SessionManager] — assigns PTYs to terminal sessions
- * - [io.furryr.file.AgentViewModel] — lifecycle management
+ * - [io.furryr.file.TerminalSheet] — terminal lifecycle management
  */
 object PtyManager {
     private const val TAG = "PtyManager"

@@ -101,8 +101,27 @@
     <string name="rename_container_title">重命名容器</string>
     <string name="drawer_group_saf">Local location</string>
     <string name="drawer_add_location">Add local location</string>
+    <string name="drawer_add_ftp">Add FTP location</string>
+    <string name="ftp_add_title">Add FTP location</string>
+    <string name="ftp_edit_title">Edit FTP location</string>
+    <string name="ftp_name_label">Name</string>
+    <string name="ftp_host_label">Host</string>
+    <string name="ftp_port_label">Port</string>
+    <string name="ftp_username_label">Username</string>
+    <string name="ftp_password_label">Password</string>
+    <string name="no_ftp_servers">No FTP locations</string>
+    <string name="delete_ftp_confirm">Delete FTP location \'%1$s\'?</string>
+    <string name="drawer_add_sftp">Add SFTP location</string>
+    <string name="sftp_add_title">Add SFTP location</string>
+    <string name="sftp_edit_title">Edit SFTP location</string>
+    <string name="no_sftp_servers">No SFTP locations</string>
+    <string name="delete_sftp_confirm">Delete SFTP location \'%1$s\'?</string>
     <string name="drawer_rename">Rename</string>
     <string name="drawer_delete">Delete</string>
+    <string name="drawer_kill">Kill</string>
+    <string name="container_backend_chroot">chroot</string>
+    <string name="container_backend_proot">proot</string>
+    <string name="toast_killed">Killed %1$s</string>
     <string name="container_state_failed">Failed</string>
     <string name="container_state_deleted">Deleted</string>
     <string name="terminal_drawer_title">Terminals</string>
@@ -110,6 +129,12 @@
     <string name="wizard_pull_desc">Enter a Docker image reference to create a container.</string>
     <string name="wizard_image_placeholder">library/alpine:latest</string>
     <string name="wizard_name_placeholder">my-alpine</string>
+    <string name="wizard_backend_label">Container backend</string>
+    <string name="wizard_backend_chroot">chroot (root)</string>
+    <string name="wizard_backend_chroot_desc">Runs as root. Requires root access; fixed at creation time.</string>
+    <string name="wizard_backend_proot">proot (app user)</string>
+    <string name="wizard_backend_proot_desc">Runs as the app user without root. Fixed at creation time.</string>
+    <string name="wizard_backend_no_root">No root access detected — only proot is available.</string>
     <string name="settings_container">Container</string>
     <string name="settings_docker_hub_url">Docker Hub address</string>
     <string name="settings_docker_hub_key">Docker Hub key</string>
@@ -120,4 +145,12 @@
     <string name="settings_docker_hub_key_desc">Optional authentication token</string>
     <string name="settings_terminal_font_desc">Font file path (TTF/OTF)</string>
     <string name="settings_terminal_font_size_desc">Default terminal text size</string>
+
+    <!-- Terminal foreground notification -->
+    <string name="terminal_notification_channel_name">Terminal sessions</string>
+    <string name="terminal_notification_title">Terminal</string>
+    <string name="terminal_notification_text">%1$d terminal(s) running</string>
+    <string name="terminal_wakelock_hold">Hold WakeLock</string>
+    <string name="terminal_wakelock_release">Release WakeLock</string>
+    <string name="terminal_notification_exit">Exit</string>
 </resources>

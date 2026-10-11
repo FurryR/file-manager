@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
@@ -23,6 +22,7 @@ import androidx.compose.material.icons.filled.FlipToBack
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,7 +39,7 @@ fun BottomToolbar(
     onBack: () -> Unit,
     onForward: () -> Unit,
     onCreateFile: () -> Unit,
-    onAgent: () -> Unit,
+    onTerminal: () -> Unit,
     onParent: () -> Unit,
     copyMoveActive: Boolean = false,
     onCopyMoveConfirm: () -> Unit = {},
@@ -89,8 +89,8 @@ fun BottomToolbar(
                     Icon(Icons.Default.Flip, contentDescription = "Select same type")
                 }
             } else {
-                IconButton(onClick = onAgent) {
-                    Icon(Icons.Default.Android, contentDescription = "Agent")
+                IconButton(onClick = onTerminal) {
+                    Icon(Icons.Default.Terminal, contentDescription = "Terminal")
                 }
             }
             if (selectionMode) {

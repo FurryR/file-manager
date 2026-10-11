@@ -176,7 +176,10 @@ fun FileListScreen(
                 loadSequence++
                 animateNextLoad = false
                 error = result.exceptionOrNull()
-                onInfoChange(FileRepository.info(requestedPath, raw))
+                val directoryInfo = withContext(Dispatchers.IO) {
+                    FileRepository.info(requestedPath, raw)
+                }
+                onInfoChange(directoryInfo)
                 Log.d("FileListScreen", "loadEntries: done, entries=${newEntries.size}, error=${result.exceptionOrNull()}, isRefreshing=$isRefreshing")
             } finally {
                 if (generation == loadGeneration) {

@@ -57,6 +57,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import io.furryr.file.R
 import io.furryr.file.daemon.DaemonLauncher
+import io.furryr.file.provider.ContainerDaemonProvider
 import io.furryr.file.ui.theme.FileManagerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -133,6 +134,7 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
         rootEnabled = enabled
         prefs.edit().putBoolean("root_enabled", enabled).apply()
         DaemonLauncher.setRootEnabled(enabled)
+        ContainerDaemonProvider.resetConnections()
         DaemonLauncher.reset()
     }
 
@@ -147,6 +149,7 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
             }
         }
         DaemonLauncher.setShellEnabled(enabled)
+        ContainerDaemonProvider.resetConnections()
         DaemonLauncher.reset()
     }
 
@@ -427,6 +430,7 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
                         suPath = dialogSuPath
                         prefs.edit().putString("su_path", dialogSuPath).apply()
                         DaemonLauncher.setSuPath(dialogSuPath)
+                        ContainerDaemonProvider.resetConnections()
                         DaemonLauncher.reset()
                         showCustomSuDialog = false
                     }

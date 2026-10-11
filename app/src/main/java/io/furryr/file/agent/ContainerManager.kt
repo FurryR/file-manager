@@ -2,6 +2,8 @@ package io.furryr.file.agent
 
 import android.content.Context
 import android.util.Log
+import io.furryr.file.daemon.DaemonLauncher
+import io.furryr.file.provider.ContainerDaemonProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -16,8 +18,8 @@ import java.io.File
  * All file I/O and process management runs on [Dispatchers.IO].
  *
  * Container processes are not tracked here — [SessionManager] manages
- * terminal sessions with proot directly via [ProotRunner]. Use
- * [SessionManager.hasContainerSession] to check whether a container has
+ * terminal sessions through the native daemon (chroot or proot backend).
+ * Use [SessionManager.hasContainerSession] to check whether a container has
  * an active terminal.
  *
  * Directory layout under [Context.filesDir]:
@@ -38,10 +40,16 @@ object ContainerManager {
         context: Context,
         name: String,
         imageRef: String,
+        backend: ContainerBackend = ContainerBackend.PROOT,
     ): Result<Container> = withContext(Dispatchers.IO) {
         var didCreateDir = false
         try {
             validateContainerName(name).getOrElse { return@withContext Result.failure(it) }
+            if (backend == ContainerBackend.CHROOT && !DaemonLauncher.isRootAvailable()) {
+                return@withContext Result.failure(
+                    IllegalStateException("The chroot backend requires root access")
+                )
+            }
             ProotInstaller.install(context).getOrThrow()
 
             val containersDir = getContainersDir(context)
@@ -65,11 +73,20 @@ object ContainerManager {
                 state = ContainerState.CREATED,
                 createdAt = System.currentTimeMillis(),
                 rootfsPath = containerDir.absolutePath,
+                backend = backend,
             )
 
             saveDistro(containerDir, container, imageRef)
 
-            Log.i(TAG, "Container '$name' created (image=$imageRef) at ${containerDir.absolutePath}")
+            if (backend == ContainerBackend.CHROOT) {
+                // TODO(workaround): the rootfs is extracted as the app UID, but
+                // a chroot container expects root-owned files. Ideally the
+                // extraction itself would run as root; until then, ask the root
+                // daemon for a one-shot recursive chown.
+                chownRootfsToRoot(containerDir.absolutePath)
+            }
+
+            Log.i(TAG, "Container '$name' created (image=$imageRef, backend=$backend) at ${containerDir.absolutePath}")
             Result.success(container)
         } catch (e: Exception) {
             if (didCreateDir) {
@@ -98,7 +115,20 @@ object ContainerManager {
                 return@withContext Result.success(Unit)
             }
 
-            deleteRecursively(containerDir)
+            // A chroot rootfs is root-owned, so the app UID cannot unlink it;
+            // delegate the recursive removal to the root daemon.
+            val container = runCatching { loadContainer(containerDir) }.getOrNull()
+            if (container?.backend == ContainerBackend.CHROOT && DaemonLauncher.isRootAvailable()) {
+                val result = DaemonLauncher.getConnection(appDaemon = false).exec(
+                    command = "/system/bin/toybox",
+                    args = listOf("rm", "-rf", containerDir.absolutePath),
+                ).getOrThrow()
+                if (result.exitCode != 0) {
+                    throw RuntimeException("Failed to delete container: ${result.stderrText.trim()}")
+                }
+            } else {
+                deleteRecursively(containerDir)
+            }
             Log.i(TAG, "Container '$name' deleted")
 
             Result.success(Unit)
@@ -228,35 +258,12 @@ object ContainerManager {
     ): Result<String> = withContext(Dispatchers.IO) {
         try {
             validateContainerName(name).getOrElse { return@withContext Result.failure(it) }
-            val containerDir = getContainerDir(context, name)
-            val container = loadContainer(containerDir)
+            // Validates that the container exists and has a manifest.
+            loadContainer(getContainerDir(context, name))
 
-            val cmd = ProotRunner.buildProotCommand(
-                context,
-                container,
-                listOf(command),
-            )
-
-            val pb = ProcessBuilder(cmd)
-            pb.directory(File(container.rootfsPath))
-            pb.redirectErrorStream(true)
-
-            val process = pb.start()
-            val output = process.inputStream.bufferedReader().use { it.readText() }
-
-            val exitCode = process.waitFor()
-            if (exitCode != 0) {
-                val trimmed = output.trim()
-                return@withContext Result.failure(
-                    RuntimeException(
-                        if (trimmed.isNotEmpty()) trimmed
-                        else "Command exited with code $exitCode"
-                    )
-                )
-            }
-
-            Log.d(TAG, "execInContainer '$name': '$command' → exit $exitCode")
-            Result.success(output.trim())
+            val output = ContainerDaemonProvider.execContainer(name, command)
+            Log.d(TAG, "execInContainer '$name': '$command'")
+            Result.success(output)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -309,6 +316,9 @@ object ContainerManager {
             json.put("bindMounts", mountsArray)
             distroFile.writeText(json.toString(2))
 
+            // Drop cached container daemons so the new mount takes effect.
+            ContainerDaemonProvider.resetConnections()
+
             Log.i(TAG, "Bind mount added to '$name': $srcAndroidPath -> $dstContainerPath")
             Result.success(Unit)
         } catch (e: Exception) {
@@ -325,6 +335,37 @@ object ContainerManager {
 
     private fun getContainerDir(context: Context, name: String): File =
         File(getContainersDir(context), name)
+
+    /**
+     * TODO(workaround): give a freshly extracted chroot rootfs root ownership by
+     * delegating `chown -R 0:0` to the root daemon. Best-effort — root can read
+     * app-owned files anyway, so a failure only affects ownership semantics.
+     */
+    private fun chownRootfsToRoot(rootfs: String) {
+        runCatching {
+            val uid = android.os.Process.myUid()
+            val gid = android.system.Os.getgid()
+            val conn = DaemonLauncher.getConnection(appDaemon = false)
+            // Rootfs contents -> root:0 ...
+            val chownAll = conn.exec(
+                command = "/system/bin/toybox",
+                args = listOf("chown", "-R", "0:0", rootfs),
+            ).getOrThrow()
+            if (chownAll.exitCode != 0) {
+                Log.w(TAG, "chown rootfs failed (${chownAll.exitCode}): ${chownAll.stderrText.trim()}")
+                return@runCatching
+            }
+            // ... but keep the container directory and metadata app-owned so
+            // distro.json stays writable and the tree stays manageable.
+            val restore = conn.exec(
+                command = "/system/bin/toybox",
+                args = listOf("chown", "$uid:$gid", rootfs, "$rootfs/distro.json"),
+            ).getOrThrow()
+            if (restore.exitCode != 0) {
+                Log.w(TAG, "restore ownership failed (${restore.exitCode}): ${restore.stderrText.trim()}")
+            }
+        }.onFailure { Log.w(TAG, "chown rootfs request failed", it) }
+    }
 
     private fun validateContainerName(name: String): Result<Unit> {
         return if (ContainerUriResolver.isValidContainerName(name)) {
@@ -364,6 +405,7 @@ object ContainerManager {
             put("name", container.name)
             put("distroId", container.distroId)
             put("image", imageRef)
+            put("backend", container.backend.name.lowercase())
             put("bindMounts", mountsArray)
         }
 
@@ -382,12 +424,18 @@ object ContainerManager {
             )
         }
 
+        val backend = when (json.optString("backend", "proot").lowercase()) {
+            "chroot" -> ContainerBackend.CHROOT
+            else -> ContainerBackend.PROOT
+        }
+
         return Container(
             name = json.getString("name"),
             distroId = json.getString("distroId"),
             state = ContainerState.CREATED,
             createdAt = json.optLong("createdAt", 0L),
             rootfsPath = containerDir.absolutePath,
+            backend = backend,
             bindMounts = bindMounts,
         )
     }

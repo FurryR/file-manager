@@ -56,7 +56,8 @@ import java.lang.reflect.Modifier
  */
 class PtyBridge(
     private val ptyConnection: PtyConnection,
-    private val terminalSession: TerminalSession
+    private val terminalSession: TerminalSession,
+    private val onStop: (() -> Unit)? = null,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -153,6 +154,9 @@ class PtyBridge(
 
         runCatching { ptyConnection.inputStream.close() }
         runCatching { ptyConnection.outputStream.close() }
+
+        // Let the owner (e.g. the chroot daemon) reap the child PTY.
+        runCatching { onStop?.invoke() }
     }
 
     // =================================================================

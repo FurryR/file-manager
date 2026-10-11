@@ -28,6 +28,9 @@ message Request {
     TruncateHandleRequest truncate_handle = 23;
     WaitPtyRequest wait_pty = 24;
     KillPtyRequest kill_pty = 25;
+    CopyFromSourceRequest copy_from_source = 26;
+    ReadSourceResponse read_source_response = 27;
+    ExecRequest exec = 28;
   }
 }
 
@@ -63,6 +66,27 @@ message CopyRequest {
   string to = 2;
 }
 
+// Destination-driven copy. A real source is attached with SCM_RIGHTS; a
+// virtual source is read through ReadSourceRequest/ReadSourceResponse.
+message CopyFromSourceRequest {
+  string to = 1;
+  uint64 source_size = 2;
+  bool virtual_source = 3;
+}
+
+message ReadSourceRequest {
+  uint64 request_id = 1;
+  uint64 offset = 2;
+  uint32 length = 3;
+}
+
+message ReadSourceResponse {
+  uint64 request_id = 1;
+  bytes data = 2;
+  bool eof = 3;
+  string error = 4;
+}
+
 message StreamProgress {
   bool finished = 1;
   uint64 total_bytes = 2;
@@ -85,6 +109,24 @@ message Response {
   optional DupHandleResponse dup_handle = 12;
   uint32 child_pid = 13;
   int32 exit_code = 14;
+  optional ReadSourceRequest read_source_request = 15;
+  optional ExecResponse exec = 16;
+}
+
+// Non-PTY command execution. Runs [command] with [args], captures stdout and
+// stderr, and reports the exit code. Used to run container commands under a
+// root daemon (chroot) without allocating a pseudo-terminal.
+message ExecRequest {
+  string command = 1;
+  repeated string args = 2;
+  string cwd = 3;
+  map<string, string> env = 4;
+}
+
+message ExecResponse {
+  int32 exit_code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
 }
 
 message FileEntry {
@@ -153,6 +195,11 @@ enum HandleMode {
 message OpenHandleRequest {
   string path = 1;
   HandleMode mode = 2;
+  // When true the daemon may attach a kernel fd to a READ reply. Whether the
+  // client can actually receive it depends on the file's SELinux label relative
+  // to the app's context; a denied hand-off just drops the fd (SCM_RIGHTS list
+  // truncated) and the client reads through ReadHandle instead. Defaults false.
+  bool want_fd = 3;
 }
 
 message OpenHandleResponse {

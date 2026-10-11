@@ -75,7 +75,7 @@ import kotlin.math.abs
 private const val SmallRatio = 0.50f
 private const val LargeRatio = 0.90f
 private val DrawerWidth = 180.dp
-private const val TAG = "AgentSheet"
+private const val TAG = "TerminalSheet"
 private const val DRAWER_DRAG_THRESHOLD = 50f
 
 private data class TerminalTab(
@@ -85,7 +85,7 @@ private data class TerminalTab(
 )
 
 @Composable
-fun AgentSheet(
+fun TerminalSheet(
     visible: Boolean,
     onDismiss: () -> Unit,
     currentPath: String = "",

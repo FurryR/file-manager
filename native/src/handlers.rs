@@ -4,7 +4,7 @@ use std::os::fd::RawFd;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::fs::File;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 
 use crate::copy;
 use crate::handles::HandleTable;
@@ -28,11 +28,20 @@ pub async fn handle_streaming(
     cancel_flags: &Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     source_read_broker: &copy::SourceReadBroker,
     tx: mpsc::UnboundedSender<OutboundResponse>,
+    shutdown: &watch::Sender<bool>,
 ) {
     let req_id = request.id;
     let cmd = request.command;
 
     match cmd {
+        Some(Command::Exit(_)) => {
+            close_unexpected_fd(attached_fd);
+            // Ack first (the connection loop flushes queued responses on the
+            // shutdown signal), then tear the whole daemon down. Any connection
+            // may ask for this.
+            let _ = tx.send(OutboundResponse::plain(ok_response(req_id)));
+            let _ = shutdown.send(true);
+        }
         Some(Command::List(ListRequest { path })) => {
             let resp = match list::list_files(&path).await {
                 Ok(entries) => Response { id: req_id, ok: true, entries, ..Response::default() },
@@ -420,4 +429,41 @@ fn ok_response(id: u64) -> Response {
 
 fn error_response(id: u64, error: io::Error) -> Response {
     Response { id, ok: false, error: error.to_string(), ..Response::default() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handle_streaming;
+    use crate::handles::HandleTable;
+    use crate::proto::request::Command;
+    use crate::proto::{ExitRequest, Request};
+    use crate::pty::PtyManager;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, watch, Mutex};
+
+    #[tokio::test]
+    async fn exit_request_acks_and_signals_shutdown() {
+        let pty = Arc::new(Mutex::new(PtyManager::new()));
+        let handles = Arc::new(Mutex::new(HandleTable::new()));
+        let cancel = Arc::new(Mutex::new(HashMap::<u64, Arc<AtomicBool>>::new()));
+        let broker = crate::copy::SourceReadBroker::default();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (resp_tx, mut resp_rx) = mpsc::unbounded_channel();
+
+        let request = Request {
+            id: 7,
+            command: Some(Command::Exit(ExitRequest {})),
+        };
+        handle_streaming(
+            request, None, &pty, &handles, &cancel, &broker, resp_tx, &shutdown_tx,
+        )
+        .await;
+
+        assert!(*shutdown_rx.borrow(), "exit must signal daemon shutdown");
+        let outbound = resp_rx.recv().await.expect("exit must be acked");
+        assert!(outbound.response.ok);
+        assert_eq!(outbound.response.id, 7);
+    }
 }

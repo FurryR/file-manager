@@ -11,9 +11,9 @@ import android.util.Log
 import android.webkit.MimeTypeMap
 import io.furryr.file.FileRepository
 import io.furryr.file.ForwardProviderAuthority
-import io.furryr.file.copy.FdFileSource
-import io.furryr.file.copy.FileSource
-import io.furryr.file.copy.OpenMode
+import io.furryr.file.core.source.FdFileSource
+import io.furryr.file.core.source.FileSource
+import io.furryr.file.core.source.OpenMode
 import io.furryr.file.util.Path
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

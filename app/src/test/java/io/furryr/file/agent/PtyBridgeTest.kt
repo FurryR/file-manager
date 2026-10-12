@@ -2,6 +2,7 @@ package io.furryr.file.agent
 
 import com.termux.terminal.TerminalEmulator
 import com.termux.terminal.TerminalSession
+import io.furryr.file.core.process.ProcessChannel
 import io.mockk.clearAllMocks
 import io.mockk.every
 import io.mockk.mockk
@@ -13,10 +14,28 @@ import org.junit.Before
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.FileDescriptor
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+
+/** In-memory [ProcessChannel] for exercising [PtyBridge] without a daemon. */
+private class PtyConnection(
+    val ptyId: Long,
+    val inputStream: InputStream,
+    val outputStream: OutputStream,
+) : ProcessChannel {
+    override val id: Long get() = ptyId
+    override val pid: Int get() = 0
+    override val fileDescriptor: FileDescriptor? get() = null
+    override val input: InputStream get() = inputStream
+    override val output: OutputStream get() = outputStream
+    override suspend fun resize(rows: Int, cols: Int): Result<Unit> = Result.success(Unit)
+    override suspend fun signal(signal: Int): Result<Unit> = Result.success(Unit)
+    override suspend fun waitFor(): Result<Int> = Result.success(0)
+    override fun close() {}
+}
 
 class PtyBridgeTest {
 

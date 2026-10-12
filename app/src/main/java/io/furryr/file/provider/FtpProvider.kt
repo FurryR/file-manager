@@ -1,11 +1,13 @@
 package io.furryr.file.provider
 
+import io.furryr.file.model.FtpServer
 import android.content.Context
-import io.furryr.file.copy.CopyProgress
-import io.furryr.file.copy.FileSource
-import io.furryr.file.copy.OpenMode
-import io.furryr.file.copy.StreamFileSource
-import io.furryr.file.model.FileEntry
+import io.furryr.file.core.model.CopyProgress
+import io.furryr.file.core.source.FileSource
+import io.furryr.file.core.source.OpenMode
+import io.furryr.file.core.source.StreamFileSource
+import io.furryr.file.core.model.FileEntry
+import io.furryr.file.core.model.ProviderStat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow

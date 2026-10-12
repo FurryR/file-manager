@@ -1,6 +1,6 @@
-package io.furryr.file.copy
+package io.furryr.file.core.source
 
-import io.furryr.file.daemon.DaemonConnection
+import io.furryr.file.core.ipc.DaemonConnection
 import io.furryr.file.proto.HandleMode as ProtoHandleMode
 import java.io.FileDescriptor
 import java.io.FileInputStream
@@ -72,7 +72,7 @@ sealed class FileSource : Closeable {
 // ══════════════════════════════════════════════════════════════════
 
 /** Daemon-virtual handle. All I/O goes through [DaemonConnection] handle protocol. */
-class HandleFileSource(
+class HandleFileSource internal constructor(
     val handleId: Long,
     override val size: Long,
     override val absolutePath: String?,

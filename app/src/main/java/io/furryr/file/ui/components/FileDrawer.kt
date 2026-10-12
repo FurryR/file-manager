@@ -3,13 +3,14 @@ import io.furryr.file.ui.theme.*
 import io.furryr.file.ui.screens.*
 import io.furryr.file.ui.components.*
 import io.furryr.file.ui.util.*
-import io.furryr.file.daemon.*
 import io.furryr.file.model.*
-import io.furryr.file.agent.*
+import io.furryr.file.agent.Container
+import io.furryr.file.agent.ContainerState
+import io.furryr.file.agent.ContainerBackend
 import io.furryr.file.R
+import io.furryr.file.FileRepository
+import io.furryr.file.core.model.ProviderStat
 import io.furryr.file.DefaultPath
-import io.furryr.file.daemon.DaemonLauncher
-import io.furryr.file.daemon.StatResult
 import io.furryr.file.ui.util.formatSize
 
 
@@ -79,10 +80,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.furryr.file.agent.ContainerManager
 import kotlin.math.abs
-import io.furryr.file.provider.SafDatabase
-import io.furryr.file.provider.SafLocation
-import io.furryr.file.provider.FtpServer
-import io.furryr.file.provider.SftpServer
+import io.furryr.file.model.SafLocation
+import io.furryr.file.model.FtpServer
+import io.furryr.file.model.SftpServer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -130,8 +130,8 @@ fun FileDrawer(
 ) {
     val configuration = LocalConfiguration.current
     val context = LocalContext.current
-    var rootStat by remember { mutableStateOf<StatResult?>(null) }
-    var homeStat by remember { mutableStateOf<StatResult?>(null) }
+    var rootStat by remember { mutableStateOf<ProviderStat?>(null) }
+    var homeStat by remember { mutableStateOf<ProviderStat?>(null) }
     var containers by remember { mutableStateOf<List<Container>>(emptyList()) }
     var showDrawerMenu by remember { mutableStateOf(false) }
     var contextMenuTarget by remember { mutableStateOf<Container?>(null) }
@@ -225,10 +225,10 @@ fun FileDrawer(
 
     LaunchedEffect(refreshKey, safRefreshKey) {
         rootStat = withContext(Dispatchers.IO) {
-            DaemonLauncher.getConnection().stat("/").getOrNull()
+            FileRepository.stat("/").getOrNull()
         }
         homeStat = withContext(Dispatchers.IO) {
-            DaemonLauncher.getConnection().stat(DefaultPath).getOrNull()
+            FileRepository.stat(DefaultPath).getOrNull()
         }
         containers = withContext(Dispatchers.IO) {
             ContainerManager.listContainers(context).getOrDefault(emptyList())

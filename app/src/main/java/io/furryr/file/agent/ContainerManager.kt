@@ -2,7 +2,9 @@ package io.furryr.file.agent
 
 import android.content.Context
 import android.util.Log
-import io.furryr.file.daemon.DaemonLauncher
+import io.furryr.file.core.DaemonManager
+import io.furryr.file.core.DaemonTarget
+import io.furryr.file.core.process.CommandSpec
 import io.furryr.file.provider.ContainerDaemonProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -45,7 +47,7 @@ object ContainerManager {
         var didCreateDir = false
         try {
             validateContainerName(name).getOrElse { return@withContext Result.failure(it) }
-            if (backend == ContainerBackend.CHROOT && !DaemonLauncher.isRootAvailable()) {
+            if (backend == ContainerBackend.CHROOT && !DaemonManager.isRootAvailable()) {
                 return@withContext Result.failure(
                     IllegalStateException("The chroot backend requires root access")
                 )
@@ -118,10 +120,12 @@ object ContainerManager {
             // A chroot rootfs is root-owned, so the app UID cannot unlink it;
             // delegate the recursive removal to the root daemon.
             val container = runCatching { loadContainer(containerDir) }.getOrNull()
-            if (container?.backend == ContainerBackend.CHROOT && DaemonLauncher.isRootAvailable()) {
-                val result = DaemonLauncher.getConnection(appDaemon = false).exec(
-                    command = "/system/bin/toybox",
-                    args = listOf("rm", "-rf", containerDir.absolutePath),
+            if (container?.backend == ContainerBackend.CHROOT && DaemonManager.isRootAvailable()) {
+                val result = DaemonManager.execService(DaemonTarget.Primary).run(
+                    CommandSpec(
+                        command = "/system/bin/toybox",
+                        args = listOf("rm", "-rf", containerDir.absolutePath),
+                    )
                 ).getOrThrow()
                 if (result.exitCode != 0) {
                     throw RuntimeException("Failed to delete container: ${result.stderrText.trim()}")
@@ -341,15 +345,17 @@ object ContainerManager {
      * delegating `chown -R 0:0` to the root daemon. Best-effort — root can read
      * app-owned files anyway, so a failure only affects ownership semantics.
      */
-    private fun chownRootfsToRoot(rootfs: String) {
+    private suspend fun chownRootfsToRoot(rootfs: String) {
         runCatching {
             val uid = android.os.Process.myUid()
             val gid = android.system.Os.getgid()
-            val conn = DaemonLauncher.getConnection(appDaemon = false)
+            val exec = DaemonManager.execService(DaemonTarget.Primary)
             // Rootfs contents -> root:0 ...
-            val chownAll = conn.exec(
-                command = "/system/bin/toybox",
-                args = listOf("chown", "-R", "0:0", rootfs),
+            val chownAll = exec.run(
+                CommandSpec(
+                    command = "/system/bin/toybox",
+                    args = listOf("chown", "-R", "0:0", rootfs),
+                )
             ).getOrThrow()
             if (chownAll.exitCode != 0) {
                 Log.w(TAG, "chown rootfs failed (${chownAll.exitCode}): ${chownAll.stderrText.trim()}")
@@ -357,9 +363,11 @@ object ContainerManager {
             }
             // ... but keep the container directory and metadata app-owned so
             // distro.json stays writable and the tree stays manageable.
-            val restore = conn.exec(
-                command = "/system/bin/toybox",
-                args = listOf("chown", "$uid:$gid", rootfs, "$rootfs/distro.json"),
+            val restore = exec.run(
+                CommandSpec(
+                    command = "/system/bin/toybox",
+                    args = listOf("chown", "$uid:$gid", rootfs, "$rootfs/distro.json"),
+                )
             ).getOrThrow()
             if (restore.exitCode != 0) {
                 Log.w(TAG, "restore ownership failed (${restore.exitCode}): ${restore.stderrText.trim()}")

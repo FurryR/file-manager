@@ -6,34 +6,38 @@
 
 | Directory | Contents |
 |-----------|----------|
-| `.` (root) | `MainActivity.kt`, `FileManagerApp.kt`, `Constants.kt`, `FileRepository.kt` |
-| `agent/` | Session, container, PTY, terminal, wizard, distro, proot — all agent/container logic |
-| `daemon/` | `FileDaemonClient.kt`, `DaemonLauncher.kt`, `DaemonConnection.kt`, `DaemonProtocol.kt`, `OsSocket.kt`, `RootUtils.kt`, `FileErrors.kt` |
-| `model/` | `Models.kt`, `ErrorState.kt` |
-| `provider/` | SAF, container, daemon, document, forward, FTP, SFTP file providers |
-| `copy/` | `FileSource.kt`, `CopyProgress.kt` |
+| `.` (root) | `MainActivity.kt`, `FileManagerApp.kt`, `Constants.kt`, `FileRepository.kt`, `LocationsRepository.kt` |
+| `agent/` | Session, container, PTY bridge, terminal, wizard, distro, proot — all agent/container logic |
+| `model/` | `Models.kt`, `Locations.kt`, `ErrorState.kt` |
+| `provider/` | SAF, container, daemon, document, forward, FTP, SFTP file providers + location DBs |
 | `ui/components/` | `BottomToolbar.kt`, `TopBarContent.kt`, `FileDrawer.kt`, `Dialogs.kt` |
 | `ui/screens/` | `FileListScreen.kt`, `SettingsActivity.kt`, `LicensesScreen.kt` |
 | `ui/theme/` | `FileManagerTheme.kt` (Material3 dark/light) |
 | `ui/util/` | `Formatters.kt`, `FileIcons.kt`, `FileOpen.kt`, `OperationNotification.kt` |
 
+> Transport, sources and the unified exec API live in the `:core` module
+> (`io.furryr.file.core.*`). The old `daemon/` and `copy/` packages were removed.
+
 ## WHERE TO LOOK
 
-- **Add new file operation**: define proto message → `FileDaemonClient.kt` method → `FileRepository.kt` helper → call from `FileManagerApp.kt`
-- **Add UI toggle**: `SettingsActivity.kt` (prefs-based, reset daemon on change)
+- **Add new file operation**: define proto message → `:core/FileService.kt` → `FileRepository.kt` helper → call from `FileManagerApp.kt`
+- **Add UI toggle**: `SettingsActivity.kt` (prefs-based, `DaemonManager.reset()` on change)
 - **Change IPC protocol**: `proto/file_daemon.proto` (both sides need rebuild)
 - **Selection logic**: `FileManagerApp.kt` lines 200-218 (`toggleSelection`, `rangeSelectTo`)
 - **Terminal sessions**: `agent/SessionManager.kt` — session lifecycle, container session cleanup
 - **Container management**: `agent/ContainerManager.kt` — process tracking, kill
+- **Container daemon launch**: `agent/ContainerDaemonLauncher.kt` — proot/chroot argv (app-owned SPI)
 - **Terminal panel**: `TerminalSheet.kt` — bottom sheet with terminals; `TerminalForegroundService.kt` keeps sessions alive
-- **Native daemon entry**: `daemon/DaemonLauncher.kt` — starts `libfiledaemon.so` from `nativeLibraryDir`
+- **Exec/PTY**: `:core/process/ExecService.kt` — `CommandSpec` → `ProcessChannel` (one path for terminal + command exec)
+- **Native daemon entry**: `:core/DaemonManager.kt` — starts `libfiledaemon.so` from `nativeLibraryDir`
 
 ## CONVENTIONS
 
 - **State hoisting**: all state in `FileManagerApp.kt`, passed down as params/callbacks.
-- **`@Synchronized` on `FileDaemonClient`** — all daemon methods are atomic.
+- **`:core` is `internal`-guarded** — UI touches only `DaemonManager`, `ExecService`,
+  `FileService`, sources/models; never `DaemonConnection`/proto/sockets.
 - **`Dispatchers.IO`** for daemon calls in coroutines.
-- **Protobuf lite** — `com.google.protobuf:protobuf-javalite`.
+- **Protobuf lite** — `com.google.protobuf:protobuf-javalite` (generated in `:core`).
 - **No `enum` for screens** — uses `private enum class` in Activity files.
 - **SessionManager singleton** — `object`, not DI. Manual wiring via `configure()`.
 - **Native binaries as jniLibs** — `libfiledaemon.so` and `libproot.so` in `jniLibs/arm64-v8a/`.

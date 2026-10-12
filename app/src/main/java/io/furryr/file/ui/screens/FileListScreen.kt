@@ -4,7 +4,6 @@ import io.furryr.file.ui.theme.*
 import io.furryr.file.ui.screens.*
 import io.furryr.file.ui.components.*
 import io.furryr.file.ui.util.*
-import io.furryr.file.daemon.*
 import io.furryr.file.model.*
 import io.furryr.file.R
 import io.furryr.file.model.ErrorState
@@ -58,9 +57,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import io.furryr.file.daemon.PermissionDeniedException
 import io.furryr.file.model.DirectoryInfo
-import io.furryr.file.model.FileEntry
+import io.furryr.file.core.model.FileEntry
+import io.furryr.file.core.PermissionDeniedException
 import io.furryr.file.ui.util.formatSize
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext

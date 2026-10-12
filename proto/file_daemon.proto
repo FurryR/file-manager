@@ -31,8 +31,14 @@ message Request {
     CopyFromSourceRequest copy_from_source = 26;
     ReadSourceResponse read_source_response = 27;
     ExecRequest exec = 28;
+    ExitRequest exit = 29;
   }
 }
+
+// Ask the daemon to shut down. The daemon keeps serving *other* connections
+// after one disconnects; it only exits when any connection sends this. Multiple
+// clients (UI, future run0) can be attached simultaneously.
+message ExitRequest {}
 
 message ListRequest {
   string path = 1;

@@ -5,7 +5,9 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{mpsc, Mutex};
+use tokio::net::UnixStream;
+use tokio::sync::{mpsc, watch, Mutex};
+use tokio::task::JoinSet;
 
 mod proto {
     include!(concat!(env!("OUT_DIR"), "/filedaemon.rs"));
@@ -24,6 +26,15 @@ use pty::PtyManager;
 use protocol::{FrameReader, OutboundResponse};
 
 static TERMINATE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// State shared by every connection. The daemon outlives any single client, so
+/// PTYs, handles, cancellation flags and the source-read broker are global.
+struct Shared {
+    pty_manager: Arc<Mutex<PtyManager>>,
+    handles: Arc<Mutex<HandleTable>>,
+    cancel_flags: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
+    source_read_broker: copy::SourceReadBroker,
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> io::Result<()> {
@@ -62,9 +73,66 @@ async fn main() -> io::Result<()> {
         libc::signal(libc::SIGINT, shutdown_handler);
     };
 
-    let (mut stream, _) = listener.accept().await?;
+    let shared = Arc::new(Shared {
+        pty_manager: Arc::new(Mutex::new(PtyManager::new())),
+        handles: Arc::new(Mutex::new(HandleTable::new())),
+        cancel_flags: Arc::new(Mutex::new(HashMap::new())),
+        source_read_broker: copy::SourceReadBroker::default(),
+    });
 
-    // Duplicate fd for independent read/write halves
+    // Broadcast shutdown: an `exit` request from *any* connection, or a signal,
+    // stops the listener and lets connections flush their final responses.
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut main_shutdown = shutdown_rx.clone();
+    let mut connections: JoinSet<()> = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((stream, _)) => {
+                        let shared = shared.clone();
+                        let conn_shutdown = shutdown_rx.clone();
+                        let conn_shutdown_tx = shutdown_tx.clone();
+                        connections.spawn(async move {
+                            if let Err(error) =
+                                handle_connection(stream, shared, conn_shutdown, conn_shutdown_tx).await
+                            {
+                                eprintln!("[file-daemon] connection ended: {error}");
+                            }
+                        });
+                    }
+                    Err(error) => eprintln!("[file-daemon] accept error: {error}"),
+                }
+            }
+            _ = main_shutdown.changed() => break,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                if TERMINATE_REQUESTED.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Tell every connection to stop, then give them a moment to flush (e.g. the
+    // `exit` ack) before tearing the process tree down.
+    let _ = shutdown_tx.send(true);
+    let drain = async { while connections.join_next().await.is_some() {} };
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(1000), drain).await;
+
+    shared.pty_manager.lock().await.close_all();
+    Ok(())
+}
+
+/// Serve one client. A disconnect only ends *this* connection — the daemon keeps
+/// running so other clients (or a reconnecting one) can still use it.
+async fn handle_connection(
+    stream: UnixStream,
+    shared: Arc<Shared>,
+    mut shutdown_rx: watch::Receiver<bool>,
+    shutdown_tx: watch::Sender<bool>,
+) -> io::Result<()> {
+    // Duplicate fd for independent read/write halves.
     let raw_fd = stream.as_raw_fd();
     let write_fd = unsafe { libc::dup(raw_fd) };
     if write_fd < 0 {
@@ -72,31 +140,26 @@ async fn main() -> io::Result<()> {
     }
     let write_std = unsafe { StdUnixStream::from_raw_fd(write_fd) };
     write_std.set_nonblocking(true)?;
-    let mut write_stream = tokio::net::UnixStream::from_std(write_std)?;
+    let mut write_stream = UnixStream::from_std(write_std)?;
+    let mut stream = stream;
 
-    let cancel_flags: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>> = Arc::new(Mutex::new(HashMap::new()));
-    let pty_manager: Arc<Mutex<PtyManager>> = Arc::new(Mutex::new(PtyManager::new()));
-    let handles: Arc<Mutex<HandleTable>> = Arc::new(Mutex::new(HandleTable::new()));
-
-    // Channel for handlers to send responses back to the write loop
     let (response_tx, mut response_rx) = mpsc::unbounded_channel::<OutboundResponse>();
-    let source_read_broker = copy::SourceReadBroker::default();
     let mut frame_reader = FrameReader::new();
 
-    let loop_result = loop {
+    loop {
         tokio::select! {
             request_result = frame_reader.read_frame(&mut stream) => {
                 match request_result {
                     Ok(Some(incoming)) => {
                         let tx = response_tx.clone();
-                        let cancel_flags = cancel_flags.clone();
-                        let pty_manager = pty_manager.clone();
-                        let handles = handles.clone();
-                        let source_read_broker = source_read_broker.clone();
+                        let shared = shared.clone();
+                        let shutdown = shutdown_tx.clone();
                         tokio::spawn(async move {
                             handlers::handle_streaming(
-                                incoming.request, incoming.attached_fd, &pty_manager, &handles,
-                                &cancel_flags, &source_read_broker, tx,
+                                incoming.request, incoming.attached_fd,
+                                &shared.pty_manager, &shared.handles,
+                                &shared.cancel_flags, &shared.source_read_broker, tx,
+                                &shutdown,
                             ).await;
                         });
                     }
@@ -113,24 +176,29 @@ async fn main() -> io::Result<()> {
                             if let Err(error) = result {
                                 break Err(error);
                             }
-                        } else {
-                            if let Err(error) = protocol::write_frame(&mut write_stream, r.response).await {
-                                break Err(error);
-                            }
+                        } else if let Err(error) =
+                            protocol::write_frame(&mut write_stream, r.response).await
+                        {
+                            break Err(error);
                         }
                     }
                     None => break Ok(()),
                 }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                if TERMINATE_REQUESTED.load(Ordering::Relaxed) {
-                    break Ok(());
+            _ = shutdown_rx.changed() => {
+                // Flush anything already queued (e.g. the `exit` ack), then stop.
+                while let Ok(r) = response_rx.try_recv() {
+                    if let Some(fd) = r.attached_fd {
+                        let _ = protocol::write_response_with_fd(write_fd, &r.response, fd);
+                        unsafe { libc::close(fd); }
+                    } else {
+                        let _ = protocol::write_frame(&mut write_stream, r.response).await;
+                    }
                 }
+                break Ok(());
             }
         }
-    };
-    pty_manager.lock().await.close_all();
-    loop_result
+    }
 }
 
 fn parse_socket_arg() -> io::Result<String> {

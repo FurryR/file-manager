@@ -16,15 +16,16 @@ import io.furryr.file.agent.SessionManager
 /**
  * Foreground service shown while at least one terminal session is active.
  *
- * Keeps the process alive when the app is backgrounded and optionally holds a
- * [PowerManager.WakeLock] so long-running commands keep running with the screen
- * off. The notification exposes two actions:
+ * Keeps the process alive when the app is backgrounded and holds a
+ * [PowerManager.WakeLock] for its whole lifetime so long-running commands keep
+ * running with the screen off. The notification exposes two actions:
  *
- * - toggle the wake lock ("Hold WakeLock" / "Release WakeLock"),
+ * - toggle the wake lock ("Hold WakeLock" / "Release WakeLock"; held by default),
  * - exit, which closes every terminal session and stops the service.
  *
- * Lifecycle is driven by [SessionManager]: it starts this service when the
- * first session is created and stops it when the last one is destroyed.
+ * Lifetime is owned by the service itself: [SessionManager] starts it when the
+ * first session is created, and the service listens for session changes to
+ * refresh the notification count and stop once the last session is gone.
  */
 class TerminalForegroundService : Service() {
 
@@ -56,42 +57,86 @@ class TerminalForegroundService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wakeLockHeld = false
+    private var foregroundStarted = false
+
+    /**
+     * Keeps the notification's terminal count in sync with [SessionManager] and
+     * tears the service down once the last session is gone. The service -- not
+     * the Compose UI -- owns session lifetime, so terminals survive the UI being
+     * destroyed while the process stays alive.
+     */
+    private val sessionChangeListener: () -> Unit = { refreshNotification() }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
+        SessionManager.addSessionChangeListener(sessionChangeListener)
+        // Hold the partial wake lock for the whole lifetime of the service so
+        // long-running terminal commands keep executing with the screen off.
+        // This is the actual "keep alive" guarantee; the foreground
+        // notification alone only prevents the process from being reclaimed.
+        setWakeLockHeld(true)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_EXIT -> {
                 SessionManager.destroyAll()
-                releaseWakeLock()
-                stopForegroundCompat()
                 stopSelf()
             }
             ACTION_TOGGLE_WAKE_LOCK -> {
-                setWakeLockHeld(!wakeLockHeld)
-                startForegroundCompat()
+                if (SessionManager.getAllSessions().isEmpty()) {
+                    stopSelf()
+                } else {
+                    setWakeLockHeld(!wakeLockHeld)
+                    startForegroundCompat()
+                }
             }
-            else -> startForegroundCompat()
+            else -> {
+                // Always enter the foreground state first: the system requires
+                // startForeground() within a few seconds of the service being
+                // started, even if the last session has already disappeared.
+                startForegroundCompat()
+                if (SessionManager.getAllSessions().isEmpty()) stopSelf()
+            }
         }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        releaseWakeLock()
+        SessionManager.removeSessionChangeListener(sessionChangeListener)
+        setWakeLockHeld(false)
         stopForegroundCompat()
         super.onDestroy()
     }
 
+    /** Republish the notification (or stop the service) after any session change. */
+    private fun refreshNotification() {
+        val count = SessionManager.getAllSessions().size
+        if (count == 0) {
+            // The system requires startForeground() shortly after the service is
+            // started, so satisfy it before tearing ourselves down.
+            if (!foregroundStarted) startForegroundCompat()
+            stopSelf()
+            return
+        }
+        if (foregroundStarted) {
+            getSystemService(NotificationManager::class.java)
+                .notify(NOTIFICATION_ID, buildNotification(count))
+        } else {
+            startForegroundCompat()
+        }
+    }
+
     private fun startForegroundCompat() {
+        foregroundStarted = true
         startForeground(NOTIFICATION_ID, buildNotification(SessionManager.getAllSessions().size))
     }
 
     private fun stopForegroundCompat() {
+        foregroundStarted = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {

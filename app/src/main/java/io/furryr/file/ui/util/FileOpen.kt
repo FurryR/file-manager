@@ -3,7 +3,6 @@ import io.furryr.file.ui.theme.*
 import io.furryr.file.ui.screens.*
 import io.furryr.file.ui.components.*
 import io.furryr.file.ui.util.*
-import io.furryr.file.daemon.*
 import io.furryr.file.model.*
 import io.furryr.file.R
 
@@ -12,7 +11,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
 import io.furryr.file.ProviderAuthority
-import io.furryr.file.model.FileEntry
+import io.furryr.file.core.model.FileEntry
 import io.furryr.file.provider.ForwardFileProvider
 import io.furryr.file.util.PrimaryStorage
 import java.io.File

@@ -2,7 +2,8 @@ package io.furryr.file.provider
 
 import android.content.Context
 import io.furryr.file.FileRepository
-import io.furryr.file.daemon.DaemonLauncher
+import io.furryr.file.agent.ContainerDaemonLauncher
+import io.furryr.file.core.DaemonManager
 
 /**
  * Wire up the daemon configuration and register every [FileProvider].
@@ -14,10 +15,14 @@ fun installFileProviders(context: Context) {
     val appContext = context.applicationContext
     val prefs = appContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
-    DaemonLauncher.init(appContext)
-    DaemonLauncher.setRootEnabled(prefs.getBoolean("root_enabled", false))
-    DaemonLauncher.setShellEnabled(prefs.getBoolean("shell_enabled", false))
-    DaemonLauncher.setSuPath(prefs.getString("su_path", "") ?: "")
+    DaemonManager.init(appContext)
+    DaemonManager.configure(
+        rootEnabled = prefs.getBoolean("root_enabled", false),
+        shellEnabled = prefs.getBoolean("shell_enabled", false),
+        suPath = prefs.getString("su_path", "") ?: "",
+    )
+    // Let the app decide how named (container) daemons are launched.
+    DaemonManager.setLauncher { request -> ContainerDaemonLauncher.command(appContext, request) }
 
     FileRepository.setDefault(DaemonFileProvider())
     ContainerDaemonProvider.init(appContext)

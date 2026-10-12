@@ -1,13 +1,13 @@
 package io.furryr.file
 
-import io.furryr.file.copy.CopyProgress
-import io.furryr.file.copy.FileSource
-import io.furryr.file.copy.OpenMode
-import io.furryr.file.copy.StreamFileSource
-import io.furryr.file.model.FileEntry
+import io.furryr.file.core.model.CopyProgress
+import io.furryr.file.core.source.FileSource
+import io.furryr.file.core.source.OpenMode
+import io.furryr.file.core.source.StreamFileSource
+import io.furryr.file.core.model.FileEntry
 import io.furryr.file.provider.FileProvider
 import io.furryr.file.provider.ProviderFeature
-import io.furryr.file.provider.ProviderStat
+import io.furryr.file.core.model.ProviderStat
 import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.util.UUID

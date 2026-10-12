@@ -2,8 +2,10 @@ package io.furryr.file.util
 
 import android.system.Os
 import android.util.Log
-import io.furryr.file.daemon.DaemonConnection
-import io.furryr.file.daemon.DaemonLauncher
+import io.furryr.file.core.DaemonManager
+import io.furryr.file.core.DaemonTarget
+import io.furryr.file.core.process.CommandSpec
+import io.furryr.file.core.process.ProcessChannel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import java.io.FileDescriptor
@@ -23,11 +25,8 @@ object ProcessHelper {
     private const val TAG = "ProcessHelper"
     private const val CONTAINER_PREFIX = "container://"
 
-    private data class PtyInfo(val ptyId: Long, val childPid: Int, val connection: DaemonConnection)
-
-    private val fdToPty = HashMap<Int, PtyInfo>()
-    private val pidToPty = HashMap<Int, PtyInfo>()
-
+    private val fdToChannel = HashMap<Int, ProcessChannel>()
+    private val pidToChannel = HashMap<Int, ProcessChannel>()
     private val mapLock = Any()
 
     @JvmStatic
@@ -42,61 +41,66 @@ object ProcessHelper {
 
         val containerName = cmd.removePrefix(CONTAINER_PREFIX)
             .takeIf { cmd.startsWith(CONTAINER_PREFIX) && it.isNotBlank() }
-        val conn = if (containerName != null) {
-            DaemonLauncher.connectContainerByName(containerName)
+        val target = if (containerName != null) {
+            DaemonTarget.Named(containerName)
         } else {
-            DaemonLauncher.getConnection(appDaemon = true)
+            DaemonTarget.AppUid
         }
 
-        val ptyFd = conn.spawnPty(
-            command = if (containerName != null) "/bin/sh" else cmd,
-            args = args?.toList() ?: emptyList(),
+        // Container sessions start a login shell as root via `login -f root`
+        // (login lives in /bin on every supported rootfs -- busybox on Alpine,
+        // a usrmerge symlink on Debian/Ubuntu/Arch/Fedora). Without -f, login
+        // would prompt for credentials, which the daemon cannot answer.
+        val spec = CommandSpec(
+            command = if (containerName != null) "/bin/login" else cmd,
+            args = if (containerName != null) listOf("-f", "root") else (args?.toList() ?: emptyList()),
             env = env,
-            rows = rows, cols = columns,
             cwd = if (containerName != null) "/" else cwd,
-        ).getOrThrow()
+            rows = rows,
+            cols = columns,
+        )
+        val channel = DaemonManager.execService(target).spawn(spec).getOrThrow()
+        val fd = channel.fileDescriptor
+            ?: throw IllegalStateException("daemon returned no PTY fd")
 
-        val rawFd = getRawFd(ptyFd.fileDescriptor)
-        processId[0] = ptyFd.childPid
+        val rawFd = getRawFd(fd)
+        processId[0] = channel.pid
 
-        val info = PtyInfo(ptyFd.ptyId, ptyFd.childPid, conn)
         synchronized(mapLock) {
-            fdToPty[rawFd] = info
-            pidToPty[ptyFd.childPid] = info
+            fdToChannel[rawFd] = channel
+            pidToChannel[channel.pid] = channel
         }
 
-        Log.d(TAG, "createSubprocess: fd=$rawFd pid=${ptyFd.childPid} ptyId=${ptyFd.ptyId} container=$containerName")
+        Log.d(TAG, "createSubprocess: fd=$rawFd pid=${channel.pid} container=$containerName")
         rawFd
     }
 
     @JvmStatic
     fun setPtyWindowSize(fd: Int, rows: Int, cols: Int) {
-        val info: PtyInfo?
-        synchronized(mapLock) { info = fdToPty[fd] }
-        info ?: return
-        onIoThread { info.connection.resizePty(info.ptyId, rows, cols).getOrThrow() }
+        val channel: ProcessChannel?
+        synchronized(mapLock) { channel = fdToChannel[fd] }
+        channel ?: return
+        onIoThread { channel.resize(rows, cols).getOrThrow() }
     }
 
     @JvmStatic
     fun waitFor(processId: Int): Int {
-        val info: PtyInfo?
-        synchronized(mapLock) { info = pidToPty[processId] }
-        info ?: return -1
-        val exitCode = onIoThread { info.connection.waitPty(info.ptyId).getOrThrow() }
+        val channel: ProcessChannel?
+        synchronized(mapLock) { channel = pidToChannel[processId] }
+        channel ?: return -1
+        val exitCode = onIoThread { channel.waitFor().getOrThrow() }
         Log.d(TAG, "waitFor: pid=$processId exitCode=$exitCode")
         return exitCode
     }
 
     @JvmStatic
     fun close(fileDescriptor: Int) {
-        val info: PtyInfo?
+        val channel: ProcessChannel?
         synchronized(mapLock) {
-            info = fdToPty.remove(fileDescriptor)
-            if (info != null) pidToPty.remove(info.childPid)
+            channel = fdToChannel.remove(fileDescriptor)
+            if (channel != null) pidToChannel.remove(channel.pid)
         }
-        if (info != null) {
-            onIoThread { runCatching { info.connection.closePty(info.ptyId) } }
-        }
+        channel?.let { runCatching { it.close() } }
         closeRawFd(fileDescriptor)
     }
 
@@ -107,7 +111,7 @@ object ProcessHelper {
      * rejects with `NetworkOnMainThreadException` when the syscall runs on the
      * main thread — so hop onto an IO thread and block until it finishes.
      */
-    private fun <T> onIoThread(block: () -> T): T = runBlocking(Dispatchers.IO) { block() }
+    private fun <T> onIoThread(block: suspend () -> T): T = runBlocking(Dispatchers.IO) { block() }
 
     private fun getRawFd(fd: FileDescriptor): Int {
         val field = FileDescriptor::class.java.getDeclaredField("descriptor")

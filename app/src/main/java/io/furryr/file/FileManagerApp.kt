@@ -1,20 +1,18 @@
 package io.furryr.file
-import io.furryr.file.daemon.*
 import io.furryr.file.model.*
 import io.furryr.file.ui.components.*
 import io.furryr.file.ui.screens.*
 import io.furryr.file.ui.util.*
 import io.furryr.file.util.Path
 
+import io.furryr.file.core.DaemonManager
+import io.furryr.file.core.DaemonStatus
 import io.furryr.file.agent.ContainerWizardActivity
 import io.furryr.file.agent.ContainerManager
 import io.furryr.file.agent.SessionManager
-import io.furryr.file.provider.SafDatabase
-import io.furryr.file.provider.SafLocation
-import io.furryr.file.provider.FtpProvider
-import io.furryr.file.provider.FtpServer
-import io.furryr.file.provider.SftpProvider
-import io.furryr.file.provider.SftpServer
+import io.furryr.file.model.SafLocation
+import io.furryr.file.model.FtpServer
+import io.furryr.file.model.SftpServer
 import android.app.Activity
 import android.Manifest
 import android.content.Context
@@ -89,12 +87,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 
-import io.furryr.file.daemon.DaemonLauncher
-import io.furryr.file.daemon.StatResult
 import io.furryr.file.model.CopyMoveSource
 import io.furryr.file.model.CopyMoveState
 import io.furryr.file.model.DirectoryInfo
-import io.furryr.file.model.FileEntry
+import io.furryr.file.core.model.FileEntry
 import io.furryr.file.model.FileTab
 import io.furryr.file.model.OperationProgress
 import io.furryr.file.ui.components.BottomToolbar
@@ -157,13 +153,12 @@ fun FileManagerApp(
     // Tracks the last daemon connection generation we've reacted to.
     // When DaemonLauncher establishes a fresh connection (after start or
     // recovery) this counter increments, triggering file list + drawer refresh.
-    var lastRefreshDaemonGen by remember { mutableIntStateOf(DaemonLauncher.readyGeneration) }
+    var lastRefreshDaemonGen by remember { mutableIntStateOf(DaemonManager.generation) }
 
     val containerWizardLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { _ -> containerRefreshKey++ }
 
-    val safDb = remember { SafDatabase(context) }
     var safLocations by remember { mutableStateOf<List<SafLocation>>(emptyList()) }
     var safRefreshKey by remember { mutableIntStateOf(0) }
 
@@ -175,29 +170,27 @@ fun FileManagerApp(
             context.contentResolver.takePersistableUriPermission(
                 uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             )
-            safDb.insert(uri.toString())
+            LocationsRepository.insertSaf(uri.toString())
             safRefreshKey++
         }
     }
 
     LaunchedEffect(safRefreshKey) {
-        safLocations = withContext(Dispatchers.IO) { safDb.getAll() }
+        safLocations = withContext(Dispatchers.IO) { LocationsRepository.safLocations() }
     }
 
-    val ftpDb = remember { FtpProvider.getDatabase() }
     var ftpLocations by remember { mutableStateOf<List<FtpServer>>(emptyList()) }
     var ftpRefreshKey by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(ftpRefreshKey) {
-        ftpLocations = withContext(Dispatchers.IO) { ftpDb.getAll() }
+        ftpLocations = withContext(Dispatchers.IO) { LocationsRepository.ftpServers() }
     }
 
-    val sftpDb = remember { SftpProvider.getDatabase() }
     var sftpLocations by remember { mutableStateOf<List<SftpServer>>(emptyList()) }
     var sftpRefreshKey by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(sftpRefreshKey) {
-        sftpLocations = withContext(Dispatchers.IO) { sftpDb.getAll() }
+        sftpLocations = withContext(Dispatchers.IO) { LocationsRepository.sftpServers() }
     }
 
     LaunchedEffect(operationHidden, operationJob) {
@@ -455,9 +448,9 @@ fun FileManagerApp(
     // refresh whenever the daemon establishes a fresh connection after
     // start, restart, or transient failure recovery.
     LaunchedEffect(Unit) {
-        DaemonLauncher.daemonState.collect { state ->
-            if (state is DaemonLauncher.DaemonState.Connected) {
-                val currentGen = DaemonLauncher.readyGeneration
+        DaemonManager.status.collect { state ->
+            if (state is DaemonStatus.Connected) {
+                val currentGen = DaemonManager.generation
                 if (currentGen > lastRefreshDaemonGen) {
                     lastRefreshDaemonGen = currentGen
                     refreshFileList(animate = false)
@@ -599,7 +592,7 @@ fun FileManagerApp(
                         // then tear down its dedicated daemon (kills the process tree).
                         SessionManager.destroyContainerSessions(name)
                         withContext(Dispatchers.IO) {
-                            DaemonLauncher.closeContainerConnection(name)
+                            DaemonManager.closeNamedConnection(name)
                         }
                         // Any tab browsing into the killed container is now
                         // invalid; drop it (and reopen home if none remain).
@@ -650,13 +643,13 @@ fun FileManagerApp(
                 },
                 onSafRename = { hexId, newName ->
                     scope.launch {
-                        withContext(Dispatchers.IO) { safDb.rename(hexId, newName) }
+                        withContext(Dispatchers.IO) { LocationsRepository.renameSaf(hexId, newName) }
                         safRefreshKey++
                     }
                 },
                 onSafDelete = { hexId ->
                     scope.launch {
-                        withContext(Dispatchers.IO) { safDb.delete(hexId) }
+                        withContext(Dispatchers.IO) { LocationsRepository.deleteSaf(hexId) }
                         safRefreshKey++
                     }
                 },
@@ -668,7 +661,7 @@ fun FileManagerApp(
                         mutable.add(to, item)
                         scope.launch {
                             withContext(Dispatchers.IO) {
-                                safDb.reorder(mutable.map { it.hexId })
+                                LocationsRepository.reorderSaf(mutable.map { it.hexId })
                             }
                             safRefreshKey++
                         }
@@ -679,7 +672,7 @@ fun FileManagerApp(
                 onAddFtp = { host, name, port, username, password ->
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
-                            runCatching { ftpDb.insert(host, name, port, username, password) }
+                            runCatching { LocationsRepository.insertFtp(host, name, port, username, password) }
                         }
                         Toast.makeText(
                             context,
@@ -693,7 +686,7 @@ fun FileManagerApp(
                 onFtpSave = { oldHost, newHost, name, port, username, password ->
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
-                            runCatching { ftpDb.update(oldHost, newHost, name, port, username, password) }
+                            runCatching { LocationsRepository.updateFtp(oldHost, newHost, name, port, username, password) }
                         }
                         Toast.makeText(
                             context,
@@ -710,7 +703,7 @@ fun FileManagerApp(
                 },
                 onFtpDelete = { host ->
                     scope.launch {
-                        withContext(Dispatchers.IO) { ftpDb.delete(host) }
+                        withContext(Dispatchers.IO) { LocationsRepository.deleteFtp(host) }
                         ftpRefreshKey++
                     }
                 },
@@ -722,7 +715,7 @@ fun FileManagerApp(
                         mutable.add(to, item)
                         scope.launch {
                             withContext(Dispatchers.IO) {
-                                ftpDb.reorder(mutable.map { it.host })
+                                LocationsRepository.reorderFtp(mutable.map { it.host })
                             }
                             ftpRefreshKey++
                         }
@@ -733,7 +726,7 @@ fun FileManagerApp(
                 onAddSftp = { host, name, port, username, password ->
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
-                            runCatching { sftpDb.insert(host, name, port, username, password) }
+                            runCatching { LocationsRepository.insertSftp(host, name, port, username, password) }
                         }
                         Toast.makeText(
                             context,
@@ -747,7 +740,7 @@ fun FileManagerApp(
                 onSftpSave = { oldHost, newHost, name, port, username, password ->
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
-                            runCatching { sftpDb.update(oldHost, newHost, name, port, username, password) }
+                            runCatching { LocationsRepository.updateSftp(oldHost, newHost, name, port, username, password) }
                         }
                         Toast.makeText(
                             context,
@@ -764,7 +757,7 @@ fun FileManagerApp(
                 },
                 onSftpDelete = { host ->
                     scope.launch {
-                        withContext(Dispatchers.IO) { sftpDb.delete(host) }
+                        withContext(Dispatchers.IO) { LocationsRepository.deleteSftp(host) }
                         sftpRefreshKey++
                     }
                 },
@@ -776,7 +769,7 @@ fun FileManagerApp(
                         mutable.add(to, item)
                         scope.launch {
                             withContext(Dispatchers.IO) {
-                                sftpDb.reorder(mutable.map { it.host })
+                                LocationsRepository.reorderSftp(mutable.map { it.host })
                             }
                             sftpRefreshKey++
                         }
@@ -1006,7 +999,7 @@ fun FileManagerApp(
             onConfirm = { path ->
                 showJumpDialog = false
                 scope.launch {
-                    val stat = withContext(Dispatchers.IO) { DaemonLauncher.getConnection().stat(path).getOrNull() }
+                    val stat = withContext(Dispatchers.IO) { FileRepository.stat(path).getOrNull() }
                     if (stat != null && stat.exists && !stat.isDirectory) {
                             val parent = FileRepository.navigate(path, "..")
                         if (parent != null) {

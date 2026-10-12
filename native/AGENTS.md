@@ -15,14 +15,20 @@ native/
 
 ## WHERE TO LOOK
 
-- **File operations**: `handle_request()` dispatches by command
+- **File operations**: `handlers::handle_streaming()` dispatches by command
+- **Connection lifecycle**: `main()` accept loop + `handle_connection()` — one task per client
 - **Abstract socket**: `create_abstract_server()` + `bind_abstract_socket()`
 - **UID check** for data path: `maybe_android_data_path()` — skips `/Android/data` UID trick when root
 - **Progress tracking**: `TaskState` in `HashMap`, tasks spawn via `tokio::spawn`
 
 ## CONVENTIONS
 
-- **Single-threaded async** — `tokio::main(flavor = "current_thread")`
+- **Single-threaded async** — `tokio::main(flavor = "current_thread")`; concurrency is tasks, not threads
+- **Multi-client** — the daemon serves many concurrent connections. Each has its own
+  read loop, write half and response channel; PTYs/handles/broker are shared via `Shared`.
+  A client disconnecting only ends *that* connection — the daemon keeps running.
+- **Shutdown is explicit** — an `ExitRequest` from *any* connection (or SIGTERM/SIGHUP/SIGINT)
+  stops the listener, flushes acks, closes all PTYs and exits. Disconnecting never does.
 - **Protobuf codegen** via `prost-build` in `build.rs` — output at compile time
 - **Error → `Response.ok=false` + `error` string** — no exceptions across IPC
 - **Framed protocol** — 4-byte big-endian length prefix + protobuf payload

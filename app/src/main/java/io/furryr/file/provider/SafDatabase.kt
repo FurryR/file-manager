@@ -3,13 +3,7 @@ package io.furryr.file.provider
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
-
-data class SafLocation(
-    val hexId: String,
-    val name: String,
-    val treeUri: String,
-    val sortOrder: Int,
-)
+import io.furryr.file.model.SafLocation
 
 class SafDatabase(context: Context) : SQLiteOpenHelper(context, "saf_locations.db", null, 2) {
     private val db = writableDatabase

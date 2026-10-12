@@ -1,11 +1,11 @@
 package io.furryr.file
 
 import android.net.Uri
-import io.furryr.file.copy.CopyProgress
-import io.furryr.file.copy.FileSource
-import io.furryr.file.copy.OpenMode
+import io.furryr.file.core.model.CopyProgress
+import io.furryr.file.core.source.FileSource
+import io.furryr.file.core.source.OpenMode
 import io.furryr.file.model.DirectoryInfo
-import io.furryr.file.model.FileEntry
+import io.furryr.file.core.model.FileEntry
 import io.furryr.file.provider.FileProvider
 import io.furryr.file.provider.ResolvedProvider
 import io.furryr.file.util.Path
@@ -46,6 +46,8 @@ object FileRepository {
     // ── Simple ops ──────────────────────────────────────────────
 
     fun list(path: String) = dispatch(path) { p, ip -> runBlocking { p.list(ip) } }
+
+    fun stat(path: String) = dispatch(path) { p, ip -> runBlocking { p.stat(ip) } }
 
     fun createFile(parentPath: String, name: String): Result<String> = runCatching {
         val fullPath = Path.parse(parentPath).child(name).toString()

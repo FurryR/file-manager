@@ -1,10 +1,10 @@
-package io.furryr.file.daemon
+package io.furryr.file.core.ipc
 
 import android.system.Os
 import android.system.OsConstants
 import android.util.Log
+import io.furryr.file.core.HiddenApi
 import io.furryr.file.proto.Response
-import io.furryr.file.util.HiddenApi
 import java.io.EOFException
 import java.io.FileDescriptor
 import java.io.IOException

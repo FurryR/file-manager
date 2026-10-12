@@ -1,41 +1,29 @@
 package io.furryr.file.provider
 
 import android.content.Context
-import io.furryr.file.agent.Container
 import io.furryr.file.agent.ContainerManager
-import io.furryr.file.copy.CopyProgress
-import io.furryr.file.copy.FdFileSource
-import io.furryr.file.copy.FileSource
-import io.furryr.file.copy.HandleFileSource
-import io.furryr.file.copy.OpenMode
-import io.furryr.file.copy.openDaemonSource
-import io.furryr.file.daemon.DaemonConnection
-import io.furryr.file.daemon.DaemonLauncher
-import io.furryr.file.daemon.OPEN_TIMEOUT_MS
-import io.furryr.file.model.FileEntry
-import io.furryr.file.proto.CreateDirRequest
-import io.furryr.file.proto.CreateFileRequest
-import io.furryr.file.proto.DeleteRequest
-import io.furryr.file.proto.DupHandleRequest
-import io.furryr.file.proto.ListRequest
-import io.furryr.file.proto.OpenHandleRequest
-import io.furryr.file.proto.RenameRequest
-import io.furryr.file.proto.Request
-import io.furryr.file.proto.StatRequest
-import io.furryr.file.proto.CopyRequest
+import io.furryr.file.core.DaemonManager
+import io.furryr.file.core.DaemonTarget
+import io.furryr.file.core.file.FileService
+import io.furryr.file.core.model.CopyProgress
+import io.furryr.file.core.model.FileEntry
+import io.furryr.file.core.model.ProviderStat
+import io.furryr.file.core.process.CommandSpec
+import io.furryr.file.core.source.FileSource
+import io.furryr.file.core.source.OpenMode
 import io.furryr.file.util.Path
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.launch
 import java.io.File
 
-object ContainerDaemonProvider : FileProvider, PtyCapable {
-    private const val TAG = "ContainerDaemonProvider"
+/**
+ * [FileProvider] for containers. Each container has its own dedicated daemon
+ * (chroot or proot) started by [DaemonManager] through the app's launcher.
+ *
+ * `container://<name>/<path>` maps to `<path>` inside that container's daemon;
+ * `container:///` lists the app-local set of containers.
+ */
+object ContainerDaemonProvider : FileProvider {
     private lateinit var appContext: Context
-
-    private val connLock = Any()
 
     override val scheme: String get() = "container"
     override val authority: String? get() = null
@@ -46,14 +34,13 @@ object ContainerDaemonProvider : FileProvider, PtyCapable {
         appContext = context.applicationContext
     }
 
-    fun resetConnections() = synchronized(connLock) { closeConnectionsLocked() }
+    /** Drop every cached container daemon (e.g. after changing bind mounts). */
+    fun resetConnections() = DaemonManager.closeNamedConnections()
 
-    /** Run a command inside the container and return stdout. */
+    /** Run a command inside [containerName] and return its stdout. */
     suspend fun execContainer(containerName: String, command: String): String {
-        val container = ContainerManager.getContainer(appContext, containerName)
-            ?: throw IllegalStateException("Container '$containerName' not found")
-        val result = connectionFor(container)
-            .exec(command = "/bin/sh", args = listOf("-c", command))
+        val result = exec(containerName)
+            .run(CommandSpec("/bin/sh", listOf("-c", command)))
             .getOrThrow()
         if (result.exitCode != 0) {
             val message = result.stderrText.trim()
@@ -64,36 +51,20 @@ object ContainerDaemonProvider : FileProvider, PtyCapable {
         return result.stdoutText.trim()
     }
 
-    /** The dedicated daemon for the container's fixed backend. */
-    private fun connectionFor(container: Container): DaemonConnection =
-        DaemonLauncher.connectContainer(container)
-
     override fun isAvailable(): Boolean = true
 
     override suspend fun connect(): Result<Unit> = Result.success(Unit)
 
-    override suspend fun disconnect() {
-        synchronized(connLock) { closeConnectionsLocked() }
-    }
+    override suspend fun disconnect() = DaemonManager.closeNamedConnections()
 
     override suspend fun list(path: String): Result<List<FileEntry>> = runCatching {
         val segments = Path.parse(path).segmentList
         if (segments.isEmpty()) {
             listContainerRoot()
         } else {
-            val containerName = segments.first()
-            val localPath = daemonPath(segments)
-            val response = send(containerName, Request.newBuilder()
-                .setList(ListRequest.newBuilder().setPath(localPath))
-                .build())
             val baseUri = innerPathToUri(path)
-            response.entriesList.map { entry ->
-                FileEntry(
-                    name = entry.name, path = "$baseUri/${entry.name}",
-                    isDirectory = entry.isDirectory, modifiedAt = entry.modifiedAtMs,
-                    isSymlink = entry.isSymlink, realPath = entry.realPath,
-                    mode = entry.mode, size = entry.size,
-                )
+            files(segments.first()).list(daemonPath(segments)).getOrThrow().map { entry ->
+                entry.copy(path = "$baseUri/${entry.name}")
             }.sortedWith(compareByDescending<FileEntry> { it.isDirectory }.thenBy { it.name.lowercase() })
         }
     }
@@ -109,121 +80,58 @@ object ContainerDaemonProvider : FileProvider, PtyCapable {
                 exists = dir.exists(), isDirectory = dir.isDirectory,
             )
         } else {
-            val response = send(segments.first(), Request.newBuilder()
-                .setStat(StatRequest.newBuilder().setPath(daemonPath(segments)))
-                .build())
-            ProviderStat(
-                usableBytes = response.stat.usableBytes, totalBytes = response.stat.totalBytes,
-                exists = response.stat.exists, isDirectory = response.stat.isDirectory,
-            )
+            files(segments.first()).stat(daemonPath(segments)).getOrThrow()
         }
     }
 
     override suspend fun createFile(path: String): Result<Unit> = runCatching {
         val segments = containerSegments(path)
-        if (segments.isEmpty()) throw IllegalStateException("Cannot create file at container root")
-        send(segments.first(), Request.newBuilder()
-            .setCreateFile(CreateFileRequest.newBuilder().setPath(daemonPath(segments)))
-            .build())
+        files(segments.first()).createFile(daemonPath(segments)).getOrThrow()
     }
 
     override suspend fun createDirectory(path: String): Result<Unit> = runCatching {
-        val segments = Path.parse(path).segmentList
-        if (segments.isEmpty()) throw IllegalStateException("Cannot create directory at container root")
-        send(segments.first(), Request.newBuilder()
-            .setCreateDir(CreateDirRequest.newBuilder().setPath(daemonPath(segments)))
-            .build())
+        val segments = containerSegments(path)
+        files(segments.first()).createDirectory(daemonPath(segments)).getOrThrow()
     }
 
     override suspend fun delete(path: String): Result<Unit> = runCatching {
-        val segments = Path.parse(path).segmentList
-        if (segments.isEmpty()) throw IllegalStateException("Cannot delete container root")
-        send(segments.first(), Request.newBuilder()
-            .setDelete(DeleteRequest.newBuilder().setPath(daemonPath(segments)))
-            .build())
+        val segments = containerSegments(path)
+        files(segments.first()).delete(daemonPath(segments)).getOrThrow()
     }
 
     override suspend fun rename(path: String, newName: String): Result<Unit> = runCatching {
-        val segments = Path.parse(path).segmentList
-        if (segments.isEmpty()) throw IllegalStateException("Cannot rename at container root")
-        send(segments.first(), Request.newBuilder()
-            .setRename(RenameRequest.newBuilder().setPath(daemonPath(segments)).setNewName(newName))
-            .build())
+        val segments = containerSegments(path)
+        files(segments.first()).rename(daemonPath(segments), newName).getOrThrow()
     }
 
     override suspend fun open(path: String, mode: OpenMode): Result<FileSource> = runCatching {
         val segments = containerSegments(path)
-        val containerName = segments.first()
-        openDaemonSource(daemonPath(segments), mode) { ensureConnected(containerName) }
+        files(segments.first()).open(daemonPath(segments), mode).getOrThrow()
     }
 
     override fun copy(from: String, to: String, isCopy: Boolean): Flow<CopyProgress> {
-        // from/to are inner paths (e.g. "/test/sub/file") — resolve to real rootfs
         val fromSegments = containerSegments(from)
         val toSegments = containerSegments(to)
-        require(fromSegments.first() == toSegments.first()) { "copy endpoints must use the same container" }
-        return copyInternal(fromSegments.first(), daemonPath(fromSegments), daemonPath(toSegments), isCopy)
+        require(fromSegments.first() == toSegments.first()) {
+            "copy endpoints must use the same container"
+        }
+        return files(fromSegments.first())
+            .copy(daemonPath(fromSegments), daemonPath(toSegments), isCopy)
     }
 
     override fun copy(src: FileSource, destPath: String, isCopy: Boolean): Flow<CopyProgress> {
-        // destPath is an inner path (e.g. "/test/foo.txt") — resolve to real rootfs
         val toSegments = containerSegments(destPath)
-        val containerName = toSegments.first()
-        val toLocal = daemonPath(toSegments)
-        return if (src is HandleFileSource || src is FdFileSource) {
-            ensureConnected(containerName).copyFromSource(src, toLocal, isCopy)
-        } else chunkedCopyFallback(ensureConnected(containerName), src, toLocal, isCopy)
+        return files(toSegments.first()).copyFromSource(src, daemonPath(toSegments), isCopy)
     }
-
-    override suspend fun spawnPty(
-        command: String, args: List<String>, env: Map<String, String>,
-        termType: String, rows: Int, cols: Int, cwd: String?, useRoot: Boolean,
-    ): Result<PtyConnection> =
-        Result.failure(UnsupportedOperationException("Container PTY not supported"))
-
-    override suspend fun resizePty(ptyId: Long, rows: Int, cols: Int): Result<Unit> =
-        Result.failure(UnsupportedOperationException())
-
-    override suspend fun closePty(ptyId: Long): Result<Unit> =
-        Result.failure(UnsupportedOperationException())
 
     // ── Internal ───────────────────────────────────────────────────
 
-    private fun ensureConnected(containerName: String? = null): DaemonConnection {
-        val name = containerName
-            ?: throw IllegalArgumentException("container name required")
-        val container = ContainerManager.getContainer(appContext, name)
-            ?: throw IllegalStateException("Container '$name' not found")
-        return connectionFor(container)
-    }
+    private fun files(name: String): FileService =
+        DaemonManager.fileService(DaemonTarget.Named(name))
 
-    private fun send(containerName: String, request: Request): io.furryr.file.proto.Response =
-        sendWithConnection(containerName, request).second.response
+    private fun exec(name: String) = DaemonManager.execService(DaemonTarget.Named(name))
 
-    private fun sendWithConnection(containerName: String, request: Request): Pair<DaemonConnection, io.furryr.file.daemon.DaemonResponse> = synchronized(connLock) {
-        var conn = ensureConnected(containerName)
-        var lastError: Exception? = null
-        for (attempt in 0 until 2) {
-            if (attempt > 0) {
-                conn.close()
-                conn = ensureConnected(containerName)
-            }
-            try {
-                return conn to conn.request(request, OPEN_TIMEOUT_MS)
-            } catch (e: io.furryr.file.daemon.PermissionDeniedException) { throw e
-            } catch (e: Exception) { lastError = e; if (attempt == 0) continue }
-        }
-        throw lastError ?: IllegalStateException("container daemon send failed")
-    }
-
-    private fun closeConnectionsLocked() {
-        DaemonLauncher.closeContainerConnections()
-    }
-
-    /**
-     * The container daemon lives *inside* the container, so paths are
-     * container-absolute: `container://<name>/etc/passwd` -> `/etc/passwd`.
-     */
+    /** The container daemon lives inside the container, so paths are container-absolute. */
     private fun daemonPath(segments: List<String>): String {
         val subPath = segments.drop(1).joinToString("/")
         return if (subPath.isEmpty()) "/" else "/$subPath"
@@ -235,47 +143,7 @@ object ContainerDaemonProvider : FileProvider, PtyCapable {
         return segments
     }
 
-    private fun copyInternal(containerName: String, from: String, to: String, isCopy: Boolean): Flow<CopyProgress> {
-        val request = Request.newBuilder()
-            .setCopy(CopyRequest.newBuilder().setFrom(from).setTo(to))
-            .build()
-        val conn = ensureConnected(containerName)
-        return conn.requestStream(request, isCopy)
-    }
-
-    private fun chunkedCopyFallback(conn: DaemonConnection, src: FileSource, destPath: String, isCopy: Boolean): Flow<CopyProgress> = flow {
-        val h = conn.request(Request.newBuilder()
-            .setOpenHandle(OpenHandleRequest.newBuilder().setPath(destPath).setMode(io.furryr.file.proto.HandleMode.WRITE))
-            .build()).response.openHandle
-        try {
-            var offset = 0L
-            var copied = 0L
-            while (true) {
-                val data = src.readChunk(offset, 256 * 1024)
-                if (data.isEmpty()) break
-                conn.request(Request.newBuilder()
-                    .setWriteHandle(io.furryr.file.proto.WriteHandleRequest.newBuilder()
-                        .setHandleId(h.handleId).setOffset(offset)
-                        .setData(com.google.protobuf.ByteString.copyFrom(data)))
-                    .build())
-                offset += data.size
-                copied += data.size
-                emit(CopyProgress(src.size, copied, src.absolutePath ?: "", false, isCopy))
-            }
-            emit(CopyProgress(src.size, copied, src.absolutePath ?: "", true, isCopy))
-        } finally {
-            runCatching {
-                conn.request(Request.newBuilder()
-                    .setCloseHandle(io.furryr.file.proto.CloseHandleRequest.newBuilder().setHandleId(h.handleId))
-                    .build())
-            }
-        }
-    }.flowOn(Dispatchers.IO)
-
     private fun listContainerRoot(): List<FileEntry> {
-        val containersDir = File(appContext.filesDir, "containers")
-        if (!containersDir.isDirectory) return emptyList()
-
         val containers = ContainerManager.listContainers(appContext).getOrDefault(emptyList())
         return containers.map { container ->
             FileEntry(
@@ -283,15 +151,12 @@ object ContainerDaemonProvider : FileProvider, PtyCapable {
                 path = "$scheme://${container.name}",
                 isDirectory = true,
                 modifiedAt = container.createdAt,
-                isSymlink = false,
                 realPath = "$scheme://${container.name}",
                 mode = 0x41ED, // drwxr-xr-x
-                size = 0,
             )
         }.sortedBy { it.name.lowercase() }
     }
 
-    private fun innerPathToUri(innerPath: String): String {
-        return "${scheme}://${innerPath.trimStart('/')}"
-    }
+    private fun innerPathToUri(innerPath: String): String =
+        "${scheme}://${innerPath.trimStart('/')}"
 }

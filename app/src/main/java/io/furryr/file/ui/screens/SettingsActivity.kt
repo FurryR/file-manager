@@ -3,7 +3,6 @@ import io.furryr.file.ui.theme.*
 import io.furryr.file.ui.screens.*
 import io.furryr.file.ui.components.*
 import io.furryr.file.ui.util.*
-import io.furryr.file.daemon.*
 import io.furryr.file.model.*
 import io.furryr.file.ui.screens.SettingsActivity
 
@@ -56,8 +55,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import io.furryr.file.R
-import io.furryr.file.daemon.DaemonLauncher
-import io.furryr.file.provider.ContainerDaemonProvider
+import io.furryr.file.core.DaemonManager
 import io.furryr.file.ui.theme.FileManagerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -72,7 +70,7 @@ class SettingsActivity : ComponentActivity() {
     private val shizukuListener =
         rikka.shizuku.Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
             if (requestCode == SHIZUKU_REQUEST_CODE && grantResult == PackageManager.PERMISSION_GRANTED) {
-                DaemonLauncher.reset()
+                DaemonManager.reset()
             }
         }
 
@@ -133,24 +131,24 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
     fun updateRootEnabled(enabled: Boolean) {
         rootEnabled = enabled
         prefs.edit().putBoolean("root_enabled", enabled).apply()
-        DaemonLauncher.setRootEnabled(enabled)
-        ContainerDaemonProvider.resetConnections()
-        DaemonLauncher.reset()
+        DaemonManager.setRootEnabled(enabled)
+        DaemonManager.closeNamedConnections()
+        DaemonManager.reset()
     }
 
     fun updateShellEnabled(enabled: Boolean) {
         shellEnabled = enabled
         prefs.edit().putBoolean("shell_enabled", enabled).apply()
-        if (enabled && !DaemonLauncher.hasShizukuPermission()) {
+        if (enabled && !DaemonManager.hasShizukuPermission()) {
             try {
                 rikka.shizuku.Shizuku.requestPermission(SHIZUKU_REQUEST_CODE)
             } catch (_: Exception) {
                 // Shizuku not installed — will fall through to direct mode
             }
         }
-        DaemonLauncher.setShellEnabled(enabled)
-        ContainerDaemonProvider.resetConnections()
-        DaemonLauncher.reset()
+        DaemonManager.setShellEnabled(enabled)
+        DaemonManager.closeNamedConnections()
+        DaemonManager.reset()
     }
 
     Scaffold(
@@ -429,9 +427,9 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
                     onClick = {
                         suPath = dialogSuPath
                         prefs.edit().putString("su_path", dialogSuPath).apply()
-                        DaemonLauncher.setSuPath(dialogSuPath)
-                        ContainerDaemonProvider.resetConnections()
-                        DaemonLauncher.reset()
+                        DaemonManager.setSuPath(dialogSuPath)
+                        DaemonManager.closeNamedConnections()
+                        DaemonManager.reset()
                         showCustomSuDialog = false
                     }
                 ) {

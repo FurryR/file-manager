@@ -1,4 +1,4 @@
-package io.furryr.file.daemon
+package io.furryr.file.core.ipc
 
 import io.furryr.file.proto.Response
 import java.io.FileDescriptor

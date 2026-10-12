@@ -1,14 +1,9 @@
-package io.furryr.file.daemon
-import io.furryr.file.ui.theme.*
-import io.furryr.file.ui.screens.*
-import io.furryr.file.ui.components.*
-import io.furryr.file.ui.util.*
-import io.furryr.file.daemon.*
-import io.furryr.file.model.*
+package io.furryr.file.core
 
 import java.io.File
 import java.util.concurrent.TimeUnit
 
+/** Best-effort detection of a `su` binary on the device. */
 fun detectSuPath(): String {
     val candidates = listOf(
         "/system/bin/su",
@@ -20,6 +15,7 @@ fun detectSuPath(): String {
     return candidates.firstOrNull { File(it).exists() } ?: "su"
 }
 
+/** Run `su -c id` to check whether [suPath] actually grants root. */
 fun isSuAvailable(suPath: String): Boolean {
     if (suPath.isBlank()) return false
     return runCatching {
@@ -28,4 +24,5 @@ fun isSuAvailable(suPath: String): Boolean {
     }.getOrDefault(false)
 }
 
+/** Single-quote [value] for safe interpolation into a `su -c` shell command. */
 fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"

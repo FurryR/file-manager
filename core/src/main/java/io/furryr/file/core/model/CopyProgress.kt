@@ -1,4 +1,4 @@
-package io.furryr.file.copy
+package io.furryr.file.core.model
 
 data class CopyProgress(
     val totalBytes: Long,

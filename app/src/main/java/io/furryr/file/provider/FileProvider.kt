@@ -1,9 +1,10 @@
 package io.furryr.file.provider
 
-import io.furryr.file.copy.CopyProgress
-import io.furryr.file.copy.FileSource
-import io.furryr.file.copy.OpenMode
-import io.furryr.file.model.FileEntry
+import io.furryr.file.core.model.CopyProgress
+import io.furryr.file.core.model.FileEntry
+import io.furryr.file.core.model.ProviderStat
+import io.furryr.file.core.source.FileSource
+import io.furryr.file.core.source.OpenMode
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -51,10 +52,3 @@ enum class ProviderFeature {
     RENAME, STREAM_COPY, PTY, SYMLINK,
     OPEN,
 }
-
-data class ProviderStat(
-    val usableBytes: Long = 0,
-    val totalBytes: Long = 0,
-    val exists: Boolean = false,
-    val isDirectory: Boolean = false,
-)

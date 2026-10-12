@@ -15,7 +15,7 @@ pub fn create_abstract_server(name: &str) -> io::Result<UnixListener> {
         return Err(e);
     }
 
-    let result = unsafe { libc::listen(fd, 1) };
+    let result = unsafe { libc::listen(fd, 16) };
     if result != 0 {
         unsafe { libc::close(fd) };
         return Err(io::Error::last_os_error());

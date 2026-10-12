@@ -1,4 +1,4 @@
-package io.furryr.file.copy
+package io.furryr.file.core.source
 
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream

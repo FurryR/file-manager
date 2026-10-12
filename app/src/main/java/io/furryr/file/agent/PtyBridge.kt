@@ -55,7 +55,7 @@ import java.lang.reflect.Modifier
  *        PTY output and capture user input.
  */
 class PtyBridge(
-    private val ptyConnection: PtyConnection,
+    private val ptyConnection: io.furryr.file.core.process.ProcessChannel,
     private val terminalSession: TerminalSession,
     private val onStop: (() -> Unit)? = null,
 ) {
@@ -102,8 +102,8 @@ class PtyBridge(
                 while (isActive) {
                     val n = input.read(buf)
                     if (n == -1) break
-                    ptyConnection.outputStream.write(buf, 0, n)
-                    ptyConnection.outputStream.flush()
+                    ptyConnection.output.write(buf, 0, n)
+                    ptyConnection.output.flush()
                 }
             } catch (_: IOException) {
                 // stream closed or pipe broken -- graceful exit
@@ -115,7 +115,7 @@ class PtyBridge(
             val buf = ByteArray(4096)
             try {
                 while (isActive) {
-                    val n = ptyConnection.inputStream.read(buf)
+                    val n = ptyConnection.input.read(buf)
                     if (n == -1) break
                     emulator.append(buf, n)
                     notifyScreenUpdate()
@@ -152,8 +152,8 @@ class PtyBridge(
 
         scope.cancel()
 
-        runCatching { ptyConnection.inputStream.close() }
-        runCatching { ptyConnection.outputStream.close() }
+        runCatching { ptyConnection.input.close() }
+        runCatching { ptyConnection.output.close() }
 
         // Let the owner (e.g. the chroot daemon) reap the child PTY.
         runCatching { onStop?.invoke() }

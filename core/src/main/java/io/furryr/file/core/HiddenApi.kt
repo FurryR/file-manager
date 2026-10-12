@@ -1,4 +1,4 @@
-package io.furryr.file.util
+package io.furryr.file.core
 
 import android.os.Build
 import android.util.Log

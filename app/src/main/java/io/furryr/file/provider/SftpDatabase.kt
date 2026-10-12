@@ -3,15 +3,7 @@ package io.furryr.file.provider
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
-
-data class SftpServer(
-    val host: String,
-    val name: String,
-    val port: Int,
-    val username: String,
-    val password: String,
-    val sortOrder: Int,
-)
+import io.furryr.file.model.SftpServer
 
 class SftpDatabase(context: Context) : SQLiteOpenHelper(context, "sftp_servers.db", null, 1) {
     private val db = writableDatabase

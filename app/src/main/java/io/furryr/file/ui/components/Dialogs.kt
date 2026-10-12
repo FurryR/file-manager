@@ -3,7 +3,6 @@ import io.furryr.file.ui.theme.*
 import io.furryr.file.ui.screens.*
 import io.furryr.file.ui.components.*
 import io.furryr.file.ui.util.*
-import io.furryr.file.daemon.*
 import io.furryr.file.model.*
 import io.furryr.file.ui.screens.SortMode
 import io.furryr.file.R
@@ -38,7 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.furryr.file.DefaultPath
 import io.furryr.file.model.DirectoryInfo
-import io.furryr.file.model.FileEntry
+import io.furryr.file.core.model.FileEntry
 import io.furryr.file.model.OperationProgress
 import io.furryr.file.ui.util.formatSize
 

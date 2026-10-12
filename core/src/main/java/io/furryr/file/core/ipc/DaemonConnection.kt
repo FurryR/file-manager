@@ -1,17 +1,21 @@
-package io.furryr.file.daemon
+package io.furryr.file.core.ipc
 
 import android.util.Log
-import io.furryr.file.copy.CopyProgress
-import io.furryr.file.copy.FdFileSource
-import io.furryr.file.model.FileEntry
-import io.furryr.file.copy.FileSource
-import io.furryr.file.copy.HandleFileSource
+import io.furryr.file.core.PermissionDeniedException
+import io.furryr.file.core.model.CopyProgress
+import io.furryr.file.core.model.ExecResult
+import io.furryr.file.core.model.FileEntry
+import io.furryr.file.core.model.ProviderStat
+import io.furryr.file.core.source.FdFileSource
+import io.furryr.file.core.source.FileSource
+import io.furryr.file.core.source.HandleFileSource
 import io.furryr.file.proto.ClosePTYRequest
 import io.furryr.file.proto.CloseHandleRequest
 import io.furryr.file.proto.CreateDirRequest
 import io.furryr.file.proto.CreateFileRequest
 import io.furryr.file.proto.DeleteRequest
 import io.furryr.file.proto.DupHandleRequest
+import io.furryr.file.proto.ExitRequest
 import io.furryr.file.proto.HandleMode
 import io.furryr.file.proto.KillPtyRequest
 import io.furryr.file.proto.ListRequest
@@ -45,44 +49,43 @@ import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicLong
 
 /** Default bound for control requests that should never take long (open/stat/list/…). */
-const val OPEN_TIMEOUT_MS = 20_000L
+internal const val OPEN_TIMEOUT_MS = 20_000L
 
-data class StatResult(
-    val usableBytes: Long,
-    val totalBytes: Long,
-    val exists: Boolean,
-    val isDirectory: Boolean
-)
+/** How long the client keeps trying to re-attach after a transient socket drop. */
+private const val RECONNECT_ATTEMPTS = 50
+private const val RECONNECT_DELAY_MS = 100L
 
-data class PtyFd(
+internal data class PtyFd(
     val fileDescriptor: FileDescriptor,
     val ptyId: Long,
     val childPid: Int
 )
 
-data class OpenHandleResult(
+internal data class OpenHandleResult(
     val handleId: Long,
     val size: Long,
     val fileDescriptor: FileDescriptor? = null,
 )
 
-data class ExecResult(
-    val exitCode: Int,
-    val stdout: ByteArray,
-    val stderr: ByteArray,
-) {
-    val stdoutText: String get() = String(stdout, Charsets.UTF_8)
-    val stderrText: String get() = String(stderr, Charsets.UTF_8)
-}
-
-class DaemonConnection internal constructor(
-    internal val socket: OsSocket,
+internal class DaemonConnection internal constructor(
+    private val socketName: String,
+    initialSocket: OsSocket,
     process: Process?,
 ) {
+    @Volatile
+    private var socket: OsSocket = initialSocket
+
     internal val daemonProcess: Process? = process
 
     @Volatile
     private var isClosed = false
+
+    /** Set once reconnection has been given up (daemon likely gone). */
+    @Volatile
+    private var dead = false
+
+    @Volatile
+    private var reconnecting = false
 
     // ── Async request dispatch ──────────────────────────────────────
 
@@ -115,18 +118,50 @@ class DaemonConnection internal constructor(
     }
 
     private fun readerLoop() {
-        try {
-            while (true) {
-                val resp = socket.readFrame()
-                dispatchResponse(resp)
-            }
-        } catch (_: EOFException) {
-            // normal shutdown
-        } catch (e: Exception) {
-            if (!isClosed) {
+        while (true) {
+            try {
+                while (true) {
+                    val resp = socket.readFrame()
+                    dispatchResponse(resp)
+                }
+            } catch (_: EOFException) {
+                // peer closed this connection; the daemon itself may still live
+            } catch (e: Exception) {
+                if (isClosed) return
                 Log.w(TAG, "reader error", e)
-                failAllPending(e)
             }
+            if (isClosed) return
+            // In-flight requests can no longer be answered.
+            failAllPending(IllegalStateException("daemon connection lost"))
+            if (!attemptReconnect()) {
+                dead = true
+                Log.w(TAG, "daemon reconnection abandoned: $socketName")
+                return
+            }
+        }
+    }
+
+    /**
+     * Re-attach to the same daemon socket after a transient drop (e.g. the app
+     * being frozen). Returns false once the socket is unreachable, letting the
+     * owner start a fresh daemon.
+     */
+    private fun attemptReconnect(): Boolean {
+        reconnecting = true
+        try {
+            for (attempt in 0 until RECONNECT_ATTEMPTS) {
+                if (isClosed) return false
+                try {
+                    socket = OsSocket.connect(socketName)
+                    Log.i(TAG, "reconnected to daemon: $socketName")
+                    return true
+                } catch (_: Exception) {
+                    Thread.sleep(RECONNECT_DELAY_MS)
+                }
+            }
+            return false
+        } finally {
+            reconnecting = false
         }
     }
 
@@ -185,13 +220,35 @@ class DaemonConnection internal constructor(
         }
     }
 
-    fun isAlive(): Boolean = !isClosed && socket.isOpen
+    /**
+     * A connection is alive while it is neither explicitly closed nor given up
+     * on. A brief socket drop keeps it alive — the reader loop is re-attaching.
+     */
+    fun isAlive(): Boolean = !isClosed && !dead && (socket.isOpen || reconnecting)
+
+    /**
+     * Ask the daemon to shut down (graceful). The daemon serves multiple clients
+     * and only exits when one of them sends this — disconnecting does not.
+     */
+    fun exit() {
+        val id = requestIdCounter.getAndIncrement()
+        val req = Request.newBuilder()
+            .setId(id)
+            .setExit(ExitRequest.getDefaultInstance())
+            .build()
+        synchronized(writeLock) {
+            runCatching { socket.writeFrame(req.toByteArray()) }
+        }
+    }
 
     fun close() {
         synchronized(writeLock) {
             if (isClosed) return
             isClosed = true
         }
+        // Request a graceful shutdown before dropping the socket; the daemon
+        // otherwise keeps running for its other clients.
+        exit()
         failAllPending(EOFException("connection closed"))
         // Closing the socket makes the daemon read EOF and exit its loop, which
         // tears down its whole process tree (close_all). Give it a moment, then
@@ -306,11 +363,11 @@ class DaemonConnection internal constructor(
             .build())
     }
 
-    fun stat(path: String): Result<StatResult> = runCatching {
+    fun stat(path: String): Result<ProviderStat> = runCatching {
         val resp = request(Request.newBuilder()
             .setStat(StatRequest.newBuilder().setPath(path))
             .build()).response
-        StatResult(
+        ProviderStat(
             usableBytes = resp.stat.usableBytes, totalBytes = resp.stat.totalBytes,
             exists = resp.stat.exists, isDirectory = resp.stat.isDirectory
         )

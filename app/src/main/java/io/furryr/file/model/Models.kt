@@ -1,10 +1,4 @@
 package io.furryr.file.model
-import io.furryr.file.ui.theme.*
-import io.furryr.file.ui.screens.*
-import io.furryr.file.ui.components.*
-import io.furryr.file.ui.util.*
-import io.furryr.file.daemon.*
-import io.furryr.file.model.*
 import io.furryr.file.ui.util.formatSize
 import io.furryr.file.util.Path
 
@@ -23,17 +17,6 @@ data class FileTab(
             return if (p.isRoot) "/" else path
         }
 }
-
-data class FileEntry(
-    val name: String,
-    val path: String,
-    val isDirectory: Boolean,
-    val modifiedAt: Long,
-    val isSymlink: Boolean = false,
-    val realPath: String = "",
-    val mode: Int = 0,
-    val size: Long = 0L
-)
 
 data class DirectoryInfo(
     val folderCount: Int = 0,

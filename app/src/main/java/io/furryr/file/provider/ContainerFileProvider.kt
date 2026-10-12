@@ -3,11 +3,12 @@ package io.furryr.file.provider
 import android.content.Context
 import android.util.Log
 import io.furryr.file.agent.ContainerManager
-import io.furryr.file.copy.CopyProgress
-import io.furryr.file.copy.FileSource
-import io.furryr.file.copy.OpenMode
-import io.furryr.file.copy.StreamFileSource
-import io.furryr.file.model.FileEntry
+import io.furryr.file.core.model.CopyProgress
+import io.furryr.file.core.source.FileSource
+import io.furryr.file.core.source.OpenMode
+import io.furryr.file.core.source.StreamFileSource
+import io.furryr.file.core.model.FileEntry
+import io.furryr.file.core.model.ProviderStat
 import io.furryr.file.util.Path
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow

@@ -13,9 +13,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import io.furryr.file.daemon.DaemonLauncher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import io.furryr.file.core.DaemonManager
 import io.furryr.file.provider.installFileProviders
 import io.furryr.file.ui.theme.FileManagerTheme
 import io.furryr.file.ui.util.OperationNotification
@@ -41,11 +41,11 @@ class MainActivity : ComponentActivity() {
         installFileProviders(this)
 
         // Pre-start the daemon off the main thread. Failure is logged and
-        // observable via DaemonLauncher.daemonState; the lazy-init in
-        // DaemonLauncher.send() will retry on the next API call.
+        // observable via DaemonManager.status; the lazy-init in
+        // DaemonManager will retry on the next API call.
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                DaemonLauncher.connect()
+                DaemonManager.warmUp().getOrThrow()
                 Log.i("FileManager", "Daemon pre-start complete")
             } catch (e: Exception) {
                 Log.w("FileManager", "Daemon pre-start failed (will retry on first operation)", e)

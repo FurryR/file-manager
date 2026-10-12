@@ -5,7 +5,9 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.util.Log
 import io.furryr.file.TerminalForegroundService
-import io.furryr.file.daemon.DaemonLauncher
+import io.furryr.file.core.DaemonManager
+import io.furryr.file.core.DaemonTarget
+import io.furryr.file.core.process.CommandSpec
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import kotlinx.coroutines.Dispatchers
@@ -152,13 +154,17 @@ object SessionManager {
                     }
 
                     is SessionType.RootPty -> {
-                        val ptyConn = PtyManager.createPty(
-                            useRoot = true,
-                            command = "/system/bin/sh"
-                        ).getOrThrow()
+                        val target = if (DaemonManager.canStartRootDaemon()) {
+                            DaemonTarget.Primary
+                        } else {
+                            DaemonTarget.AppUid
+                        }
+                        val channel = DaemonManager.execService(target)
+                            .spawn(CommandSpec("/system/bin/sh", escalate = true))
+                            .getOrThrow()
 
                         val ts = createTerminalSession("/system/bin/sh", context)
-                        val bridge = PtyBridge(ptyConn, ts).also { it.start() }
+                        val bridge = PtyBridge(channel, ts).also { it.start() }
                         Pair(ts, bridge)
                     }
 
@@ -259,10 +265,8 @@ object SessionManager {
             runCatching { info.session.finishIfRunning() }
         }
 
-        // Hide the foreground notification once nothing is left running.
-        if (synchronized(mutex) { sessions.isEmpty() }) {
-            appContext?.let { TerminalForegroundService.stop(it) }
-        }
+        // The foreground service observes session changes and stops itself
+        // once nothing is left running.
 
         Log.d(TAG, "destroySession: done id=$sessionId")
     }
@@ -339,8 +343,6 @@ object SessionManager {
             sessions.clear()
         }
 
-        appContext?.let { TerminalForegroundService.stop(it) }
-
         Log.d(TAG, "destroyAll: done")
     }
 
@@ -367,7 +369,7 @@ object SessionManager {
             ?: throw IllegalStateException("Container '$containerName' not found")
         // Warm the container daemon off the main thread so the synchronous
         // spawn inside TerminalSession is fast.
-        withContext(Dispatchers.IO) { DaemonLauncher.connectContainerByName(containerName) }
+        withContext(Dispatchers.IO) { DaemonManager.warmNamed(containerName) }
         val ts = createTerminalSession("container://$containerName", context, customCwd = "/")
         return ts to null
     }

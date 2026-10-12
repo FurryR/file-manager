@@ -47,7 +47,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.furryr.file.R
-import io.furryr.file.daemon.DaemonLauncher
+import io.furryr.file.core.DaemonManager
 import io.furryr.file.ui.theme.FileManagerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -82,7 +82,7 @@ private fun ContainerWizardScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    val rootAvailable = remember { DaemonLauncher.isRootAvailable() }
+    val rootAvailable = remember { DaemonManager.isRootAvailable() }
 
     var imageRef by rememberSaveable { mutableStateOf("library/alpine:latest") }
     var containerName by rememberSaveable { mutableStateOf("") }

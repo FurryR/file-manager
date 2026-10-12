@@ -65,7 +65,7 @@ import androidx.compose.ui.unit.sp
 import com.termux.terminal.TerminalSession
 import io.furryr.file.agent.SessionManager
 import io.furryr.file.agent.TerminalViewComposable
-import io.furryr.file.daemon.DaemonLauncher
+import io.furryr.file.core.DaemonManager
 import android.app.Activity
 import android.util.Log
 import android.view.ViewTreeObserver
@@ -83,6 +83,12 @@ private data class TerminalTab(
     val session: TerminalSession,
     val label: String,
 )
+
+private fun sessionLabel(type: SessionManager.SessionType): String = when (type) {
+    is SessionManager.SessionType.Container -> type.containerName
+    is SessionManager.SessionType.RootPty -> "Root"
+    is SessionManager.SessionType.AppShell -> "Local"
+}
 
 @Composable
 fun TerminalSheet(
@@ -155,11 +161,9 @@ fun TerminalSheet(
         SessionManager.addSessionFinishedListener(sessionFinishedListener)
         onDispose {
             SessionManager.removeSessionFinishedListener(sessionFinishedListener)
-            scope.launch {
-                for (tab in tabs) {
-                    SessionManager.destroySession(tab.sessionId)
-                }
-            }
+            // Sessions are owned by SessionManager and kept alive by
+            // TerminalForegroundService; they must survive the UI being torn
+            // down so the user can reopen them from the notification.
             tabs.clear()
             activeTabIndex = -1
             sessionError = null
@@ -179,6 +183,27 @@ fun TerminalSheet(
         } else {
             SessionManager.SessionType.AppShell(cwd = "/sdcard") to "Local"
         }
+    }
+
+    /**
+     * Repopulate [tabs] from sessions that outlived the previous UI (e.g. after
+     * an activity recreation) so the tabs and the notification count agree.
+     */
+    fun restoreTabs() {
+        val infos = SessionManager.getAllSessionInfos()
+        if (infos.isEmpty()) return
+        infos.forEach { info ->
+            if (tabs.none { it.sessionId == info.id }) {
+                tabs.add(
+                    TerminalTab(
+                        sessionId = info.id,
+                        session = info.session,
+                        label = sessionLabel(info.type),
+                    )
+                )
+            }
+        }
+        if (activeTabIndex !in tabs.indices) activeTabIndex = tabs.lastIndex
     }
 
     fun createNewTab() {
@@ -202,7 +227,8 @@ fun TerminalSheet(
 
     LaunchedEffect(visible) {
         if (visible) {
-            DaemonLauncher.connect()
+            DaemonManager.warmUp()
+            restoreTabs()
             createNewTab()
         }
     }

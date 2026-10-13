@@ -4,9 +4,13 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.util.Log
 import io.furryr.file.core.file.FileService
+import io.furryr.file.core.hub.HubServer
 import io.furryr.file.core.ipc.DaemonConnection
-import io.furryr.file.core.ipc.OsSocket
 import io.furryr.file.core.process.ExecService
+import io.furryr.file.uds.ReconnectPolicy
+import io.furryr.file.uds.Transport
+import io.furryr.file.uds.UdsClient
+import io.furryr.file.uds.UdsEndpoint
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -68,7 +72,10 @@ fun interface DaemonLauncher {
  */
 object DaemonManager {
     private const val TAG = "DaemonManager"
-    private const val NativeLibName = "libfiledaemon.so"
+    private const val DaemonBinaryName = "libfiledaemon.so"
+
+    /** Stable abstract endpoint the run0 communication hub listens on. */
+    private const val DefaultHubName = "io.furryr.file.hub"
 
     private lateinit var appContext: Context
     private var executableFile: File? = null
@@ -77,6 +84,8 @@ object DaemonManager {
     @Volatile private var primary: DaemonConnection? = null
     @Volatile private var appUid: DaemonConnection? = null
     private val named = mutableMapOf<String, DaemonConnection>()
+
+    @Volatile private var hub: HubServer? = null
 
     @Volatile private var launcher: DaemonLauncher? = null
     @Volatile private var registry: DaemonRegistry = DaemonRegistry { emptyList() }
@@ -104,7 +113,7 @@ object DaemonManager {
         // Lift the hidden-API restriction (needed for android.system.Os.recvmsg)
         // before any daemon I/O starts.
         HiddenApi.ensure()
-        val nativeLib = File(appContext.applicationInfo.nativeLibraryDir, NativeLibName)
+        val nativeLib = File(appContext.applicationInfo.nativeLibraryDir, DaemonBinaryName)
         if (!nativeLib.exists()) {
             Log.w(TAG, "Daemon binary not found at ${nativeLib.absolutePath}")
             return
@@ -141,6 +150,43 @@ object DaemonManager {
 
     /** Live endpoints an external client could attach to (future run0). */
     fun endpoints(): List<DaemonEndpoint> = registry.endpoints()
+
+    /** Live daemon endpoints with their actual sockets, ready for hub attach. */
+    fun liveEndpoints(): List<DaemonEndpoint> = synchronized(lock) {
+        val list = ArrayList<DaemonEndpoint>()
+        primary?.takeIf { it.isAlive() }?.let {
+            list.add(DaemonEndpoint("primary", it.socketName, rootActive))
+        }
+        appUid?.takeIf { it.isAlive() }?.let {
+            list.add(DaemonEndpoint("app-uid", it.socketName, false))
+        }
+        named.forEach { (name, connection) ->
+            if (connection.isAlive()) list.add(DaemonEndpoint(name, connection.socketName, false))
+        }
+        list
+    }
+
+    /**
+     * Start the run0 communication hub on [endpointName] (idempotent). The hub
+     * relays frames, including descriptors, to whichever live daemon a client
+     * attaches to — it parses only its own handshake.
+     */
+    fun startHub(endpointName: String = DefaultHubName) {
+        synchronized(lock) {
+            if (hub != null) return
+            hub = HubServer.listen(
+                UdsEndpoint.Abstract(endpointName),
+                resolver = { name -> liveEndpoints().firstOrNull { it.name == name } },
+                endpointsProvider = { liveEndpoints() },
+            )
+            Log.i(TAG, "Hub listening at $endpointName")
+        }
+    }
+
+    fun stopHub() = synchronized(lock) {
+        hub?.close()
+        hub = null
+    }
 
     // ── Privilege queries ─────────────────────────────────────────────
 
@@ -245,10 +291,20 @@ object DaemonManager {
         }
     }
 
-    private fun startPrimary(): DaemonConnection = when {
-        rootEnabled && suPath.isNotBlank() -> startRootDaemon()
-        shellEnabled && isShizukuAvailable() && hasShizukuPermission() -> startShellDaemon()
-        else -> startAppDaemon()
+    private fun startPrimary(): DaemonConnection {
+        if (rootEnabled && suPath.isNotBlank()) {
+            if (isSuAvailable(suPath)) {
+                runCatching { return startRootDaemon() }
+                    .onFailure { Log.w(TAG, "Root daemon start failed; falling back", it) }
+            } else {
+                Log.w(TAG, "su at '$suPath' is not usable; skipping root daemon")
+            }
+        }
+        if (shellEnabled && isShizukuAvailable() && hasShizukuPermission()) {
+            runCatching { return startShellDaemon() }
+                .onFailure { Log.w(TAG, "Shell daemon start failed; falling back", it) }
+        }
+        return startAppDaemon()
     }
 
     private fun startAppDaemon(): DaemonConnection {
@@ -267,8 +323,9 @@ object DaemonManager {
         Log.i(TAG, "Starting root daemon: $suPath -c $cmd")
         val process = ProcessBuilder(suPath, "-c", cmd)
             .directory(appContext.filesDir).redirectErrorStream(true).start()
+        val connection = DaemonConnection(socketName, connectWithRetry(socketName), process)
         rootActive = true
-        return DaemonConnection(socketName, connectWithRetry(socketName), process)
+        return connection
     }
 
     private fun startShellDaemon(): DaemonConnection {
@@ -306,13 +363,13 @@ object DaemonManager {
 
     private fun newSocketName() = "file-daemon-${UUID.randomUUID()}"
 
-    private fun connectWithRetry(socketName: String): OsSocket {
+    private fun connectWithRetry(socketName: String): Transport {
         var lastError: Exception? = null
         for (i in 0 until 50) {
             try {
-                val sock = OsSocket.connect(socketName)
+                val transport = UdsClient.connect(UdsEndpoint.Abstract(socketName), ReconnectPolicy())
                 Log.i(TAG, "Connected via abstract socket: $socketName")
-                return sock
+                return transport
             } catch (e: Exception) { lastError = e; Thread.sleep(100) }
         }
         throw IllegalStateException("Failed to connect to daemon", lastError)

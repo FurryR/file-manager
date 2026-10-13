@@ -15,8 +15,10 @@
 | `ui/theme/` | `FileManagerTheme.kt` (Material3 dark/light) |
 | `ui/util/` | `Formatters.kt`, `FileIcons.kt`, `FileOpen.kt`, `OperationNotification.kt` |
 
-> Transport, sources and the unified exec API live in the `:core` module
-> (`io.furryr.file.core.*`). The old `daemon/` and `copy/` packages were removed.
+> The proto-agnostic UDS transport lives in the `:uds` module
+> (`io.furryr.file.uds.*`); the daemon protocol, sources and the unified exec
+> API live in `:core` (`io.furryr.file.core.*`). The old `daemon/` and `copy/`
+> packages were removed.
 
 ## WHERE TO LOOK
 

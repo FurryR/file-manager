@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package filehub;
+
+option java_package = "io.furryr.file.proto.hub";
+option java_multiple_files = true;
+
+// Control-plane frames exchanged with the communication hub. After a successful
+// Attach the connection switches to a transparent relay of the target daemon's
+// own protocol — the hub never parses it.
+message HubRequest {
+  uint64 id = 1;
+  oneof command {
+    ListEndpointsRequest list_endpoints = 2;
+    AttachRequest attach = 3;
+    DetachRequest detach = 4;
+  }
+}
+
+message ListEndpointsRequest {}
+
+message AttachRequest {
+  string name = 1;
+}
+
+message DetachRequest {}
+
+message HubResponse {
+  uint64 id = 1;
+  bool ok = 2;
+  string error = 3;
+  repeated HubEndpoint endpoints = 4;
+}
+
+message HubEndpoint {
+  string name = 1;
+  string socket = 2;
+  bool elevated = 3;
+}

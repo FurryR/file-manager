@@ -12,12 +12,12 @@ import java.io.IOException
  * executable before first use.
  */
 object ProotInstaller {
-    private const val SO_NAME = "libproot.so"
+    private const val BINARY_NAME = "libproot.so"
     private const val TAG = "ProotInstaller"
 
     fun install(context: Context): Result<File> = runCatching {
         val appContext = context.applicationContext
-        val binary = File(appContext.applicationInfo.nativeLibraryDir, SO_NAME)
+        val binary = File(appContext.applicationInfo.nativeLibraryDir, BINARY_NAME)
         if (!binary.exists()) {
             throw IOException("proot binary not found at ${binary.absolutePath}")
         }
@@ -31,5 +31,5 @@ object ProotInstaller {
     }
 
     fun expectedPath(context: Context): File =
-        File(context.applicationContext.applicationInfo.nativeLibraryDir, SO_NAME)
+        File(context.applicationContext.applicationInfo.nativeLibraryDir, BINARY_NAME)
 }

@@ -25,3 +25,4 @@ dependencyResolutionManagement {
 rootProject.name = "FileManager"
 include(":app")
 include(":core")
+include(":uds")

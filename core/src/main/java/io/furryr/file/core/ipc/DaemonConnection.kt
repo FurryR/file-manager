@@ -1,5 +1,6 @@
 package io.furryr.file.core.ipc
 
+import android.system.Os
 import android.util.Log
 import io.furryr.file.core.PermissionDeniedException
 import io.furryr.file.core.model.CopyProgress
@@ -11,6 +12,7 @@ import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.HandleFileSource
 import io.furryr.file.proto.ClosePTYRequest
 import io.furryr.file.proto.CloseHandleRequest
+import io.furryr.file.proto.CancelRequest
 import io.furryr.file.proto.CreateDirRequest
 import io.furryr.file.proto.CreateFileRequest
 import io.furryr.file.proto.DeleteRequest
@@ -31,6 +33,10 @@ import io.furryr.file.proto.CopyFromSourceRequest
 import io.furryr.file.proto.TruncateHandleRequest
 import io.furryr.file.proto.WaitPtyRequest
 import io.furryr.file.proto.ReadSourceResponse
+import io.furryr.file.proto.Response
+import io.furryr.file.uds.Frame
+import io.furryr.file.uds.Transport
+import io.furryr.file.uds.TransportEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -40,6 +46,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import java.io.EOFException
 import java.io.FileDescriptor
 import java.util.concurrent.CompletableFuture
@@ -50,10 +57,6 @@ import java.util.concurrent.atomic.AtomicLong
 
 /** Default bound for control requests that should never take long (open/stat/list/…). */
 internal const val OPEN_TIMEOUT_MS = 20_000L
-
-/** How long the client keeps trying to re-attach after a transient socket drop. */
-private const val RECONNECT_ATTEMPTS = 50
-private const val RECONNECT_DELAY_MS = 100L
 
 internal data class PtyFd(
     val fileDescriptor: FileDescriptor,
@@ -67,25 +70,28 @@ internal data class OpenHandleResult(
     val fileDescriptor: FileDescriptor? = null,
 )
 
+/**
+ * Protocol layer over a proto-agnostic [Transport]: it owns request/response
+ * correlation, streaming, source-read brokering and handle/pty decoding. The
+ * socket, framing, SCM_RIGHTS and reconnect policy all live in `:uds`.
+ *
+ * Blocking by design — the public facades ([io.furryr.file.core.file.FileService],
+ * [io.furryr.file.core.process.ExecService]) stay synchronous; sends bridge into
+ * the transport's coroutine world.
+ */
 internal class DaemonConnection internal constructor(
-    private val socketName: String,
-    initialSocket: OsSocket,
+    internal val socketName: String,
+    private val transport: Transport,
     process: Process?,
 ) {
-    @Volatile
-    private var socket: OsSocket = initialSocket
-
     internal val daemonProcess: Process? = process
 
     @Volatile
     private var isClosed = false
 
-    /** Set once reconnection has been given up (daemon likely gone). */
+    /** Set once the transport has given up (daemon likely gone). */
     @Volatile
     private var dead = false
-
-    @Volatile
-    private var reconnecting = false
 
     // ── Async request dispatch ──────────────────────────────────────
 
@@ -99,7 +105,7 @@ internal class DaemonConnection internal constructor(
     private val pendingRequests = HashMap<Long, PendingRequest>()
     private val sourceReaders = HashMap<Long, FileSource>()
     private val pendingLock = Any()
-    private val writeLock = Any()
+    private val closeLock = Any()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     init {
@@ -117,57 +123,36 @@ internal class DaemonConnection internal constructor(
         }
     }
 
-    private fun readerLoop() {
-        while (true) {
-            try {
-                while (true) {
-                    val resp = socket.readFrame()
-                    dispatchResponse(resp)
-                }
-            } catch (_: EOFException) {
-                // peer closed this connection; the daemon itself may still live
-            } catch (e: Exception) {
-                if (isClosed) return
-                Log.w(TAG, "reader error", e)
-            }
-            if (isClosed) return
-            // In-flight requests can no longer be answered.
-            failAllPending(IllegalStateException("daemon connection lost"))
-            if (!attemptReconnect()) {
-                dead = true
-                Log.w(TAG, "daemon reconnection abandoned: $socketName")
-                return
-            }
-        }
-    }
-
-    /**
-     * Re-attach to the same daemon socket after a transient drop (e.g. the app
-     * being frozen). Returns false once the socket is unreachable, letting the
-     * owner start a fresh daemon.
-     */
-    private fun attemptReconnect(): Boolean {
-        reconnecting = true
-        try {
-            for (attempt in 0 until RECONNECT_ATTEMPTS) {
-                if (isClosed) return false
-                try {
-                    socket = OsSocket.connect(socketName)
+    private suspend fun readerLoop() {
+        transport.events.collect { event ->
+            when (event) {
+                is TransportEvent.Incoming -> dispatchResponse(event.frame)
+                is TransportEvent.Reconnecting ->
+                    failAllPending(IllegalStateException("daemon connection lost"))
+                is TransportEvent.Reconnected ->
                     Log.i(TAG, "reconnected to daemon: $socketName")
-                    return true
-                } catch (_: Exception) {
-                    Thread.sleep(RECONNECT_DELAY_MS)
+                is TransportEvent.Closed -> {
+                    dead = true
+                    failAllPending(event.cause ?: IllegalStateException("daemon connection lost"))
                 }
             }
-            return false
-        } finally {
-            reconnecting = false
+        }
+        if (!isClosed) {
+            dead = true
+            failAllPending(EOFException("daemon connection lost"))
         }
     }
 
-    private fun dispatchResponse(resp: DaemonResponse) {
-        resp.response.readSourceRequest?.let { readRequest ->
-            val source = synchronized(pendingLock) { sourceReaders[resp.response.id] }
+    private fun dispatchResponse(frame: Frame) {
+        // The daemon protocol attaches at most one descriptor; drop the rest.
+        if (frame.fds.size > 1) {
+            frame.fds.drop(1).forEach { runCatching { Os.close(it) } }
+        }
+        val fd = frame.fds.firstOrNull()
+        val decoded = DaemonResponse(Response.parseFrom(frame.payload), fd)
+
+        decoded.response.readSourceRequest?.let { readRequest ->
+            val source = synchronized(pendingLock) { sourceReaders[decoded.response.id] }
             if (source != null) {
                 scope.launch(Dispatchers.IO) {
                     val result = runCatching { source.readChunk(readRequest.offset, readRequest.length) }
@@ -185,29 +170,34 @@ internal class DaemonConnection internal constructor(
                 }
             }
         }
-        val id = resp.response.id
+
+        val id = decoded.response.id
         synchronized(pendingLock) {
-            val pending = pendingRequests[id] ?: return
+            val pending = pendingRequests[id]
+            if (pending == null) {
+                fd?.let { runCatching { Os.close(it) } }
+                return
+            }
             when (pending) {
                 is PendingRequest.Single -> {
                     pendingRequests.remove(id)
-                    pending.future.complete(resp)
+                    pending.future.complete(decoded)
                 }
                 is PendingRequest.Stream -> {
-                    val prog = resp.response.streamProgress
+                    val prog = decoded.response.streamProgress
                     if (prog != null && prog.finished) {
                         pendingRequests.remove(id)
-                        pending.channel.trySend(resp)
+                        pending.channel.trySend(decoded)
                         pending.channel.close()
                     } else {
-                        pending.channel.trySend(resp)
+                        pending.channel.trySend(decoded)
                     }
                 }
             }
         }
     }
 
-    private fun failAllPending(cause: Exception) {
+    private fun failAllPending(cause: Throwable) {
         synchronized(pendingLock) {
             val err = IllegalStateException("daemon connection lost", cause)
             pendingRequests.values.forEach {
@@ -222,27 +212,24 @@ internal class DaemonConnection internal constructor(
 
     /**
      * A connection is alive while it is neither explicitly closed nor given up
-     * on. A brief socket drop keeps it alive — the reader loop is re-attaching.
+     * on. A brief socket drop keeps it alive — the transport is re-attaching.
      */
-    fun isAlive(): Boolean = !isClosed && !dead && (socket.isOpen || reconnecting)
+    fun isAlive(): Boolean = !isClosed && !dead
 
     /**
      * Ask the daemon to shut down (graceful). The daemon serves multiple clients
      * and only exits when one of them sends this — disconnecting does not.
      */
     fun exit() {
-        val id = requestIdCounter.getAndIncrement()
         val req = Request.newBuilder()
-            .setId(id)
+            .setId(requestIdCounter.getAndIncrement())
             .setExit(ExitRequest.getDefaultInstance())
             .build()
-        synchronized(writeLock) {
-            runCatching { socket.writeFrame(req.toByteArray()) }
-        }
+        runCatching { rawSend(req) }
     }
 
     fun close() {
-        synchronized(writeLock) {
+        synchronized(closeLock) {
             if (isClosed) return
             isClosed = true
         }
@@ -250,16 +237,13 @@ internal class DaemonConnection internal constructor(
         // otherwise keeps running for its other clients.
         exit()
         failAllPending(EOFException("connection closed"))
-        // Closing the socket makes the daemon read EOF and exit its loop, which
-        // tears down its whole process tree (close_all). Give it a moment, then
-        // force-kill if it is still around.
-        runCatching { socket.close() }
+        runCatching { transport.close() }
         scope.cancel()
         daemonProcess?.let { p ->
             // Shizuku's remote Process throws from isAlive()/exitValue() when
             // the process has not exited, so guard the whole teardown.
             runCatching {
-                if (p.isAlive && !p.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                if (p.isAlive && !p.waitFor(500, TimeUnit.MILLISECONDS)) {
                     p.destroyForcibly()
                 }
             }
@@ -269,6 +253,10 @@ internal class DaemonConnection internal constructor(
     private val TAG = "DaemonConnection"
 
     // ── Core I/O ──────────────────────────────────────────────────────
+
+    private fun rawSend(request: Request, fds: List<FileDescriptor> = emptyList()) {
+        runBlocking { transport.send(request.toByteArray(), fds) }
+    }
 
     /** Send a request and wait for the matching response. */
     fun request(request: Request): DaemonResponse = request(request, 0L)
@@ -280,14 +268,17 @@ internal class DaemonConnection internal constructor(
      *        the wait so a wedged daemon cannot hang the caller forever.
      */
     fun request(request: Request, timeoutMillis: Long): DaemonResponse {
+        if (isClosed) throw IllegalStateException("connection closed")
         val id = requestIdCounter.getAndIncrement()
         val req = request.toBuilder().setId(id).build()
         val future = CompletableFuture<DaemonResponse>()
 
         synchronized(pendingLock) { pendingRequests[id] = PendingRequest.Single(future) }
-        synchronized(writeLock) {
-            if (isClosed) throw IllegalStateException("connection closed")
-            socket.writeFrame(req.toByteArray())
+        try {
+            rawSend(req)
+        } catch (e: Exception) {
+            synchronized(pendingLock) { pendingRequests.remove(id) }
+            throw e
         }
 
         val resp = try {
@@ -309,31 +300,41 @@ internal class DaemonConnection internal constructor(
         return resp
     }
 
+    /** Allocate a request id for a stream whose handle is created by the caller. */
+    fun allocateRequestId(): Long = requestIdCounter.getAndIncrement()
+
+    /** Ask the daemon to abort an in-flight streaming request by id. */
+    fun cancel(targetId: Long): Result<Unit> = runCatching {
+        request(Request.newBuilder()
+            .setCancel(CancelRequest.newBuilder().setTargetId(targetId))
+            .build())
+    }
+
     /** Send a streaming request, returning a Flow of CopyProgress. */
-    fun requestStream(request: Request, isCopy: Boolean = true): Flow<CopyProgress> = flow {
-        val id = requestIdCounter.getAndIncrement()
+    fun requestStream(request: Request, isCopy: Boolean = true): Flow<CopyProgress> =
+        requestStream(request, allocateRequestId(), isCopy)
+
+    internal fun requestStream(request: Request, id: Long, isCopy: Boolean): Flow<CopyProgress> = flow {
         val req = request.toBuilder().setId(id).build()
         val channel = Channel<DaemonResponse>(Channel.UNLIMITED)
 
         synchronized(pendingLock) { pendingRequests[id] = PendingRequest.Stream(channel) }
-        synchronized(writeLock) {
-            if (isClosed) throw IllegalStateException("connection closed")
-            socket.writeFrame(req.toByteArray())
-        }
-
-        for (resp in channel) {
-            if (!resp.response.ok) {
-                throw IllegalStateException(resp.response.error.ifBlank { "daemon stream request failed" })
+        try {
+            rawSend(req)
+            for (resp in channel) {
+                if (!resp.response.ok) {
+                    throw IllegalStateException(resp.response.error.ifBlank { "daemon stream request failed" })
+                }
+                val p = resp.response.streamProgress ?: continue
+                emit(CopyProgress(
+                    totalBytes = p.totalBytes, copiedBytes = p.copiedBytes,
+                    currentName = p.currentName, finished = p.finished, isCopy = isCopy,
+                ))
+                if (p.finished) break
             }
-            val p = resp.response.streamProgress ?: continue
-            emit(CopyProgress(
-                totalBytes = p.totalBytes, copiedBytes = p.copiedBytes,
-                currentName = p.currentName, finished = p.finished, isCopy = isCopy,
-            ))
-            if (p.finished) break
+        } finally {
+            synchronized(pendingLock) { pendingRequests.remove(id) }
         }
-
-        synchronized(pendingLock) { pendingRequests.remove(id) }
     }.flowOn(Dispatchers.IO)
 
     // ── File operations ──────────────────────────────────────────────
@@ -387,16 +388,21 @@ internal class DaemonConnection internal constructor(
 
     // ── Copy with progress ─────────────────────────────────────────
 
-    fun copy(from: String, to: String, isCopy: Boolean = true): Flow<CopyProgress> {
+    fun copy(from: String, to: String, isCopy: Boolean = true): Flow<CopyProgress> =
+        copyWithId(allocateRequestId(), from, to, isCopy)
+
+    internal fun copyWithId(id: Long, from: String, to: String, isCopy: Boolean): Flow<CopyProgress> {
         val req = Request.newBuilder()
             .setCopy(CopyRequest.newBuilder().setFrom(from).setTo(to))
             .build()
-        return requestStream(req, isCopy)
+        return requestStream(req, id, isCopy)
     }
 
     /** Destination-driven copy. Real FDs travel as SCM_RIGHTS; virtual handles are pulled. */
-    fun copyFromSource(source: FileSource, to: String, isCopy: Boolean = true): Flow<CopyProgress> = flow {
-        val id = requestIdCounter.getAndIncrement()
+    fun copyFromSource(source: FileSource, to: String, isCopy: Boolean = true): Flow<CopyProgress> =
+        copyFromSource(source, to, allocateRequestId(), isCopy)
+
+    internal fun copyFromSource(source: FileSource, to: String, id: Long, isCopy: Boolean): Flow<CopyProgress> = flow {
         val req = Request.newBuilder()
             .setId(id)
             .setCopyFromSource(CopyFromSourceRequest.newBuilder()
@@ -413,10 +419,7 @@ internal class DaemonConnection internal constructor(
             if (source is HandleFileSource) sourceReaders[id] = source
         }
         try {
-            synchronized(writeLock) {
-                if (isClosed) throw IllegalStateException("connection closed")
-                socket.writeFrame(req.toByteArray(), (source as? FdFileSource)?.fileDescriptor)
-            }
+            rawSend(req, listOfNotNull((source as? FdFileSource)?.fileDescriptor))
             for (resp in channel) {
                 if (!resp.response.ok) {
                     throw IllegalStateException(resp.response.error.ifBlank { "daemon copy failed" })

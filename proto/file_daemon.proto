@@ -32,6 +32,7 @@ message Request {
     ReadSourceResponse read_source_response = 27;
     ExecRequest exec = 28;
     ExitRequest exit = 29;
+    CancelRequest cancel = 30;
   }
 }
 
@@ -39,6 +40,13 @@ message Request {
 // after one disconnects; it only exits when any connection sends this. Multiple
 // clients (UI, future run0) can be attached simultaneously.
 message ExitRequest {}
+
+// Cancel an in-flight streaming request (e.g. a long copy) by the id it was
+// issued with. Cancellation is scoped to the connection that issued the
+// request: each connection keeps its own in-flight table.
+message CancelRequest {
+  uint64 target_id = 1;
+}
 
 message ListRequest {
   string path = 1;

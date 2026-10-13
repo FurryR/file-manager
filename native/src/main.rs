@@ -28,11 +28,11 @@ use protocol::{FrameReader, OutboundResponse};
 static TERMINATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// State shared by every connection. The daemon outlives any single client, so
-/// PTYs, handles, cancellation flags and the source-read broker are global.
+/// PTYs, handles and the source-read broker are global. Cancellable in-flight
+/// requests are *not* — each connection owns its own table.
 struct Shared {
     pty_manager: Arc<Mutex<PtyManager>>,
     handles: Arc<Mutex<HandleTable>>,
-    cancel_flags: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     source_read_broker: copy::SourceReadBroker,
 }
 
@@ -76,7 +76,6 @@ async fn main() -> io::Result<()> {
     let shared = Arc::new(Shared {
         pty_manager: Arc::new(Mutex::new(PtyManager::new())),
         handles: Arc::new(Mutex::new(HandleTable::new())),
-        cancel_flags: Arc::new(Mutex::new(HashMap::new())),
         source_read_broker: copy::SourceReadBroker::default(),
     });
 
@@ -146,7 +145,11 @@ async fn handle_connection(
     let (response_tx, mut response_rx) = mpsc::unbounded_channel::<OutboundResponse>();
     let mut frame_reader = FrameReader::new();
 
-    loop {
+    // Cancellable in-flight requests are scoped to this connection.
+    let cancel_flags: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    let result = loop {
         tokio::select! {
             request_result = frame_reader.read_frame(&mut stream) => {
                 match request_result {
@@ -154,11 +157,12 @@ async fn handle_connection(
                         let tx = response_tx.clone();
                         let shared = shared.clone();
                         let shutdown = shutdown_tx.clone();
+                        let cancel_flags = cancel_flags.clone();
                         tokio::spawn(async move {
                             handlers::handle_streaming(
                                 incoming.request, incoming.attached_fd,
                                 &shared.pty_manager, &shared.handles,
-                                &shared.cancel_flags, &shared.source_read_broker, tx,
+                                cancel_flags, &shared.source_read_broker, tx,
                                 &shutdown,
                             ).await;
                         });
@@ -198,7 +202,17 @@ async fn handle_connection(
                 break Ok(());
             }
         }
+    };
+
+    // Connection gone: cancel whatever is still in flight on it.
+    {
+        let mut flags = cancel_flags.lock().await;
+        for flag in flags.values() {
+            flag.store(true, Ordering::Relaxed);
+        }
+        flags.clear();
     }
+    result
 }
 
 fn parse_socket_arg() -> io::Result<String> {

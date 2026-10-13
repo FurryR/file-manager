@@ -50,6 +50,8 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 Log.w("FileManager", "Daemon pre-start failed (will retry on first operation)", e)
             }
+            runCatching { DaemonManager.startHub() }
+                .onFailure { Log.w("FileManager", "Hub start failed", it) }
         }
 
         setContent {

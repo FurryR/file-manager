@@ -1,6 +1,7 @@
 package io.furryr.file.core.file
 
 import io.furryr.file.core.ipc.DaemonConnection
+import io.furryr.file.core.model.CopyHandle
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
@@ -51,6 +52,30 @@ class FileService internal constructor(private val resolve: () -> DaemonConnecti
             connection.copyFromSource(src, destPath, isCopy)
         } else {
             chunkedCopy(connection, src, destPath, isCopy)
+        }
+    }
+
+    /** Same-daemon copy/move, cancellable on the daemon via [CopyHandle.cancel]. */
+    fun copyHandle(from: String, to: String, isCopy: Boolean): CopyHandle {
+        val connection = resolve()
+        val id = connection.allocateRequestId()
+        return CopyHandle(id, connection.copyWithId(id, from, to, isCopy)) { connection.cancel(id) }
+    }
+
+    /**
+     * Copy an external [FileSource] into this daemon, cancellable on the daemon
+     * when the source is fd/handle-backed. Stream sources are copied client-side,
+     * where cancellation is collection cancellation.
+     */
+    fun copyFromSourceHandle(src: FileSource, destPath: String, isCopy: Boolean): CopyHandle {
+        val connection = resolve()
+        val id = connection.allocateRequestId()
+        return if (src is HandleFileSource || src is FdFileSource) {
+            CopyHandle(id, connection.copyFromSource(src, destPath, id, isCopy)) { connection.cancel(id) }
+        } else {
+            CopyHandle(id, chunkedCopy(connection, src, destPath, isCopy)) {
+                Result.failure(UnsupportedOperationException("streamed source cancels via collection"))
+            }
         }
     }
 

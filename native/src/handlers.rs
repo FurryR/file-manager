@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::os::fd::RawFd;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::fs::File;
 use tokio::sync::{mpsc, watch, Mutex};
 
@@ -11,7 +11,7 @@ use crate::handles::HandleTable;
 use crate::list;
 use crate::proto::request::Command;
 use crate::proto::{
-    CloseHandleRequest, ClosePtyRequest, CopyFromSourceRequest, CopyRequest, CreateDirRequest, CreateFileRequest,
+    CancelRequest, CloseHandleRequest, ClosePtyRequest, CopyFromSourceRequest, CopyRequest, CreateDirRequest, CreateFileRequest,
     DeleteRequest, DupHandleRequest, ExecRequest, ExecResponse, GetHandleSizeRequest, KillPtyRequest, ListRequest,
     OpenHandleRequest, RenameRequest, Request, ResizePtyRequest, Response,
     SeekHandleRequest, StatRequest, TruncateHandleRequest, WaitPtyRequest,
@@ -25,7 +25,7 @@ pub async fn handle_streaming(
     attached_fd: Option<RawFd>,
     pty_manager: &Arc<Mutex<PtyManager>>,
     handles: &Arc<Mutex<HandleTable>>,
-    cancel_flags: &Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
+    cancel_flags: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     source_read_broker: &copy::SourceReadBroker,
     tx: mpsc::UnboundedSender<OutboundResponse>,
     shutdown: &watch::Sender<bool>,
@@ -165,6 +165,25 @@ pub async fn handle_streaming(
                 None => error_response(req_id, io::Error::new(io::ErrorKind::NotFound, "source read request not found")),
             };
             let _ = tx.send(OutboundResponse::plain(response));
+        }
+        Some(Command::Cancel(CancelRequest { target_id })) => {
+            close_unexpected_fd(attached_fd);
+            let flags = cancel_flags.lock().await;
+            let resp = match flags.get(&target_id) {
+                Some(flag) => {
+                    flag.store(true, Ordering::Relaxed);
+                    ok_response(req_id)
+                }
+                None => error_response(
+                    req_id,
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("request {target_id} is not cancellable"),
+                    ),
+                ),
+            };
+            drop(flags);
+            let _ = tx.send(OutboundResponse::plain(resp));
         }
         Some(Command::SpawnPty(req)) => {
             let mut mgr = pty_manager.lock().await;
@@ -457,7 +476,7 @@ mod tests {
             command: Some(Command::Exit(ExitRequest {})),
         };
         handle_streaming(
-            request, None, &pty, &handles, &cancel, &broker, resp_tx, &shutdown_tx,
+            request, None, &pty, &handles, cancel, &broker, resp_tx, &shutdown_tx,
         )
         .await;
 

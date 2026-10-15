@@ -14,7 +14,7 @@ import java.io.File
  *
  * Bind mount policy mirrors the native chroot backend: individual device nodes
  * instead of the whole `/dev`, plus `/dev/pts`, `/dev/shm`, `/proc`, `/sys`,
- * `/system`, `/vendor`, `/sdcard`, `/data`, a writable `/tmp` and a generated
+ * `/system`, `/vendor`, `/storage`, `/sdcard`, `/data`, writable `/tmp` and `/run`, and a generated
  * `/etc/resolv.conf`.
  */
 object ProotRunner {
@@ -25,7 +25,7 @@ object ProotRunner {
 
     /**
      * Binds passed to the native chroot backend via `--bind`. The chroot daemon
-     * mounts `/tmp` as tmpfs itself, so only the resolver and user mounts are
+     * mounts `/tmp` and `/run` as tmpfs itself, so only the resolver and user mounts are
      * forwarded.
      */
     fun chrootBinds(context: Context, container: Container): List<Pair<String, String>> =
@@ -35,14 +35,15 @@ object ProotRunner {
 
     /**
      * Full argv to launch the container daemon under proot:
-     *   proot -l -0 -r rootfs -b ... -w / <daemon> --socket <name> --proot
+     *   proot -l -0 -r rootfs -b ... -w / <daemon> --key <pub> --id <id> --proot
      */
     fun buildProotDaemonCommand(
         context: Context,
         container: Container,
         prootPath: String,
         daemonPath: String,
-        socketName: String,
+        publicKey: String,
+        id: String,
     ): List<String> {
         // `-l` (--link2symlink) is required: Android's app data is mounted
         // with SELinux policies that forbid hard links, so any hardlink(2)
@@ -58,8 +59,10 @@ object ProotRunner {
         args.add("-w")
         args.add("/")
         args.add(daemonPath)
-        args.add("--socket")
-        args.add(socketName)
+        args.add("--key")
+        args.add(publicKey)
+        args.add("--id")
+        args.add(id)
         args.add("--proot")
         return args
     }
@@ -82,24 +85,29 @@ object ProotRunner {
         BindMount("/apex", "/apex"),
         BindMount("/linkerconfig", "/linkerconfig"),
         BindMount("/vendor", "/vendor"),
+        BindMount("/storage", "/storage"),
         BindMount("/storage/emulated/0", "/sdcard"),
         BindMount("/data", "/data"),
     )
 
     private fun runtimeMounts(context: Context, container: Container): List<BindMount> =
-        listOf(tmpMount(context, container), resolverMount(context, container))
+        listOf(
+            BindMount(tempSubdir(context, container, "guest").absolutePath, "/tmp"),
+            BindMount(tempSubdir(context, container, "run").absolutePath, "/run"),
+            resolverMount(context, container),
+        )
 
     /** Host directory proot uses for its own temporary files (`PROOT_TMP_DIR`). */
-    fun prootTmpDir(context: Context, container: Container): File {
-        val tmpDir = File(runtimeDir(context, container), "tmp")
+    fun prootTmpDir(context: Context, container: Container): File =
+        tempSubdir(context, container, "proot")
+
+    private fun tempSubdir(context: Context, container: Container, name: String): File {
+        val tmpDir = File(runtimeDir(context, container), "tmp/$name")
         if (!tmpDir.exists() && !tmpDir.mkdirs()) {
             throw IllegalStateException("Failed to create container temp directory: ${tmpDir.absolutePath}")
         }
         return tmpDir
     }
-
-    private fun tmpMount(context: Context, container: Container): BindMount =
-        BindMount(prootTmpDir(context, container).absolutePath, "/tmp")
 
     private fun resolverMount(context: Context, container: Container): BindMount {
         val resolverFile = File(runtimeDir(context, container), "resolv.conf")

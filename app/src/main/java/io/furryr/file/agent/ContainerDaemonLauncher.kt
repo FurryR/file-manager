@@ -10,7 +10,7 @@ import io.furryr.file.core.shellQuote
  * honouring its fixed backend. This is where proot/chroot knowledge lives —
  * `:core` never sees it.
  *
- * - chroot: launched as root via `su -c '<daemon> --socket … --chroot <rootfs> --bind …'`.
+ * - chroot: launched as root via `su -c '<daemon> --key <pub> --id <id> --chroot <rootfs> --bind …'`.
  *   The daemon isolates the mount tree and chroots itself.
  * - proot: launched as the app UID through proot, so the daemon process itself
  *   lives inside the container.
@@ -31,7 +31,8 @@ object ContainerDaemonLauncher {
     ): DaemonCommand {
         val tokens = mutableListOf(
             shellQuote(request.daemonExecutable),
-            "--socket", shellQuote(request.socketName),
+            "--key", shellQuote(request.publicKey),
+            "--id", shellQuote(request.id),
             "--chroot", shellQuote(container.rootfsPath),
         )
         for ((source, target) in ProotRunner.chrootBinds(context, container)) {
@@ -53,7 +54,8 @@ object ContainerDaemonLauncher {
             container = container,
             prootPath = proot.absolutePath,
             daemonPath = request.daemonExecutable,
-            socketName = request.socketName,
+            publicKey = request.publicKey,
+            id = request.id,
         )
         // proot needs a writable host temp dir; Android has no /tmp.
         val env = mapOf(

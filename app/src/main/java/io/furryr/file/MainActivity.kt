@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import io.furryr.file.core.DaemonManager
+import io.furryr.file.core.hub.Hub
 import io.furryr.file.provider.installFileProviders
 import io.furryr.file.ui.theme.FileManagerTheme
 import io.furryr.file.ui.util.OperationNotification
@@ -50,8 +51,8 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 Log.w("FileManager", "Daemon pre-start failed (will retry on first operation)", e)
             }
-            runCatching { DaemonManager.startHub() }
-                .onFailure { Log.w("FileManager", "Hub start failed", it) }
+            runCatching { Hub.start(applicationContext) }
+                .onFailure { Log.w("FileManager", "hub start failed", it) }
         }
 
         setContent {

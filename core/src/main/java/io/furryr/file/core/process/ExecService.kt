@@ -23,8 +23,13 @@ data class CommandSpec(
     val termType: String = "xterm-256color",
     val rows: Int = 24,
     val cols: Int = 80,
-    /** Request privilege escalation; the root daemon honours it. */
-    val escalate: Boolean = false,
+    /**
+     * Run the process as this OS user (name or numeric UID). Null inherits the
+     * daemon's credentials; a root daemon can switch to any user (run0-style).
+     */
+    val user: String? = null,
+    /** Nice level for the process; negative values require a root daemon. */
+    val nice: Int? = null,
 )
 
 /**
@@ -50,12 +55,7 @@ interface ProcessChannel : Closeable {
 
     suspend fun resize(rows: Int, cols: Int): Result<Unit>
 
-    /**
-     * Deliver [signal] to the process.
-     *
-     * Only termination signals are wired through the current daemon protocol;
-     * arbitrary signals need a protocol extension (the run0 seam).
-     */
+    /** Deliver [signal] to the process group. */
     suspend fun signal(signal: Int): Result<Unit>
 
     suspend fun waitFor(): Result<Int>
@@ -74,7 +74,7 @@ class ExecService internal constructor(private val resolve: () -> DaemonConnecti
             val pty = connection.spawnPty(
                 command = spec.command, args = spec.args, env = spec.env,
                 termType = spec.termType, rows = spec.rows, cols = spec.cols,
-                cwd = spec.cwd, useRoot = spec.escalate,
+                cwd = spec.cwd, user = spec.user, nice = spec.nice,
             ).getOrThrow()
             PtyProcessChannel(connection, pty.ptyId, pty.childPid, pty.fileDescriptor)
         }
@@ -90,9 +90,6 @@ class ExecService internal constructor(private val resolve: () -> DaemonConnecti
     }
 }
 
-private const val SIGKILL = 9
-private const val SIGTERM = 15
-
 private class PtyProcessChannel(
     private val connection: DaemonConnection,
     override val id: Long,
@@ -105,12 +102,8 @@ private class PtyProcessChannel(
     override suspend fun resize(rows: Int, cols: Int): Result<Unit> =
         connection.resizePty(id, rows, cols)
 
-    override suspend fun signal(signal: Int): Result<Unit> = when (signal) {
-        SIGKILL, SIGTERM -> connection.killPty(id)
-        else -> Result.failure(
-            UnsupportedOperationException("signal $signal needs a daemon protocol extension")
-        )
-    }
+    override suspend fun signal(signal: Int): Result<Unit> =
+        connection.signalPty(id, signal)
 
     override suspend fun waitFor(): Result<Int> = connection.waitPty(id)
 

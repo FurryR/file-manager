@@ -33,53 +33,21 @@ class SessionManagerTest {
     }
 
     @Test
-    fun `SessionType RootPty defaults useShizuku to false`() {
-        val t = SessionManager.SessionType.RootPty()
-        assertTrue(!t.useShizuku)
-    }
-
-    @Test
-    fun `SessionType RootPty accepts useShizuku flag`() {
-        val t = SessionManager.SessionType.RootPty(useShizuku = true)
-        assertTrue(t.useShizuku)
-    }
-
-    @Test
     fun `SessionInfo holds all fields`() {
         val session = mockk<TerminalSession>(relaxed = true)
-        val bridge = mockk<PtyBridge>(relaxed = true)
         val now = System.currentTimeMillis()
 
         val info = SessionManager.SessionInfo(
             id = "test-id",
             session = session,
             type = SessionManager.SessionType.AppShell(),
-            ptyBridge = bridge,
             createdAt = now
         )
 
         assertEquals("test-id", info.id)
         assertEquals(session, info.session)
         assertTrue(info.type is SessionManager.SessionType.AppShell)
-        assertEquals(bridge, info.ptyBridge)
         assertEquals(now, info.createdAt)
-    }
-
-    @Test
-    fun `SessionInfo Container type has null ptyBridge`() {
-        val session = mockk<TerminalSession>(relaxed = true)
-
-        val info = SessionManager.SessionInfo(
-            id = "container-session",
-            session = session,
-            type = SessionManager.SessionType.Container("ubuntu"),
-            ptyBridge = null,
-            createdAt = 1000L
-        )
-
-        assertEquals("container-session", info.id)
-        assertTrue(info.type is SessionManager.SessionType.Container)
-        assertNull(info.ptyBridge)
     }
 
     // ── SessionManager map query tests ────────────────────────────────

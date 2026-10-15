@@ -33,7 +33,22 @@ message Request {
     ExecRequest exec = 28;
     ExitRequest exit = 29;
     CancelRequest cancel = 30;
+    AuthRequest auth = 31;
+    SignalPtyRequest signal_pty = 32;
   }
+}
+
+// The daemon issues a fresh nonce on every accepted connection; the client
+// proves it holds the app's Ed25519 private key by signing the daemon's
+// socket name together with that nonce. No other request is served before the
+// handshake succeeds, so a process that merely guesses the (public) socket
+// name cannot talk to the daemon.
+message ServerHello {
+  bytes nonce = 1;
+}
+
+message AuthRequest {
+  bytes signature = 1;
 }
 
 // Ask the daemon to shut down. The daemon keeps serving *other* connections
@@ -125,6 +140,7 @@ message Response {
   int32 exit_code = 14;
   optional ReadSourceRequest read_source_request = 15;
   optional ExecResponse exec = 16;
+  optional ServerHello server_hello = 17;
 }
 
 // Non-PTY command execution. Runs [command] with [args], captures stdout and
@@ -169,7 +185,13 @@ message SpawnPTYRequest {
   uint32 rows = 5;
   uint32 cols = 6;
   string cwd = 7;
-  bool use_root = 8;
+  // OS user to run the command as — a user name or a numeric UID. Unset
+  // inherits the daemon's own credentials. Only a root daemon can change to an
+  // arbitrary user; a non-root daemon can only honour its own uid. This is the
+  // run0-style "drop into a user's shell" knob.
+  optional string user = 8;
+  // Nice level for the child. Negative values require a root daemon.
+  optional int32 nice = 9;
 }
 
 message ResizePTYRequest {
@@ -196,6 +218,12 @@ message WaitPtyRequest {
 
 message KillPtyRequest {
   uint64 pty_id = 1;
+}
+
+// Deliver an arbitrary signal to a PTY's process group (the run0 seam).
+message SignalPtyRequest {
+  uint64 pty_id = 1;
+  int32 signal = 2;
 }
 
 // ── Virtual file handle protocol ───────────────────────────────────

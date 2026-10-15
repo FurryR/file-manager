@@ -1,0 +1,16 @@
+[package]
+name = "run0"
+version = "0.1.0"
+edition = "2021"
+description = "Elevate privileges interactively through the file-manager daemon hub"
+
+[[bin]]
+name = "run0"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+prost = "0.13"
+
+[build-dependencies]
+prost-build = "0.13"

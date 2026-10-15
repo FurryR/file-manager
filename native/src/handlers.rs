@@ -14,7 +14,7 @@ use crate::proto::{
     CancelRequest, CloseHandleRequest, ClosePtyRequest, CopyFromSourceRequest, CopyRequest, CreateDirRequest, CreateFileRequest,
     DeleteRequest, DupHandleRequest, ExecRequest, ExecResponse, GetHandleSizeRequest, KillPtyRequest, ListRequest,
     OpenHandleRequest, RenameRequest, Request, ResizePtyRequest, Response,
-    SeekHandleRequest, StatRequest, TruncateHandleRequest, WaitPtyRequest,
+    SeekHandleRequest, SignalPtyRequest, StatRequest, TruncateHandleRequest, WaitPtyRequest,
     PtyEvent,
 };
 use crate::protocol::OutboundResponse;
@@ -292,6 +292,15 @@ pub async fn handle_streaming(
             };
             let _ = tx.send(OutboundResponse::plain(resp));
         }
+        Some(Command::SignalPty(SignalPtyRequest { pty_id, signal })) => {
+            close_unexpected_fd(attached_fd);
+            let mut mgr = pty_manager.lock().await;
+            let resp = match mgr.signal_pty(pty_id, signal) {
+                Ok(()) => ok_response(req_id),
+                Err(error) => error_response(req_id, error),
+            };
+            let _ = tx.send(OutboundResponse::plain(resp));
+        }
         Some(Command::OpenHandle(OpenHandleRequest { path, mode, want_fd })) => {
             let mode = crate::proto::HandleMode::try_from(mode).unwrap_or(crate::proto::HandleMode::Read);
             let mut table = handles.lock().await;
@@ -393,6 +402,12 @@ pub async fn handle_streaming(
         None => {
             close_unexpected_fd(attached_fd);
             let _ = tx.send(OutboundResponse::plain(Response { id: req_id, ok: false, error: "missing command".to_string(), ..Response::default() }));
+        }
+        // Handled in the connection loop before any dispatch; reaching here
+        // means an authenticated client sent it after the handshake.
+        Some(Command::Auth(_)) => {
+            close_unexpected_fd(attached_fd);
+            let _ = tx.send(OutboundResponse::plain(Response { id: req_id, ok: false, error: "already authenticated".to_string(), ..Response::default() }));
         }
     }
 }

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::io;
 use std::mem;
 use std::os::fd::RawFd;
@@ -8,6 +8,67 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::proto::SpawnPtyRequest;
 
 static NEXT_PTY_ID: AtomicU64 = AtomicU64::new(1);
+
+/// A resolved target user for a spawned command.
+struct RunAs {
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    name: CString,
+    home: Option<String>,
+}
+
+fn cstr_to_string(ptr: *const libc::c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    unsafe { CStr::from_ptr(ptr) }.to_str().ok().map(str::to_owned)
+}
+
+/// Resolve a user name or numeric UID to `(uid, gid, name, home)`. The passwd
+/// entry is copied immediately; `getpwnam`/`getpwuid` share a static buffer.
+fn resolve_user(user: &str) -> io::Result<RunAs> {
+    if user.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty user"));
+    }
+
+    if let Ok(uid) = user.parse::<libc::uid_t>() {
+        let mut gid = uid;
+        let mut name = CString::new(user).expect("numeric user is NUL-free");
+        let mut home = None;
+        let passwd = unsafe { libc::getpwuid(uid) };
+        if !passwd.is_null() {
+            unsafe {
+                gid = (*passwd).pw_gid;
+                if let Some(entry) = cstr_to_string((*passwd).pw_name) {
+                    name = CString::new(entry).expect("pw_name is NUL-free");
+                }
+                home = cstr_to_string((*passwd).pw_dir);
+            }
+        }
+        return Ok(RunAs { uid, gid, name, home });
+    }
+
+    let requested = CString::new(user).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let passwd = unsafe { libc::getpwnam(requested.as_ptr()) };
+    if passwd.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("unknown user '{user}'"),
+        ));
+    }
+    unsafe {
+        let uid = (*passwd).pw_uid;
+        let gid = (*passwd).pw_gid;
+        let name = cstr_to_string((*passwd).pw_name).unwrap_or_else(|| user.to_owned());
+        let home = cstr_to_string((*passwd).pw_dir);
+        Ok(RunAs {
+            uid,
+            gid,
+            name: CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+            home,
+        })
+    }
+}
 
 #[derive(Debug)]
 pub struct PtyManager {
@@ -79,6 +140,35 @@ impl PtyManager {
             );
         }
 
+        // Resolve the requested run-as user up front, so an unknown user is a
+        // clean request error rather than a child that dies after fork. A
+        // non-root daemon can only "switch" to its own uid.
+        let run_as = match req.user.as_deref() {
+            Some(user) if !user.is_empty() => Some(resolve_user(user)?),
+            _ => None,
+        };
+        if let Some(ref target) = run_as {
+            let euid = unsafe { libc::geteuid() };
+            if euid != 0 && target.uid != euid {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("daemon (uid {euid}) cannot run as uid {}", target.uid),
+                ));
+            }
+        }
+
+        // A negative nice level requires CAP_SYS_NICE (root).
+        let nice = req.nice;
+        if let Some(value) = nice {
+            let euid = unsafe { libc::geteuid() };
+            if value < 0 && euid != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("daemon (uid {euid}) cannot set nice {value} (negative requires root)"),
+                ));
+            }
+        }
+
         // Build environment: copy caller's env then overlay request env
         let mut env_map: HashMap<String, String> = HashMap::new();
         // Inherit daemon's environment as baseline
@@ -92,6 +182,16 @@ impl PtyManager {
         // Overlay with explicit env from request
         for (k, v) in &req.env {
             env_map.insert(k.clone(), v.clone());
+        }
+        // Adopt the target user's identity in the environment.
+        if let Some(ref target) = run_as {
+            if let Some(ref home) = target.home {
+                env_map.insert("HOME".to_string(), home.clone());
+            }
+            if let Ok(name) = target.name.to_str() {
+                env_map.insert("USER".to_string(), name.to_string());
+                env_map.insert("LOGNAME".to_string(), name.to_string());
+            }
         }
         let mut envp: Vec<CString> = Vec::with_capacity(env_map.len() + 1);
         for (k, v) in &env_map {
@@ -159,6 +259,24 @@ impl PtyManager {
                 // Change working directory if specified
                 if let Some(ref cwd) = cwd_c {
                     libc::chdir(cwd.as_ptr());
+                }
+
+                // Apply the requested nice level before dropping privileges --
+                // lowering niceness needs CAP_SYS_NICE, which root still has.
+                if let Some(value) = nice {
+                    libc::setpriority(libc::PRIO_PROCESS, 0, value);
+                }
+
+                // Drop to the requested user, if any. Refuse to run with the
+                // wrong credentials if the switch fails.
+                if let Some(ref target) = run_as {
+                    libc::initgroups(target.name.as_ptr(), target.gid);
+                    if libc::setgid(target.gid) != 0 {
+                        libc::_exit(126);
+                    }
+                    if libc::setuid(target.uid) != 0 {
+                        libc::_exit(126);
+                    }
                 }
 
                 // Execute the target command
@@ -233,6 +351,22 @@ impl PtyManager {
             libc::close(handle.master_fd);
         }
 
+        Ok(())
+    }
+
+    /// Deliver an arbitrary signal to a PTY's process group. Used by the run0
+    /// attach path via the hub, which needs more than SIGHUP/SIGKILL.
+    pub fn signal_pty(&mut self, pty_id: u64, signal: i32) -> io::Result<()> {
+        let handle = self.ptys.get(&pty_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("pty {} not found", pty_id),
+            )
+        })?;
+        // Negative pid targets the whole process group.
+        unsafe {
+            libc::kill(-(handle.child_pid as i32), signal);
+        }
         Ok(())
     }
 

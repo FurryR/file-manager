@@ -7,23 +7,22 @@ import io.furryr.file.core.file.FileService
 import io.furryr.file.core.hub.HubServer
 import io.furryr.file.core.ipc.DaemonConnection
 import io.furryr.file.core.process.ExecService
-import io.furryr.file.uds.ReconnectPolicy
 import io.furryr.file.uds.Transport
 import io.furryr.file.uds.UdsClient
 import io.furryr.file.uds.UdsEndpoint
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.runBlocking
 import java.io.File
-import java.util.UUID
 
 /** Which daemon a caller wants to talk to. */
 sealed interface DaemonTarget {
-    /** The root daemon when configured, otherwise the app-UID daemon. */
+    /** The elevated daemon (root via `su`, else Shizuku) when available, otherwise the app daemon. */
     data object Primary : DaemonTarget
 
     /** A daemon forced to run under the app UID (never elevated). */
-    data object AppUid : DaemonTarget
+    data object App : DaemonTarget
 
     /** A named daemon (e.g. a container), launched by a registered [DaemonLauncher]. */
     data class Named(val name: String) : DaemonTarget
@@ -41,7 +40,12 @@ sealed interface DaemonStatus {
 data class DaemonLaunchRequest(
     val name: String,
     val daemonExecutable: String,
+    /** Derived abstract socket name (from [publicKey] and [id]). */
     val socketName: String,
+    /** Hex-encoded Ed25519 public key the daemon authenticates against. */
+    val publicKey: String,
+    /** Target id the socket name is derived from (e.g. a container name). */
+    val id: String,
     val filesDir: String,
     /** The configured `su` path, for launchers that need root escalation. */
     val suPath: String,
@@ -54,9 +58,10 @@ data class DaemonCommand(
 )
 
 /**
- * SPI for launching a *named* daemon. Core owns the app / root / shell launch
- * strategies; hosts register a launcher for names they own (e.g. containers
- * via proot or chroot). Returning `null` means "not handled by this launcher".
+ * SPI for launching a *named* daemon. Core owns the app / privileged (root or
+ * Shizuku) launch strategies; hosts register a launcher for names they own
+ * (e.g. containers via proot or chroot). Returning `null` means "not handled by
+ * this launcher".
  *
  * This is the single seam that lets the UI side decide *how* a daemon starts;
  * core itself stays backend-agnostic.
@@ -75,14 +80,20 @@ object DaemonManager {
     private const val DaemonBinaryName = "libfiledaemon.so"
 
     /** Stable abstract endpoint the run0 communication hub listens on. */
-    private const val DefaultHubName = "io.furryr.file.hub"
+    internal const val DefaultHubName = "io.furryr.file.hub"
+
+    /** Target ids the daemon socket names are derived from. The elevated
+     *  daemon is a single target: launched with `su` when root is available,
+     *  otherwise via Shizuku. */
+    private const val PrivilegedId = "privileged"
+    private const val AppId = "app"
 
     private lateinit var appContext: Context
     private var executableFile: File? = null
 
     private val lock = Any()
     @Volatile private var primary: DaemonConnection? = null
-    @Volatile private var appUid: DaemonConnection? = null
+    @Volatile private var app: DaemonConnection? = null
     private val named = mutableMapOf<String, DaemonConnection>()
 
     @Volatile private var hub: HubServer? = null
@@ -110,6 +121,11 @@ object DaemonManager {
     @Synchronized
     fun init(context: Context) {
         appContext = context.applicationContext
+        // Load or create the app's Ed25519 identity before any daemon starts:
+        // its public key is what a daemon is launched with and what socket
+        // names are derived from.
+        runCatching { DaemonIdentity.init(appContext) }
+            .onFailure { Log.e(TAG, "Failed to initialize daemon identity", it) }
         // Lift the hidden-API restriction (needed for android.system.Os.recvmsg)
         // before any daemon I/O starts.
         HiddenApi.ensure()
@@ -157,8 +173,8 @@ object DaemonManager {
         primary?.takeIf { it.isAlive() }?.let {
             list.add(DaemonEndpoint("primary", it.socketName, rootActive))
         }
-        appUid?.takeIf { it.isAlive() }?.let {
-            list.add(DaemonEndpoint("app-uid", it.socketName, false))
+        app?.takeIf { it.isAlive() }?.let {
+            list.add(DaemonEndpoint("app", it.socketName, false))
         }
         named.forEach { (name, connection) ->
             if (connection.isAlive()) list.add(DaemonEndpoint(name, connection.socketName, false))
@@ -174,11 +190,7 @@ object DaemonManager {
     fun startHub(endpointName: String = DefaultHubName) {
         synchronized(lock) {
             if (hub != null) return
-            hub = HubServer.listen(
-                UdsEndpoint.Abstract(endpointName),
-                resolver = { name -> liveEndpoints().firstOrNull { it.name == name } },
-                endpointsProvider = { liveEndpoints() },
-            )
+            hub = HubServer.listen(UdsEndpoint.Abstract(endpointName))
             Log.i(TAG, "Hub listening at $endpointName")
         }
     }
@@ -217,7 +229,7 @@ object DaemonManager {
     /** Kill every daemon (process tree included) and forget them. */
     fun reset() = synchronized(lock) {
         primary?.close(); primary = null
-        appUid?.close(); appUid = null
+        app?.close(); app = null
         named.values.forEach { it.close() }; named.clear()
         rootActive = false
         _status.value = DaemonStatus.Idle
@@ -244,7 +256,7 @@ object DaemonManager {
     fun exit(target: DaemonTarget = DaemonTarget.Primary) = synchronized(lock) {
         when (target) {
             DaemonTarget.Primary -> primary?.exit()
-            DaemonTarget.AppUid -> appUid?.exit()
+            DaemonTarget.App -> app?.exit()
             is DaemonTarget.Named -> named[target.name]?.exit()
         }
     }
@@ -262,11 +274,11 @@ object DaemonManager {
     internal fun connection(target: DaemonTarget): DaemonConnection = synchronized(lock) {
         when (target) {
             DaemonTarget.Primary -> primary?.takeIf { it.isAlive() } ?: startPrimaryLocked()
-            DaemonTarget.AppUid -> {
+            DaemonTarget.App -> {
                 if (!rootEnabled && !shellEnabled) {
                     primary?.takeIf { it.isAlive() } ?: startPrimaryLocked()
                 } else {
-                    appUid?.takeIf { it.isAlive() } ?: startAppDaemon().also { appUid = it }
+                    app?.takeIf { it.isAlive() } ?: startAppDaemon().also { app = it }
                 }
             }
             is DaemonTarget.Named -> named[target.name]?.takeIf { it.isAlive() } ?: run {
@@ -292,6 +304,10 @@ object DaemonManager {
     }
 
     private fun startPrimary(): DaemonConnection {
+        // The elevated daemon is a single target with a single id: launched with
+        // `su` when root is available, otherwise via Shizuku. Because the socket
+        // name is shared, the two can never coexist — whoever is already running
+        // is re-attached to.
         if (rootEnabled && suPath.isNotBlank()) {
             if (isSuAvailable(suPath)) {
                 runCatching { return startRootDaemon() }
@@ -301,25 +317,30 @@ object DaemonManager {
             }
         }
         if (shellEnabled && isShizukuAvailable() && hasShizukuPermission()) {
-            runCatching { return startShellDaemon() }
-                .onFailure { Log.w(TAG, "Shell daemon start failed; falling back", it) }
+            runCatching { return startShizukuDaemon() }
+                .onFailure { Log.w(TAG, "Shizuku daemon start failed; falling back", it) }
         }
         return startAppDaemon()
     }
 
     private fun startAppDaemon(): DaemonConnection {
-        val socketName = newSocketName()
+        attachExisting(AppId)?.let { return it }
+        val id = AppId
+        val socketName = DaemonIdentity.socketName(id)
         val executable = getExecutable()
-        Log.i(TAG, "Starting daemon: ${executable.absolutePath} --socket $socketName")
-        val process = ProcessBuilder(executable.absolutePath, "--socket", socketName)
-            .directory(appContext.filesDir).redirectErrorStream(true).start()
+        Log.i(TAG, "Starting daemon: ${executable.absolutePath} --id $id")
+        val process = ProcessBuilder(
+            executable.absolutePath, "--key", DaemonIdentity.publicKeyHex(), "--id", id,
+        ).directory(appContext.filesDir).redirectErrorStream(true).start()
         return DaemonConnection(socketName, connectWithRetry(socketName), process)
     }
 
     private fun startRootDaemon(): DaemonConnection {
-        val socketName = newSocketName()
+        attachExisting(PrivilegedId)?.let { rootActive = true; return it }
+        val id = PrivilegedId
+        val socketName = DaemonIdentity.socketName(id)
         val executable = getExecutable()
-        val cmd = "${shellQuote(executable.absolutePath)} --socket ${shellQuote(socketName)}"
+        val cmd = "${shellQuote(executable.absolutePath)} --key ${shellQuote(DaemonIdentity.publicKeyHex())} --id ${shellQuote(id)}"
         Log.i(TAG, "Starting root daemon: $suPath -c $cmd")
         val process = ProcessBuilder(suPath, "-c", cmd)
             .directory(appContext.filesDir).redirectErrorStream(true).start()
@@ -328,23 +349,31 @@ object DaemonManager {
         return connection
     }
 
-    private fun startShellDaemon(): DaemonConnection {
-        val socketName = newSocketName()
+    private fun startShizukuDaemon(): DaemonConnection {
+        attachExisting(PrivilegedId)?.let { return it }
+        val id = PrivilegedId
+        val socketName = DaemonIdentity.socketName(id)
         val executable = getExecutable()
-        Log.i(TAG, "Starting shell daemon via Shizuku: ${executable.absolutePath} --socket $socketName")
+        Log.i(TAG, "Starting daemon via Shizuku: ${executable.absolutePath} --id $id")
         val process = shizukuNewProcess(
-            arrayOf(executable.absolutePath, "--socket", socketName), null,
+            arrayOf(executable.absolutePath, "--key", DaemonIdentity.publicKeyHex(), "--id", id), null,
             appContext.filesDir.absolutePath)
         return DaemonConnection(socketName, connectWithRetry(socketName), process)
     }
 
     private fun startNamedDaemon(name: String): DaemonConnection {
+        // Prefix the id so container names can never collide with the reserved
+        // primary ids (privileged/app).
+        val id = namedDaemonId(name)
+        attachExisting(id)?.let { return it }
         val activeLauncher = launcher
             ?: throw IllegalStateException("No DaemonLauncher registered for '$name'")
         val request = DaemonLaunchRequest(
             name = name,
             daemonExecutable = getExecutable().absolutePath,
-            socketName = newSocketName(),
+            socketName = DaemonIdentity.socketName(id),
+            publicKey = DaemonIdentity.publicKeyHex(),
+            id = id,
             filesDir = appContext.filesDir.absolutePath,
             suPath = suPath,
         )
@@ -361,16 +390,40 @@ object DaemonManager {
     private fun getExecutable(): File = executableFile
         ?: throw IllegalStateException("Daemon binary not installed. Call init() first.")
 
-    private fun newSocketName() = "file-daemon-${UUID.randomUUID()}"
+    /** Socket id for a named (container) daemon, namespaced away from primary ids. */
+    private fun namedDaemonId(name: String) = "container-$name"
+
+    /**
+     * Reuse a daemon that outlived a previous app process: connect to the
+     * derived socket name and authenticate. Returns null when nothing is
+     * listening, the daemon speaks a different identity, or the handshake fails.
+     */
+    private fun attachExisting(id: String): DaemonConnection? {
+        val socketName = DaemonIdentity.socketName(id)
+        return try {
+            val transport = UdsClient.connect(UdsEndpoint.Abstract(socketName))
+            runBlocking { DaemonAuth.authenticate(transport, socketName) }
+            Log.i(TAG, "Reattached to existing daemon '$id' at $socketName")
+            DaemonConnection(socketName, transport, null)
+        } catch (e: Exception) {
+            null
+        }
+    }
 
     private fun connectWithRetry(socketName: String): Transport {
         var lastError: Exception? = null
         for (i in 0 until 50) {
-            try {
-                val transport = UdsClient.connect(UdsEndpoint.Abstract(socketName), ReconnectPolicy())
-                Log.i(TAG, "Connected via abstract socket: $socketName")
-                return transport
-            } catch (e: Exception) { lastError = e; Thread.sleep(100) }
+            val transport = try {
+                UdsClient.connect(UdsEndpoint.Abstract(socketName))
+            } catch (e: Exception) {
+                lastError = e
+                Thread.sleep(100)
+                continue
+            }
+            // Any connection must pass the identity handshake before use.
+            runBlocking { DaemonAuth.authenticate(transport, socketName) }
+            Log.i(TAG, "Connected via abstract socket: $socketName")
+            return transport
         }
         throw IllegalStateException("Failed to connect to daemon", lastError)
     }

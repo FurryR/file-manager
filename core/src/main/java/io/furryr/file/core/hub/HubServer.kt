@@ -1,14 +1,18 @@
 package io.furryr.file.core.hub
 
+import android.system.Os
 import android.util.Log
-import io.furryr.file.core.DaemonEndpoint
-import io.furryr.file.proto.hub.HubEndpoint
+import io.furryr.file.core.DaemonManager
+import io.furryr.file.core.DaemonTarget
+import io.furryr.file.proto.hub.ExecResponse
 import io.furryr.file.proto.hub.HubRequest
 import io.furryr.file.proto.hub.HubResponse
+import io.furryr.file.proto.hub.ListTargetsResponse
+import io.furryr.file.proto.hub.Target
+import io.furryr.file.proto.hub.WaitResponse
 import io.furryr.file.uds.Frame
 import io.furryr.file.uds.Transport
 import io.furryr.file.uds.TransportEvent
-import io.furryr.file.uds.UdsClient
 import io.furryr.file.uds.UdsEndpoint
 import io.furryr.file.uds.UdsServer
 import kotlinx.coroutines.CoroutineScope
@@ -17,22 +21,20 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.io.Closeable
+import java.io.FileDescriptor
 
 /**
- * The run0-style communication hub: a stable UDS server that external clients
- * attach to. It enumerates live daemon endpoints and, on [HubRequest.Attach],
- * becomes a transparent frame relay to the chosen daemon — parsing only its own
- * attach handshake, never the daemon protocol. Descriptors are forwarded as-is.
+ * The communication hub: a stable, unauthenticated UDS server that run0 (and,
+ * later, agents) attach to.
  *
- * A relay opens a fresh kernel connection to the daemon (the daemon is
- * multi-client and its state is daemon-global), so the hub stays stateless
- * w.r.t. handles, PTYs and cancellation.
+ * Unlike a transparent relay, the hub speaks its **own** protocol
+ * ([io.furryr.file.proto.hub.HubRequest]) and translates each operation onto the
+ * daemon the connection selected — spawning PTYs, forwarding signals, reaping
+ * children. The daemon's own file protocol is never exposed here, and the hub
+ * holds the app identity, so it authenticates to the daemon on the client's
+ * behalf. Each connection keeps its own selected target; PTYs are daemon-global.
  */
-class HubServer internal constructor(
-    private val server: UdsServer,
-    private val resolver: (String) -> DaemonEndpoint?,
-    private val endpointsProvider: () -> List<DaemonEndpoint>,
-) : Closeable {
+class HubServer internal constructor(private val server: UdsServer) : Closeable {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -45,128 +47,143 @@ class HubServer internal constructor(
     }
 
     private suspend fun serve(client: Transport) {
-        var daemon: Transport? = null
+        val state = ConnectionState()
         try {
             client.events.collect { event ->
                 when (event) {
                     is TransportEvent.Incoming -> {
-                        val target = daemon
-                        if (target == null) {
-                            val attached = handleControl(client, event.frame)
-                            if (attached != null) {
-                                daemon = attached
-                                pumpDaemon(attached, client)
-                            }
-                        } else {
-                            forward(event.frame, target)
+                        val reply = dispatch(event.frame, state)
+                        event.frame.close()
+                        try {
+                            client.send(reply.response.toByteArray(), listOfNotNull(reply.fd))
+                        } finally {
+                            // The descriptor is duplicated into the receiver by
+                            // the kernel; drop our copy.
+                            reply.fd?.let { runCatching { Os.close(it) } }
                         }
                     }
-                    is TransportEvent.Closed -> {
-                        runCatching { daemon?.close() }
-                        return@collect
-                    }
+                    is TransportEvent.Closed -> return@collect
                     else -> {}
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "hub client ended", e)
         } finally {
-            runCatching { daemon?.close() }
             runCatching { client.close() }
         }
     }
 
-    private fun pumpDaemon(daemon: Transport, client: Transport) {
-        scope.launch {
-            try {
-                daemon.events.collect { event ->
-                    when (event) {
-                        is TransportEvent.Incoming -> forward(event.frame, client)
-                        is TransportEvent.Closed -> client.close()
-                        else -> {}
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "hub daemon pump ended", e)
-            } finally {
-                runCatching { daemon.close() }
-            }
-        }
-    }
-
-    private suspend fun handleControl(client: Transport, frame: Frame): Transport? {
+    private suspend fun dispatch(frame: Frame, state: ConnectionState): Reply {
         val request = try {
             HubRequest.parseFrom(frame.payload)
         } catch (_: Exception) {
-            frame.close()
-            client.close()
-            return null
+            return Reply(failure(0, "malformed hub request"))
         }
-        frame.close() // control frames carry no descriptors
         val id = request.id
-        return when (request.commandCase) {
-            HubRequest.CommandCase.LIST_ENDPOINTS -> {
-                val response = HubResponse.newBuilder()
-                    .setId(id).setOk(true)
-                    .addAllEndpoints(endpointsProvider().map {
-                        HubEndpoint.newBuilder()
-                            .setName(it.name).setSocket(it.socketName).setElevated(it.elevated)
-                            .build()
-                    })
-                    .build()
-                client.send(response.toByteArray())
-                null
-            }
-            HubRequest.CommandCase.ATTACH -> {
-                val target = resolver(request.attach.name)
-                if (target == null) {
-                    client.send(failure(id, "unknown endpoint '${request.attach.name}'"))
-                    return null
+        return runCatching {
+            when (request.opCase) {
+                HubRequest.OpCase.LIST_TARGETS ->
+                    Reply(
+                        HubResponse.newBuilder().setId(id).setOk(true)
+                            .setTargets(
+                                ListTargetsResponse.newBuilder().addAllTargets(
+                                    DaemonManager.liveEndpoints().map {
+                                        Target.newBuilder()
+                                            .setName(it.name).setElevated(it.elevated).build()
+                                    },
+                                ),
+                            ).build(),
+                    )
+
+                HubRequest.OpCase.SELECT_TARGET -> {
+                    state.target = request.selectTarget.target.ifBlank { "primary" }
+                    Reply(ok(id))
                 }
-                val daemon = try {
-                    UdsClient.connect(UdsEndpoint.Abstract(target.socketName))
-                } catch (e: Exception) {
-                    client.send(failure(id, "cannot attach: ${e.message}"))
-                    return null
+
+                HubRequest.OpCase.EXEC -> {
+                    val exec = request.exec
+                    val pty = DaemonManager.connection(target(state.target)).spawnPty(
+                        command = exec.command,
+                        args = exec.argsList,
+                        env = exec.envMap,
+                        termType = exec.term,
+                        rows = exec.rows,
+                        cols = exec.cols,
+                        cwd = exec.cwd.ifBlank { null },
+                        user = if (exec.hasUser()) exec.user else null,
+                        nice = if (exec.hasNice()) exec.nice else null,
+                    ).getOrThrow()
+                    Reply(
+                        HubResponse.newBuilder().setId(id).setOk(true)
+                            .setExec(
+                                ExecResponse.newBuilder()
+                                    .setPtyId(pty.ptyId).setPid(pty.childPid).build(),
+                            ).build(),
+                        pty.fileDescriptor,
+                    )
                 }
-                client.send(HubResponse.newBuilder().setId(id).setOk(true).build().toByteArray())
-                daemon
+
+                HubRequest.OpCase.RESIZE -> {
+                    val r = request.resize
+                    DaemonManager.connection(target(state.target))
+                        .resizePty(r.ptyId, r.rows, r.cols).getOrThrow()
+                    Reply(ok(id))
+                }
+
+                HubRequest.OpCase.SIGNAL -> {
+                    val s = request.signal
+                    DaemonManager.connection(target(state.target))
+                        .signalPty(s.ptyId, s.signal).getOrThrow()
+                    Reply(ok(id))
+                }
+
+                HubRequest.OpCase.WAIT -> {
+                    val code = DaemonManager.connection(target(state.target))
+                        .waitPty(request.wait.ptyId).getOrThrow()
+                    Reply(
+                        HubResponse.newBuilder().setId(id).setOk(true)
+                            .setWait(WaitResponse.newBuilder().setExitCode(code)).build(),
+                    )
+                }
+
+                HubRequest.OpCase.CLOSE -> {
+                    DaemonManager.connection(target(state.target))
+                        .closePty(request.close.ptyId).getOrThrow()
+                    Reply(ok(id))
+                }
+
+                else -> Reply(failure(id, "missing hub op"))
             }
-            HubRequest.CommandCase.DETACH -> {
-                client.send(HubResponse.newBuilder().setId(id).setOk(true).build().toByteArray())
-                null
-            }
-            else -> {
-                client.send(failure(id, "missing hub command"))
-                null
-            }
-        }
+        }.getOrElse { Reply(failure(id, it.message ?: "hub request failed")) }
     }
 
-    private fun failure(id: Long, message: String): ByteArray =
-        HubResponse.newBuilder().setId(id).setOk(false).setError(message).build().toByteArray()
-
-    private suspend fun forward(frame: Frame, target: Transport) {
-        try {
-            target.send(frame.payload, frame.fds)
-        } finally {
-            frame.close()
-        }
+    private fun target(name: String): DaemonTarget = when (name) {
+        "primary" -> DaemonTarget.Primary
+        "app" -> DaemonTarget.App
+        else -> DaemonTarget.Named(name)
     }
+
+    private fun ok(id: Int): HubResponse =
+        HubResponse.newBuilder().setId(id).setOk(true).build()
+
+    private fun failure(id: Int, message: String): HubResponse =
+        HubResponse.newBuilder().setId(id).setOk(false).setError(message).build()
 
     override fun close() {
         server.close()
         scope.cancel()
     }
 
+    private class ConnectionState {
+        var target: String = "primary"
+    }
+
+    private class Reply(val response: HubResponse, val fd: FileDescriptor? = null)
+
     companion object {
         private const val TAG = "HubServer"
 
         /** Bind [endpoint] and start serving. */
-        fun listen(
-            endpoint: UdsEndpoint,
-            resolver: (String) -> DaemonEndpoint?,
-            endpointsProvider: () -> List<DaemonEndpoint>,
-        ): HubServer = HubServer(UdsServer.listen(endpoint), resolver, endpointsProvider)
+        fun listen(endpoint: UdsEndpoint): HubServer = HubServer(UdsServer.listen(endpoint))
     }
 }

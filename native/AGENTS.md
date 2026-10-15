@@ -17,7 +17,8 @@ native/
 
 - **File operations**: `handlers::handle_streaming()` dispatches by command
 - **Connection lifecycle**: `main()` accept loop + `handle_connection()` — one task per client
-- **Abstract socket**: `create_abstract_server()` + `bind_abstract_socket()`
+- **Connection auth**: `auth::derive_socket_name` / `auth::verify`; every client must sign the `--key`/`--id`-derived socket's nonce before any request
+- **Abstract socket**: `create_abstract_server()` + `bind_abstract_socket()` (name derived from `--key`/`--id`)
 - **UID check** for data path: `maybe_android_data_path()` — skips `/Android/data` UID trick when root
 - **Progress tracking**: `TaskState` in `HashMap`, tasks spawn via `tokio::spawn`
 
@@ -32,7 +33,7 @@ native/
 - **Protobuf codegen** via `prost-build` in `build.rs` — output at compile time
 - **Error → `Response.ok=false` + `error` string** — no exceptions across IPC
 - **Framed protocol** — 4-byte big-endian length prefix + protobuf payload
-- **Abstract namespace** socket — `sun_path[0] = '\0'`, name passed from Kotlin as `--socket`
+- **Abstract namespace** socket — `sun_path[0] = '\0'`, name derived from Kotlin's `--key <pub> --id <id>`
 
 ## ANTI-PATTERNS
 

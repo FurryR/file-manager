@@ -26,6 +26,7 @@ import io.furryr.file.proto.RenameRequest
 import io.furryr.file.proto.Request
 import io.furryr.file.proto.ResizePTYRequest
 import io.furryr.file.proto.SeekHandleRequest
+import io.furryr.file.proto.SignalPtyRequest
 import io.furryr.file.proto.SpawnPTYRequest
 import io.furryr.file.proto.StatRequest
 import io.furryr.file.proto.CopyRequest
@@ -507,12 +508,15 @@ internal class DaemonConnection internal constructor(
     fun spawnPty(
         command: String = "/system/bin/sh", args: List<String> = emptyList(),
         env: Map<String, String> = emptyMap(), termType: String = "xterm-256color",
-        rows: Int = 24, cols: Int = 80, cwd: String? = null, useRoot: Boolean = false
+        rows: Int = 24, cols: Int = 80, cwd: String? = null, user: String? = null,
+        nice: Int? = null
     ): Result<PtyFd> = runCatching {
         val ptyReq = SpawnPTYRequest.newBuilder()
             .setCommand(command).addAllArgs(args).putAllEnv(env)
-            .setTermType(termType).setRows(rows).setCols(cols).setUseRoot(useRoot)
+            .setTermType(termType).setRows(rows).setCols(cols)
         if (cwd != null) ptyReq.cwd = cwd
+        if (user != null) ptyReq.user = user
+        if (nice != null) ptyReq.nice = nice
         val req = Request.newBuilder().setSpawnPty(ptyReq).build()
 
         val resp = request(req)
@@ -547,6 +551,13 @@ internal class DaemonConnection internal constructor(
     fun killPty(ptyId: Long): Result<Unit> = runCatching {
         request(Request.newBuilder()
             .setKillPty(KillPtyRequest.newBuilder().setPtyId(ptyId))
+            .build())
+    }
+
+    /** Deliver an arbitrary [signal] to the PTY's process group. */
+    fun signalPty(ptyId: Long, signal: Int): Result<Unit> = runCatching {
+        request(Request.newBuilder()
+            .setSignalPty(SignalPtyRequest.newBuilder().setPtyId(ptyId).setSignal(signal))
             .build())
     }
 

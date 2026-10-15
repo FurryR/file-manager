@@ -22,6 +22,7 @@ const DIRS: &[(&str, &str)] = &[
     ("/apex", "/apex"),
     ("/linkerconfig", "/linkerconfig"),
     ("/vendor", "/vendor"),
+    ("/storage", "/storage"),
     ("/storage/emulated/0", "/sdcard"),
     // The daemon/proot binaries and the app's files live under /data; mounting
     // it keeps the container able to reach them.
@@ -60,6 +61,7 @@ pub fn enter_chroot(rootfs: &str, binds: &[(String, String)]) -> io::Result<()> 
 
     proc_mount(&rootfs_path, "/proc")?;
     tmpfs_mount(&rootfs_path, "/tmp", "1777")?;
+    tmpfs_mount(&rootfs_path, "/run", "0755")?;
 
     for (source, target) in binds {
         if source.is_empty() || target.is_empty() || !Path::new(source).exists() {

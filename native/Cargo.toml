@@ -7,6 +7,10 @@ edition = "2021"
 libc = "0.2"
 prost = "0.13"
 tokio = { version = "1.41", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
+# Connection authentication: Ed25519 verification + socket-name derivation.
+ed25519-dalek = "2"
+sha2 = "0.10"
+getrandom = "0.3"
 
 [build-dependencies]
 prost-build = "0.13"

@@ -19,7 +19,7 @@ file-manager/
 │       ├── DaemonManager.kt      # Public facade: lifecycle, launcher SPI, hub, services
 │       ├── DaemonRegistry.kt     # endpoint enumeration seam
 │       ├── ipc/                  # INTERNAL: DaemonConnection (proto codec + id correlation)
-│       ├── hub/                  # INTERNAL: HubServer (attach handshake + transparent relay)
+│       ├── hub/                  # INTERNAL: HubServer + Hub (shared run0/agent server + lifecycle)
 │       ├── process/              # CommandSpec + ProcessChannel + ExecService (unified PTY/exec)
 │       ├── file/                 # FileService (daemon-backed file ops)
 │       ├── source/               # FileSource (fd/handle/stream)
@@ -34,6 +34,8 @@ file-manager/
 │   ├── Cargo.toml
 │   ├── build-android-aarch64.sh  # Cross-compile Rust → Android ARM64
 │   └── build-proot.sh            # Cross-compile proot from source
+├── run0/                # Rust run0 CLI (separate subproject; hub-protocol client)
+│   └── src/main.rs      # arg parsing + hub protocol + local tty bridge
 ├── proto/               # Protobuf IPC (generated into :core)
 │   ├── file_daemon.proto  # daemon protocol
 │   └── hub.proto          # run0 hub attach handshake
@@ -66,8 +68,10 @@ file-manager/
 | Provider locations | `app/.../LocationsRepository.kt` | SAF/FTP/SFTP config facade |
 | Daemon facade | `core/.../DaemonManager.kt` | Lifecycle, targets, launcher SPI, hub |
 | UDS transport | `uds/.../UdsTransport.kt` | Frames + fd passing; `UdsClient`/`UdsServer` |
-| run0 hub | `core/.../hub/HubServer.kt` | Attach handshake + transparent relay |
-| Hub protocol | `proto/hub.proto` | Control-plane handshake |
+| run0 hub server | `core/.../hub/HubServer.kt` | Interprets the hub protocol, translates to daemons |
+| run0 CLI | `run0/src/main.rs` | Rust client: hub protocol + local tty bridge |
+| Hub protocol | `proto/hub.proto` | run0/agent protocol (list/select/exec/resize/signal/wait/close) |
+| run0 bootstrap | `core/.../hub/Hub.kt` | Installs the binary, starts the hub, env contract |
 | Unified exec/PTY | `core/.../process/ExecService.kt` | `CommandSpec` → `ProcessChannel` |
 | Daemon file I/O | `core/.../file/FileService.kt` | list/stat/open/copy per target |
 | Container launch | `app/.../agent/ContainerDaemonLauncher.kt` | proot/chroot argv (app-owned) |
@@ -104,22 +108,36 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
 ## NOTES
 
 - Target SDK 28 avoids storage restrictions needed by root features.
-- Native executables are packaged as **`lib*.so` under `jniLibs/`** because the
-  Android installer only auto-extracts `lib/<abi>/lib*.so` to `nativeLibraryDir`
-  (`debuggable` apps are the sole exception). Renaming them to `file-daemon` /
-  `proot` would drop them from the APK (AGP strips non-`.so` from jniLibs) and
-  break extraction. To ship original names you must extract them yourself at
-  runtime (e.g. from `assets/`).
+- `DaemonManager.startHub()` runs the run0 communication hub (bootstrap in
+  [`core/hub/Hub.kt`]): a stable, unauthenticated UDS server that speaks
+  its **own** protocol ([`proto/hub.proto`]) and translates each request onto
+  the selected daemon — it never exposes the daemon's file protocol. run0 (and,
+  later, agents) attach to it; the hub holds the app identity, so it
+  authenticates to the daemon on the client's behalf. The `run0` Rust CLI is a
+  separate subproject (`run0/`), shipped by original name via an asset that the
+  app extracts to `filesDir/bin`; app-spawned shells get `RUN0_SOCKET` and that
+  directory on `PATH`.
+- Native executables are packaged as **`lib*.so` under `jniLibs/`**
+  (`libfiledaemon.so`, `libproot.so`) because the Android installer only
+  auto-extracts `lib/<abi>/lib*.so` to `nativeLibraryDir`. AGP's jniLibs
+  pipeline also drops any non-`.so` entry, so the `lib*.so` names are what let
+  the daemon/proot binaries ship and be extracted without a custom staging step.
 - Build scripts under `native/` copy the compiled binaries into `jniLibs/`.
-- Socket uses **abstract namespace** (UUID-based, no filesystem path) — works across UIDs.
-- Daemon priority: `su` (root) > `Shizuku` (shell) > direct (app UID).
+- Daemon sockets use the **abstract namespace**, but names are *derived*
+  (`file-daemon-<sha256(pubkey‖id)>`), not random: the app generates an Ed25519
+  identity once ([`core/DaemonIdentity.kt`]) and every launch gets `--key <pub>
+  --id <id>`. Stable names let a daemon that outlived the app be re-attached.
+  Every connection must pass a nonce/signature handshake
+  ([`core/DaemonAuth.kt`] ↔ `native/src/auth.rs`) — the derived name is public,
+  so it is not a credential. The run0 hub keeps its random name. Ids are
+  `privileged` (one elevated target: `su` when root is available, else Shizuku),
+  `app`, and `container-<name>` for named daemons (the prefix avoids colliding
+  with the reserved ids).
+- Daemon priority: `su` (root) > `Shizuku` (shell) > direct (app UID). The
+  elevated daemon is a single `privileged` target regardless of mechanism.
 - **The daemon is multi-client** — it serves many concurrent connections, but
   per-connection state (cancellable in-flight requests) is *not* shared, and
   long-lived resources (handles, PTYs) are daemon-global. Shutdown is explicit
   via an `ExitRequest` (or a signal); `DaemonConnection` re-attaches via
   `:uds.ReconnectPolicy` after a transient drop.
 - Client entry points live in `:core` (`DaemonManager.fileService/execService`).
-- `DaemonManager.startHub()` runs the run0-style communication hub: a stable
-  UDS server that enumerates live endpoints (`liveEndpoints()`) and, on attach,
-  relays frames (fds included) to the chosen daemon without parsing its proto.
-  Peer-credential auth is not implemented yet — the hub is same-device trusted.

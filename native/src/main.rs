@@ -12,6 +12,7 @@ use tokio::task::JoinSet;
 mod proto {
     include!(concat!(env!("OUT_DIR"), "/filedaemon.rs"));
 }
+mod auth;
 mod container;
 mod copy;
 mod handlers;
@@ -34,11 +35,16 @@ struct Shared {
     pty_manager: Arc<Mutex<PtyManager>>,
     handles: Arc<Mutex<HandleTable>>,
     source_read_broker: copy::SourceReadBroker,
+    /// The app's Ed25519 public key, used to authenticate every connection.
+    public_key: Vec<u8>,
+    /// Derived abstract socket name, also bound into the auth challenge.
+    socket_name: String,
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> io::Result<()> {
-    let socket_name = parse_socket_arg()?;
+    let (public_key, id) = parse_identity_args()?;
+    let socket_name = auth::derive_socket_name(&public_key, &id);
     let chroot_rootfs = parse_value_arg("--chroot");
     let proot_mode = has_flag("--proot");
 
@@ -77,6 +83,8 @@ async fn main() -> io::Result<()> {
         pty_manager: Arc::new(Mutex::new(PtyManager::new())),
         handles: Arc::new(Mutex::new(HandleTable::new())),
         source_read_broker: copy::SourceReadBroker::default(),
+        public_key,
+        socket_name,
     });
 
     // Broadcast shutdown: an `exit` request from *any* connection, or a signal,
@@ -149,11 +157,64 @@ async fn handle_connection(
     let cancel_flags: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    // Issue the challenge before serving anything: the client must prove it
+    // holds the app's private key by signing `auth_message`.
+    let nonce = auth::random_nonce()?;
+    let auth_message = auth::auth_message(&shared.socket_name, &nonce);
+    let hello = proto::Response {
+        id: 0,
+        ok: true,
+        server_hello: Some(proto::ServerHello { nonce: nonce.to_vec() }),
+        ..Default::default()
+    };
+    protocol::write_frame(&mut write_stream, hello).await?;
+    let mut authed = false;
+
     let result = loop {
         tokio::select! {
             request_result = frame_reader.read_frame(&mut stream) => {
                 match request_result {
                     Ok(Some(incoming)) => {
+                        if !authed {
+                            if let Some(fd) = incoming.attached_fd {
+                                unsafe { libc::close(fd); }
+                            }
+                            match incoming.request.command {
+                                Some(proto::request::Command::Auth(request)) => {
+                                    if auth::verify(&shared.public_key, &auth_message, &request.signature) {
+                                        authed = true;
+                                        let reply = proto::Response {
+                                            id: incoming.request.id,
+                                            ok: true,
+                                            ..Default::default()
+                                        };
+                                        let _ = response_tx.send(OutboundResponse::plain(reply));
+                                    } else {
+                                        let reply = proto::Response {
+                                            id: incoming.request.id,
+                                            ok: false,
+                                            error: "authentication failed".to_string(),
+                                            ..Default::default()
+                                        };
+                                        let _ = response_tx.send(OutboundResponse::plain(reply));
+                                        break Err(io::Error::new(
+                                            io::ErrorKind::PermissionDenied,
+                                            "authentication failed",
+                                        ));
+                                    }
+                                }
+                                _ => {
+                                    let reply = proto::Response {
+                                        id: incoming.request.id,
+                                        ok: false,
+                                        error: "authentication required".to_string(),
+                                        ..Default::default()
+                                    };
+                                    let _ = response_tx.send(OutboundResponse::plain(reply));
+                                }
+                            }
+                            continue;
+                        }
                         let tx = response_tx.clone();
                         let shared = shared.clone();
                         let shutdown = shutdown_tx.clone();
@@ -215,19 +276,17 @@ async fn handle_connection(
     result
 }
 
-fn parse_socket_arg() -> io::Result<String> {
-    let mut args = env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--socket" {
-            if let Some(path) = args.next() {
-                return Ok(path);
-            }
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "missing --socket argument",
-    ))
+fn parse_identity_args() -> io::Result<(Vec<u8>, String)> {
+    let key = parse_value_arg("--key").ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "missing --key argument")
+    })?;
+    let public_key = auth::parse_hex(&key).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "--key must be a hex string")
+    })?;
+    let id = parse_value_arg("--id").ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "missing --id argument")
+    })?;
+    Ok((public_key, id))
 }
 
 /// Return the value following `name` (e.g. `--chroot <rootfs>`).
@@ -283,7 +342,8 @@ mod tests {
             rows: 24,
             cols: 80,
             cwd: "/tmp".to_string(),
-            use_root: true,
+            user: Some("root".to_string()),
+            nice: None,
         };
 
         use prost::Message;
@@ -299,7 +359,7 @@ mod tests {
         assert_eq!(decoded.rows, 24);
         assert_eq!(decoded.cols, 80);
         assert_eq!(decoded.cwd, "/tmp");
-        assert!(decoded.use_root);
+        assert_eq!(decoded.user.as_deref(), Some("root"));
         assert_eq!(decoded.env.get("TERM").map(|s| s.as_str()), Some("xterm-256color"));
         assert_eq!(decoded.env.get("HOME").map(|s| s.as_str()), Some("/root"));
     }

@@ -44,7 +44,7 @@ object ProcessHelper {
         val target = if (containerName != null) {
             DaemonTarget.Named(containerName)
         } else {
-            DaemonTarget.AppUid
+            DaemonTarget.App
         }
 
         // Container sessions start a login shell as root via `login -f root`

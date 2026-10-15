@@ -50,4 +50,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
     implementation("dev.rikka.shizuku:api:13.1.5")
+    // Ed25519 (RFC 8032) for the daemon connection handshake. Pure Java, so it
+    // works down to minSdk 26 without Conscrypt/Android-13 providers.
+    implementation("net.i2p.crypto:eddsa:0.3.0")
 }

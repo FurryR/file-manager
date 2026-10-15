@@ -5,35 +5,99 @@ package filehub;
 option java_package = "io.furryr.file.proto.hub";
 option java_multiple_files = true;
 
-// Control-plane frames exchanged with the communication hub. After a successful
-// Attach the connection switches to a transparent relay of the target daemon's
-// own protocol — the hub never parses it.
+// The hub's own request/response protocol.
+//
+// The hub is a stable, long-lived, unauthenticated local server (run0 today,
+// agents later). It deliberately exposes only a curated command/signal surface
+// and translates each request onto the right daemon internally; the daemon's
+// own file protocol is never exposed here. After a successful Exec, the PTY
+// master fd travels as SCM_RIGHTS on the response frame.
 message HubRequest {
-  uint64 id = 1;
-  oneof command {
-    ListEndpointsRequest list_endpoints = 2;
-    AttachRequest attach = 3;
-    DetachRequest detach = 4;
+  uint32 id = 1;
+  oneof op {
+    ListTargetsRequest list_targets = 2;
+    SelectTargetRequest select_target = 3;
+    ExecRequest exec = 4;
+    ResizeRequest resize = 5;
+    SignalRequest signal = 6;
+    WaitRequest wait = 7;
+    CloseRequest close = 8;
   }
 }
 
-message ListEndpointsRequest {}
-
-message AttachRequest {
-  string name = 1;
-}
-
-message DetachRequest {}
-
 message HubResponse {
-  uint64 id = 1;
+  uint32 id = 1;
   bool ok = 2;
   string error = 3;
-  repeated HubEndpoint endpoints = 4;
+  oneof result {
+    ListTargetsResponse targets = 4;
+    ExecResponse exec = 5;
+    WaitResponse wait = 6;
+  }
 }
 
-message HubEndpoint {
+// ── Target selection ──────────────────────────────────────────────
+
+message ListTargetsRequest {}
+
+message ListTargetsResponse {
+  repeated Target targets = 1;
+}
+
+message Target {
   string name = 1;
-  string socket = 2;
-  bool elevated = 3;
+  bool elevated = 2;
+}
+
+// Select the daemon target for this connection. Defaults to `primary`.
+message SelectTargetRequest {
+  string target = 1;
+}
+
+// ── Command execution ─────────────────────────────────────────────
+
+message ExecRequest {
+  string command = 1;
+  repeated string args = 2;
+  map<string, string> env = 3;
+  string cwd = 4;
+  // OS user to run as (name or numeric UID); unset = daemon's own credentials.
+  optional string user = 5;
+  string term = 6;
+  uint32 rows = 7;
+  uint32 cols = 8;
+  // Nice level for the spawned process. Negative values require the daemon to
+  // be root.
+  optional int32 nice = 9;
+}
+
+// The PTY master fd rides this response as SCM_RIGHTS.
+message ExecResponse {
+  uint64 pty_id = 1;
+  uint32 pid = 2;
+}
+
+// ── PTY control ───────────────────────────────────────────────────
+
+message ResizeRequest {
+  uint64 pty_id = 1;
+  uint32 rows = 2;
+  uint32 cols = 3;
+}
+
+message SignalRequest {
+  uint64 pty_id = 1;
+  int32 signal = 2;
+}
+
+message WaitRequest {
+  uint64 pty_id = 1;
+}
+
+message WaitResponse {
+  int32 exit_code = 1;
+}
+
+message CloseRequest {
+  uint64 pty_id = 1;
 }

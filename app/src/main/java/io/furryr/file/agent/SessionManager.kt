@@ -6,8 +6,7 @@ import android.content.Context
 import android.util.Log
 import io.furryr.file.TerminalForegroundService
 import io.furryr.file.core.DaemonManager
-import io.furryr.file.core.DaemonTarget
-import io.furryr.file.core.process.CommandSpec
+import io.furryr.file.core.hub.Hub
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import kotlinx.coroutines.Dispatchers
@@ -17,9 +16,8 @@ import java.util.UUID
 /**
  * Singleton managing all active terminal sessions.
  *
- * Supports three session types:
+ * Supports two session types:
  * - [SessionType.AppShell] -- local shell inside Termux's own PTY
- * - [SessionType.RootPty] -- daemon-spawned PTY with optional root escalation
  * - [SessionType.Container] -- proot container process run directly as
  *   the PTY shell; no external bridge needed
  *
@@ -68,9 +66,6 @@ object SessionManager {
 
         /** Proot container process run directly as the PTY shell. */
         data class Container(val containerName: String) : SessionType()
-
-        /** Daemon-spawned PTY with optional root/shizuku escalation. */
-        data class RootPty(val useShizuku: Boolean = false) : SessionType()
     }
 
     /**
@@ -79,14 +74,12 @@ object SessionManager {
      * @property id            UUID assigned at creation time.
      * @property session       The Termux [TerminalSession] for display/input.
      * @property type          How the session was created and wired.
-     * @property ptyBridge     Non-null when [type] is [SessionType.RootPty].
      * @property createdAt     Unix-epoch millis when the session was created.
      */
     data class SessionInfo(
         val id: String,
         val session: TerminalSession,
         val type: SessionType,
-        val ptyBridge: PtyBridge?,
         val createdAt: Long
     )
 
@@ -127,14 +120,9 @@ object SessionManager {
     /**
      * Create a new terminal session of the given [type].
      *
-     * For [SessionType.AppShell] the session runs a local shell directly
-     * using Termux's built-in PTY -- no bridging required.
-     *
-     * For [SessionType.RootPty] a daemon-backed PTY is spawned via
-     * [PtyManager.createPty] and bridged to the [TerminalSession].
-     *
-     * For [SessionType.Container] the native daemon spawns the container
-     * process (chroot or proot) and its PTY is bridged to the terminal.
+     * Both kinds spawn their shell on a daemon -- the app daemon for a local
+     * shell, the container's own daemon for `container://` -- and Termux's
+     * terminal then owns the returned PTY fd directly.
      *
      * @param type    The kind of session to create.
      * @param context Android [Context] (needed for container operations).
@@ -147,26 +135,9 @@ object SessionManager {
                 val sessionId = UUID.randomUUID().toString()
                 Log.d(TAG, "createSession: id=$sessionId type=$type")
 
-                val (terminalSession, ptyBridge) = when (type) {
-                    is SessionType.AppShell -> {
-                        val ts = createTerminalSession(type.command, context, customCwd = type.cwd)
-                        Pair(ts, null)
-                    }
-
-                    is SessionType.RootPty -> {
-                        val target = if (DaemonManager.canStartRootDaemon()) {
-                            DaemonTarget.Primary
-                        } else {
-                            DaemonTarget.AppUid
-                        }
-                        val channel = DaemonManager.execService(target)
-                            .spawn(CommandSpec("/system/bin/sh", escalate = true))
-                            .getOrThrow()
-
-                        val ts = createTerminalSession("/system/bin/sh", context)
-                        val bridge = PtyBridge(channel, ts).also { it.start() }
-                        Pair(ts, bridge)
-                    }
+                val terminalSession = when (type) {
+                    is SessionType.AppShell ->
+                        createTerminalSession(type.command, context, customCwd = type.cwd)
 
                     is SessionType.Container -> createContainerTerminal(type.containerName, context)
                 }
@@ -175,7 +146,6 @@ object SessionManager {
                     id = sessionId,
                     session = terminalSession,
                     type = type,
-                    ptyBridge = ptyBridge,
                     createdAt = System.currentTimeMillis()
                 )
 
@@ -241,8 +211,8 @@ object SessionManager {
     /**
      * Destroy an active terminal session.
      *
-     * Stops any active I/O bridge ([PtyBridge]), finishes the underlying
-     * [TerminalSession], and removes it from the internal map.
+     * Finishes the underlying [TerminalSession] and removes it from the
+     * internal map.
      *
      * @param sessionId UUID returned by [createSession].
      * @return [Result.success] on success, [Result.failure] if the session
@@ -256,9 +226,6 @@ object SessionManager {
             if (removed != null) sessionChangeListeners.forEach { it() }
             removed
         } ?: return@runCatching
-
-        // Stop I/O bridge first.
-        info.ptyBridge?.stop()
 
         // Terminate the shell process inside the session.
         if (info.session.getPid() > 0) {
@@ -360,7 +327,7 @@ object SessionManager {
     private suspend fun createContainerTerminal(
         containerName: String,
         context: Context,
-    ): Pair<TerminalSession, PtyBridge?> {
+    ): TerminalSession {
         // Fail early with a clear message. The shell itself is spawned by
         // ProcessHelper on the container's dedicated daemon via the marker
         // command, so the TerminalSession owns the container PTY fd directly
@@ -370,16 +337,15 @@ object SessionManager {
         // Warm the container daemon off the main thread so the synchronous
         // spawn inside TerminalSession is fast.
         withContext(Dispatchers.IO) { DaemonManager.warmNamed(containerName) }
-        val ts = createTerminalSession("container://$containerName", context, customCwd = "/")
-        return ts to null
+        return createTerminalSession("container://$containerName", context, customCwd = "/")
     }
 
     /**
      * Construct a [TerminalSession] with sensible defaults.
      *
-     * The shell runs inside Termux's own PTY. For [SessionType.Container]
-     * the proot binary is passed as [shell] with [args] containing proot
-     * flags so the terminal session directly manages the container process.
+     * The shell is spawned on the daemon by [io.furryr.file.util.ProcessHelper]
+     * (the ASM-rewritten `com.termux.terminal.JNI` path); Termux then drives the
+     * returned PTY fd directly.
      */
     private fun createTerminalSession(
         shell: String,
@@ -392,6 +358,17 @@ object SessionManager {
             context.cacheDir.mkdirs()
             val tmpDir = context.cacheDir.absolutePath
             add("PROOT_TMP_DIR=$tmpDir")
+            // Make `run0` reachable from the shell and point it at the hub.
+            Hub.socketName?.let { add("${Hub.SOCKET_ENV}=$it") }
+            Hub.binDir?.let { dir ->
+                val pathIndex = indexOfFirst { it.startsWith("PATH=") }
+                if (pathIndex >= 0) {
+                    this[pathIndex] =
+                        "PATH=${dir.absolutePath}:${this[pathIndex].removePrefix("PATH=")}"
+                } else {
+                    add("PATH=${dir.absolutePath}")
+                }
+            }
         }
         Log.d(TAG, "Shell: $shell, Cwd: $cwd, Args: $args, Env: $env")
         return TerminalSession(

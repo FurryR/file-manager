@@ -51,13 +51,16 @@ class ProotRunnerTest {
             container = container,
             prootPath = "/data/lib/libproot.so",
             daemonPath = "/data/lib/libfiledaemon.so",
-            socketName = "file-daemon-test",
+            publicKey = "aa".repeat(32),
+            id = "test-container",
         )
         assertEquals("/data/lib/libproot.so", cmd.first())
         assertTrue(cmd.contains("--proot"))
-        assertTrue(cmd.contains("--socket"))
-        assertEquals("file-daemon-test", cmd[cmd.indexOf("--socket") + 1])
-        assertEquals("/data/lib/libfiledaemon.so", cmd[cmd.indexOf("--socket") - 1])
+        assertTrue(cmd.contains("--key"))
+        assertEquals("aa".repeat(32), cmd[cmd.indexOf("--key") + 1])
+        assertTrue(cmd.contains("--id"))
+        assertEquals("test-container", cmd[cmd.indexOf("--id") + 1])
+        assertEquals("/data/lib/libfiledaemon.so", cmd[cmd.indexOf("--key") - 1])
         // Device binds that exist on any host are forwarded individually.
         assertTrue(cmd.contains("/dev/null:/dev/null"))
         assertFalse(cmd.contains("/dev:/dev"))

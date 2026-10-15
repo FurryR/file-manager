@@ -86,7 +86,6 @@ private data class TerminalTab(
 
 private fun sessionLabel(type: SessionManager.SessionType): String = when (type) {
     is SessionManager.SessionType.Container -> type.containerName
-    is SessionManager.SessionType.RootPty -> "Root"
     is SessionManager.SessionType.AppShell -> "Local"
 }
 

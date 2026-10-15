@@ -44,3 +44,13 @@ JNI_DIR="$ROOT_DIR/app/src/main/jniLibs/arm64-v8a"
 mkdir -p "$JNI_DIR"
 cp "$NATIVE_DIR/target/aarch64-linux-android/release/file_daemon" \
   "$JNI_DIR/libfiledaemon.so"
+
+# run0 utility. AGP drops non-.so entries from jniLibs, so it ships by its
+# original name as an asset and the app extracts it at startup.
+CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$LINKER" \
+  cargo build --manifest-path "$ROOT_DIR/run0/Cargo.toml" --release --target aarch64-linux-android
+
+ASSETS_DIR="$ROOT_DIR/app/src/main/assets"
+mkdir -p "$ASSETS_DIR"
+cp "$ROOT_DIR/run0/target/aarch64-linux-android/release/run0" \
+  "$ASSETS_DIR/run0"

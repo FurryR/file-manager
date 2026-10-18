@@ -6,4 +6,6 @@ data class ProviderStat(
     val totalBytes: Long = 0,
     val exists: Boolean = false,
     val isDirectory: Boolean = false,
+    val canCreateChildren: Boolean = false,
+    val canEnter: Boolean = false,
 )

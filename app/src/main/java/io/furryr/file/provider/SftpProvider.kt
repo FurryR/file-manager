@@ -64,6 +64,11 @@ object SftpProvider : FileProvider {
 
     override suspend fun connect(): Result<Unit> = Result.success(Unit)
 
+    override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
+        if (path.trim('/').isEmpty()) return DirectoryCapabilities()
+        return super<FileProvider>.directoryCapabilities(path)
+    }
+
     override suspend fun disconnect() {
         synchronized(connLock) {
             sessions.values.forEach { runCatching { it.disconnect() } }
@@ -109,9 +114,6 @@ object SftpProvider : FileProvider {
 
     override suspend fun stat(path: String): Result<ProviderStat> = runCatching {
         val (server, remotePath) = resolveServerPath(path)
-        if (remotePath == "/") {
-            return@runCatching ProviderStat(exists = true, isDirectory = true)
-        }
         val ch = channel(server)
         try {
             val attrs = ch.lstat(remotePath)

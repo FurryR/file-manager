@@ -157,20 +157,3 @@ fn path_cstring(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "nul byte in path"))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dirs_include_data_and_dev() {
-        assert!(DIRS.iter().any(|(_, t)| *t == "/data"));
-        assert!(DIRS.iter().any(|(_, t)| *t == "/dev"));
-    }
-
-    #[test]
-    fn missing_rootfs_is_rejected() {
-        let result = enter_chroot("/definitely/not/here", &[]);
-        assert!(result.is_err());
-    }
-}

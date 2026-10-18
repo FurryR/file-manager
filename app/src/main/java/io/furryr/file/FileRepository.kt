@@ -7,6 +7,8 @@ import io.furryr.file.core.source.OpenMode
 import io.furryr.file.model.DirectoryInfo
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.provider.FileProvider
+import io.furryr.file.provider.DirectoryCapabilities
+import io.furryr.file.core.PermissionDeniedException
 import io.furryr.file.provider.ResolvedProvider
 import io.furryr.file.util.Path
 import kotlinx.coroutines.Dispatchers
@@ -49,13 +51,20 @@ object FileRepository {
 
     fun stat(path: String) = dispatch(path) { p, ip -> runBlocking { p.stat(ip) } }
 
+    suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
+        val resolved = resolve(path).getOrNull() ?: return DirectoryCapabilities()
+        return resolved.provider.directoryCapabilities(resolved.innerPath)
+    }
+
     fun createFile(parentPath: String, name: String): Result<String> = runCatching {
+        if (!runBlocking { directoryCapabilities(parentPath) }.canCreate) throw PermissionDeniedException(parentPath)
         val fullPath = Path.parse(parentPath).child(name).toString()
         dispatch(fullPath) { p, ip -> runBlocking { p.createFile(ip) } }.getOrThrow()
         fullPath
     }
 
     fun createDirectory(parentPath: String, name: String): Result<String> = runCatching {
+        if (!runBlocking { directoryCapabilities(parentPath) }.canCreate) throw PermissionDeniedException(parentPath)
         val fullPath = Path.parse(parentPath).child(name).toString()
         dispatch(fullPath) { p, ip -> runBlocking { p.createDirectory(ip) } }.getOrThrow()
         fullPath

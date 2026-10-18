@@ -15,12 +15,17 @@ fun detectSuPath(): String {
     return candidates.firstOrNull { File(it).exists() } ?: "su"
 }
 
-/** Run `su -c id` to check whether [suPath] actually grants root. */
+/** Run `su -c 'id -u'` to check whether [suPath] actually grants root. */
 fun isSuAvailable(suPath: String): Boolean {
     if (suPath.isBlank()) return false
     return runCatching {
-        val process = ProcessBuilder(suPath, "-c", "id").redirectErrorStream(true).start()
-        process.waitFor(2, TimeUnit.SECONDS) && process.exitValue() == 0
+        val process = ProcessBuilder(suPath, "-c", "id -u").redirectErrorStream(true).start()
+        try {
+            process.waitFor(2, TimeUnit.SECONDS) && process.exitValue() == 0 &&
+                process.inputStream.bufferedReader().use { it.readText().trim() } == "0"
+        } finally {
+            process.destroyForcibly()
+        }
     }.getOrDefault(false)
 }
 

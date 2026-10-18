@@ -7,10 +7,4 @@ sealed interface TransportEvent {
 
     /** The connection dropped and will not be re-established. */
     class Closed(val cause: Throwable?) : TransportEvent
-
-    /** A reconnect attempt is starting. */
-    class Reconnecting(val attempt: Int) : TransportEvent
-
-    /** A reconnect succeeded; the transport is live again. */
-    data object Reconnected : TransportEvent
 }

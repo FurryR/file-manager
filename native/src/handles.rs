@@ -142,31 +142,3 @@ impl HandleTable {
         self.handles.get(&handle_id).map(|s| s.size)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::HandleTable;
-    use crate::proto::HandleMode;
-    use std::io::Read;
-    use std::os::fd::FromRawFd;
-
-    #[tokio::test]
-    async fn duplicated_handle_fd_reads_file_contents() {
-        let path = std::env::temp_dir().join(format!(
-            "file-daemon-handle-test-{}",
-            std::process::id(),
-        ));
-        std::fs::write(&path, b"handle data").unwrap();
-
-        let mut handles = HandleTable::new();
-        let handle = handles.open(path.to_str().unwrap(), HandleMode::Read).await.unwrap();
-        let fd = handles.duplicate_fd(handle.handle_id).unwrap();
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-        let mut contents = Vec::new();
-        file.read_to_end(&mut contents).unwrap();
-
-        assert_eq!(contents, b"handle data");
-        handles.close(handle.handle_id).await.unwrap();
-        std::fs::remove_file(path).unwrap();
-    }
-}

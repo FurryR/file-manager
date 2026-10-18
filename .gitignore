@@ -6,7 +6,7 @@ app/build/
 *.apk
 *.aar
 app/src/main/jniLibs/*
-/app/src/main/assets/run0
+/app/src/main/executables/
 
 # IDE files
 .idea/

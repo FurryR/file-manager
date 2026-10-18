@@ -45,17 +45,27 @@ fun LicensesScreen(modifier: Modifier = Modifier) {
                 license = "GNU GPLv3"
             )
             LicenseEntry(
+                name = "AndroidX Activity",
+                url = "https://developer.android.com/jetpack/androidx/releases/activity",
+                license = "Apache License 2.0"
+            )
+            LicenseEntry(
+                name = "AndroidX Compose",
+                url = "https://developer.android.com/jetpack/compose",
+                license = "Apache License 2.0"
+            )
+            LicenseEntry(
+                name = "AndroidX Lifecycle",
+                url = "https://developer.android.com/jetpack/androidx/releases/lifecycle",
+                license = "Apache License 2.0"
+            )
+            LicenseEntry(
                 name = "Kotlin",
                 url = "https://kotlinlang.org",
                 license = "Apache License 2.0"
             )
             LicenseEntry(
-                name = "Jetpack Compose",
-                url = "https://developer.android.com/jetpack/compose",
-                license = "Apache License 2.0"
-            )
-            LicenseEntry(
-                name = "Material3",
+                name = "Material 3",
                 url = "https://m3.material.io",
                 license = "Apache License 2.0"
             )
@@ -67,6 +77,11 @@ fun LicensesScreen(modifier: Modifier = Modifier) {
             LicenseEntry(
                 name = "Shizuku",
                 url = "https://github.com/RikkaApps/Shizuku",
+                license = "Apache License 2.0"
+            )
+            LicenseEntry(
+                name = "HiddenApiBypass",
+                url = "https://github.com/LSPosed/AndroidHiddenApiBypass",
                 license = "Apache License 2.0"
             )
             LicenseEntry(
@@ -85,6 +100,11 @@ fun LicensesScreen(modifier: Modifier = Modifier) {
                 license = "MIT License"
             )
             LicenseEntry(
+                name = "Kotlin Coroutines",
+                url = "https://github.com/Kotlin/kotlinx.coroutines",
+                license = "Apache License 2.0"
+            )
+            LicenseEntry(
                 name = "Prost",
                 url = "https://github.com/tokio-rs/prost",
                 license = "Apache License 2.0"
@@ -98,6 +118,21 @@ fun LicensesScreen(modifier: Modifier = Modifier) {
                 name = "PRoot",
                 url = "https://github.com/termux/proot",
                 license = "GNU GPLv2"
+            )
+            LicenseEntry(
+                name = "Apache Commons Net",
+                url = "https://commons.apache.org/proper/commons-net/",
+                license = "Apache License 2.0"
+            )
+            LicenseEntry(
+                name = "JSch",
+                url = "https://github.com/mwiede/jsch",
+                license = "BSD 3-Clause License"
+            )
+            LicenseEntry(
+                name = "EdDSA-Java",
+                url = "https://github.com/str4d/ed25519-java",
+                license = "CC0 1.0 / Public Domain"
             )
         }
     }

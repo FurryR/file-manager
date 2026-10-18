@@ -26,7 +26,7 @@ object OperationNotification {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Operation Progress",
+                context.getString(R.string.operation_notification_channel_name),
                 NotificationManager.IMPORTANCE_LOW
             )
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -45,8 +45,8 @@ object OperationNotification {
         )
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setContentTitle(if (isCopy) "正在复制" else "正在移动")
-            .setContentText("正在从 $fromName ${if (isCopy) "复制" else "移动"}文件")
+            .setContentTitle(context.getString(if (isCopy) R.string.copying_title else R.string.moving_title))
+            .setContentText(context.getString(if (isCopy) R.string.copying_notification_text else R.string.moving_notification_text, fromName))
             .setSmallIcon(android.R.drawable.ic_menu_upload)
             .setContentIntent(pendingIntent)
             .setOngoing(true)

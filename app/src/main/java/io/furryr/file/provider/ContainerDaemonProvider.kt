@@ -57,6 +57,16 @@ object ContainerDaemonProvider : FileProvider {
 
     override suspend fun disconnect() = DaemonManager.closeNamedConnections()
 
+    override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
+        val segments = Path.parse(path).segmentList
+        if (segments.isEmpty()) return DirectoryCapabilities()
+        val directory = stat(path).getOrNull() ?: return DirectoryCapabilities()
+        return DirectoryCapabilities(
+            canCreate = directory.canCreateChildren,
+            canOpenTerminal = directory.canEnter,
+        )
+    }
+
     override suspend fun list(path: String): Result<List<FileEntry>> = runCatching {
         val segments = Path.parse(path).segmentList
         if (segments.isEmpty()) {

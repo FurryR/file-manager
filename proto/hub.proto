@@ -57,8 +57,12 @@ message SelectTargetRequest {
 // ── Command execution ─────────────────────────────────────────────
 
 message ExecRequest {
+  // Empty selects the target user's passwd shell, falling back to an executable
+  // /bin/sh or /system/bin/sh in the target filesystem.
   string command = 1;
+  // Passed verbatim, including for an empty command (e.g. ["-l"] for login).
   repeated string args = 2;
+  // Explicit overrides only; the hub injects its own HUB_SOCKET.
   map<string, string> env = 3;
   string cwd = 4;
   // OS user to run as (name or numeric UID); unset = daemon's own credentials.
@@ -69,6 +73,9 @@ message ExecRequest {
   // Nice level for the spawned process. Negative values require the daemon to
   // be root.
   optional int32 nice = 9;
+  // One SCM_RIGHTS directory fd accompanies this request. Resolve it to a
+  // reachable pathname in the selected target; do not directly fchdir to it.
+  bool cwd_fd = 10;
 }
 
 // The PTY master fd rides this response as SCM_RIGHTS.

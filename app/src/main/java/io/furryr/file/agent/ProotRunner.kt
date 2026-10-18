@@ -14,8 +14,9 @@ import java.io.File
  *
  * Bind mount policy mirrors the native chroot backend: individual device nodes
  * instead of the whole `/dev`, plus `/dev/pts`, `/dev/shm`, `/proc`, `/sys`,
- * `/system`, `/vendor`, `/storage`, `/sdcard`, `/data`, writable `/tmp` and `/run`, and a generated
- * `/etc/resolv.conf`.
+ * `/system`, `/apex`, `/linkerconfig/ld.config.txt`, `/vendor`, `/storage`, `/sdcard`,
+ * `/data`, writable `/tmp` and `/run`, and a generated
+ * `/etc/resolv.conf` and `/etc/profile.d/hub.sh`.
  */
 object ProotRunner {
 
@@ -25,11 +26,11 @@ object ProotRunner {
 
     /**
      * Binds passed to the native chroot backend via `--bind`. The chroot daemon
-     * mounts `/tmp` and `/run` as tmpfs itself, so only the resolver and user mounts are
+     * mounts `/tmp` and `/run` as tmpfs itself, so only the resolver, profile and user mounts are
      * forwarded.
      */
     fun chrootBinds(context: Context, container: Container): List<Pair<String, String>> =
-        (listOf(resolverMount(context, container)) + container.bindMounts)
+        (listOf(resolverMount(context, container), hubProfileMount(context, container)) + container.bindMounts)
             .filter { File(it.srcAndroidPath).exists() }
             .map { it.srcAndroidPath to it.dstContainerPath }
 
@@ -83,7 +84,9 @@ object ProotRunner {
         // config in /linkerconfig. Needed so the Android-built daemon binary can
         // be exec'd under proot.
         BindMount("/apex", "/apex"),
-        BindMount("/linkerconfig", "/linkerconfig"),
+        // App UIDs can read this file even when stat on /linkerconfig is denied,
+        // which makes proot discard a bind of the whole directory.
+        BindMount("/linkerconfig/ld.config.txt", "/linkerconfig/ld.config.txt"),
         BindMount("/vendor", "/vendor"),
         BindMount("/storage", "/storage"),
         BindMount("/storage/emulated/0", "/sdcard"),
@@ -95,6 +98,7 @@ object ProotRunner {
             BindMount(tempSubdir(context, container, "guest").absolutePath, "/tmp"),
             BindMount(tempSubdir(context, container, "run").absolutePath, "/run"),
             resolverMount(context, container),
+            hubProfileMount(context, container),
         )
 
     /** Host directory proot uses for its own temporary files (`PROOT_TMP_DIR`). */
@@ -119,6 +123,18 @@ object ProotRunner {
             .orEmpty()
         resolverFile.writeText(dnsServers.joinToString(separator = "\n", postfix = "\n"))
         return BindMount(resolverFile.absolutePath, "/etc/resolv.conf")
+    }
+
+    private fun hubProfileMount(context: Context, container: Container): BindMount {
+        val profileFile = File(runtimeDir(context, container), "hub.sh")
+        // Login profiles can replace the inherited PATH even with `login -p`.
+        profileFile.writeText(
+            "if [ -n \"\${HUB_PATH-}\" ]; then\n" +
+                "    export PATH=\"\${PATH:+\$PATH:}\$HUB_PATH\"\n" +
+                "    unset HUB_PATH\n" +
+                "fi\n",
+        )
+        return BindMount(profileFile.absolutePath, "/etc/profile.d/hub.sh")
     }
 
     private fun runtimeDir(context: Context, container: Container): File {

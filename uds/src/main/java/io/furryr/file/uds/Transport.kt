@@ -12,6 +12,8 @@ import java.io.FileDescriptor
  * Reader and writer run independently: [events] is driven by the transport's
  * own reader loop while [send] is safe to call concurrently. [events] is a
  * single-consumer flow (backed by a channel); collect it once.
+ * EOF or an I/O error closes the socket and finishes the flow. A transport
+ * never reconnects or replays requests; subsequent sends fail.
  */
 interface Transport : Closeable {
 

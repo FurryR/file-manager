@@ -33,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.furryr.file.DefaultPath
@@ -93,21 +94,21 @@ fun JumpDialog(initialPath: String, onDismiss: () -> Unit, onConfirm: (String) -
     var value by remember(initialPath) { mutableStateOf(initialPath) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("跳转") },
+        title = { Text(stringResource(R.string.jump_title)) },
         text = {
             OutlinedTextField(
                 value = value,
                 onValueChange = { value = it },
-                label = { Text("路径") },
+                label = { Text(stringResource(R.string.path_label)) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
         },
         confirmButton = {
-            TextButton(onClick = { onConfirm(value.ifBlank { DefaultPath }) }) { Text("确定") }
+            TextButton(onClick = { onConfirm(value.ifBlank { DefaultPath }) }) { Text(stringResource(R.string.confirm)) }
         }
     )
 }
@@ -117,7 +118,7 @@ fun InfoDialog(path: String, info: DirectoryInfo, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Info") },
-        text = { Text("$path\n${info.summary}") },
+        text = { Text("$path\n${info.summary(LocalContext.current)}") },
         confirmButton = {
             TextButton(onClick = onDismiss) { Text("OK") }
         }

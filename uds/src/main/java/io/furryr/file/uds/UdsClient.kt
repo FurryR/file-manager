@@ -3,15 +3,9 @@ package io.furryr.file.uds
 /** Entry point for UDS clients. */
 object UdsClient {
 
-    /**
-     * Connect to [endpoint]. With a non-null [reconnect] the transport
-     * re-attaches to the same endpoint after a transient drop instead of
-     * emitting [TransportEvent.Closed].
-     */
-    fun connect(endpoint: UdsEndpoint, reconnect: ReconnectPolicy? = null): Transport {
+    /** Connect once to [endpoint]. EOF and I/O errors are terminal. */
+    fun connect(endpoint: UdsEndpoint): Transport {
         val socket = UdsNative.connectSocket(endpoint)
-        val factory: (() -> UdsSocket)? =
-            if (reconnect != null) ({ UdsNative.connectSocket(endpoint) }) else null
-        return UdsTransport(initial = socket, reconnect = reconnect, reconnectFactory = factory)
+        return UdsTransport(socket)
     }
 }

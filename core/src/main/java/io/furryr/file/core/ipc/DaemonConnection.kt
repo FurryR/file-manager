@@ -2,6 +2,7 @@ package io.furryr.file.core.ipc
 
 import android.system.Os
 import android.util.Log
+import io.furryr.file.core.DaemonIdentity
 import io.furryr.file.core.PermissionDeniedException
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.model.ExecResult
@@ -39,6 +40,7 @@ import io.furryr.file.uds.Frame
 import io.furryr.file.uds.Transport
 import io.furryr.file.uds.TransportEvent
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -74,23 +76,24 @@ internal data class OpenHandleResult(
 /**
  * Protocol layer over a proto-agnostic [Transport]: it owns request/response
  * correlation, streaming, source-read brokering and handle/pty decoding. The
- * socket, framing, SCM_RIGHTS and reconnect policy all live in `:uds`.
+ * socket, framing and SCM_RIGHTS all live in `:uds`; disconnects are terminal.
  *
  * Blocking by design — the public facades ([io.furryr.file.core.file.FileService],
  * [io.furryr.file.core.process.ExecService]) stay synchronous; sends bridge into
  * the transport's coroutine world.
  */
 internal class DaemonConnection internal constructor(
-    internal val socketName: String,
+    private val identity: DaemonIdentity,
     private val transport: Transport,
     process: Process?,
 ) {
+    internal val socketName: String get() = identity.socketName
     internal val daemonProcess: Process? = process
 
     @Volatile
     private var isClosed = false
 
-    /** Set once the transport has given up (daemon likely gone). */
+    /** Set once the transport is lost; this connection is never reused. */
     @Volatile
     private var dead = false
 
@@ -125,22 +128,24 @@ internal class DaemonConnection internal constructor(
     }
 
     private suspend fun readerLoop() {
-        transport.events.collect { event ->
-            when (event) {
-                is TransportEvent.Incoming -> dispatchResponse(event.frame)
-                is TransportEvent.Reconnecting ->
-                    failAllPending(IllegalStateException("daemon connection lost"))
-                is TransportEvent.Reconnected ->
-                    Log.i(TAG, "reconnected to daemon: $socketName")
-                is TransportEvent.Closed -> {
-                    dead = true
-                    failAllPending(event.cause ?: IllegalStateException("daemon connection lost"))
+        try {
+            transport.events.collect { event ->
+                when (event) {
+                    is TransportEvent.Incoming -> dispatchResponse(event.frame)
+                    is TransportEvent.Closed -> {
+                        dead = true
+                        failAllPending(event.cause ?: EOFException("daemon connection lost"))
+                    }
                 }
             }
-        }
-        if (!isClosed) {
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "daemon reader failed", e)
+        } finally {
             dead = true
             failAllPending(EOFException("daemon connection lost"))
+            transport.close()
         }
     }
 
@@ -150,7 +155,12 @@ internal class DaemonConnection internal constructor(
             frame.fds.drop(1).forEach { runCatching { Os.close(it) } }
         }
         val fd = frame.fds.firstOrNull()
-        val decoded = DaemonResponse(Response.parseFrom(frame.payload), fd)
+        val decoded = try {
+            DaemonResponse(Response.parseFrom(frame.payload), fd)
+        } catch (e: Exception) {
+            fd?.let { runCatching { Os.close(it) } }
+            throw e
+        }
 
         decoded.response.readSourceRequest?.let { readRequest ->
             val source = synchronized(pendingLock) { sourceReaders[decoded.response.id] }
@@ -208,18 +218,16 @@ internal class DaemonConnection internal constructor(
                 }
             }
             pendingRequests.clear()
+            sourceReaders.clear()
         }
     }
 
-    /**
-     * A connection is alive while it is neither explicitly closed nor given up
-     * on. A brief socket drop keeps it alive — the transport is re-attaching.
-     */
+    /** A dropped connection is terminal; later operations need a fresh daemon. */
     fun isAlive(): Boolean = !isClosed && !dead
 
     /**
      * Ask the daemon to shut down (graceful). The daemon serves multiple clients
-     * and only exits when one of them sends this — disconnecting does not.
+     * and also exits when its last authenticated client disconnects.
      */
     fun exit() {
         val req = Request.newBuilder()
@@ -229,25 +237,29 @@ internal class DaemonConnection internal constructor(
         runCatching { rawSend(req) }
     }
 
+    /** Disconnect only this client, leaving other authenticated clients alone. */
     fun close() {
         synchronized(closeLock) {
             if (isClosed) return
             isClosed = true
         }
-        // Request a graceful shutdown before dropping the socket; the daemon
-        // otherwise keeps running for its other clients.
-        exit()
         failAllPending(EOFException("connection closed"))
         runCatching { transport.close() }
         scope.cancel()
+    }
+
+    /** Explicitly stop the entire daemon, then release this connection. */
+    fun shutdown() {
+        if (!isClosed) exit()
+        close()
         daemonProcess?.let { p ->
             // Shizuku's remote Process throws from isAlive()/exitValue() when
             // the process has not exited, so guard the whole teardown.
             runCatching {
-                if (p.isAlive && !p.waitFor(500, TimeUnit.MILLISECONDS)) {
+                if (p.isAlive && !p.waitFor(1500, TimeUnit.MILLISECONDS)) {
                     p.destroyForcibly()
                 }
-            }
+            }.onFailure { Log.w(TAG, "Failed to stop daemon process", it) }
         }
     }
 
@@ -256,6 +268,7 @@ internal class DaemonConnection internal constructor(
     // ── Core I/O ──────────────────────────────────────────────────────
 
     private fun rawSend(request: Request, fds: List<FileDescriptor> = emptyList()) {
+        check(isAlive()) { "connection closed" }
         runBlocking { transport.send(request.toByteArray(), fds) }
     }
 
@@ -268,15 +281,18 @@ internal class DaemonConnection internal constructor(
      * @param timeoutMillis 0 means wait indefinitely; a positive value bounds
      *        the wait so a wedged daemon cannot hang the caller forever.
      */
-    fun request(request: Request, timeoutMillis: Long): DaemonResponse {
-        if (isClosed) throw IllegalStateException("connection closed")
+    fun request(request: Request, timeoutMillis: Long, fds: List<FileDescriptor> = emptyList()): DaemonResponse {
+        if (!isAlive()) throw IllegalStateException("connection closed")
         val id = requestIdCounter.getAndIncrement()
         val req = request.toBuilder().setId(id).build()
         val future = CompletableFuture<DaemonResponse>()
 
-        synchronized(pendingLock) { pendingRequests[id] = PendingRequest.Single(future) }
+        synchronized(pendingLock) {
+            check(isAlive()) { "connection closed" }
+            pendingRequests[id] = PendingRequest.Single(future)
+        }
         try {
-            rawSend(req)
+            rawSend(req, fds)
         } catch (e: Exception) {
             synchronized(pendingLock) { pendingRequests.remove(id) }
             throw e
@@ -286,6 +302,7 @@ internal class DaemonConnection internal constructor(
             if (timeoutMillis > 0L) future.get(timeoutMillis, TimeUnit.MILLISECONDS)
             else future.get()
         } catch (e: InterruptedException) {
+            synchronized(pendingLock) { pendingRequests.remove(id) }
             Thread.currentThread().interrupt()
             throw IllegalStateException("interrupted", e)
         } catch (e: TimeoutException) {
@@ -319,7 +336,10 @@ internal class DaemonConnection internal constructor(
         val req = request.toBuilder().setId(id).build()
         val channel = Channel<DaemonResponse>(Channel.UNLIMITED)
 
-        synchronized(pendingLock) { pendingRequests[id] = PendingRequest.Stream(channel) }
+        synchronized(pendingLock) {
+            check(isAlive()) { "connection closed" }
+            pendingRequests[id] = PendingRequest.Stream(channel)
+        }
         try {
             rawSend(req)
             for (resp in channel) {
@@ -371,7 +391,8 @@ internal class DaemonConnection internal constructor(
             .build()).response
         ProviderStat(
             usableBytes = resp.stat.usableBytes, totalBytes = resp.stat.totalBytes,
-            exists = resp.stat.exists, isDirectory = resp.stat.isDirectory
+            exists = resp.stat.exists, isDirectory = resp.stat.isDirectory,
+            canCreateChildren = resp.stat.canCreateChildren, canEnter = resp.stat.canEnter
         )
     }
 
@@ -416,6 +437,7 @@ internal class DaemonConnection internal constructor(
             throw UnsupportedOperationException("source cannot be sent to daemon")
         }
         synchronized(pendingLock) {
+            check(isAlive()) { "connection closed" }
             pendingRequests[id] = PendingRequest.Stream(channel)
             if (source is HandleFileSource) sourceReaders[id] = source
         }
@@ -509,17 +531,17 @@ internal class DaemonConnection internal constructor(
         command: String = "/system/bin/sh", args: List<String> = emptyList(),
         env: Map<String, String> = emptyMap(), termType: String = "xterm-256color",
         rows: Int = 24, cols: Int = 80, cwd: String? = null, user: String? = null,
-        nice: Int? = null
+        nice: Int? = null, cwdFd: FileDescriptor? = null,
     ): Result<PtyFd> = runCatching {
         val ptyReq = SpawnPTYRequest.newBuilder()
             .setCommand(command).addAllArgs(args).putAllEnv(env)
-            .setTermType(termType).setRows(rows).setCols(cols)
+            .setTermType(termType).setRows(rows).setCols(cols).setCwdFd(cwdFd != null)
         if (cwd != null) ptyReq.cwd = cwd
         if (user != null) ptyReq.user = user
         if (nice != null) ptyReq.nice = nice
         val req = Request.newBuilder().setSpawnPty(ptyReq).build()
 
-        val resp = request(req)
+        val resp = request(req, 0L, listOfNotNull(cwdFd))
         val fd = resp.attachedFd
             ?: throw IllegalStateException("no ancillary fd received from daemon")
         PtyFd(

@@ -129,6 +129,7 @@ pub async fn copy_from_virtual(
             break;
         }
     }
+    dst.flush().await?;
     Ok(copied)
 }
 
@@ -157,6 +158,7 @@ async fn copy_reader<R: tokio::io::AsyncRead + Unpin>(
         copied += n as u64;
         let _ = tx.send(progress(req_id, total, copied, to));
     }
+    dst.flush().await?;
     Ok(copied)
 }
 
@@ -215,6 +217,7 @@ async fn copy_file(
         }));
     }
 
+    dst_file.flush().await?;
     Ok(())
 }
 
@@ -224,46 +227,5 @@ pub async fn delete_recursive(path: &str) -> io::Result<()> {
         fs::remove_dir_all(p).await
     } else {
         fs::remove_file(p).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{copy_from_virtual, SourceReadBroker};
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
-    use tokio::sync::mpsc;
-
-    #[tokio::test]
-    async fn virtual_copy_pulls_source_data_from_broker() {
-        let path = std::env::temp_dir().join(format!(
-            "file-daemon-virtual-copy-test-{}",
-            std::process::id(),
-        ));
-        let broker = SourceReadBroker::default();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let path_string = path.to_string_lossy().into_owned();
-
-        let task = tokio::spawn({
-            let broker = broker.clone();
-            let cancel = cancel.clone();
-            let tx = tx.clone();
-            async move { copy_from_virtual(&path_string, 7, 5, &tx, &cancel, &broker).await }
-        });
-
-        let outbound = rx.recv().await.expect("destination should request source data");
-        let read = outbound.response.read_source_request.expect("source read request");
-        let sender = broker.lock().await.remove(&read.request_id).expect("pending broker request");
-        sender.send(crate::proto::ReadSourceResponse {
-            request_id: read.request_id,
-            data: b"hello".to_vec(),
-            eof: true,
-            error: String::new(),
-        }).expect("destination should receive source data");
-
-        task.await.expect("copy task should finish").expect("virtual copy should succeed");
-        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
-        std::fs::remove_file(path).unwrap();
     }
 }

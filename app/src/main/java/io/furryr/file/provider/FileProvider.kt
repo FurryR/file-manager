@@ -22,6 +22,12 @@ interface FileProvider {
 
     suspend fun list(path: String): Result<List<FileEntry>>
     suspend fun stat(path: String): Result<ProviderStat>
+    suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
+        return DirectoryCapabilities(
+            canCreate = (ProviderFeature.CREATE_FILE in features || ProviderFeature.CREATE_DIR in features) &&
+                list(path).isSuccess,
+        )
+    }
     suspend fun createFile(path: String): Result<Unit>
     suspend fun createDirectory(path: String): Result<Unit>
     suspend fun delete(path: String): Result<Unit>

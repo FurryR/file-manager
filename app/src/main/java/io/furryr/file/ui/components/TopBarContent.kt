@@ -18,6 +18,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -39,7 +40,7 @@ fun TitleBlock(path: String, info: DirectoryInfo, onClick: () -> Unit) {
             style = MaterialTheme.typography.titleSmall
         )
         Text(
-            text = info.summary,
+            text = info.summary(LocalContext.current),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             style = MaterialTheme.typography.bodySmall

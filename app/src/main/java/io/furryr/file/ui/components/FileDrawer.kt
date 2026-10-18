@@ -10,6 +10,7 @@ import io.furryr.file.agent.ContainerBackend
 import io.furryr.file.R
 import io.furryr.file.FileRepository
 import io.furryr.file.core.model.ProviderStat
+import io.furryr.file.core.DaemonManager
 import io.furryr.file.DefaultPath
 import io.furryr.file.ui.util.formatSize
 
@@ -31,6 +32,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
@@ -60,6 +63,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -83,6 +87,8 @@ import kotlin.math.abs
 import io.furryr.file.model.SafLocation
 import io.furryr.file.model.FtpServer
 import io.furryr.file.model.SftpServer
+import io.furryr.file.model.LocationAddress
+import io.furryr.file.model.LocationAddressParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -94,6 +100,8 @@ fun FileDrawer(
     onRootClick: () -> Unit,
     onContainerClick: (name: String) -> Unit,
     onNewContainer: () -> Unit,
+    onCreateContainer: (name: String, image: String, backend: ContainerBackend) -> Unit = { _, _, _ -> },
+    rootAvailable: Boolean = DaemonManager.isRootAvailable(),
     onSettingsClick: () -> Unit,
     onContainerRename: (oldName: String, newName: String) -> Unit = { _, _ -> },
     onContainerDelete: (name: String) -> Unit = {},
@@ -106,6 +114,8 @@ fun FileDrawer(
     safLocations: List<SafLocation> = emptyList(),
     safRefreshKey: Int = 0,
     onAddLocation: () -> Unit = {},
+    onUseExternalStorage: () -> Unit = {},
+    onLocalPath: (String) -> Unit = {},
     onSafClick: (hexId: String) -> Unit = {},
     onSafRename: (hexId: String, newName: String) -> Unit = { _, _ -> },
     onSafDelete: (hexId: String) -> Unit = {},
@@ -134,6 +144,8 @@ fun FileDrawer(
     var homeStat by remember { mutableStateOf<ProviderStat?>(null) }
     var containers by remember { mutableStateOf<List<Container>>(emptyList()) }
     var showDrawerMenu by remember { mutableStateOf(false) }
+    var showContainerDialog by remember { mutableStateOf(false) }
+    var showAddLocationDialog by remember { mutableStateOf(false) }
     var contextMenuTarget by remember { mutableStateOf<Container?>(null) }
     var dialogTargetName by remember { mutableStateOf<String?>(null) }
     var showDeleteDialog by remember { mutableStateOf(false) }
@@ -279,35 +291,19 @@ fun FileDrawer(
                                 onDismissRequest = { showDrawerMenu = false }
                             ) {
                             DropdownMenuItem(
+                                text = { Text(stringResource(R.string.drawer_add_unified_location)) },
+                                leadingIcon = { Icon(Icons.Default.FolderOpen, null) },
+                                onClick = {
+                                    showDrawerMenu = false
+                                    showAddLocationDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text(stringResource(R.string.drawer_new_container)) },
                                 leadingIcon = { Icon(Icons.Default.Add, null) },
                                 onClick = {
                                     showDrawerMenu = false
-                                    onNewContainer()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.drawer_add_location)) },
-                                leadingIcon = { Icon(Icons.Default.FolderOpen, null) },
-                                onClick = {
-                                    showDrawerMenu = false
-                                    onAddLocation()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.drawer_add_ftp)) },
-                                leadingIcon = { Icon(Icons.Default.Cloud, null) },
-                                onClick = {
-                                    showDrawerMenu = false
-                                    showAddFtpDialog = true
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.drawer_add_sftp)) },
-                                leadingIcon = { Icon(Icons.Default.Cloud, null) },
-                                onClick = {
-                                    showDrawerMenu = false
-                                    showAddSftpDialog = true
+                                    showContainerDialog = true
                                 }
                             )
                             DropdownMenuItem(
@@ -457,10 +453,10 @@ fun FileDrawer(
                 )
             }
             if (1 !in collapsedGroups) {
-                if (displayFtpLocations.isEmpty()) {
+                if (displayFtpLocations.isEmpty() && displaySftpLocations.isEmpty()) {
                     item {
                         Text(
-                            text = stringResource(R.string.no_ftp_servers),
+                            text = stringResource(R.string.no_locations),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
@@ -539,17 +535,7 @@ fun FileDrawer(
                             }
                         }
                     }
-                    if (displaySftpLocations.isEmpty()) {
-                        item {
-                            Text(
-                                text = stringResource(R.string.no_sftp_servers),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                            )
-                        }
-                    } else {
-                        itemsIndexed(
+                    itemsIndexed(
                             displaySftpLocations,
                             key = { _, server -> "sftp_${server.host}" }
                         ) { _, server ->
@@ -621,7 +607,6 @@ fun FileDrawer(
                                 }
                             }
                         }
-                    }
                 }
             }
 
@@ -697,6 +682,7 @@ fun FileDrawer(
                                 DropdownMenuItem(
                                     text = { Text(stringResource(R.string.drawer_delete)) },
                                     leadingIcon = { Icon(Icons.Default.Delete, null) },
+                                    enabled = container.backend != ContainerBackend.CHROOT || rootAvailable,
                                     onClick = {
                                         dialogTargetName = contextMenuTarget?.name
                                         contextMenuTarget = null
@@ -706,6 +692,7 @@ fun FileDrawer(
                                 DropdownMenuItem(
                                     text = { Text(stringResource(R.string.drawer_kill)) },
                                     leadingIcon = { Icon(Icons.Default.PowerSettingsNew, null) },
+                                    enabled = container.backend != ContainerBackend.CHROOT || rootAvailable,
                                     onClick = {
                                         contextMenuTarget?.name?.let { onContainerKill(it) }
                                         contextMenuTarget = null
@@ -818,8 +805,8 @@ fun FileDrawer(
         val hex = safDeleteTarget
         AlertDialog(
             onDismissRequest = { safDeleteTarget = null },
-            title = { Text(stringResource(R.string.delete_container_title)) },
-            text = { Text("确定要删除此位置吗？") },
+            title = { Text(stringResource(R.string.delete_location_title)) },
+            text = { Text(stringResource(R.string.delete_location_confirm)) },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -841,7 +828,7 @@ fun FileDrawer(
         val hex = safRenameTarget
         AlertDialog(
             onDismissRequest = { safRenameTarget = null },
-            title = { Text("重命名位置") },
+            title = { Text(stringResource(R.string.rename_location_title)) },
             text = {
                 OutlinedTextField(
                     value = safRenameText,
@@ -979,9 +966,169 @@ fun FileDrawer(
             },
         )
     }
+
+    if (showContainerDialog) {
+        ContainerCreateDialog(
+            rootAvailable = rootAvailable,
+            onDismiss = { showContainerDialog = false },
+            onConfirm = { name, image, backend ->
+                showContainerDialog = false
+                onCreateContainer(name, image, backend)
+            },
+        )
+    }
+
+    if (showAddLocationDialog) {
+        AddLocationDialog(
+            onDismiss = { showAddLocationDialog = false },
+            onUseExternalStorage = {
+                showAddLocationDialog = false
+                onUseExternalStorage()
+            },
+            onConfirm = { address ->
+                showAddLocationDialog = false
+                when (address.scheme) {
+                    "ftp" -> onAddFtp(address.host, address.name.ifBlank { address.host }, address.port ?: 21, address.username, address.password)
+                    "sftp" -> onAddSftp(address.host, address.name.ifBlank { address.host }, address.port ?: 22, address.username, address.password)
+                    else -> onLocalPath(address.path)
+                }
+            },
+        )
+    }
 }
 
+@Composable
+private fun ContainerCreateDialog(
+    rootAvailable: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (String, String, ContainerBackend) -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    var image by remember { mutableStateOf("library/alpine:latest") }
+    var useChroot by remember { mutableStateOf(rootAvailable) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.wizard_create)) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = 4.dp),
+            ) {
+                Text(stringResource(R.string.wizard_pull_title), style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    stringResource(R.string.wizard_pull_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(16.dp))
+                OutlinedTextField(name, { name = it }, label = { Text(stringResource(R.string.wizard_name_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(image, { image = it }, label = { Text(stringResource(R.string.wizard_image_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(16.dp))
+                Text(stringResource(R.string.wizard_backend_label), style = MaterialTheme.typography.titleSmall)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = useChroot, enabled = rootAvailable, onClick = { useChroot = true })
+                    Column {
+                        Text(stringResource(R.string.wizard_backend_chroot), color = if (rootAvailable) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(stringResource(R.string.wizard_backend_chroot_desc), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = !useChroot, onClick = { useChroot = false })
+                    Column {
+                        Text(stringResource(R.string.wizard_backend_proot))
+                        Text(stringResource(R.string.wizard_backend_proot_desc), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                if (!rootAvailable) {
+                    Text(
+                        stringResource(R.string.wizard_backend_no_root),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(start = 48.dp, top = 4.dp),
+                    )
+                }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
+        confirmButton = {
+            TextButton(
+                enabled = name.isNotBlank() && image.isNotBlank(),
+                onClick = { onConfirm(name.trim(), image.trim(), if (useChroot && rootAvailable) ContainerBackend.CHROOT else ContainerBackend.PROOT) },
+            ) { Text(stringResource(R.string.wizard_create_button)) }
+        },
+    )
+}
 
+@Composable
+private fun AddLocationDialog(
+    onDismiss: () -> Unit,
+    onUseExternalStorage: () -> Unit,
+    onConfirm: (LocationAddress) -> Unit,
+) {
+    var path by remember { mutableStateOf("") }
+    var address by remember { mutableStateOf(LocationAddress()) }
+    var invalid by remember { mutableStateOf(false) }
+
+    fun updatePath(value: String) {
+        path = value
+        address = LocationAddressParser.parse(value) ?: LocationAddress()
+        invalid = false
+    }
+    fun updateRemote(update: LocationAddress) {
+        address = update
+        path = update.toUrl()
+        invalid = false
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.drawer_add_unified_location)) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = path,
+                    onValueChange = ::updatePath,
+                    label = { Text(stringResource(R.string.location_path)) },
+                    placeholder = { Text(stringResource(R.string.location_path_hint)) },
+                    singleLine = true,
+                    isError = invalid,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (address.isRemote) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(stringResource(R.string.location_scheme) + ": ${address.scheme}", style = MaterialTheme.typography.labelLarge)
+                    OutlinedTextField(address.name, { updateRemote(address.copy(name = it)) }, label = { Text(stringResource(R.string.ftp_name_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(address.host, { updateRemote(address.copy(host = it)) }, label = { Text(stringResource(R.string.ftp_host_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(address.port?.toString().orEmpty(), { updateRemote(address.copy(port = it.toIntOrNull())) }, label = { Text(stringResource(R.string.ftp_port_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(address.username, { updateRemote(address.copy(username = it)) }, label = { Text(stringResource(R.string.ftp_username_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(address.password, { updateRemote(address.copy(password = it)) }, label = { Text(stringResource(R.string.ftp_password_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                }
+                if (invalid) Text(stringResource(R.string.location_invalid), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onUseExternalStorage) {
+                    Text(stringResource(R.string.use_external_storage))
+                }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onDismiss) {
+                    Text(stringResource(R.string.cancel))
+                }
+                TextButton(onClick = {
+                    val parsed = LocationAddressParser.parse(path)
+                    if (parsed == null || (parsed.isRemote && parsed.host.isBlank())) invalid = true else onConfirm(parsed)
+                }) { Text(stringResource(R.string.confirm)) }
+            }
+        },
+    )
+}
 
 @Composable
 private fun GroupHeader(

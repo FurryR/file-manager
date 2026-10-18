@@ -13,7 +13,7 @@ import java.io.OutputStream
 
 /**
  * What to run. One type serves the terminal, container exec and the future
- * run0-style attach path.
+ * external client attach path.
  */
 data class CommandSpec(
     val command: String,
@@ -25,7 +25,7 @@ data class CommandSpec(
     val cols: Int = 80,
     /**
      * Run the process as this OS user (name or numeric UID). Null inherits the
-     * daemon's credentials; a root daemon can switch to any user (run0-style).
+     * daemon's credentials; a root daemon can switch to any user.
      */
     val user: String? = null,
     /** Nice level for the process; negative values require a root daemon. */
@@ -35,7 +35,7 @@ data class CommandSpec(
 /**
  * A live child process wired back through a PTY master. The single abstraction
  * shared by the terminal (which owns [fileDescriptor]) and by command
- * execution, including a future attach-a-running-daemon (run0) mechanism.
+ * execution, including external clients attaching to a running daemon.
  */
 interface ProcessChannel : Closeable {
     /** Daemon-side handle id (PTY id). */

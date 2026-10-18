@@ -7,12 +7,13 @@ import io.furryr.file.model.*
 import io.furryr.file.ui.screens.SettingsActivity
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
+import android.util.Log
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -22,28 +23,30 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,24 +58,31 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import io.furryr.file.R
+import io.furryr.file.AppLocale
+import io.furryr.file.agent.SessionManager
 import io.furryr.file.core.DaemonManager
 import io.furryr.file.ui.theme.FileManagerTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
 
-private enum class Screen { MAIN, LICENSES }
 private const val SHIZUKU_REQUEST_CODE = 100
 
 class SettingsActivity : ComponentActivity() {
+    private var shizukuPermissionGranted by mutableStateOf(false)
     private val shizukuListener =
         rikka.shizuku.Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
             if (requestCode == SHIZUKU_REQUEST_CODE && grantResult == PackageManager.PERMISSION_GRANTED) {
-                DaemonManager.reset()
+                shizukuPermissionGranted = true
             }
         }
+
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(AppLocale.wrap(newBase))
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -83,21 +93,12 @@ class SettingsActivity : ComponentActivity() {
             val darkTheme = remember { prefs.getBoolean("dark_theme", true) }
             FileManagerTheme(darkTheme = darkTheme) {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    var currentScreen by remember { mutableStateOf(Screen.MAIN) }
-
-                    BackHandler(currentScreen != Screen.MAIN) {
-                        currentScreen = Screen.MAIN
-                    }
-
-                    when (currentScreen) {
-                        Screen.MAIN -> SettingsMainPage(
-                            onBack = { finish() },
-                            onLicenses = { currentScreen = Screen.LICENSES }
-                        )
-                        Screen.LICENSES -> LicensesPage(
-                            onBack = { currentScreen = Screen.MAIN }
-                        )
-                    }
+                    SettingsMainPage(
+                        onBack = { finish() },
+                        onLicenses = { startActivity(Intent(this, LicensesActivity::class.java)) },
+                        shizukuPermissionGranted = shizukuPermissionGranted,
+                        onShizukuPermissionHandled = { shizukuPermissionGranted = false },
+                    )
                 }
             }
         }
@@ -111,7 +112,12 @@ class SettingsActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
+private fun SettingsMainPage(
+    onBack: () -> Unit,
+    onLicenses: () -> Unit,
+    shizukuPermissionGranted: Boolean,
+    onShizukuPermissionHandled: () -> Unit,
+) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("settings", Context.MODE_PRIVATE) }
     var rootEnabled by remember { mutableStateOf(prefs.getBoolean("root_enabled", false)) }
@@ -126,34 +132,74 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
     var terminalFont by remember { mutableStateOf(prefs.getString("terminal_font", "") ?: "") }
     var showTerminalFontSizeDialog by remember { mutableStateOf(false) }
     var terminalFontSize by remember { mutableStateOf(prefs.getInt("terminal_font_size", 9).toString()) }
+    var showLanguageDialog by remember { mutableStateOf(false) }
+    var showAboutDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    var applyingPermissions by remember { mutableStateOf(false) }
+    var pendingPermissionChange by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    fun applyPermissionChange(change: () -> Unit) {
+        applyingPermissions = true
+        scope.launch {
+            try {
+                // Stop Termux sessions before their daemon connections disappear.
+                SessionManager.destroyAll()
+                change()
+                withContext(NonCancellable + Dispatchers.IO) {
+                    DaemonManager.reset()
+                    DaemonManager.warmUp()
+                        .onFailure { Log.w("SettingsActivity", "Daemon restart failed", it) }
+                }
+            } finally {
+                applyingPermissions = false
+            }
+        }
+    }
+
+    fun requestPermissionChange(change: () -> Unit) {
+        if (applyingPermissions) return
+        if (SessionManager.getAllSessions().isNotEmpty()) {
+            pendingPermissionChange = change
+        } else {
+            applyPermissionChange(change)
+        }
+    }
+
+    LaunchedEffect(shizukuPermissionGranted, applyingPermissions) {
+        if (shizukuPermissionGranted && !applyingPermissions) {
+            onShizukuPermissionHandled()
+            if (shellEnabled && !DaemonManager.isRootAvailable()) {
+                requestPermissionChange {}
+            }
+        }
+    }
 
     fun updateRootEnabled(enabled: Boolean) {
-        rootEnabled = enabled
-        prefs.edit().putBoolean("root_enabled", enabled).apply()
-        DaemonManager.setRootEnabled(enabled)
-        DaemonManager.closeNamedConnections()
-        DaemonManager.reset()
+        requestPermissionChange {
+            rootEnabled = enabled
+            prefs.edit().putBoolean("root_enabled", enabled).apply()
+            DaemonManager.setRootEnabled(enabled)
+        }
     }
 
     fun updateShellEnabled(enabled: Boolean) {
-        shellEnabled = enabled
-        prefs.edit().putBoolean("shell_enabled", enabled).apply()
-        if (enabled && !DaemonManager.hasShizukuPermission()) {
-            try {
-                rikka.shizuku.Shizuku.requestPermission(SHIZUKU_REQUEST_CODE)
-            } catch (_: Exception) {
-                // Shizuku not installed — will fall through to direct mode
+        requestPermissionChange {
+            shellEnabled = enabled
+            prefs.edit().putBoolean("shell_enabled", enabled).apply()
+            DaemonManager.setShellEnabled(enabled)
+            if (enabled && !DaemonManager.hasShizukuPermission()) {
+                try {
+                    rikka.shizuku.Shizuku.requestPermission(SHIZUKU_REQUEST_CODE)
+                } catch (_: Exception) {
+                    // Shizuku not installed — will fall through to direct mode
+                }
             }
         }
-        DaemonManager.setShellEnabled(enabled)
-        DaemonManager.closeNamedConnections()
-        DaemonManager.reset()
     }
 
     Scaffold(
         topBar = {
-            CenterAlignedTopAppBar(
+            TopAppBar(
                 title = { Text(stringResource(R.string.settings)) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -182,7 +228,7 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { updateRootEnabled(!rootEnabled) }
+                    .clickable(enabled = !applyingPermissions) { updateRootEnabled(!rootEnabled) }
                     .padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
                 Column(modifier = Modifier.weight(1f)) {
@@ -198,6 +244,7 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
                 }
                 Switch(
                     checked = rootEnabled,
+                    enabled = !applyingPermissions,
                     onCheckedChange = ::updateRootEnabled
                 )
             }
@@ -209,7 +256,7 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { updateShellEnabled(!shellEnabled) }
+                    .clickable(enabled = !applyingPermissions) { updateShellEnabled(!shellEnabled) }
                     .padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
                 Column(modifier = Modifier.weight(1f)) {
@@ -225,6 +272,7 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
                 }
                 Switch(
                     checked = shellEnabled,
+                    enabled = !applyingPermissions,
                     onCheckedChange = ::updateShellEnabled
                 )
             }
@@ -236,7 +284,7 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { showCustomSuDialog = true }
+                    .clickable(enabled = !applyingPermissions) { showCustomSuDialog = true }
                     .padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
                 Column(modifier = Modifier.weight(1f)) {
@@ -380,26 +428,132 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
 
             HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
 
-            // Open source licenses
+            Text(
+                text = stringResource(R.string.settings_other),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+            )
+
             Row(
                 verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showAboutDialog = true }
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(stringResource(R.string.about), style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        stringResource(R.string.about_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable(onClick = onLicenses)
                     .padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
+                Text(stringResource(R.string.open_source_licenses), style = MaterialTheme.typography.bodyLarge)
                 Text(
-                    text = stringResource(R.string.open_source_licenses),
-                    style = MaterialTheme.typography.bodyLarge,
-                    modifier = Modifier.weight(1f)
-                )
-                Icon(
-                    Icons.Default.Info,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    stringResource(R.string.open_source_licenses_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showLanguageDialog = true }
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                Column {
+                    Text(stringResource(R.string.language), style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        stringResource(when (AppLocale.current(context)) {
+                            AppLocale.ENGLISH -> R.string.language_english
+                            AppLocale.CHINESE -> R.string.language_chinese
+                            else -> R.string.language_system
+                        }),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
+    }
+
+    if (showAboutDialog) {
+        AboutDialog(onDismiss = { showAboutDialog = false })
+    }
+
+    if (showLanguageDialog) {
+        var selected by remember { mutableStateOf(AppLocale.current(context)) }
+        AlertDialog(
+            onDismissRequest = { showLanguageDialog = false },
+            title = { Text(stringResource(R.string.language)) },
+            text = {
+                Column {
+                    listOf(
+                        AppLocale.SYSTEM to R.string.language_system,
+                        AppLocale.ENGLISH to R.string.language_english,
+                        AppLocale.CHINESE to R.string.language_chinese,
+                    ).forEach { (value, label) ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable { selected = value }
+                        ) {
+                            RadioButton(selected = selected == value, onClick = { selected = value })
+                            Text(stringResource(label))
+                        }
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLanguageDialog = false }) { Text(stringResource(R.string.cancel)) }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showLanguageDialog = false
+                    if (selected != AppLocale.current(context)) {
+                        AppLocale.set(context, selected)
+                        (context as? android.app.Activity)?.recreate()
+                    }
+                }) { Text(stringResource(R.string.confirm)) }
+            },
+        )
+    }
+
+    if (pendingPermissionChange != null) {
+        AlertDialog(
+            onDismissRequest = { pendingPermissionChange = null },
+            title = { Text(stringResource(R.string.permission_change_title)) },
+            text = { Text(stringResource(R.string.permission_change_close_terminals)) },
+            dismissButton = {
+                TextButton(onClick = { pendingPermissionChange = null }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val change = pendingPermissionChange ?: return@TextButton
+                    pendingPermissionChange = null
+                    applyPermissionChange(change)
+                }) {
+                    Text(stringResource(R.string.confirm))
+                }
+            },
+        )
     }
 
     // Custom su dialog
@@ -425,12 +579,14 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
             confirmButton = {
                 TextButton(
                     onClick = {
-                        suPath = dialogSuPath
-                        prefs.edit().putString("su_path", dialogSuPath).apply()
-                        DaemonManager.setSuPath(dialogSuPath)
-                        DaemonManager.closeNamedConnections()
-                        DaemonManager.reset()
                         showCustomSuDialog = false
+                        if (dialogSuPath != suPath) {
+                            requestPermissionChange {
+                                suPath = dialogSuPath
+                                prefs.edit().putString("su_path", dialogSuPath).apply()
+                                DaemonManager.setSuPath(dialogSuPath)
+                            }
+                        }
                     }
                 ) {
                     Text(stringResource(R.string.confirm))
@@ -543,21 +699,30 @@ private fun SettingsMainPage(onBack: () -> Unit, onLicenses: () -> Unit) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LicensesPage(onBack: () -> Unit) {
-    Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text(stringResource(R.string.licenses_title)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
-                    }
-                }
-            )
-        }
-    ) { padding ->
-        LicensesScreen(modifier = Modifier.padding(padding))
-    }
+private fun AboutDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val version = context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.about)) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineMedium)
+                Text(
+                    stringResource(R.string.version, version),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(24.dp))
+                Text(stringResource(R.string.about_description), style = MaterialTheme.typography.bodyLarge)
+                Spacer(Modifier.height(24.dp))
+                Text(stringResource(R.string.source_code), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Text("https://github.com/FurryR/file-manager", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp))
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.confirm)) }
+        },
+    )
 }

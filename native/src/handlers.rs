@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{IntoRawFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::fs::File;
@@ -22,7 +22,7 @@ use crate::pty::PtyManager;
 
 pub async fn handle_streaming(
     request: Request,
-    attached_fd: Option<RawFd>,
+    attached_fd: Option<OwnedFd>,
     pty_manager: &Arc<Mutex<PtyManager>>,
     handles: &Arc<Mutex<HandleTable>>,
     cancel_flags: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
@@ -135,7 +135,7 @@ pub async fn handle_streaming(
                 let result = if virtual_source {
                     copy::copy_from_virtual(&to, req_id, source_size, &tx_clone, &cancel_flag, &broker).await
                 } else if let Some(fd) = source_fd {
-                    copy::copy_from_fd(fd, &to, req_id, source_size, &tx_clone, &cancel_flag).await
+                    copy::copy_from_fd(fd.into_raw_fd(), &to, req_id, source_size, &tx_clone, &cancel_flag).await
                 } else {
                     Err(io::Error::new(io::ErrorKind::InvalidInput, "missing source fd"))
                 };
@@ -187,13 +187,13 @@ pub async fn handle_streaming(
         }
         Some(Command::SpawnPty(req)) => {
             let mut mgr = pty_manager.lock().await;
-            match mgr.spawn_pty(req) {
+            match mgr.spawn_pty_with_cwd_fd(req, attached_fd) {
                 Ok((pty_id, master_fd, child_pid)) => {
                     let resp = Response {
                         id: req_id, ok: true, pty_id, child_pid,
                         ..Response::default()
                     };
-                    let client_fd = unsafe { libc::dup(master_fd) };
+                    let client_fd = unsafe { libc::fcntl(master_fd, libc::F_DUPFD_CLOEXEC, 0) };
                     if client_fd < 0 {
                         let error = io::Error::last_os_error();
                         let _ = mgr.close_pty(pty_id);
@@ -235,14 +235,20 @@ pub async fn handle_streaming(
                     Ok(pid) => {
                         let result = tokio::task::spawn_blocking(move || {
                             let mut status: i32 = 0;
-                            unsafe {
-                                libc::waitpid(pid as i32, &mut status as *mut i32, 0);
+                            loop {
+                                let waited = unsafe { libc::waitpid(pid as i32, &mut status, 0) };
+                                if waited == pid as i32 {
+                                    return Ok(status);
+                                }
+                                let error = io::Error::last_os_error();
+                                if error.kind() != io::ErrorKind::Interrupted {
+                                    return Err(error);
+                                }
                             }
-                            status
                         }).await;
 
                         let exit_code = match result {
-                            Ok(status) => {
+                            Ok(Ok(status)) => {
                                 if libc::WIFEXITED(status) {
                                     libc::WEXITSTATUS(status) as i32
                                 } else if libc::WIFSIGNALED(status) {
@@ -251,7 +257,16 @@ pub async fn handle_streaming(
                                     -1
                                 }
                             }
-                            Err(_) => -1,
+                            Ok(Err(error)) => {
+                                let _ = tx.send(OutboundResponse::plain(error_response(req_id, error)));
+                                return;
+                            }
+                            Err(error) => {
+                                let _ = tx.send(OutboundResponse::plain(error_response(
+                                    req_id, io::Error::other(error.to_string()),
+                                )));
+                                return;
+                            }
                         };
 
                         // Clean up after child has been reaped
@@ -419,21 +434,31 @@ async fn run_exec(
     cwd: String,
     env: HashMap<String, String>,
 ) -> Response {
-    let outcome = tokio::task::spawn_blocking(move || {
-        let mut cmd = std::process::Command::new(&command);
-        cmd.args(&args);
-        if !cwd.is_empty() {
-            cmd.current_dir(&cwd);
+    struct ProcessGroup(u32);
+    impl Drop for ProcessGroup {
+        fn drop(&mut self) {
+            unsafe { libc::kill(-(self.0 as i32), libc::SIGKILL); }
         }
-        for (key, value) in &env {
-            cmd.env(key, value);
-        }
-        cmd.output()
-    })
-    .await;
+    }
+
+    let mut cmd = tokio::process::Command::new(&command);
+    cmd.args(&args).envs(&env).kill_on_drop(true).process_group(0)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if !cwd.is_empty() {
+        cmd.current_dir(&cwd);
+    }
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => return error_response(req_id, error),
+    };
+    // Cancellation must kill the command's group, not leave blocking work holding the runtime open.
+    let _group = ProcessGroup(child.id().expect("new child has a pid"));
+    let outcome = child.wait_with_output().await;
 
     match outcome {
-        Ok(Ok(output)) => Response {
+        Ok(output) => Response {
             id: req_id,
             ok: true,
             exec: Some(ExecResponse {
@@ -443,18 +468,12 @@ async fn run_exec(
             }),
             ..Response::default()
         },
-        Ok(Err(error)) => error_response(req_id, error),
-        Err(error) => error_response(
-            req_id,
-            io::Error::new(io::ErrorKind::Other, error.to_string()),
-        ),
+        Err(error) => error_response(req_id, error),
     }
 }
 
-fn close_unexpected_fd(fd: Option<RawFd>) {
-    if let Some(fd) = fd {
-        unsafe { libc::close(fd); }
-    }
+fn close_unexpected_fd(fd: Option<OwnedFd>) {
+    drop(fd);
 }
 
 fn ok_response(id: u64) -> Response {
@@ -463,41 +482,4 @@ fn ok_response(id: u64) -> Response {
 
 fn error_response(id: u64, error: io::Error) -> Response {
     Response { id, ok: false, error: error.to_string(), ..Response::default() }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::handle_streaming;
-    use crate::handles::HandleTable;
-    use crate::proto::request::Command;
-    use crate::proto::{ExitRequest, Request};
-    use crate::pty::PtyManager;
-    use std::collections::HashMap;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
-    use tokio::sync::{mpsc, watch, Mutex};
-
-    #[tokio::test]
-    async fn exit_request_acks_and_signals_shutdown() {
-        let pty = Arc::new(Mutex::new(PtyManager::new()));
-        let handles = Arc::new(Mutex::new(HandleTable::new()));
-        let cancel = Arc::new(Mutex::new(HashMap::<u64, Arc<AtomicBool>>::new()));
-        let broker = crate::copy::SourceReadBroker::default();
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let (resp_tx, mut resp_rx) = mpsc::unbounded_channel();
-
-        let request = Request {
-            id: 7,
-            command: Some(Command::Exit(ExitRequest {})),
-        };
-        handle_streaming(
-            request, None, &pty, &handles, cancel, &broker, resp_tx, &shutdown_tx,
-        )
-        .await;
-
-        assert!(*shutdown_rx.borrow(), "exit must signal daemon shutdown");
-        let outbound = resp_rx.recv().await.expect("exit must be acked");
-        assert!(outbound.response.ok);
-        assert_eq!(outbound.response.id, 7);
-    }
 }

@@ -1,4 +1,6 @@
 package io.furryr.file.model
+import android.content.Context
+import io.furryr.file.R
 import io.furryr.file.ui.util.formatSize
 import io.furryr.file.util.Path
 
@@ -25,8 +27,13 @@ data class DirectoryInfo(
     val totalBytes: Long = 0L,
     val refreshToken: Int = 0
 ) {
-    val summary: String
-        get() = "文件夹 $folderCount | 文件 $fileCount | 可用 ${formatSize(usableBytes)}/${formatSize(totalBytes)}"
+    fun summary(context: Context): String = context.getString(
+        R.string.directory_summary,
+        folderCount,
+        fileCount,
+        formatSize(usableBytes),
+        formatSize(totalBytes),
+    )
 }
 
 data class CopyMoveSource(

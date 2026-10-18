@@ -73,18 +73,27 @@ pub fn stat_path(path: &str) -> io::Result<Stat> {
         CString::new(path).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let mut stat = mem::MaybeUninit::<libc::statvfs>::uninit();
     let result = unsafe { libc::statvfs(cpath.as_ptr(), stat.as_mut_ptr()) };
-    if result != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let stat = unsafe { stat.assume_init() };
+    let (usable_bytes, total_bytes) = if result == 0 {
+        let stat = unsafe { stat.assume_init() };
+        (
+            (stat.f_bavail as i64) * (stat.f_frsize as i64),
+            (stat.f_blocks as i64) * (stat.f_frsize as i64),
+        )
+    } else {
+        (0, 0)
+    };
     let p = Path::new(path);
     let exists = p.exists();
     let is_directory = if exists { p.is_dir() } else { false };
+    // Creation availability follows listing; actual mutations remain authoritative.
+    let can_list = std::fs::read_dir(path).is_ok();
     Ok(Stat {
-        usable_bytes: (stat.f_bavail as i64) * (stat.f_frsize as i64),
-        total_bytes: (stat.f_blocks as i64) * (stat.f_frsize as i64),
+        usable_bytes,
+        total_bytes,
         exists,
         is_directory,
+        can_create_children: can_list,
+        can_enter: true,
     })
 }
 

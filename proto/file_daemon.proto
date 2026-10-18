@@ -39,7 +39,7 @@ message Request {
 }
 
 // The daemon issues a fresh nonce on every accepted connection; the client
-// proves it holds the app's Ed25519 private key by signing the daemon's
+// proves it holds this launch's Ed25519 private key by signing the daemon's
 // socket name together with that nonce. No other request is served before the
 // handshake succeeds, so a process that merely guesses the (public) socket
 // name cannot talk to the daemon.
@@ -51,9 +51,9 @@ message AuthRequest {
   bytes signature = 1;
 }
 
-// Ask the daemon to shut down. The daemon keeps serving *other* connections
-// after one disconnects; it only exits when any connection sends this. Multiple
-// clients (UI, future run0) can be attached simultaneously.
+// Explicitly shut down the whole daemon, including other authenticated clients.
+// Otherwise it exits when its last authenticated client disconnects, or when no
+// client has authenticated within 10 seconds of starting the listener.
 message ExitRequest {}
 
 // Cancel an in-flight streaming request (e.g. a long copy) by the id it was
@@ -175,11 +175,21 @@ message Stat {
   int64 total_bytes = 2;
   bool exists = 3;
   bool is_directory = 4;
+  // Whether the daemon can list this directory; mutations still report their own errors.
+  bool can_create_children = 5;
+  // Terminal availability, not a filesystem traversal permission check. Always true for a daemon.
+  bool can_enter = 6;
 }
 
 message SpawnPTYRequest {
+  // Empty selects the target user's passwd shell, falling back to an executable
+  // /bin/sh or /system/bin/sh in the daemon's filesystem. argv[0] is the shell
+  // basename; explicit commands retain command as argv[0]. Empty-command shells
+  // initialize a clean target-user environment instead of inheriting daemon env.
   string command = 1;
+  // Passed verbatim; callers request login mode explicitly with "-l".
   repeated string args = 2;
+  // Explicit overrides. Shells retain the daemon's launch-configured PATH.
   map<string, string> env = 3;
   string term_type = 4;
   uint32 rows = 5;
@@ -192,6 +202,9 @@ message SpawnPTYRequest {
   optional string user = 8;
   // Nice level for the child. Negative values require a root daemon.
   optional int32 nice = 9;
+  // One SCM_RIGHTS directory fd accompanies this request. The daemon reopens
+  // its pathname in the target filesystem before establishing the child's cwd.
+  bool cwd_fd = 10;
 }
 
 message ResizePTYRequest {

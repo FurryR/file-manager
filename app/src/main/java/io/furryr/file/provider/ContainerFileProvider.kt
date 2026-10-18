@@ -49,6 +49,11 @@ object ContainerFileProvider : FileProvider {
     override suspend fun connect(): Result<Unit> = Result.success(Unit)
     override suspend fun disconnect() {}
 
+    override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
+        if (path.trim('/').isEmpty()) return DirectoryCapabilities()
+        return super<FileProvider>.directoryCapabilities(path)
+    }
+
     override suspend fun list(path: String): Result<List<FileEntry>> = runCatching {
         val segments = Path.parse(path).segmentList
         if (segments.isEmpty()) {

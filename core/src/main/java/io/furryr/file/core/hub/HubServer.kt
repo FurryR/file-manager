@@ -4,35 +4,40 @@ import android.system.Os
 import android.util.Log
 import io.furryr.file.core.DaemonManager
 import io.furryr.file.core.DaemonTarget
+import io.furryr.file.core.ipc.DaemonConnection
 import io.furryr.file.proto.hub.ExecResponse
 import io.furryr.file.proto.hub.HubRequest
 import io.furryr.file.proto.hub.HubResponse
 import io.furryr.file.proto.hub.ListTargetsResponse
 import io.furryr.file.proto.hub.Target
 import io.furryr.file.proto.hub.WaitResponse
-import io.furryr.file.uds.Frame
 import io.furryr.file.uds.Transport
 import io.furryr.file.uds.TransportEvent
 import io.furryr.file.uds.UdsEndpoint
 import io.furryr.file.uds.UdsServer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import java.io.Closeable
 import java.io.FileDescriptor
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * The communication hub: a stable, unauthenticated UDS server that run0 (and,
- * later, agents) attach to.
+ * The communication hub: an unauthenticated UDS server for local clients.
  *
  * Unlike a transparent relay, the hub speaks its **own** protocol
  * ([io.furryr.file.proto.hub.HubRequest]) and translates each operation onto the
  * daemon the connection selected — spawning PTYs, forwarding signals, reaping
  * children. The daemon's own file protocol is never exposed here, and the hub
  * holds the app identity, so it authenticates to the daemon on the client's
- * behalf. Each connection keeps its own selected target; PTYs are daemon-global.
+ * behalf. Each connection owns its PTY handles and keeps its own selected target.
  */
 class HubServer internal constructor(private val server: UdsServer) : Closeable {
 
@@ -46,39 +51,90 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
         }
     }
 
-    private suspend fun serve(client: Transport) {
+    private suspend fun serve(client: Transport) = coroutineScope {
         val state = ConnectionState()
         try {
-            client.events.collect { event ->
+            client.events.takeWhile { it !is TransportEvent.Closed }.collect { event ->
                 when (event) {
                     is TransportEvent.Incoming -> {
-                        val reply = dispatch(event.frame, state)
-                        event.frame.close()
                         try {
-                            client.send(reply.response.toByteArray(), listOfNotNull(reply.fd))
+                            val request = try {
+                                HubRequest.parseFrom(event.frame.payload)
+                            } catch (_: Exception) {
+                                null
+                            }
+                            if (request == null) {
+                                send(client, Reply(failure(0, "malformed hub request")))
+                            } else if (request.opCase != HubRequest.OpCase.EXEC && event.frame.fds.isNotEmpty()) {
+                                send(client, Reply(failure(request.id, "unexpected hub descriptors")))
+                            } else if (request.opCase == HubRequest.OpCase.WAIT) {
+                                // Capture ownership in request order, before later CLOSE/SELECT_TARGET.
+                                val handle = request.wait.ptyId
+                                val pty = state.ptys[handle]
+                                if (pty == null) {
+                                    send(client, Reply(failure(request.id, "PTY not owned by client")))
+                                } else {
+                                    launch {
+                                        val reply = try {
+                                            val code = runInterruptible {
+                                                pty.connection.waitPty(pty.id).getOrThrow()
+                                            }
+                                            state.ptys.remove(handle, pty)
+                                            Reply(
+                                                HubResponse.newBuilder().setId(request.id).setOk(true)
+                                                    .setWait(WaitResponse.newBuilder().setExitCode(code)).build(),
+                                            )
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: Exception) {
+                                            Reply(failure(request.id, e.message ?: "hub request failed"))
+                                        }
+                                        try {
+                                            send(client, reply)
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: Exception) {
+                                            Log.w(TAG, "hub wait response delivery failed", e)
+                                            client.close()
+                                        }
+                                    }
+                                }
+                            } else {
+                                send(client, dispatch(request, state, event.frame.fds))
+                            }
                         } finally {
-                            // The descriptor is duplicated into the receiver by
-                            // the kernel; drop our copy.
-                            reply.fd?.let { runCatching { Os.close(it) } }
+                            event.frame.close()
                         }
                     }
-                    is TransportEvent.Closed -> return@collect
                     else -> {}
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "hub client ended", e)
         } finally {
+            coroutineContext.cancelChildren()
             runCatching { client.close() }
+            state.ptys.values.forEach { pty ->
+                pty.connection.closePty(pty.id).onFailure {
+                    Log.w(TAG, "hub PTY cleanup failed", it)
+                }
+            }
+            state.ptys.clear()
         }
     }
 
-    private suspend fun dispatch(frame: Frame, state: ConnectionState): Reply {
-        val request = try {
-            HubRequest.parseFrom(frame.payload)
-        } catch (_: Exception) {
-            return Reply(failure(0, "malformed hub request"))
+    private suspend fun send(client: Transport, reply: Reply) {
+        try {
+            client.send(reply.response.toByteArray(), listOfNotNull(reply.fd))
+        } finally {
+            // SCM_RIGHTS duplicates the descriptor; drop our copy even on send failure.
+            reply.fd?.let { runCatching { Os.close(it) } }
         }
+    }
+
+    private fun dispatch(request: HubRequest, state: ConnectionState, fds: List<FileDescriptor>): Reply {
         val id = request.id
         return runCatching {
             when (request.opCase) {
@@ -102,22 +158,28 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
 
                 HubRequest.OpCase.EXEC -> {
                     val exec = request.exec
-                    val pty = DaemonManager.connection(target(state.target)).spawnPty(
+                    require(fds.size == if (exec.cwdFd) 1 else 0) { "invalid cwd descriptor count" }
+                    require(!exec.cwdFd || exec.cwd.isEmpty()) { "cwd path and descriptor are mutually exclusive" }
+                    val connection = DaemonManager.connection(target(state.target))
+                    val pty = connection.spawnPty(
                         command = exec.command,
                         args = exec.argsList,
-                        env = exec.envMap,
+                        env = exec.envMap + Hub.environment(),
                         termType = exec.term,
                         rows = exec.rows,
                         cols = exec.cols,
                         cwd = exec.cwd.ifBlank { null },
                         user = if (exec.hasUser()) exec.user else null,
                         nice = if (exec.hasNice()) exec.nice else null,
+                        cwdFd = fds.singleOrNull(),
                     ).getOrThrow()
+                    val handle = state.nextHandle++
+                    state.ptys[handle] = OwnedPty(connection, pty.ptyId)
                     Reply(
                         HubResponse.newBuilder().setId(id).setOk(true)
                             .setExec(
                                 ExecResponse.newBuilder()
-                                    .setPtyId(pty.ptyId).setPid(pty.childPid).build(),
+                                    .setPtyId(handle).setPid(pty.childPid).build(),
                             ).build(),
                         pty.fileDescriptor,
                     )
@@ -125,36 +187,32 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
 
                 HubRequest.OpCase.RESIZE -> {
                     val r = request.resize
-                    DaemonManager.connection(target(state.target))
-                        .resizePty(r.ptyId, r.rows, r.cols).getOrThrow()
+                    val pty = state.pty(r.ptyId)
+                    pty.connection.resizePty(pty.id, r.rows, r.cols).getOrThrow()
                     Reply(ok(id))
                 }
 
                 HubRequest.OpCase.SIGNAL -> {
                     val s = request.signal
-                    DaemonManager.connection(target(state.target))
-                        .signalPty(s.ptyId, s.signal).getOrThrow()
+                    val pty = state.pty(s.ptyId)
+                    pty.connection.signalPty(pty.id, s.signal).getOrThrow()
                     Reply(ok(id))
                 }
 
-                HubRequest.OpCase.WAIT -> {
-                    val code = DaemonManager.connection(target(state.target))
-                        .waitPty(request.wait.ptyId).getOrThrow()
-                    Reply(
-                        HubResponse.newBuilder().setId(id).setOk(true)
-                            .setWait(WaitResponse.newBuilder().setExitCode(code)).build(),
-                    )
-                }
-
                 HubRequest.OpCase.CLOSE -> {
-                    DaemonManager.connection(target(state.target))
-                        .closePty(request.close.ptyId).getOrThrow()
+                    val handle = request.close.ptyId
+                    val pty = state.pty(handle)
+                    pty.connection.closePty(pty.id).getOrThrow()
+                    state.ptys.remove(handle, pty)
                     Reply(ok(id))
                 }
 
                 else -> Reply(failure(id, "missing hub op"))
             }
-        }.getOrElse { Reply(failure(id, it.message ?: "hub request failed")) }
+        }.getOrElse {
+            if (it is CancellationException) throw it
+            Reply(failure(id, it.message ?: "hub request failed"))
+        }
     }
 
     private fun target(name: String): DaemonTarget = when (name) {
@@ -176,7 +234,14 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
 
     private class ConnectionState {
         var target: String = "primary"
+        var nextHandle: Long = 1
+        val ptys = ConcurrentHashMap<Long, OwnedPty>()
+
+        fun pty(handle: Long): OwnedPty =
+            ptys[handle] ?: error("PTY not owned by client")
     }
+
+    private class OwnedPty(val connection: DaemonConnection, val id: Long)
 
     private class Reply(val response: HubResponse, val fd: FileDescriptor? = null)
 

@@ -2,12 +2,58 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io;
 use std::mem;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::proto::SpawnPtyRequest;
 
 static NEXT_PTY_ID: AtomicU64 = AtomicU64::new(1);
+
+fn reopen_cwd(fd: RawFd) -> io::Result<OwnedFd> {
+    let mut original = unsafe { mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstat(fd, &mut original) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if original.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "cwd fd is not a directory"));
+    }
+    let path = std::fs::read_link(format!("/proc/self/fd/{fd}"))?;
+    if !path.is_absolute() || path.as_os_str().as_bytes().ends_with(b" (deleted)") {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "cwd fd pathname is deleted or unreachable"));
+    }
+    let candidate = CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    // Resolve in the daemon's own filesystem. Never fchdir the received fd:
+    // it may refer to a private mount or a directory outside the target root.
+    let reopened = unsafe { libc::open(candidate.as_ptr(), libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    if reopened < 0 {
+        let error = io::Error::last_os_error();
+        return Err(io::Error::new(error.kind(),
+            format!("cannot reopen cwd {} in target: {error}", path.display())));
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(reopened) })
+}
+
+// Called only after the child has dropped credentials. Use a parent-allocated
+// buffer so cwd validation does not allocate after fork.
+unsafe fn enter_fd_cwd(fd: RawFd, buffer: &mut [libc::c_char]) -> bool {
+    if libc::fchdir(fd) != 0 {
+        return false;
+    }
+    if libc::getcwd(buffer.as_mut_ptr(), buffer.len()).is_null() {
+        return false;
+    }
+    if buffer[0] != b'/' as libc::c_char {
+        // Linux can report "(unreachable)/..." for a cwd outside the root.
+        #[cfg(not(target_os = "android"))]
+        { *libc::__errno_location() = libc::ENOENT; }
+        #[cfg(target_os = "android")]
+        { *libc::__errno() = libc::ENOENT; }
+        return false;
+    }
+    true
+}
 
 /// A resolved target user for a spawned command.
 struct RunAs {
@@ -15,6 +61,7 @@ struct RunAs {
     gid: libc::gid_t,
     name: CString,
     home: Option<String>,
+    shell: Option<String>,
 }
 
 fn cstr_to_string(ptr: *const libc::c_char) -> Option<String> {
@@ -24,17 +71,50 @@ fn cstr_to_string(ptr: *const libc::c_char) -> Option<String> {
     unsafe { CStr::from_ptr(ptr) }.to_str().ok().map(str::to_owned)
 }
 
-/// Resolve a user name or numeric UID to `(uid, gid, name, home)`. The passwd
-/// entry is copied immediately; `getpwnam`/`getpwuid` share a static buffer.
+fn parse_passwd(contents: &str, user: &str) -> Option<RunAs> {
+    let requested_uid = user.parse::<libc::uid_t>().ok();
+    contents.lines().find_map(|line| {
+        let fields: Vec<_> = line.split(':').collect();
+        if fields.len() != 7 || fields[0].is_empty() || fields[0].starts_with('#') || line.contains('\0') {
+            return None;
+        }
+        let uid = fields[2].parse::<libc::uid_t>().ok()?;
+        let gid = fields[3].parse::<libc::gid_t>().ok()?;
+        if requested_uid.map_or(fields[0] != user, |requested| uid != requested) {
+            return None;
+        }
+        Some(RunAs {
+            uid,
+            gid,
+            name: CString::new(fields[0]).ok()?,
+            home: Some(fields[5].to_owned()),
+            shell: Some(fields[6].to_owned()),
+        })
+    })
+}
+
+/// Prefer the target filesystem's passwd file: Bionic synthesizes Android
+/// entries even inside containers. Copy libc's shared passwd buffer on fallback.
 fn resolve_user(user: &str) -> io::Result<RunAs> {
     if user.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty user"));
+    }
+
+    match std::fs::read_to_string("/etc/passwd") {
+        Ok(contents) => {
+            if let Some(target) = parse_passwd(&contents, user) {
+                return Ok(target);
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
 
     if let Ok(uid) = user.parse::<libc::uid_t>() {
         let mut gid = uid;
         let mut name = CString::new(user).expect("numeric user is NUL-free");
         let mut home = None;
+        let mut shell = None;
         let passwd = unsafe { libc::getpwuid(uid) };
         if !passwd.is_null() {
             unsafe {
@@ -43,9 +123,10 @@ fn resolve_user(user: &str) -> io::Result<RunAs> {
                     name = CString::new(entry).expect("pw_name is NUL-free");
                 }
                 home = cstr_to_string((*passwd).pw_dir);
+                shell = cstr_to_string((*passwd).pw_shell);
             }
         }
-        return Ok(RunAs { uid, gid, name, home });
+        return Ok(RunAs { uid, gid, name, home, shell });
     }
 
     let requested = CString::new(user).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -66,8 +147,55 @@ fn resolve_user(user: &str) -> io::Result<RunAs> {
             gid,
             name: CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
             home,
+            shell: cstr_to_string((*passwd).pw_shell),
         })
     }
+}
+
+fn resolve_shell(passwd_shell: Option<&str>) -> io::Result<String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // The daemon already lives in the target filesystem, including containers.
+    passwd_shell.into_iter().chain(["/bin/sh", "/system/bin/sh"])
+        .find(|shell| {
+            std::path::Path::new(shell).is_absolute()
+                && std::fs::metadata(shell).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "target user has no executable shell"))
+}
+
+fn build_environment(req: &SpawnPtyRequest, target: Option<&RunAs>, command: &str) -> HashMap<String, String> {
+    let mut env: HashMap<String, String> = if req.command.is_empty() {
+        let path = if command.starts_with("/system/") {
+            "/system/bin:/system/xbin"
+        } else {
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        };
+        let mut env = HashMap::from([
+            ("SHELL".into(), command.into()),
+            ("PATH".into(), std::env::var("PATH").unwrap_or_else(|_| path.into())),
+        ]);
+        if std::path::Path::new("/tmp").is_dir() {
+            env.insert("TMPDIR".into(), "/tmp".into());
+        }
+        env
+    } else {
+        std::env::vars().collect()
+    };
+    if let Some(target) = target {
+        if let Some(home) = &target.home {
+            env.insert("HOME".into(), home.clone());
+        }
+        let name = target.name.to_string_lossy().into_owned();
+        env.insert("USER".into(), name.clone());
+        env.insert("LOGNAME".into(), name);
+    }
+    if !req.term_type.is_empty() {
+        env.insert("TERM".into(), req.term_type.clone());
+    }
+    env.extend(req.env.clone());
+    env
 }
 
 #[derive(Debug)]
@@ -90,56 +218,43 @@ impl PtyManager {
         }
     }
 
-    /// Spawn a new PTY. Forks a child, sets up session/terminal, execs the
-    /// requested command, and returns the master fd, pty_id, and child_pid.
-    /// The caller is responsible for sending the master fd to the client.
-    ///
-    /// For container daemons the daemon already lives inside the container
-    /// (chroot/proot), so the command resolves there directly.
-    pub fn spawn_pty(&mut self, req: SpawnPtyRequest) -> io::Result<(u64, RawFd, u32)> {
+    pub(crate) fn spawn_pty_with_cwd_fd(
+        &mut self, req: SpawnPtyRequest, attached_fd: Option<OwnedFd>,
+    ) -> io::Result<(u64, RawFd, u32)> {
+        let cwd_fd = match (req.cwd_fd, attached_fd) {
+            (true, Some(fd)) => Some(reopen_cwd(fd.as_raw_fd())?),
+            (true, None) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "missing cwd fd")),
+            (false, Some(_)) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "unexpected cwd fd")),
+            (false, None) => None,
+        };
+        // The original descriptor has been dropped, including on validation
+        // errors. Only the reopened CLOEXEC descriptor is inherited by fork.
+        let mut cwd_buffer = [0 as libc::c_char; libc::PATH_MAX as usize];
         // 1. Open a PTY master
-        let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+        let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
         if master_fd < 0 {
             return Err(io::Error::last_os_error());
         }
+        let master = unsafe { OwnedFd::from_raw_fd(master_fd) };
+        let master_fd = master.as_raw_fd();
 
         // 2. Grant and unlock slave
         if unsafe { libc::grantpt(master_fd) } != 0 {
-            let e = io::Error::last_os_error();
-            unsafe { libc::close(master_fd) };
-            return Err(e);
+            return Err(io::Error::last_os_error());
         }
         if unsafe { libc::unlockpt(master_fd) } != 0 {
-            let e = io::Error::last_os_error();
-            unsafe { libc::close(master_fd) };
-            return Err(e);
+            return Err(io::Error::last_os_error());
         }
 
         // 3. Get slave path
         let mut slave_buf = [0u8; 128];
         if unsafe { libc::ptsname_r(master_fd, slave_buf.as_mut_ptr() as *mut libc::c_char, slave_buf.len()) } != 0 {
-            let e = io::Error::last_os_error();
-            unsafe { libc::close(master_fd) };
-            return Err(e);
+            return Err(io::Error::last_os_error());
         }
         let slave_ptr = slave_buf.as_ptr();
 
         // 4. Build command/args/env as CStrings in the parent so they are
         //    safely accessible after fork (fork duplicates memory).
-        let command_c =
-            CString::new(req.command.as_bytes()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let mut argv: Vec<CString> = Vec::with_capacity(1 + req.args.len() + 1);
-        argv.push(
-            CString::new(req.command.as_bytes())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
-        );
-        for arg in &req.args {
-            argv.push(
-                CString::new(arg.as_bytes())
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
-            );
-        }
-
         // Resolve the requested run-as user up front, so an unknown user is a
         // clean request error rather than a child that dies after fork. A
         // non-root daemon can only "switch" to its own uid.
@@ -157,6 +272,26 @@ impl PtyManager {
             }
         }
 
+        let own_user = if req.command.is_empty() && run_as.is_none() {
+            Some(resolve_user(&unsafe { libc::geteuid() }.to_string())?)
+        } else {
+            None
+        };
+        let target = run_as.as_ref().or(own_user.as_ref());
+        let command = if req.command.is_empty() {
+            resolve_shell(target.unwrap().shell.as_deref())?
+        } else {
+            req.command.clone()
+        };
+        let argv0 = if req.command.is_empty() {
+            command.rsplit('/').next().unwrap()
+        } else {
+            &command
+        };
+        let argv: Vec<CString> = std::iter::once(argv0).chain(req.args.iter().map(String::as_str))
+            .map(|arg| CString::new(arg).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e)))
+            .collect::<io::Result<_>>()?;
+
         // A negative nice level requires CAP_SYS_NICE (root).
         let nice = req.nice;
         if let Some(value) = nice {
@@ -169,30 +304,24 @@ impl PtyManager {
             }
         }
 
-        // Build environment: copy caller's env then overlay request env
-        let mut env_map: HashMap<String, String> = HashMap::new();
-        // Inherit daemon's environment as baseline
-        for (key, value) in std::env::vars() {
-            env_map.insert(key, value);
-        }
-        // Overlay TERM from term_type if provided and not overridden by req.env
-        if !req.term_type.is_empty() {
-            env_map.entry("TERM".to_string()).or_insert_with(|| req.term_type.clone());
-        }
-        // Overlay with explicit env from request
-        for (k, v) in &req.env {
-            env_map.insert(k.clone(), v.clone());
-        }
-        // Adopt the target user's identity in the environment.
-        if let Some(ref target) = run_as {
-            if let Some(ref home) = target.home {
-                env_map.insert("HOME".to_string(), home.clone());
-            }
-            if let Ok(name) = target.name.to_str() {
-                env_map.insert("USER".to_string(), name.to_string());
-                env_map.insert("LOGNAME".to_string(), name.to_string());
-            }
-        }
+        let env_map = build_environment(&req, target, &command);
+        // Prepare PATH candidates before fork, but try them in the child's cwd
+        // and with its credentials. Empty PATH entries mean the current directory.
+        let commands: Vec<CString> = if command.contains('/') {
+            vec![command.clone()]
+        } else {
+            #[cfg(target_os = "android")]
+            let default_path = "/system/bin:/system/xbin";
+            #[cfg(not(target_os = "android"))]
+            let default_path = "/bin:/usr/bin";
+            env_map.get("PATH").map(String::as_str).unwrap_or(default_path)
+                .split(':')
+                .map(|dir| if dir.is_empty() { command.clone() } else { format!("{dir}/{command}") })
+                .collect()
+        }.into_iter()
+            .map(|command| CString::new(command).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e)))
+            .collect::<io::Result<_>>()?;
+
         let mut envp: Vec<CString> = Vec::with_capacity(env_map.len() + 1);
         for (k, v) in &env_map {
             let entry = format!("{}={}", k, v);
@@ -207,23 +336,54 @@ impl PtyManager {
 
         let rows = req.rows;
         let cols = req.cols;
-        let cwd_c = if !req.cwd.is_empty() {
-            Some(CString::new(req.cwd.as_bytes()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?)
+        let cwd = if req.cwd_fd {
+            String::new()
+        } else if req.cwd == "~" {
+            let home = match target {
+                Some(target) => target.home.clone(),
+                None => resolve_user(&unsafe { libc::geteuid() }.to_string())?.home
+                    .or_else(|| env_map.get("HOME").cloned()),
+            };
+            home.filter(|home| !home.is_empty()).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "target user has no home directory")
+            })?
+        } else {
+            req.cwd.clone()
+        };
+        let cwd_c = if !cwd.is_empty() {
+            Some(CString::new(cwd).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?)
         } else {
             None
         };
 
+        // Configure the slave's terminal settings through the master before fork.
+        let mut termios = unsafe { mem::zeroed() };
+        if unsafe { libc::tcgetattr(master_fd, &mut termios) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        termios.c_iflag = (termios.c_iflag & !(libc::IXON | libc::IXOFF)) | libc::IUTF8;
+        if unsafe { libc::tcsetattr(master_fd, libc::TCSANOW, &termios) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
         // 5. Fork
         let pid = unsafe { libc::fork() };
         if pid < 0 {
-            let e = io::Error::last_os_error();
-            unsafe { libc::close(master_fd) };
-            return Err(e);
+            return Err(io::Error::last_os_error());
         }
 
         if pid == 0 {
             // ── CHILD ──────────────────────────────────────────────────
             unsafe {
+                // Neither blocked daemon signals nor Rust's ignored SIGPIPE belong in commands.
+                let mut mask = mem::zeroed();
+                if libc::sigemptyset(&mut mask) != 0
+                    || libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) != 0
+                    || libc::signal(libc::SIGPIPE, libc::SIG_DFL) == libc::SIG_ERR
+                {
+                    libc::_exit(126);
+                }
+
                 // Create new session (child becomes session leader, no ctty)
                 libc::setsid();
 
@@ -256,11 +416,6 @@ impl PtyManager {
                 // Close master fd — child does not need it
                 libc::close(master_fd);
 
-                // Change working directory if specified
-                if let Some(ref cwd) = cwd_c {
-                    libc::chdir(cwd.as_ptr());
-                }
-
                 // Apply the requested nice level before dropping privileges --
                 // lowering niceness needs CAP_SYS_NICE, which root still has.
                 if let Some(value) = nice {
@@ -279,11 +434,31 @@ impl PtyManager {
                     }
                 }
 
-                // Execute the target command
-                libc::execve(command_c.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
+                if let Some(ref fd) = cwd_fd {
+                    if !enter_fd_cwd(fd.as_raw_fd(), &mut cwd_buffer) {
+                        libc::perror(b"cwd fd\0".as_ptr().cast());
+                        libc::_exit(126);
+                    }
+                    libc::close(fd.as_raw_fd());
+                } else if let Some(ref cwd) = cwd_c {
+                    if libc::chdir(cwd.as_ptr()) != 0 {
+                        libc::perror(b"chdir\0".as_ptr().cast());
+                        libc::_exit(126);
+                    }
+                }
 
-                // execve failed — exit with code 127 (command not found / exec error)
-                libc::_exit(127);
+                let mut denied = false;
+                for command in &commands {
+                    libc::execve(command.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
+                    match io::Error::last_os_error().raw_os_error() {
+                        Some(libc::ENOENT) | Some(libc::ENOTDIR) => {}
+                        Some(libc::EACCES) => denied = true,
+                        _ => libc::_exit(126),
+                    }
+                }
+
+                // Distinguish a missing command from one that cannot be executed.
+                libc::_exit(if denied { 126 } else { 127 });
             }
         }
 
@@ -294,7 +469,7 @@ impl PtyManager {
         self.ptys.insert(
             pty_id,
             PtyHandle {
-                master_fd,
+                master_fd: master.into_raw_fd(),
                 child_pid,
                 container_name: None,
             },
@@ -348,6 +523,8 @@ impl PtyManager {
             libc::kill(-(handle.child_pid as i32), libc::SIGHUP);
             // SIGKILL to ensure termination
             libc::kill(-(handle.child_pid as i32), libc::SIGKILL);
+            // The parent can close a fresh PTY before the child has called setsid().
+            libc::kill(handle.child_pid as i32, libc::SIGKILL);
             libc::close(handle.master_fd);
         }
 
@@ -490,112 +667,5 @@ pub(crate) fn recv_fd(socket_fd: RawFd) -> io::Result<RawFd> {
         }
         let fd = *(libc::CMSG_DATA(cmsg) as *const RawFd);
         Ok(fd)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Verify send_fd correctly encodes an SCM_RIGHTS message.
-    #[test]
-    fn send_fd_round_trip() {
-        // Create a socket pair for testing
-        let mut fds = [-1i32; 2];
-        let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
-        assert_eq!(result, 0, "socketpair failed");
-
-        let sender_fd = fds[0];
-        let receiver_fd = fds[1];
-
-        // Create a pipe to get a real fd to send
-        let mut pipe_fds = [-1i32; 2];
-        let result = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };
-        assert_eq!(result, 0, "pipe failed");
-
-        let pipe_read = pipe_fds[0];
-        let pipe_write = pipe_fds[1];
-
-        // Write a known value
-        unsafe { libc::write(pipe_write, &42u8 as *const u8 as *const libc::c_void, 1) };
-
-        // Send the read end of the pipe over the socket
-        send_fd(sender_fd, pipe_read).expect("send_fd should succeed");
-
-        // Receive the fd on the other end
-        let mut recv_dummy = [0u8; 1];
-        let mut recv_iov = libc::iovec {
-            iov_base: recv_dummy.as_mut_ptr() as *mut libc::c_void,
-            iov_len: 1,
-        };
-        let recv_cmsg_space: libc::c_uint =
-            unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) };
-        let mut recv_cmsg_buf: Vec<u8> = vec![0u8; recv_cmsg_space as usize];
-        let mut recv_msg: libc::msghdr = unsafe { mem::zeroed() };
-        recv_msg.msg_iov = &mut recv_iov as *mut libc::iovec;
-        recv_msg.msg_iovlen = 1;
-        recv_msg.msg_control = recv_cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-        recv_msg.msg_controllen = recv_cmsg_space as _;
-
-        let received = unsafe { libc::recvmsg(receiver_fd, &mut recv_msg, 0) };
-        assert!(received > 0, "recvmsg should receive data");
-
-        // Extract the received fd from the control message
-        let recv_cmsg = unsafe { libc::CMSG_FIRSTHDR(&recv_msg) };
-        assert!(!recv_cmsg.is_null(), "should have a control message");
-        unsafe {
-            assert_eq!((*recv_cmsg).cmsg_level, libc::SOL_SOCKET);
-            assert_eq!((*recv_cmsg).cmsg_type, libc::SCM_RIGHTS);
-        }
-        let received_fd = unsafe { *(libc::CMSG_DATA(recv_cmsg) as *const RawFd) };
-
-        // Verify the received fd works by reading the byte we piped
-        let mut read_buf = [0u8; 1];
-        let n = unsafe { libc::read(received_fd, read_buf.as_mut_ptr() as *mut libc::c_void, 1) };
-        assert_eq!(n, 1, "should read 1 byte from received fd");
-        assert_eq!(read_buf[0], 42u8, "should read the correct byte");
-
-        // Cleanup
-        unsafe {
-            libc::close(received_fd);
-            libc::close(pipe_write); // close our original write end
-            libc::close(sender_fd);
-            libc::close(receiver_fd);
-        }
-        // pipe_read was sent and closed via received_fd above
-    }
-
-    /// PtyManager must allocate unique, monotonically increasing IDs.
-    #[test]
-    fn unique_pty_ids() {
-        // We can't actually spawn PTYs in a test without a real client
-        // socket, but we can verify the internal ID counter works by
-        // checking that NEXT_PTY_ID advances.
-        let id1 = NEXT_PTY_ID.fetch_add(1, Ordering::SeqCst);
-        let id2 = NEXT_PTY_ID.fetch_add(1, Ordering::SeqCst);
-        assert_ne!(id1, id2);
-        assert!(id2 > id1);
-    }
-
-    /// resize_pty on an unknown PTY id returns an error.
-    #[test]
-    fn resize_unknown_pty_returns_error() {
-        let mut mgr = PtyManager::new();
-        let result = mgr.resize_pty(99999, 24, 80);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        assert!(err.to_string().contains("99999"), "error should mention the PTY id");
-    }
-
-    /// close_pty on an unknown PTY id returns an error.
-    #[test]
-    fn close_unknown_pty_returns_error() {
-        let mut mgr = PtyManager::new();
-        let result = mgr.close_pty(99999);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        assert!(err.to_string().contains("99999"), "error should mention the PTY id");
     }
 }

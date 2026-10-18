@@ -37,7 +37,8 @@ import kotlin.math.roundToInt
 fun TerminalViewComposable(
     session: TerminalSession?,
     modifier: Modifier = Modifier,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    inputState: TerminalInputState = remember { TerminalInputState() },
 ) {
     val backgroundColor = MaterialTheme.colorScheme.surface.toArgb()
     val context = LocalContext.current
@@ -69,29 +70,15 @@ fun TerminalViewComposable(
         factory = { context ->
             val terminalView = TerminalView(context, null)
 
-            val wrapper = object : FrameLayout(context) {
-                override fun onCheckIsTextEditor(): Boolean = true
-
-                override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
-                    outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
-                        InputType.TYPE_TEXT_FLAG_MULTI_LINE or
-                        InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-                    outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
-                        EditorInfo.IME_FLAG_NO_EXTRACT_UI or
-                        EditorInfo.IME_FLAG_NO_ENTER_ACTION
-                    return TerminalInputConnection(this, terminalView)
-                }
-
-                override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-                    return terminalView.dispatchKeyEvent(event) || super.dispatchKeyEvent(event)
-                }
-            }
+            val wrapper = TerminalInputView(context, inputState)
 
             terminalView.apply {
-                isFocusable = false
-                isFocusableInTouchMode = false
+                // Text selection mode requests focus on the TerminalView itself.
+                // Normal keyboard input still goes through the wrapper below.
+                isFocusable = true
+                isFocusableInTouchMode = true
                 isClickable = true
-                setTerminalViewClient(TerminalViewClientImpl(this, wrapper, fontSizeDp))
+                setTerminalViewClient(TerminalViewClientImpl(this, wrapper, inputState, fontSizeDp))
                 setTextSize(fontSizePx)
                 setBackgroundColor(backgroundColor)
             }
@@ -116,6 +103,7 @@ fun TerminalViewComposable(
 
             session?.let { terminalView.attachSession(it) }
             terminalView.isEnabled = enabled
+            inputState.terminalView = terminalView
             terminalView.post { terminalView.onScreenUpdated() }
 
             wrapper
@@ -128,12 +116,21 @@ fun TerminalViewComposable(
                 (tv.mClient as TerminalViewClientImpl).fontSizeDp = fontSizeDp
             }
             if (tv.currentSession !== session) {
+                inputState.resetModifiers()
                 session?.let { tv.attachSession(it) }
-                view.requestFocus()
+                if (enabled) view.requestFocus()
                 tv.onScreenUpdated()
             }
             tv.isEnabled = enabled
+            if (!enabled) inputState.resetModifiers()
             tv.setBackgroundColor(backgroundColor)
+        },
+        onRelease = { view ->
+            (view as? TerminalInputView)?.releaseInput()
+            if (inputState.terminalView === view.getChildAt(0)) {
+                inputState.terminalView = null
+                inputState.resetModifiers()
+            }
         },
         modifier = modifier
     )
@@ -151,28 +148,69 @@ fun TerminalSnippet(
     )
 }
 
-private fun writeToTerminal(session: TerminalSession, text: CharSequence) {
-    var i = 0
-    val len = text.length
-    while (i < len) {
-        val cp = Character.codePointAt(text, i)
-        i += Character.charCount(cp)
-        if (cp == '\n'.code) {
-            session.writeCodePoint(false, '\r'.code)
-        } else {
-            session.writeCodePoint(false, cp)
-        }
-    }
-}
-
 private const val DEFAULT_FONT_SIZE_DP = 9
 private const val MIN_FONT_SIZE_DP = 8
 private const val MAX_FONT_SIZE_DP = 128
 
-private class TerminalInputConnection(
+internal class TerminalInputView(context: Context, private val inputState: TerminalInputState) : FrameLayout(context) {
+    private var connection: TerminalInputConnection? = null
+    private var restartPending = false
+    private var released = false
+    private val modeChanged: () -> Unit = {
+        // Retire the old editor before restartInput can flush stale candidates into it.
+        connection?.closeConnection()
+        if (hasFocus() && !restartPending) {
+            restartPending = true
+            post {
+                restartPending = false
+                if (hasFocus() && !released) {
+                    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                    imm.restartInput(this)
+                }
+            }
+        }
+    }
+
+    init { inputState.onInputModeChanged = modeChanged }
+
+    fun releaseInput() {
+        released = true
+        if (inputState.onInputModeChanged === modeChanged) inputState.onInputModeChanged = null
+        connection?.closeConnection()
+    }
+
+    override fun onCheckIsTextEditor(): Boolean = true
+
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
+        outAttrs.inputType = if (inputState.directInput) InputType.TYPE_NULL else
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
+            EditorInfo.IME_FLAG_NO_EXTRACT_UI or EditorInfo.IME_FLAG_NO_ENTER_ACTION
+        connection?.closeConnection()
+        return TerminalInputConnection(this, inputState).also { connection = it }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean =
+        inputState.dispatchKeyEvent(event) || super.dispatchKeyEvent(event)
+}
+
+internal class TerminalInputConnection(
     view: View,
-    private val terminalView: TerminalView
+    private val inputState: TerminalInputState,
 ) : BaseInputConnection(view, true) {
+    private var closed = false
+    private var forwardedComposition: String? = null
+
+    fun cancelComposition() {
+        super.finishComposingText()
+        resetToPlaceholder()
+    }
+
+    override fun closeConnection() {
+        cancelComposition()
+        closed = true
+        super.closeConnection()
+    }
 
     init {
         val e = getEditable()
@@ -180,28 +218,49 @@ private class TerminalInputConnection(
     }
 
     override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
-        val result = super.commitText(text, newCursorPosition)
-        if (text.isNotEmpty()) {
-            val session = terminalView.currentSession
-            if (session != null) writeToTerminal(session, text)
+        if (closed) return false
+        if (forwardedComposition == text.toString()) {
+            forwardedComposition = null
+            resetToPlaceholder()
+            return true
         }
+        forwardedComposition = null
+        val result = super.commitText(text, newCursorPosition)
+        if (text.isNotEmpty()) inputState.commitText(text)
         resetToPlaceholder()
         return result
     }
 
     override fun finishComposingText(): Boolean {
+        if (closed) return false
+        val e = getEditable()
+        val start = e?.let { getComposingSpanStart(it) } ?: -1
+        val end = e?.let { getComposingSpanEnd(it) } ?: -1
+        if (start >= 0 && end > start) inputState.commitText(e!!.subSequence(start, end).toString())
         val result = super.finishComposingText()
         resetToPlaceholder()
         return result
     }
 
     override fun sendKeyEvent(event: KeyEvent): Boolean {
-        return terminalView.dispatchKeyEvent(event)
+        return !closed && inputState.dispatchKeyEvent(event)
+    }
+
+    override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
+        if (closed) return false
+        if (inputState.directInput || forwardedComposition != null) {
+            if (forwardedComposition != text.toString()) inputState.commitText(text)
+            forwardedComposition = text.toString()
+            resetToPlaceholder()
+            return true
+        }
+        return super.setComposingText(text, newCursorPosition)
     }
 
     override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+        if (closed) return false
         val deleteKey = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL)
-        repeat(beforeLength) { terminalView.dispatchKeyEvent(deleteKey) }
+        repeat(beforeLength) { inputState.dispatchKeyEvent(deleteKey) }
         val result = super.deleteSurroundingText(beforeLength, afterLength)
         val e = getEditable()
         if (e != null && e.isEmpty()) e.append(PLACEHOLDER)
@@ -227,6 +286,7 @@ private class TerminalInputConnection(
 private class TerminalViewClientImpl(
     private val view: TerminalView,
     private val wrapper: View,
+    private val inputState: TerminalInputState,
     initialFontSizeDp: Int = DEFAULT_FONT_SIZE_DP,
 ) : TerminalViewClient {
 
@@ -259,9 +319,9 @@ private class TerminalViewClientImpl(
     override fun onKeyDown(keyCode: Int, e: KeyEvent, session: TerminalSession): Boolean = false
     override fun onKeyUp(keyCode: Int, e: KeyEvent): Boolean = false
     override fun onLongPress(event: MotionEvent): Boolean = false
-    override fun readControlKey(): Boolean = false
-    override fun readAltKey(): Boolean = false
-    override fun readShiftKey(): Boolean = false
+    override fun readControlKey(): Boolean = inputState.ctrl
+    override fun readAltKey(): Boolean = inputState.alt
+    override fun readShiftKey(): Boolean = inputState.shift
     override fun readFnKey(): Boolean = false
     override fun onCodePoint(codePoint: Int, ctrlDown: Boolean, session: TerminalSession): Boolean =
         false

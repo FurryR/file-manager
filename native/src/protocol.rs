@@ -1,8 +1,8 @@
 use prost::Message;
 use std::io;
 use std::mem;
-use std::os::fd::{AsRawFd, RawFd};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, Interest};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use tokio::io::{AsyncWriteExt, Interest};
 use tokio::net::UnixStream;
 
 use crate::proto::{Request, Response};
@@ -24,7 +24,7 @@ impl OutboundResponse {
 
 pub struct IncomingRequest {
     pub request: Request,
-    pub attached_fd: Option<RawFd>,
+    pub attached_fd: Option<OwnedFd>,
 }
 
 /// Reads framed requests while retaining SCM_RIGHTS descriptors attached to
@@ -32,31 +32,58 @@ pub struct IncomingRequest {
 pub struct FrameReader {
     header: [u8; 4],
     header_len: usize,
-    attached_fd: Option<RawFd>,
+    attached_fd: Option<OwnedFd>,
+    payload: Vec<u8>,
+    payload_len: usize,
 }
 
 impl FrameReader {
     pub fn new() -> Self {
-        Self { header: [0; 4], header_len: 0, attached_fd: None }
+        Self { header: [0; 4], header_len: 0, attached_fd: None, payload: Vec::new(), payload_len: 0 }
     }
 
-    pub async fn read_frame(&mut self, stream: &mut UnixStream) -> io::Result<Option<IncomingRequest>> {
-        while self.header_len < self.header.len() {
+    pub async fn read_frame(&mut self, stream: &mut UnixStream, max_size: usize) -> io::Result<Option<IncomingRequest>> {
+        let result = self.read_frame_inner(stream, max_size).await;
+        if result.is_err() || matches!(result, Ok(None)) {
+            self.attached_fd = None;
+        }
+        result
+    }
+
+    async fn read_frame_inner(&mut self, stream: &mut UnixStream, max_size: usize) -> io::Result<Option<IncomingRequest>> {
+        loop {
+            let reading_header = self.header_len < self.header.len();
+            if !reading_header {
+                let size = u32::from_be_bytes(self.header) as usize;
+                if size > max_size {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "request frame too large"));
+                }
+                self.payload.resize(size, 0);
+                if self.payload_len == size {
+                    break;
+                }
+            }
             stream.readable().await?;
             let control_size = unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) as usize };
-            let mut control = vec![0u8; control_size];
+            // cmsghdr requires alignment; SCM_RIGHTS padding may fit extra fds.
+            let mut control = vec![0usize; (control_size + mem::size_of::<usize>() - 1) / mem::size_of::<usize>()];
+            let buffer = if reading_header {
+                &mut self.header[self.header_len..]
+            } else {
+                &mut self.payload[self.payload_len..]
+            };
             let mut iov = libc::iovec {
-                iov_base: self.header[self.header_len..].as_mut_ptr() as *mut libc::c_void,
-                iov_len: self.header.len() - self.header_len,
+                iov_base: buffer.as_mut_ptr() as *mut libc::c_void,
+                iov_len: buffer.len(),
             };
             let mut msg: libc::msghdr = unsafe { mem::zeroed() };
             msg.msg_iov = &mut iov;
             msg.msg_iovlen = 1;
             msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
-            msg.msg_controllen = control.len() as _;
+            msg.msg_controllen = control_size as _;
 
             let received = match stream.try_io(Interest::READABLE, || {
-                let received = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, libc::MSG_DONTWAIT) };
+                let received = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut msg, libc::MSG_DONTWAIT | libc::MSG_CMSG_CLOEXEC) };
                 if received < 0 {
                     Err(io::Error::last_os_error())
                 } else {
@@ -65,16 +92,21 @@ impl FrameReader {
             }) {
                 Ok(received) => received,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error),
             };
             if received == 0 {
-                if self.header_len == 0 {
+                if reading_header && self.header_len == 0 {
                     return Ok(None);
                 }
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated request header"));
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated request frame"));
             }
 
-            self.header_len += received as usize;
+            if reading_header {
+                self.header_len += received as usize;
+            } else {
+                self.payload_len += received as usize;
+            }
             let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
             while !cmsg.is_null() {
                 let header = unsafe { &*cmsg };
@@ -83,27 +115,26 @@ impl FrameReader {
                         .saturating_sub(unsafe { libc::CMSG_LEN(0) as usize });
                     let count = data_len / mem::size_of::<RawFd>();
                     let data_ptr = unsafe { libc::CMSG_DATA(cmsg) as *const RawFd };
-                    if count > 0 {
-                        if let Some(previous) = self.attached_fd.replace(unsafe { *data_ptr }) {
-                            unsafe { libc::close(previous); }
+                    for index in 0..count {
+                        let fd = unsafe { OwnedFd::from_raw_fd(*data_ptr.add(index)) };
+                        if self.attached_fd.is_none() {
+                            self.attached_fd = Some(fd);
                         }
                     }
                 }
                 cmsg = unsafe { libc::CMSG_NXTHDR(&msg, cmsg) };
             }
+            if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated request ancillary data"));
+            }
         }
 
-        let size = u32::from_be_bytes(self.header) as usize;
-        if size > 64 * 1024 * 1024 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "request frame too large"));
-        }
-        let mut payload = vec![0u8; size];
-        stream.read_exact(&mut payload).await?;
-        let attached_fd = self.attached_fd.take();
-        self.header_len = 0;
-        let request = Request::decode(payload.as_slice())
+        let request = Request::decode(self.payload.as_slice())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        Ok(Some(IncomingRequest { request, attached_fd }))
+        self.header_len = 0;
+        self.payload_len = 0;
+        self.payload = Vec::new();
+        Ok(Some(IncomingRequest { request, attached_fd: self.attached_fd.take() }))
     }
 }
 

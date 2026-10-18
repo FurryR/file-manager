@@ -63,6 +63,10 @@ android {
         jniLibs.useLegacyPackaging = true
         jniLibs.excludes.add("**/libtermux.so")
     }
+
+    // Package standalone executables before signing, preserving lib/<abi>/<name>.
+    // The JNI input pipeline filters out filenames without a .so suffix.
+    sourceSets.getByName("main").resources.srcDir("src/main/executables")
 }
 
 androidComponents {
@@ -93,15 +97,7 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("commons-net:commons-net:3.13.0")
     implementation("com.github.mwiede:jsch:2.28.5")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
-    testImplementation("io.mockk:mockk:1.13.13")
-    testImplementation("org.robolectric:robolectric:4.13")
-    testImplementation("androidx.test:core:1.6.1")
-    testImplementation("androidx.compose.ui:ui-test-junit4")
-    testImplementation("androidx.compose.ui:ui-test-manifest")
     debugImplementation("androidx.compose.ui:ui-tooling")
-
-    testImplementation("junit:junit:4.13.2")
 }
 
 // ── ASM Bytecode Instrumentation ─────────────────────────────────────

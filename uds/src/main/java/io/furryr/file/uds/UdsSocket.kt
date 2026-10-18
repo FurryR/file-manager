@@ -48,18 +48,25 @@ internal class UdsSocket(val fd: FileDescriptor) {
     fun receiveFrame(): Frame {
         if (closed) throw IOException("socket closed")
         val fds = ArrayList<FileDescriptor>(1)
-        val header = ByteArray(HEADER_SIZE)
-        readFully(header, fds)
-        val size = ((header[0].toInt() and 0xFF) shl 24) or
-                ((header[1].toInt() and 0xFF) shl 16) or
-                ((header[2].toInt() and 0xFF) shl 8) or
-                (header[3].toInt() and 0xFF)
-        if (size < 0 || size > MAX_FRAME) throw IOException("invalid frame size: $size")
-        val payload = ByteArray(size)
-        readFully(payload, fds)
-        return Frame(payload, fds)
+        try {
+            val header = ByteArray(HEADER_SIZE)
+            readFully(header, fds)
+            val size = ((header[0].toInt() and 0xFF) shl 24) or
+                    ((header[1].toInt() and 0xFF) shl 16) or
+                    ((header[2].toInt() and 0xFF) shl 8) or
+                    (header[3].toInt() and 0xFF)
+            if (size < 0 || size > MAX_FRAME) throw IOException("invalid frame size: $size")
+            val payload = ByteArray(size)
+            readFully(payload, fds)
+            return Frame(payload, fds)
+        } catch (e: Throwable) {
+            // recvmsg may have delivered descriptors before a partial frame fails.
+            fds.forEach { runCatching { Os.close(it) } }
+            throw e
+        }
     }
 
+    @Synchronized
     fun close() {
         if (closed) return
         closed = true

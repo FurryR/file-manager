@@ -43,6 +43,7 @@ object ContainerManager {
         name: String,
         imageRef: String,
         backend: ContainerBackend = ContainerBackend.PROOT,
+        progress: ((Long, Long) -> Unit)? = null,
     ): Result<Container> = withContext(Dispatchers.IO) {
         var didCreateDir = false
         try {
@@ -65,7 +66,7 @@ object ContainerManager {
             }
             didCreateDir = containerDir.mkdirs()
 
-            DistroFetcher.downloadRootfs(imageRef, containerDir, null).getOrThrow()
+            DistroFetcher.downloadRootfs(imageRef, containerDir, progress).getOrThrow()
 
             val distroId = parseImageId(imageRef)
 

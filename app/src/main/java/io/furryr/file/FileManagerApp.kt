@@ -7,8 +7,9 @@ import io.furryr.file.util.Path
 
 import io.furryr.file.core.DaemonManager
 import io.furryr.file.core.DaemonStatus
-import io.furryr.file.agent.ContainerWizardActivity
 import io.furryr.file.agent.ContainerManager
+import io.furryr.file.agent.ContainerBackend
+import io.furryr.file.provider.DirectoryCapabilities
 import io.furryr.file.agent.SessionManager
 import io.furryr.file.model.SafLocation
 import io.furryr.file.model.FtpServer
@@ -51,6 +52,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -66,6 +68,7 @@ import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -97,6 +100,7 @@ import io.furryr.file.ui.components.BottomToolbar
 import io.furryr.file.ui.components.FileDrawer
 import io.furryr.file.ui.screens.FileListScreen
 import io.furryr.file.ui.util.OperationNotification
+import io.furryr.file.ui.util.ContainerNotification
 import io.furryr.file.ui.util.formatSize
 
 import kotlinx.coroutines.CancellationException
@@ -112,7 +116,9 @@ import kotlinx.coroutines.withContext
 @Composable
 fun FileManagerApp(
     darkTheme: Boolean = true,
-    onToggleTheme: () -> Unit = {}
+    onToggleTheme: () -> Unit = {},
+    terminalOpenRequest: Int = 0,
+    containerErrorRequest: String? = null,
 ) {
     val context = LocalContext.current
     val tabs = remember { mutableStateListOf(FileTab(path = DefaultPath)) }
@@ -121,6 +127,7 @@ fun FileManagerApp(
     var showJumpDialog by remember { mutableStateOf(false) }
     var showInfoDialog by remember { mutableStateOf(false) }
     var showCreateDialog by remember { mutableStateOf(false) }
+    var containerError by remember(containerErrorRequest) { mutableStateOf(containerErrorRequest) }
     var showMoreMenu by remember { mutableStateOf(false) }
     var pendingTabIndex by remember { mutableIntStateOf(-1) }
     var refreshTrigger by remember { mutableIntStateOf(0) }
@@ -146,6 +153,9 @@ fun FileManagerApp(
     var highlightPath by remember { mutableStateOf<String?>(null) }
     var pendingScrollPath by remember { mutableStateOf<String?>(null) }
     var showTerminalSheet by remember { mutableStateOf(false) }
+    LaunchedEffect(terminalOpenRequest) {
+        if (terminalOpenRequest > 0) showTerminalSheet = true
+    }
     var containerRefreshKey by remember { mutableIntStateOf(0) }
     var drawerSortMode by remember { mutableStateOf(false) }
     var containerNameOrder by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -154,10 +164,6 @@ fun FileManagerApp(
     // When DaemonLauncher establishes a fresh connection (after start or
     // recovery) this counter increments, triggering file list + drawer refresh.
     var lastRefreshDaemonGen by remember { mutableIntStateOf(DaemonManager.generation) }
-
-    val containerWizardLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { _ -> containerRefreshKey++ }
 
     var safLocations by remember { mutableStateOf<List<SafLocation>>(emptyList()) }
     var safRefreshKey by remember { mutableIntStateOf(0) }
@@ -225,49 +231,53 @@ fun FileManagerApp(
 
     fun currentTab(): FileTab = tabs[selectedTabIndex]
 
+    var pendingNavigation by remember(selectedTabIndex, currentTab().path) { mutableStateOf<FileTab?>(null) }
+
+    var directoryCapabilities by remember {
+        mutableStateOf(DirectoryCapabilities())
+    }
+
     fun replaceCurrent(tab: FileTab) {
         tabs[selectedTabIndex] = tab
     }
 
     fun navigateTo(path: String) {
         val tab = currentTab()
-        if (path == tab.path) return
-        replaceCurrent(tab.copy(path = path, backStack = tab.backStack + tab.path, forwardStack = emptyList()))
-    }
-
-    fun navigateDown(name: String) {
-        val tab = currentTab()
-        val child = FileRepository.navigate(tab.path, name) ?: return
-        if (child == tab.path) return
-        replaceCurrent(tab.copy(path = child, backStack = tab.backStack + tab.path, forwardStack = emptyList()))
+        if (path == tab.path || pendingNavigation != null) return
+        pendingNavigation = tab.copy(path = path, backStack = tab.backStack + tab.path, forwardStack = emptyList())
     }
 
     fun goBack() {
+        if (pendingNavigation != null) return
         val tab = currentTab()
         val target = tab.backStack.lastOrNull() ?: return
-        replaceCurrent(
+        pendingNavigation =
             tab.copy(
                 path = target,
                 backStack = tab.backStack.dropLast(1),
                 forwardStack = listOf(tab.path) + tab.forwardStack
             )
-        )
     }
 
     fun goForward() {
+        if (pendingNavigation != null) return
         val tab = currentTab()
         val target = tab.forwardStack.firstOrNull() ?: return
-        replaceCurrent(
+        pendingNavigation =
             tab.copy(
                 path = target,
                 backStack = tab.backStack + tab.path,
                 forwardStack = tab.forwardStack.drop(1)
             )
-        )
     }
 
     fun goParent() {
-        FileRepository.navigate(currentTab().path, "..")?.let(::navigateTo)
+        val path = pendingNavigation?.path ?: currentTab().path
+        val parent = FileRepository.navigate(path, "..") ?: return
+        pendingNavigation = null
+        highlightPath = null
+        pendingScrollPath = null
+        navigateTo(parent)
     }
 
     fun refreshFileList(animate: Boolean = true) {
@@ -444,9 +454,7 @@ fun FileManagerApp(
         onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
 
-    // Daemon readiness observer — triggers a file list + drawer stats
-    // refresh whenever the daemon establishes a fresh connection after
-    // start, restart, or transient failure recovery.
+    // Refresh listings and stats after initial startup or a fresh on-demand daemon launch.
     LaunchedEffect(Unit) {
         DaemonManager.status.collect { state ->
             if (state is DaemonStatus.Connected) {
@@ -487,12 +495,19 @@ fun FileManagerApp(
             clearSelection()
         } else if (drawerState.isOpen) {
             scope.launch { drawerState.close() }
-        } else if (currentTab().path != "/") {
-            goParent()
-        } else if (tabs.size > 1) {
-            closeTab(selectedTabIndex)
+        } else if (pendingNavigation != null) {
+            pendingNavigation = null
+            highlightPath = null
+            pendingScrollPath = null
         } else {
-            (context as? Activity)?.finish()
+            val currentPath = currentTab().path
+            if (FileRepository.navigate(currentPath, "..") != null) {
+                goParent()
+            } else if (tabs.size > 1) {
+                closeTab(selectedTabIndex)
+            } else {
+                (context as? Activity)?.finish()
+            }
         }
     }
 
@@ -550,9 +565,35 @@ fun FileManagerApp(
                     scope.launch { drawerState.close() }
                 },
                 onNewContainer = {
-                    containerWizardLauncher.launch(
-                        Intent(context, ContainerWizardActivity::class.java)
-                    )
+                    // The drawer owns the form; creation is handled by onCreateContainer below.
+                },
+                rootAvailable = DaemonManager.isRootAvailable(),
+                onCreateContainer = { name, image, backend ->
+                    scope.launch {
+                        ContainerNotification.showProgress(context, name, 0L, 0L)
+                        val result = withContext(Dispatchers.IO) {
+                            ContainerManager.createContainer(
+                                context = context,
+                                name = name,
+                                imageRef = image,
+                                backend = backend,
+                                progress = { current, total ->
+                                    ContainerNotification.showProgress(context, name, current, total)
+                                },
+                            )
+                        }
+                        if (result.isSuccess) {
+                            ContainerNotification.cancel(context)
+                            Toast.makeText(context, "[$name]", Toast.LENGTH_SHORT).show()
+                        } else {
+                            ContainerNotification.showFailure(
+                                context,
+                                name,
+                                result.exceptionOrNull()?.message ?: "Unknown error",
+                            )
+                        }
+                        containerRefreshKey++
+                    }
                 },
                 onSettingsClick = {
                     drawerSortMode = false
@@ -574,6 +615,9 @@ fun FileManagerApp(
                 },
                 onContainerDelete = { name ->
                     scope.launch {
+                        if (!DaemonManager.isRootAvailable() &&
+                            ContainerManager.getContainer(context, name)?.backend == ContainerBackend.CHROOT
+                        ) return@launch
                         val result = withContext(Dispatchers.IO) {
                             ContainerManager.deleteContainer(context, name)
                         }
@@ -588,6 +632,9 @@ fun FileManagerApp(
                 },
                 onContainerKill = { name ->
                     scope.launch {
+                        if (!DaemonManager.isRootAvailable() &&
+                            ContainerManager.getContainer(context, name)?.backend == ContainerBackend.CHROOT
+                        ) return@launch
                         // Close every terminal session of the container first,
                         // then tear down its dedicated daemon (kills the process tree).
                         SessionManager.destroyContainerSessions(name)
@@ -636,6 +683,16 @@ fun FileManagerApp(
                         Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
                             .setPackage("com.android.documentsui")
                     )
+                },
+                onUseExternalStorage = {
+                    safFolderLauncher.launch(
+                        Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                            .setPackage("com.android.documentsui")
+                    )
+                },
+                onLocalPath = { path ->
+                    navigateTo(path)
+                    scope.launch { drawerState.close() }
                 },
                 onSafClick = { hexId ->
                     navigateTo("saf://$hexId/")
@@ -889,11 +946,13 @@ fun FileManagerApp(
                 BottomToolbar(
                     canGoBack = toolTab.backStack.isNotEmpty(),
                     canGoForward = toolTab.forwardStack.isNotEmpty(),
-                    canGoParent = FileRepository.navigate(toolTab.path, "..") != null,
+                    canGoParent = FileRepository.navigate(pendingNavigation?.path ?: toolTab.path, "..") != null,
                     onBack = ::goBack,
                     onForward = ::goForward,
-                    onCreateFile = { showCreateDialog = true },
+                    onCreateFile = { if (directoryCapabilities.canCreate) showCreateDialog = true },
+                    canCreate = directoryCapabilities.canCreate,
                     onTerminal = { showTerminalSheet = true },
+                    canOpenTerminal = directoryCapabilities.canOpenTerminal,
                     onParent = ::goParent,
                     copyMoveActive = copyMoveState != null,
                     onCopyMoveConfirm = { showCopyMovePlaceDialog = true },
@@ -958,7 +1017,19 @@ fun FileManagerApp(
 
                 val tab = currentTab()
                 FileListScreen(
-                    path = tab.path,
+                    path = pendingNavigation?.path ?: tab.path,
+                    committedPath = tab.path,
+                    onNavigationLoaded = { loadedPath ->
+                        pendingNavigation?.takeIf { it.path == loadedPath }?.let {
+                            replaceCurrent(it)
+                            pendingNavigation = null
+                        }
+                    },
+                    onNavigationCancelled = {
+                        pendingNavigation = null
+                        highlightPath = null
+                        pendingScrollPath = null
+                    },
                     refreshToken = refreshTrigger,
                     animationToken = animationTrigger,
                     sortMode = sortMode,
@@ -967,6 +1038,10 @@ fun FileManagerApp(
                     scrollToPath = pendingScrollPath,
                     onScrollConsumed = { pendingScrollPath = null },
                     onInfoChange = { currentInfo = it },
+                    onCapabilitiesChange = {
+                        directoryCapabilities = it
+                        if (!it.canCreate) showCreateDialog = false
+                    },
                     onEntriesChange = { entries ->
                         currentEntries = entries
                         val curTab = currentTab()
@@ -980,7 +1055,7 @@ fun FileManagerApp(
                         }
                         replaceCurrent(curTab.copy(selectedPaths = newPaths))
                     },
-                    onDirectoryClick = { path -> Path.parse(path).name?.let(::navigateDown) },
+                    onDirectoryClick = ::navigateTo,
                     onFileClick = { openFile(context, it) },
                     onLongPress = { contextMenuEntry = it },
                     selectionMode = copyMoveState == null && currentTab().selectedPaths.isNotEmpty(),
@@ -1031,7 +1106,7 @@ fun FileManagerApp(
         )
     }
 
-    if (showCreateDialog) {
+    if (showCreateDialog && directoryCapabilities.canCreate) {
         CreateDialog(
             initialPath = currentTab().path,
             onDismiss = { showCreateDialog = false },
@@ -1174,6 +1249,19 @@ fun FileManagerApp(
                 copyMoveState = null
                 refreshFileList()
             }
+        )
+    }
+
+    containerError?.let { reason ->
+        AlertDialog(
+            onDismissRequest = { containerError = null },
+            title = { Text(stringResource(R.string.container_create_failed)) },
+            text = { Text(reason) },
+            confirmButton = {
+                TextButton(onClick = { containerError = null }) {
+                    Text(stringResource(R.string.confirm))
+                }
+            },
         )
     }
 

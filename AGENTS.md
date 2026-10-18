@@ -12,8 +12,8 @@ file-manager/
 │       ├── UdsSocket.kt    # framed 4-byte-length I/O, SCM_RIGHTS via recvmsg/sendmsg
 │       ├── UdsNative.kt    # native bridge: bind/listen/accept + fd helpers
 │       ├── Transport.kt    # full-duplex event transport (Frame + TransportEvent)
-│       ├── UdsTransport.kt # reader coroutine + write lock + optional reconnect
-│       └── UdsClient.kt / UdsServer.kt / Frame.kt / UdsEndpoint.kt / ReconnectPolicy.kt
+│       ├── UdsTransport.kt # reader coroutine + write lock; disconnects are terminal
+│       └── UdsClient.kt / UdsServer.kt / Frame.kt / UdsEndpoint.kt
 ├── core/                # :core — daemon protocol layer over :uds.Transport
 │   └── src/main/java/io/furryr/file/core/
 │       ├── DaemonManager.kt      # Public facade: lifecycle, launcher SPI, hub, services
@@ -94,6 +94,13 @@ file-manager/
 - UI importing `io.furryr.file.core.ipc`, `io.furryr.file.proto`, or raw
   `DaemonConnection` — always go through the `:core` public facades.
 
+## TESTING POLICY
+
+- Do not write, add, restore, or run unit tests for any Kotlin or Rust code in this repository.
+- Verify behavior through manual testing only, including UI interaction and command-line checks.
+- Do not add test-only dependencies, test source sets, or Rust `#[cfg(test)]` modules.
+- Compilation and build checks are allowed; they are not substitutes for manual behavioral testing.
+
 ## COMMANDS
 
 ```bash
@@ -108,25 +115,38 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
 ## NOTES
 
 - Target SDK 28 avoids storage restrictions needed by root features.
-- `DaemonManager.startHub()` runs the run0 communication hub (bootstrap in
-  [`core/hub/Hub.kt`]): a stable, unauthenticated UDS server that speaks
+- `DaemonManager.startHub()` runs the communication hub (bootstrap in
+  [`core/hub/Hub.kt`]): an unauthenticated UDS server with a fresh random
+  abstract socket name on every start that speaks
   its **own** protocol ([`proto/hub.proto`]) and translates each request onto
   the selected daemon — it never exposes the daemon's file protocol. run0 (and,
   later, agents) attach to it; the hub holds the app identity, so it
   authenticates to the daemon on the client's behalf. The `run0` Rust CLI is a
-  separate subproject (`run0/`), shipped by original name via an asset that the
-  app extracts to `filesDir/bin`; app-spawned shells get `RUN0_SOCKET` and that
-  directory on `PATH`.
+  separate subproject (`run0/`), staged under `app/src/main/executables/` and
+  packaged through Java resources as `lib/<abi>/run0` before APK signing. This
+  bypasses AGP's JNI filename filter. The current debuggable build types allow
+  Android to extract this original name into `nativeLibraryDir`; non-debuggable
+  builds do not extract arbitrary executable names. App-spawned shells get
+  `HUB_SOCKET` and `nativeLibraryDir` on `PATH`, so the command is `run0`.
+  Kotlin runtime code knows only the generic hub contract and utility directory.
+  Daemon launchers set PATH to the native utility directory plus the target's
+  standard directories. Target shells retain that PATH while initializing a
+  clean user environment. Clients send only
+  explicit environment overrides. Container terminals initialize that clean
+  environment before `login -p -f root`, preserving the normal login/MOTD
+  experience; hub command execution launches the passwd shell directly.
 - Native executables are packaged as **`lib*.so` under `jniLibs/`**
   (`libfiledaemon.so`, `libproot.so`) because the Android installer only
-  auto-extracts `lib/<abi>/lib*.so` to `nativeLibraryDir`. AGP's jniLibs
+  auto-extracts `lib/<abi>/lib*.so` to `nativeLibraryDir` (debuggable apps also
+  allow other safe filenames). AGP's jniLibs
   pipeline also drops any non-`.so` entry, so the `lib*.so` names are what let
   the daemon/proot binaries ship and be extracted without a custom staging step.
 - Build scripts under `native/` copy the compiled binaries into `jniLibs/`.
-- Daemon sockets use the **abstract namespace**, but names are *derived*
-  (`file-daemon-<sha256(pubkey‖id)>`), not random: the app generates an Ed25519
-  identity once ([`core/DaemonIdentity.kt`]) and every launch gets `--key <pub>
-  --id <id>`. Stable names let a daemon that outlived the app be re-attached.
+- Daemon sockets use the **abstract namespace** with names derived from the
+  public key and target id. Each daemon launch creates a fresh in-memory Ed25519
+  identity ([`core/DaemonIdentity.kt`]), owned by its connection, and receives
+  `--key <pub> --id <id>`. Keys never touch disk; the fresh key gives every launch
+  a different socket. The manager never reattaches to an old daemon.
   Every connection must pass a nonce/signature handshake
   ([`core/DaemonAuth.kt`] ↔ `native/src/auth.rs`) — the derived name is public,
   so it is not a credential. The run0 hub keeps its random name. Ids are
@@ -137,7 +157,12 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   elevated daemon is a single `privileged` target regardless of mechanism.
 - **The daemon is multi-client** — it serves many concurrent connections, but
   per-connection state (cancellable in-flight requests) is *not* shared, and
-  long-lived resources (handles, PTYs) are daemon-global. Shutdown is explicit
-  via an `ExitRequest` (or a signal); `DaemonConnection` re-attaches via
-  `:uds.ReconnectPolicy` after a transient drop.
+  long-lived resources (handles, PTYs) are daemon-global. The daemon exits after
+  10 seconds without its first successful authentication, or immediately when
+  its last authenticated connection disconnects. Unauthenticated clients cannot
+  keep it alive. `ExitRequest` and signals still shut down the whole daemon.
+  Ordinary connection close only disconnects that client; manager reset and
+  container shutdown explicitly stop the daemon. There is no transport reconnect
+  or request replay. After connection loss, a later operation starts a fresh
+  daemon on demand; old PTYs and handles are not restored.
 - Client entry points live in `:core` (`DaemonManager.fileService/execService`).

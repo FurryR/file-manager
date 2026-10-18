@@ -34,6 +34,11 @@ object SAFProvider : FileProvider {
     )
 
     private lateinit var db: SafDatabase
+
+    override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
+        if (path.trim('/').isEmpty()) return DirectoryCapabilities()
+        return super<FileProvider>.directoryCapabilities(path)
+    }
         private lateinit var appContext: Context
 
             fun init(context: Context) {

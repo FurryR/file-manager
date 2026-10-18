@@ -1,6 +1,6 @@
 //! run0 — elevate privileges interactively through the file-manager hub.
 //!
-//! It reads the hub's abstract socket name from `$RUN0_SOCKET`, connects, asks
+//! It reads the hub's abstract socket name from `$HUB_SOCKET`, connects, asks
 //! the hub to run a command under a chosen user (optionally inside a container),
 //! and bridges the returned PTY master fd to the local terminal.
 
@@ -8,10 +8,12 @@ use std::collections::HashMap;
 use std::env;
 use std::io;
 use std::mem;
-use std::os::fd::RawFd;
+use std::fs::{File, OpenOptions};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 use std::process::exit;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::thread;
 
 use prost::Message;
 
@@ -28,7 +30,7 @@ static WINCH_WRITE: AtomicI32 = AtomicI32::new(-1);
 static mut ORIG_TERMIOS: Option<libc::termios> = None;
 
 const USAGE: &str = "\
-run0 [OPTIONS...] COMMAND [ARGUMENTS...]
+run0 [OPTIONS...] [COMMAND [ARGUMENTS...]]
 
 Elevate privileges interactively.
 
@@ -45,9 +47,12 @@ Options:
 
 fn main() {
     let args = parse_args();
-    if let Err(error) = run(args) {
-        eprintln!("run0: {error}");
-        exit(2);
+    match run(args) {
+        Ok(code) => exit(code),
+        Err(error) => {
+            eprintln!("run0: {error}");
+            exit(2);
+        }
     }
 }
 
@@ -138,36 +143,60 @@ fn parse_nice(value: &str) -> i32 {
 
 // ── The run ──────────────────────────────────────────────────────────
 
-fn run(args: Args) -> io::Result<()> {
-    let socket_name = env::var("RUN0_SOCKET").map_err(|_| {
+fn command_spec(args: &Args) -> (String, Vec<String>) {
+    let mut shell_args = Vec::new();
+    if args.via_shell {
+        shell_args.push("-l".to_string());
+    }
+    if !args.command.is_empty() {
+        let script = args
+            .command
+            .iter()
+            .map(|word| format!("'{}'", word.replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        shell_args.extend(["-c".to_string(), script]);
+    }
+    (String::new(), shell_args)
+}
+
+fn working_directory(chdir: Option<&str>) -> io::Result<(String, bool, Option<File>)> {
+    match chdir {
+        Some("~") => Ok(("~".to_string(), false, None)),
+        Some(path) if Path::new(path).is_absolute() => Ok((path.to_string(), false, None)),
+        Some(path) => open_caller_directory(&env::current_dir()?.join(path)),
+        None => open_caller_directory(&env::current_dir()?),
+    }
+}
+
+fn open_caller_directory(path: &Path) -> io::Result<(String, bool, Option<File>)> {
+    let directory = OpenOptions::new().read(true)
+        .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC).open(path)?;
+    Ok((String::new(), true, Some(directory)))
+}
+
+fn run(args: Args) -> io::Result<i32> {
+    let socket_name = env::var("HUB_SOCKET").map_err(|_| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            "$RUN0_SOCKET is not set; invoke run0 from an app-spawned terminal",
+            "$HUB_SOCKET is not set; invoke run0 from an app-spawned terminal",
         )
     })?;
 
     let (rows, cols) = tty_size(libc::STDIN_FILENO);
     let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
 
-    // Command: no COMMAND means a login shell; --via-shell wraps an explicit
-    // command in the login shell; otherwise exec it directly.
-    let (command, command_args) = if args.command.is_empty() {
-        ("/system/bin/sh".to_string(), vec!["-l".to_string()])
-    } else if args.via_shell {
-        (
-            "/system/bin/sh".to_string(),
-            vec!["-l".to_string(), "-c".to_string(), args.command.join(" ")],
-        )
-    } else {
-        (args.command[0].clone(), args.command[1..].to_vec())
-    };
+    // Let the target shell resolve commands and report its own execution errors.
+    let (command, command_args) = command_spec(&args);
+    let (cwd, cwd_fd, cwd_handle) = working_directory(args.chdir.as_deref())?;
 
     let mut env_map = HashMap::new();
     for (name, value) in args.setenv {
         env_map.insert(name, value);
     }
 
-    let fd = connect_abstract(&socket_name)?;
+    let control = connect_abstract(&socket_name)?;
+    let fd = control.as_raw_fd();
     ignore_sigpipe();
 
     if let Some(machine) = args.machine.as_deref() {
@@ -181,8 +210,7 @@ fn run(args: Args) -> io::Result<()> {
         if !response.ok {
             return Err(io::Error::other(format!(
                 "cannot select '{}': {}",
-                machine,
-                response.error
+                machine, response.error
             )));
         }
     }
@@ -191,7 +219,8 @@ fn run(args: Args) -> io::Result<()> {
         command,
         args: command_args,
         env: env_map,
-        cwd: args.chdir.unwrap_or_default(),
+        cwd,
+        cwd_fd,
         user: args.user,
         term,
         rows,
@@ -202,99 +231,227 @@ fn run(args: Args) -> io::Result<()> {
         id: 2,
         op: Some(HubOp::Exec(exec)),
     };
-    let (response, master) = round_trip_with_fd(fd, request)?;
+    let (response, master) = round_trip_with_attached_fd(
+        fd,
+        request,
+        cwd_handle.as_ref().map(AsRawFd::as_raw_fd),
+    )?;
+    drop(cwd_handle);
     if !response.ok {
         return Err(io::Error::other(response.error));
     }
-    let master = master.ok_or_else(|| {
-        io::Error::other("hub returned no PTY fd (SCM_RIGHTS was dropped?)")
-    })?;
+    let master = master
+        .ok_or_else(|| io::Error::other("hub returned no PTY fd (SCM_RIGHTS was dropped?)"))?;
     let pty_id = match response.result {
         Some(filehub::hub_response::Result::Exec(e)) => e.pty_id,
-        _ => 0,
+        _ => return Err(io::Error::other("hub returned no Exec result")),
     };
 
-    let code = bridge(fd, master, pty_id)?;
-    exit(code);
+    bridge(fd, master.as_raw_fd(), pty_id)
 }
 
-/// Put the terminal into raw mode, pump bytes both ways and forward resizes,
-/// then wait for the child and return its exit code.
+/// Put the terminal into raw mode and pump bytes and resizes while waiting for
+/// the child, restoring the terminal before returning its exit code.
 fn bridge(control_fd: RawFd, master: RawFd, pty_id: u64) -> io::Result<i32> {
-    let original = make_raw(libc::STDIN_FILENO)?;
-    unsafe { ORIG_TERMIOS = Some(original) };
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
+        let original = make_raw(libc::STDIN_FILENO)?;
+        unsafe { ORIG_TERMIOS = Some(original) };
+    }
     install_winch();
     install_restore_handlers();
-
-    // stdin -> daemon PTY (own thread, so a full input buffer can never stall
-    // the output reader).
-    thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            let n = unsafe {
-                libc::read(libc::STDIN_FILENO, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-            };
-            if n <= 0 {
-                break;
-            }
-            if write_all(master, &buf[..n as usize]).is_err() {
-                break;
-            }
-        }
-    });
-
     let winch_read = WINCH_READ.load(Ordering::Relaxed);
+    let result = pump(
+        control_fd,
+        master,
+        pty_id,
+        libc::STDIN_FILENO,
+        libc::STDOUT_FILENO,
+        winch_read,
+    );
+    restore_termios();
+    unsafe { ORIG_TERMIOS = None };
+    for slot in [&WINCH_WRITE, &WINCH_READ] {
+        let fd = slot.swap(-1, Ordering::Relaxed);
+        if fd >= 0 {
+            unsafe { libc::close(fd) };
+        }
+    }
+    result
+}
+
+fn pump(
+    control_fd: RawFd,
+    master: RawFd,
+    pty_id: u64,
+    input: RawFd,
+    output: RawFd,
+    winch: RawFd,
+) -> io::Result<i32> {
+    let flags = unsafe { libc::fcntl(master, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Wait for the child concurrently with terminal I/O. Resize the shared
+    // master locally so no extra control responses enter this receive loop.
+    send_frame(
+        control_fd,
+        &HubRequest {
+            id: 3,
+            op: Some(HubOp::Wait(WaitRequest { pty_id })),
+        }
+        .encode_to_vec(),
+    )?;
     let mut buf = [0u8; 4096];
+    let mut pending = Vec::new();
+    let mut input_open = true;
+    let mut master_open = true;
+    let mut code = None;
+    let mut final_output = 64 * 1024;
     loop {
         let mut pollfds = [
-            libc::pollfd { fd: master, events: libc::POLLIN, revents: 0 },
-            libc::pollfd { fd: winch_read, events: libc::POLLIN, revents: 0 },
+            libc::pollfd {
+                fd: if master_open { master } else { -1 },
+                events: libc::POLLIN | if pending.is_empty() { 0 } else { libc::POLLOUT },
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: winch,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: if code.is_none() { control_fd } else { -1 },
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: if input_open && master_open && pending.is_empty() && code.is_none() {
+                    input
+                } else {
+                    -1
+                },
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
-        let ready = unsafe { libc::poll(pollfds.as_mut_ptr(), 2, -1) };
+        let ready = unsafe {
+            libc::poll(
+                pollfds.as_mut_ptr(),
+                pollfds.len() as _,
+                if code.is_some() { 0 } else { -1 },
+            )
+        };
         if ready < 0 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
                 continue;
             }
+            return Err(error);
+        }
+        if ready == 0 && code.is_some() {
             break;
         }
-
-        if pollfds[1].revents & libc::POLLIN != 0 {
-            drain(winch_read);
-            resize(control_fd, master, pty_id);
+        if pollfds.iter().any(|p| p.revents & libc::POLLNVAL != 0) {
+            return Err(io::Error::other("invalid bridge descriptor"));
         }
-
-        if pollfds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
-            let n = unsafe { libc::read(master, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if pollfds[1].revents & libc::POLLIN != 0 {
+            drain(winch);
+            resize(master);
+        }
+        if pollfds[2].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+            let response = receive_response(control_fd, 3)?.0;
+            if !response.ok {
+                return Err(io::Error::other(response.error));
+            }
+            code = Some(match response.result {
+                Some(filehub::hub_response::Result::Wait(w)) => w.exit_code,
+                _ => return Err(io::Error::other("hub returned no Wait result")),
+            });
+            pending.clear();
+        }
+        if pollfds[3].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
+            && code.is_none()
+        {
+            let n = unsafe { libc::read(input, buf.as_mut_ptr().cast(), buf.len()) };
             if n > 0 {
-                let _ = write_all(libc::STDOUT_FILENO, &buf[..n as usize]);
+                pending.extend_from_slice(&buf[..n as usize]);
+            } else if n == 0 {
+                input_open = false;
+                // A PTY cannot be half-closed. Supply canonical EOF for piped input.
+                // The first EOF can flush a partial line; the second ends input.
+                pending.extend_from_slice(&[4, 4]);
             } else {
-                // 0 or EIO: the slave side is gone, the child has finished.
-                break;
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
             }
         }
-    }
+        if pollfds[0].revents & libc::POLLOUT != 0 && !pending.is_empty() {
+            let n = unsafe { libc::write(master, pending.as_ptr().cast(), pending.len()) };
+            if n > 0 {
+                pending.drain(..n as usize);
+            } else if n < 0 {
+                let error = io::Error::last_os_error();
+                if !matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                ) && error.raw_os_error() != Some(libc::EIO)
+                {
+                    return Err(error);
+                }
+            }
+        }
 
-    restore_termios();
-    wait_child(control_fd, pty_id)
-}
-
-fn wait_child(control_fd: RawFd, pty_id: u64) -> io::Result<i32> {
-    let request = HubRequest {
-        id: 3,
-        op: Some(HubOp::Wait(WaitRequest { pty_id })),
-    };
-    let response = round_trip(control_fd, request)?;
-    if !response.ok {
-        return Err(io::Error::other(response.error));
+        if master_open
+            && (code.is_some()
+                || pollfds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0)
+        {
+            let limit = if code.is_some() {
+                buf.len().min(final_output)
+            } else {
+                buf.len()
+            };
+            let n = unsafe { libc::read(master, buf.as_mut_ptr() as *mut libc::c_void, limit) };
+            if n > 0 {
+                write_all(output, &buf[..n as usize])?;
+                if code.is_some() {
+                    final_output -= n as usize;
+                    if final_output == 0 {
+                        break;
+                    }
+                }
+            } else {
+                let error = io::Error::last_os_error();
+                if n == 0 || error.raw_os_error() == Some(libc::EIO) {
+                    master_open = false;
+                    pending.clear();
+                } else if !matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                ) {
+                    return Err(error);
+                } else if code.is_some() && error.kind() == io::ErrorKind::WouldBlock {
+                    break;
+                }
+            }
+        }
+        // Wait reaps and releases the daemon handle. Descendants may retain the
+        // slave, so drain bounded queued output without waiting for their EOF.
+        if code.is_some() && !master_open {
+            break;
+        }
     }
-    Ok(match response.result {
-        Some(filehub::hub_response::Result::Wait(w)) => w.exit_code,
-        _ => 0,
+    let code = code.unwrap();
+    // The daemon represents signal termination as a negative signal number.
+    Ok(if code < 0 {
+        code.saturating_neg().saturating_add(128)
+    } else {
+        code
     })
 }
 
-fn resize(control_fd: RawFd, master: RawFd, pty_id: u64) {
+fn resize(master: RawFd) {
     let (rows, cols) = tty_size(libc::STDIN_FILENO);
     let winsize = libc::winsize {
         ws_row: rows as u16,
@@ -304,49 +461,107 @@ fn resize(control_fd: RawFd, master: RawFd, pty_id: u64) {
     };
     // Set locally on the master; the kernel signals the child's process group.
     unsafe { libc::ioctl(master, TIOCSWINSZ as _, &winsize) };
-    // Also tell the hub so the daemon's view stays in sync.
-    let request = HubRequest {
-        id: 0,
-        op: Some(HubOp::Resize(filehub::ResizeRequest { pty_id, rows, cols })),
-    };
-    let _ = send_frame(control_fd, &request.encode_to_vec());
-    let _ = recv_frame(control_fd);
 }
 
 // ── Hub protocol I/O ─────────────────────────────────────────────────
 
 fn round_trip(fd: RawFd, request: HubRequest) -> io::Result<HubResponse> {
-    let (response, attached) = round_trip_with_fd(fd, request)?;
-    if let Some(extra) = attached {
-        unsafe { libc::close(extra) };
-    }
+    let (response, _attached) = round_trip_with_fd(fd, request)?;
     Ok(response)
 }
 
-fn round_trip_with_fd(fd: RawFd, request: HubRequest) -> io::Result<(HubResponse, Option<RawFd>)> {
-    send_frame(fd, &request.encode_to_vec())?;
+fn round_trip_with_fd(
+    fd: RawFd,
+    request: HubRequest,
+) -> io::Result<(HubResponse, Option<OwnedFd>)> {
+    round_trip_with_attached_fd(fd, request, None)
+}
+
+fn round_trip_with_attached_fd(
+    fd: RawFd,
+    request: HubRequest,
+    attached_fd: Option<RawFd>,
+) -> io::Result<(HubResponse, Option<OwnedFd>)> {
+    send_frame_with_fd(fd, &request.encode_to_vec(), attached_fd)?;
+    receive_response(fd, request.id)
+}
+
+fn receive_response(fd: RawFd, id: u32) -> io::Result<(HubResponse, Option<OwnedFd>)> {
     let (payload, attached) = recv_frame(fd)?;
     let response =
         HubResponse::decode(payload.as_slice()).map_err(|e| io::Error::other(e.to_string()))?;
+    if response.id != id {
+        return Err(io::Error::other("hub response id mismatch"));
+    }
     Ok((response, attached))
 }
 
 fn send_frame(fd: RawFd, payload: &[u8]) -> io::Result<()> {
+    send_frame_with_fd(fd, payload, None)
+}
+
+fn send_frame_with_fd(fd: RawFd, payload: &[u8], attached_fd: Option<RawFd>) -> io::Result<()> {
     let mut frame = Vec::with_capacity(4 + payload.len());
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(payload);
-    write_all(fd, &frame)
+    let mut sent = 0;
+    let mut attached_fd = attached_fd;
+    while sent < frame.len() {
+        let n = if let Some(rights_fd) = attached_fd {
+            let size = unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as _) } as usize;
+            let mut control = vec![0usize; size.div_ceil(mem::size_of::<usize>())];
+            let mut iov = libc::iovec {
+                iov_base: frame[sent..].as_mut_ptr().cast(),
+                iov_len: frame.len() - sent,
+            };
+            let mut msg: libc::msghdr = unsafe { mem::zeroed() };
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = control.as_mut_ptr().cast();
+            msg.msg_controllen = size as _;
+            unsafe {
+                let cmsg = libc::CMSG_FIRSTHDR(&msg);
+                (*cmsg).cmsg_level = libc::SOL_SOCKET;
+                (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+                (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<RawFd>() as _) as _;
+                *(libc::CMSG_DATA(cmsg) as *mut RawFd) = rights_fd;
+                libc::sendmsg(fd, &msg, libc::MSG_NOSIGNAL)
+            }
+        } else {
+            unsafe {
+                libc::send(
+                    fd,
+                    frame[sent..].as_ptr().cast(),
+                    frame.len() - sent,
+                    libc::MSG_NOSIGNAL,
+                )
+            }
+        };
+        if n < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "send returned zero bytes"));
+        }
+        sent += n as usize;
+        // SCM_RIGHTS must accompany only the first successful partial write.
+        attached_fd = None;
+    }
+    Ok(())
 }
 
 fn write_all(fd: RawFd, data: &[u8]) -> io::Result<()> {
     let mut sent = 0;
     while sent < data.len() {
         let n = unsafe {
-            libc::send(
+            libc::write(
                 fd,
                 data[sent..].as_ptr() as *const libc::c_void,
                 data.len() - sent,
-                libc::MSG_NOSIGNAL,
             )
         };
         if n < 0 {
@@ -357,48 +572,60 @@ fn write_all(fd: RawFd, data: &[u8]) -> io::Result<()> {
             return Err(error);
         }
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "send wrote zero bytes"));
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "write returned zero bytes",
+            ));
         }
         sent += n as usize;
     }
     Ok(())
 }
 
-fn recv_frame(fd: RawFd) -> io::Result<(Vec<u8>, Option<RawFd>)> {
+fn recv_frame(fd: RawFd) -> io::Result<(Vec<u8>, Option<OwnedFd>)> {
     let mut attached = None;
     let header = recv_exact(fd, 4, &mut attached)?;
     let size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+    if size > 64 * 1024 * 1024 {
+        return Err(io::Error::other("hub frame too large"));
+    }
     let payload = recv_exact(fd, size, &mut attached)?;
     Ok((payload, attached))
 }
 
-fn recv_exact(fd: RawFd, len: usize, attached: &mut Option<RawFd>) -> io::Result<Vec<u8>> {
+fn recv_exact(fd: RawFd, len: usize, attached: &mut Option<OwnedFd>) -> io::Result<Vec<u8>> {
     let mut buf = vec![0u8; len];
     let mut got = 0;
     while got < len {
-        let n = recv_some(fd, &mut buf[got..], attached)?;
+        let n = match recv_some(fd, &mut buf[got..], attached) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "hub closed connection"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "hub closed connection",
+            ));
         }
         got += n;
     }
     Ok(buf)
 }
 
-fn recv_some(fd: RawFd, buf: &mut [u8], attached: &mut Option<RawFd>) -> io::Result<usize> {
+fn recv_some(fd: RawFd, buf: &mut [u8], attached: &mut Option<OwnedFd>) -> io::Result<usize> {
     let mut iov = libc::iovec {
         iov_base: buf.as_mut_ptr() as *mut libc::c_void,
         iov_len: buf.len(),
     };
     let control_len = unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as u32) as usize };
-    let mut control = vec![0u8; control_len];
+    let mut control = vec![0usize; control_len.div_ceil(mem::size_of::<usize>())];
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
     msg.msg_controllen = control_len as _;
 
-    let n = unsafe { libc::recvmsg(fd, &mut msg, 0) };
+    let n = unsafe { libc::recvmsg(fd, &mut msg, libc::MSG_CMSG_CLOEXEC) };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -417,7 +644,7 @@ fn recv_some(fd: RawFd, buf: &mut [u8], attached: &mut Option<RawFd>) -> io::Res
                     continue;
                 }
                 if attached.is_none() {
-                    *attached = Some(received);
+                    *attached = Some(unsafe { OwnedFd::from_raw_fd(received) });
                 } else {
                     unsafe { libc::close(received) };
                 }
@@ -425,20 +652,26 @@ fn recv_some(fd: RawFd, buf: &mut [u8], attached: &mut Option<RawFd>) -> io::Res
         }
         cmsg = unsafe { libc::CMSG_NXTHDR(&msg, cmsg) };
     }
+    if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+        return Err(io::Error::other("truncated hub descriptors"));
+    }
     Ok(n as usize)
 }
 
 // ── Socket ───────────────────────────────────────────────────────────
 
-fn connect_abstract(name: &str) -> io::Result<RawFd> {
-    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+fn connect_abstract(name: &str) -> io::Result<OwnedFd> {
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
     let bytes = name.as_bytes();
     if bytes.len() > 107 {
-        unsafe { libc::close(fd) };
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "hub socket name too long"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "hub socket name too long",
+        ));
     }
     let mut addr: libc::sockaddr_un = unsafe { mem::zeroed() };
     addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
@@ -446,15 +679,12 @@ fn connect_abstract(name: &str) -> io::Result<RawFd> {
         addr.sun_path[index + 1] = *byte as libc::c_char;
     }
     let length = (mem::size_of::<libc::sa_family_t>() + 1 + bytes.len()) as libc::socklen_t;
-    let result = unsafe {
-        libc::connect(fd, &addr as *const _ as *const libc::sockaddr, length)
-    };
+    let result = unsafe { libc::connect(fd, &addr as *const _ as *const libc::sockaddr, length) };
     if result != 0 {
         let error = io::Error::last_os_error();
-        unsafe { libc::close(fd) };
         return Err(error);
     }
-    Ok(fd)
+    Ok(owned)
 }
 
 // ── Terminal ─────────────────────────────────────────────────────────
@@ -521,12 +751,8 @@ extern "C" fn on_terminate(signal: libc::c_int) {
 
 fn install_winch() {
     let mut pipe_fds = [0i32; 2];
-    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
+    if unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) } != 0 {
         return;
-    }
-    for fd in pipe_fds {
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
     }
     WINCH_READ.store(pipe_fds[0], Ordering::Relaxed);
     WINCH_WRITE.store(pipe_fds[1], Ordering::Relaxed);
@@ -535,9 +761,18 @@ fn install_winch() {
 
 fn install_restore_handlers() {
     unsafe {
-        libc::signal(libc::SIGTERM, on_terminate as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_terminate as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGHUP, on_terminate as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGTERM,
+            on_terminate as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            on_terminate as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGHUP,
+            on_terminate as *const () as libc::sighandler_t,
+        );
     }
 }
 

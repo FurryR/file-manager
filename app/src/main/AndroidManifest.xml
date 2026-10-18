@@ -49,12 +49,20 @@
 
         <activity
             android:name=".ui.screens.SettingsActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:exported="false"
+            android:theme="@style/Theme.FileManager" />
+
+        <activity
+            android:name=".ui.screens.LicensesActivity"
+            android:enableOnBackInvokedCallback="true"
             android:exported="false"
             android:theme="@style/Theme.FileManager" />
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.FileManager">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

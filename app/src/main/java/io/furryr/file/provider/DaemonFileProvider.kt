@@ -32,6 +32,14 @@ class DaemonFileProvider : FileProvider {
 
     override suspend fun stat(path: String) = files.stat(path)
 
+    override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
+        val directory = stat(path).getOrNull()
+        return DirectoryCapabilities(
+            canCreate = directory?.canCreateChildren == true,
+            canOpenTerminal = true,
+        )
+    }
+
     override suspend fun createFile(path: String): Result<Unit> = files.createFile(path)
 
     override suspend fun createDirectory(path: String): Result<Unit> = files.createDirectory(path)

@@ -15,11 +15,11 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -30,17 +30,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronLeft
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.surfaceColorAtElevation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -51,11 +53,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -64,11 +72,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.termux.terminal.TerminalSession
 import io.furryr.file.agent.SessionManager
+import io.furryr.file.agent.ContainerUriResolver
+import io.furryr.file.agent.TerminalInputState
 import io.furryr.file.agent.TerminalViewComposable
 import io.furryr.file.core.DaemonManager
 import android.app.Activity
+import android.content.Context
+import android.content.Intent
 import android.util.Log
-import android.view.ViewTreeObserver
+import android.view.KeyEvent
+import android.view.inputmethod.InputMethodManager
+import io.furryr.file.ui.screens.SettingsActivity
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -99,6 +113,8 @@ fun TerminalSheet(
     val configuration = LocalConfiguration.current
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
+    val view = LocalView.current
+    val focusManager = LocalFocusManager.current
 
     val tabs = remember { mutableStateListOf<TerminalTab>() }
     var activeTabIndex by remember { mutableIntStateOf(-1) }
@@ -109,57 +125,52 @@ fun TerminalSheet(
     val smallTargetPx = screenHeightPx * SmallRatio
     val largeTargetPx = screenHeightPx * LargeRatio
     val sheetHeightPx = remember { Animatable(0f) }
-    var imeBottomPx by remember { mutableIntStateOf(0) }
+    var wasVisible by remember { mutableStateOf(false) }
 
     BackHandler(enabled = visible) { onDismiss() }
 
     LaunchedEffect(visible) {
+        val isClosing = wasVisible && !visible
+        wasVisible = visible
         if (visible) {
             if (sheetHeightPx.value == 0f) {
                 sheetHeightPx.animateTo(smallTargetPx, spring(dampingRatio = Spring.DampingRatioLowBouncy))
             }
         } else {
+            if (isClosing) {
+                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                imm?.hideSoftInputFromWindow(view.windowToken, 0)
+                focusManager.clearFocus(force = true)
+                (context as? Activity)?.currentFocus?.clearFocus()
+            }
             sheetHeightPx.animateTo(0f, spring(dampingRatio = Spring.DampingRatioNoBouncy))
         }
     }
 
     // Listener for session finished events
     val sessionFinishedListener = { finishedSession: TerminalSession ->
-        val idx = tabs.indexOfFirst { it.session === finishedSession }
-        if (idx >= 0) {
-            val tab = tabs[idx]
-            scope.launch {
-                SessionManager.destroySession(tab.sessionId)
-            }
-            tabs.removeAt(idx)
-            if (tabs.isEmpty()) {
-                activeTabIndex = -1
-                onDismiss()
-            } else {
-                activeTabIndex = idx.coerceAtMost(tabs.lastIndex)
-            }
+        tabs.find { it.session === finishedSession }?.let {
+            SessionManager.destroySession(it.sessionId)
         }
+        Unit
     }
 
     DisposableEffect(Unit) {
-        val decorView = (context as? Activity)?.window?.decorView
-        val layoutListener = ViewTreeObserver.OnGlobalLayoutListener {
-            if (decorView != null) {
-                val rect = android.graphics.Rect()
-                decorView.getWindowVisibleDisplayFrame(rect)
-                imeBottomPx = (decorView.rootView.height - rect.bottom).coerceAtLeast(0)
+        val sessionChangeListener: () -> Unit = {
+            val activeId = tabs.getOrNull(activeTabIndex)?.sessionId
+            val sessionIds = SessionManager.getAllSessionInfos().map { it.id }.toSet()
+            val removed = tabs.removeAll { it.sessionId !in sessionIds }
+            if (removed) {
+                activeTabIndex = tabs.indexOfFirst { it.sessionId == activeId }
+                    .takeIf { it >= 0 } ?: tabs.lastIndex
+                if (tabs.isEmpty()) onDismiss()
             }
         }
-        decorView?.viewTreeObserver?.addOnGlobalLayoutListener(layoutListener)
-        onDispose {
-            decorView?.viewTreeObserver?.removeOnGlobalLayoutListener(layoutListener)
-        }
-    }
-
-    DisposableEffect(Unit) {
         SessionManager.addSessionFinishedListener(sessionFinishedListener)
+        SessionManager.addSessionChangeListener(sessionChangeListener)
         onDispose {
             SessionManager.removeSessionFinishedListener(sessionFinishedListener)
+            SessionManager.removeSessionChangeListener(sessionChangeListener)
             // Sessions are owned by SessionManager and kept alive by
             // TerminalForegroundService; they must survive the UI being torn
             // down so the user can reopen them from the notification.
@@ -171,8 +182,8 @@ fun TerminalSheet(
 
     fun resolveSessionType(path: String): Pair<SessionManager.SessionType, String> {
         return if (path.startsWith("container://")) {
-            val name = path.removePrefix("container://").substringBefore('/')
-            if (name.isNotBlank()) {
+            val name = ContainerUriResolver.resolveContainerUri(path).getOrThrow().containerName
+            if (name != null) {
                 SessionManager.SessionType.Container(name) to name
             } else {
                 SessionManager.SessionType.AppShell(cwd = "/sdcard") to "Local"
@@ -255,7 +266,8 @@ fun TerminalSheet(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .fillMaxHeight(sheetHeightPx.value / screenHeightPx)
+                    // adjustResize keeps this height bounded by the space above the IME.
+                    .height(with(density) { sheetHeightPx.value.toDp() })
                     .shadow(elevation = 16.dp, shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
                     .background(
                         MaterialTheme.colorScheme.surfaceColorAtElevation(3.dp),
@@ -277,11 +289,10 @@ fun TerminalSheet(
                                         current >= smallTargetPx * 0.5f -> smallTargetPx
                                         else -> 0f
                                     }
-                                    scope.launch {
-                                        if (target == 0f) {
-                                            sheetHeightPx.animateTo(0f, spring(dampingRatio = Spring.DampingRatioNoBouncy))
-                                            onDismiss()
-                                        } else {
+                                    if (target == 0f) {
+                                        onDismiss()
+                                    } else {
+                                        scope.launch {
                                             sheetHeightPx.animateTo(target, spring(dampingRatio = Spring.DampingRatioLowBouncy))
                                         }
                                     }
@@ -316,24 +327,16 @@ fun TerminalSheet(
                 }
 
                 // Content: terminal + overlay drawer
-                val isFullHeight = sheetHeightPx.value >= (smallTargetPx + largeTargetPx) / 2
-
                 ContentWithDrawer(
-                    modifier = Modifier.weight(1f).fillMaxWidth().imePadding(),
-                    imeBottomPx = if (isFullHeight) imeBottomPx else 0,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
                     showDrawer = showDrawer,
                     sessionError = sessionError,
                     tabs = tabs,
                     activeTabIndex = activeTabIndex,
+                    enabled = visible,
                     onSwitchTab = { idx -> activeTabIndex = idx; showDrawer = false },
                     onCloseTab = { tab ->
-                        val i = tabs.indexOf(tab)
-                        if (i >= 0) {
-                            scope.launch { SessionManager.destroySession(tab.sessionId) }
-                            tabs.removeAt(i)
-                            if (tabs.isEmpty()) { activeTabIndex = -1; onDismiss() }
-                            else { activeTabIndex = i.coerceAtMost(tabs.lastIndex) }
-                        }
+                        SessionManager.destroySession(tab.sessionId)
                     },
                     onDismissDrawer = { showDrawer = false },
                     onOpenDrawer = { showDrawer = true },
@@ -367,20 +370,20 @@ private fun ContentWithDrawer(
     sessionError: String?,
     tabs: List<TerminalTab>,
     activeTabIndex: Int,
-    imeBottomPx: Int = 0,
+    enabled: Boolean,
     onSwitchTab: (Int) -> Unit,
     onCloseTab: (TerminalTab) -> Unit,
     onDismissDrawer: () -> Unit,
     onOpenDrawer: () -> Unit,
     onNewTab: () -> Unit,
 ) {
-    val density = LocalDensity.current
+    val inputState = remember { TerminalInputState() }
+    val context = LocalContext.current
     Box(modifier = modifier) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 4.dp)
-                .padding(bottom = with(density) { imeBottomPx.toDp() })
                 .pointerInput(Unit) {
                     detectHorizontalDragGestures(
                         onDragEnd = { },
@@ -403,11 +406,20 @@ private fun ContentWithDrawer(
                 }
                 tabs.getOrNull(activeTabIndex) != null -> {
                     val currentTab = tabs[activeTabIndex]
-                    TerminalViewComposable(
-                        session = currentTab.session,
-                        modifier = Modifier.fillMaxSize(),
-                        enabled = true,
-                    )
+                    Column(Modifier.fillMaxSize()) {
+                        TerminalViewComposable(
+                            session = currentTab.session,
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            enabled = enabled,
+                            inputState = inputState,
+                        )
+                        TerminalExtraKeys(
+                            inputState = inputState,
+                            enabled = enabled,
+                            onOpenDrawer = onOpenDrawer,
+                            onOpenSettings = { context.startActivity(Intent(context, SettingsActivity::class.java)) },
+                        )
+                    }
                 }
             }
         }
@@ -440,6 +452,83 @@ private fun ContentWithDrawer(
                     onCloseTab = onCloseTab,
                     onNewTab = onNewTab,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+internal fun TerminalExtraKeys(
+    inputState: TerminalInputState,
+    enabled: Boolean,
+    onOpenDrawer: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    val rows = listOf(
+        listOf(
+            "ESC" to KeyEvent.KEYCODE_ESCAPE, "TAB" to KeyEvent.KEYCODE_TAB,
+            "PgUp" to KeyEvent.KEYCODE_PAGE_UP, "HOME" to KeyEvent.KEYCODE_MOVE_HOME,
+            "\u2191" to KeyEvent.KEYCODE_DPAD_UP, "END" to KeyEvent.KEYCODE_MOVE_END,
+        ),
+        listOf(
+            "CTRL" to KeyEvent.KEYCODE_CTRL_LEFT, "ALT" to KeyEvent.KEYCODE_ALT_LEFT,
+            "PgDn" to KeyEvent.KEYCODE_PAGE_DOWN, "\u2190" to KeyEvent.KEYCODE_DPAD_LEFT,
+            "\u2193" to KeyEvent.KEYCODE_DPAD_DOWN, "\u2192" to KeyEvent.KEYCODE_DPAD_RIGHT,
+        ),
+    )
+    Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer)) {
+        rows.forEachIndexed { rowIndex, keys ->
+            Row(Modifier.fillMaxWidth()) {
+                keys.forEach { (label, keyCode) ->
+                    val isSelected = when (keyCode) {
+                        KeyEvent.KEYCODE_CTRL_LEFT -> inputState.ctrl
+                        KeyEvent.KEYCODE_ALT_LEFT -> inputState.alt
+                        KeyEvent.KEYCODE_SHIFT_LEFT -> inputState.shift
+                        else -> false
+                    }
+                    TextButton(
+                        onClick = {
+                            when (keyCode) {
+                                KeyEvent.KEYCODE_CTRL_LEFT -> inputState.ctrl = !inputState.ctrl
+                                KeyEvent.KEYCODE_ALT_LEFT -> inputState.alt = !inputState.alt
+                                KeyEvent.KEYCODE_SHIFT_LEFT -> inputState.shift = !inputState.shift
+                                else -> inputState.sendKey(keyCode)
+                            }
+                        },
+                        enabled = enabled,
+                        contentPadding = PaddingValues(0.dp),
+                        shape = MaterialTheme.shapes.small,
+                        colors = ButtonDefaults.textButtonColors(
+                            containerColor = if (isSelected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+                            contentColor = if (isSelected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface,
+                        ),
+                        modifier = Modifier.weight(1f).height(36.dp)
+                            .focusProperties { canFocus = false }
+                            .semantics {
+                                contentDescription = label
+                                if (KeyEvent.isModifierKey(keyCode)) selected = isSelected
+                            },
+                    ) {
+                        Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    }
+                }
+                TextButton(
+                    onClick = if (rowIndex == 0) onOpenDrawer else onOpenSettings,
+                    enabled = enabled,
+                    contentPadding = PaddingValues(0.dp),
+                    shape = MaterialTheme.shapes.small,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+                    modifier = Modifier.weight(1f).height(36.dp)
+                        .focusProperties { canFocus = false },
+                ) {
+                    Icon(
+                        imageVector = if (rowIndex == 0) Icons.Default.Menu else Icons.Default.Settings,
+                        modifier = Modifier.size(16.dp),
+                        contentDescription = stringResource(
+                            if (rowIndex == 0) R.string.terminal_drawer_title else R.string.settings,
+                        ),
+                    )
+                }
             }
         }
     }

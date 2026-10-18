@@ -33,6 +33,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -47,6 +48,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.furryr.file.R
+import io.furryr.file.AppLocale
 import io.furryr.file.core.DaemonManager
 import io.furryr.file.ui.theme.FileManagerTheme
 import kotlinx.coroutines.Dispatchers
@@ -56,6 +58,10 @@ import kotlinx.coroutines.withContext
 class ContainerWizardActivity : ComponentActivity() {
     companion object {
         const val EXTRA_CONTAINER_NAME = "container_name"
+    }
+
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(AppLocale.wrap(newBase))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -82,7 +88,10 @@ private fun ContainerWizardScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    val rootAvailable = remember { DaemonManager.isRootAvailable() }
+    var rootAvailable by remember { mutableStateOf(DaemonManager.isRootAvailable()) }
+    LaunchedEffect(Unit) {
+        DaemonManager.status.collect { rootAvailable = DaemonManager.isRootAvailable() }
+    }
 
     var imageRef by rememberSaveable { mutableStateOf("library/alpine:latest") }
     var containerName by rememberSaveable { mutableStateOf("") }

@@ -173,7 +173,7 @@ object SessionManager {
      */
     suspend fun getOrCreateTerminal(context: Context, currentPath: String): TerminalSession {
         val containerName = if (currentPath.startsWith("container://")) {
-            currentPath.removePrefix("container://").substringBefore('/')
+            ContainerUriResolver.resolveContainerUri(currentPath).getOrThrow().containerName
         } else null
 
         val existing = synchronized(mutex) {
@@ -336,7 +336,7 @@ object SessionManager {
             ?: throw IllegalStateException("Container '$containerName' not found")
         // Warm the container daemon off the main thread so the synchronous
         // spawn inside TerminalSession is fast.
-        withContext(Dispatchers.IO) { DaemonManager.warmNamed(containerName) }
+        withContext(Dispatchers.IO) { DaemonManager.warmNamed(containerName).getOrThrow() }
         return createTerminalSession("container://$containerName", context, customCwd = "/")
     }
 
@@ -354,17 +354,18 @@ object SessionManager {
         customCwd: String? = null,
     ): TerminalSession {
         val cwd = customCwd ?: context.filesDir.absolutePath
+        Hub.start(context)
         val env = DEFAULT_ENV.toMutableList().apply {
             context.cacheDir.mkdirs()
             val tmpDir = context.cacheDir.absolutePath
             add("PROOT_TMP_DIR=$tmpDir")
-            // Make `run0` reachable from the shell and point it at the hub.
-            Hub.socketName?.let { add("${Hub.SOCKET_ENV}=$it") }
+            // Publish the hub endpoint and packaged utilities to the shell.
+            Hub.environment().forEach { (key, value) -> add("$key=$value") }
             Hub.binDir?.let { dir ->
                 val pathIndex = indexOfFirst { it.startsWith("PATH=") }
                 if (pathIndex >= 0) {
                     this[pathIndex] =
-                        "PATH=${dir.absolutePath}:${this[pathIndex].removePrefix("PATH=")}"
+                        "PATH=${this[pathIndex].removePrefix("PATH=")}:${dir.absolutePath}"
                 } else {
                     add("PATH=${dir.absolutePath}")
                 }

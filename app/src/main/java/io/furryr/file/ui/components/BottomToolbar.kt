@@ -49,7 +49,9 @@ fun BottomToolbar(
     onSelectSameType: () -> Unit = {},
     onCancelSelection: () -> Unit = {},
     onShare: () -> Unit = {},
-    canShare: Boolean = true
+    canShare: Boolean = true,
+    canOpenTerminal: Boolean = true,
+    canCreate: Boolean = true
 ) {
     Column {
         HorizontalDivider()
@@ -75,7 +77,7 @@ fun BottomToolbar(
                     Icon(Icons.Default.Close, contentDescription = "Cancel selection")
                 }
             } else {
-                IconButton(onClick = onCreateFile) {
+                IconButton(enabled = canCreate, onClick = onCreateFile) {
                     Icon(Icons.Default.Add, contentDescription = "Create file")
                 }
             }
@@ -88,7 +90,7 @@ fun BottomToolbar(
                     Icon(Icons.Default.Flip, contentDescription = "Select same type")
                 }
             } else {
-                IconButton(onClick = onTerminal) {
+                IconButton(enabled = canOpenTerminal, onClick = onTerminal) {
                     Icon(Icons.Default.Terminal, contentDescription = "Terminal")
                 }
             }

@@ -2,8 +2,10 @@ package io.furryr.file.util
 
 import android.system.Os
 import android.util.Log
+import io.furryr.file.agent.ContainerDaemonLauncher
 import io.furryr.file.core.DaemonManager
 import io.furryr.file.core.DaemonTarget
+import io.furryr.file.core.hub.Hub
 import io.furryr.file.core.process.CommandSpec
 import io.furryr.file.core.process.ProcessChannel
 import kotlinx.coroutines.Dispatchers
@@ -47,15 +49,21 @@ object ProcessHelper {
             DaemonTarget.App
         }
 
-        // Container sessions start a login shell as root via `login -f root`
-        // (login lives in /bin on every supported rootfs -- busybox on Alpine,
-        // a usrmerge symlink on Debian/Ubuntu/Arch/Fedora). Without -f, login
-        // would prompt for credentials, which the daemon cannot answer.
+        // Initialize a clean target environment before an interactive container login.
+        // Command execution through the hub bypasses login and its MOTD output.
         val spec = CommandSpec(
-            command = if (containerName != null) "/bin/login" else cmd,
-            args = if (containerName != null) listOf("-f", "root") else (args?.toList() ?: emptyList()),
-            env = env,
-            cwd = if (containerName != null) "/" else cwd,
+            command = if (containerName != null) "" else cmd,
+            args = if (containerName != null) {
+                listOf("-c", "exec /bin/login -p -f root")
+            } else (args?.toList() ?: emptyList()),
+            env = if (containerName != null) {
+                env.filterKeys { it == "TERM" } + Hub.environment() + buildMap {
+                    put("PATH", ContainerDaemonLauncher.DEFAULT_PATH)
+                    Hub.binDir?.let { put("HUB_PATH", it.absolutePath) }
+                }
+            } else env,
+            cwd = if (containerName != null) "~" else cwd,
+            user = if (containerName != null) "root" else null,
             rows = rows,
             cols = columns,
         )
@@ -80,7 +88,8 @@ object ProcessHelper {
         val channel: ProcessChannel?
         synchronized(mapLock) { channel = fdToChannel[fd] }
         channel ?: return
-        onIoThread { channel.resize(rows, cols).getOrThrow() }
+        onIoThread { channel.resize(rows, cols) }
+            .onFailure { Log.w(TAG, "setPtyWindowSize: fd=$fd is no longer available", it) }
     }
 
     @JvmStatic
@@ -88,7 +97,12 @@ object ProcessHelper {
         val channel: ProcessChannel?
         synchronized(mapLock) { channel = pidToChannel[processId] }
         channel ?: return -1
-        val exitCode = onIoThread { channel.waitFor().getOrThrow() }
+        // Termux calls this on its own thread without an exception handler.
+        // A daemon reset/disconnect must finish the session, not crash the app.
+        val exitCode = onIoThread { channel.waitFor() }.getOrElse {
+            Log.w(TAG, "waitFor: pid=$processId lost its daemon", it)
+            -1
+        }
         Log.d(TAG, "waitFor: pid=$processId exitCode=$exitCode")
         return exitCode
     }
@@ -100,8 +114,12 @@ object ProcessHelper {
             channel = fdToChannel.remove(fileDescriptor)
             if (channel != null) pidToChannel.remove(channel.pid)
         }
-        channel?.let { runCatching { it.close() } }
-        closeRawFd(fileDescriptor)
+        if (channel != null) {
+            runCatching { channel.close() }
+                .onFailure { Log.w(TAG, "close: fd=$fileDescriptor failed", it) }
+        } else {
+            closeRawFd(fileDescriptor)
+        }
     }
 
     /**

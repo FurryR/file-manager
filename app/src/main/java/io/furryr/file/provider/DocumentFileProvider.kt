@@ -55,6 +55,11 @@ object DocumentFileProvider : FileProvider {
         appContext = context.applicationContext
     }
 
+    override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
+        if (path.trim('/').isEmpty()) return DirectoryCapabilities()
+        return super<FileProvider>.directoryCapabilities(path)
+    }
+
     /**
      * Register a tree URI obtained from [android.content.Intent.ACTION_OPEN_DOCUMENT_TREE].
      * Persists the mapping and returns the hex ID.
@@ -260,4 +265,3 @@ object DocumentFileProvider : FileProvider {
     private const val COPY_BUFFER_SIZE = 256 * 1024
 
 }
-

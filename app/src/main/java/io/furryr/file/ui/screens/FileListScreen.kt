@@ -1,11 +1,13 @@
 package io.furryr.file.ui.screens
 import io.furryr.file.FileRepository
+import io.furryr.file.provider.DirectoryCapabilities
 import io.furryr.file.ui.theme.*
 import io.furryr.file.ui.screens.*
 import io.furryr.file.ui.components.*
 import io.furryr.file.ui.util.*
 import io.furryr.file.model.*
 import io.furryr.file.R
+import io.furryr.file.util.Path
 import io.furryr.file.model.ErrorState
 
 import androidx.compose.animation.AnimatedVisibility
@@ -52,6 +54,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -79,6 +82,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -88,6 +92,9 @@ enum class SortMode { NAME, DATE, SIZE, TYPE }
 @Composable
 fun FileListScreen(
     path: String,
+    committedPath: String = path,
+    onNavigationLoaded: (String) -> Unit = {},
+    onNavigationCancelled: () -> Unit = {},
     refreshToken: Int,
     animationToken: Int,
     sortMode: SortMode,
@@ -97,6 +104,7 @@ fun FileListScreen(
     onScrollConsumed: () -> Unit = {},
     onInfoChange: (DirectoryInfo) -> Unit,
     onEntriesChange: (List<FileEntry>) -> Unit = {},
+    onCapabilitiesChange: (DirectoryCapabilities) -> Unit = {},
     onDirectoryClick: (String) -> Unit,
     onFileClick: (FileEntry) -> Unit,
     onLongPress: (FileEntry) -> Unit,
@@ -109,6 +117,14 @@ fun FileListScreen(
     var error by remember { mutableStateOf<Throwable?>(null) }
     var isRefreshing by remember { mutableStateOf(false) }
     var showSpinner by remember { mutableStateOf(false) }
+    var isLoading by remember { mutableStateOf(false) }
+    var loadedPath by remember { mutableStateOf<String?>(null) }
+    var loadedCapabilities by remember { mutableStateOf(DirectoryCapabilities()) }
+    val loadingScrimAlpha by animateFloatAsState(
+        targetValue = if (showSpinner) 0.32f else 0f,
+        animationSpec = tween(durationMillis = 150),
+        label = "loadingScrimAlpha"
+    )
     var spinnerDelayJob by remember { mutableStateOf<Job?>(null) }
     var loadJob by remember { mutableStateOf<Job?>(null) }
     var loadGeneration by remember { mutableIntStateOf(0) }
@@ -116,6 +132,9 @@ fun FileListScreen(
     var loadSequence by remember { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     val currentPath by rememberUpdatedState(path)
+    val currentOnCapabilitiesChange by rememberUpdatedState(onCapabilitiesChange)
+    val currentOnNavigationLoaded by rememberUpdatedState(onNavigationLoaded)
+    val currentOnNavigationCancelled by rememberUpdatedState(onNavigationCancelled)
     val listState = rememberLazyListState()
     val filteredEntries = remember(entries, filterText) {
         if (filterText.isBlank()) entries
@@ -128,6 +147,7 @@ fun FileListScreen(
     var animationRun by remember { mutableIntStateOf(0) }
     var activeAnimationRun by remember { mutableIntStateOf(0) }
     var animatedIndices by remember { mutableStateOf<Set<Int>>(emptySet()) }
+    var animationStartIndex by remember { mutableIntStateOf(0) }
 
     fun sort(raw: List<FileEntry>): List<FileEntry> {
         val sorted = when (sortMode) {
@@ -145,7 +165,10 @@ fun FileListScreen(
         Log.d("FileListScreen", "loadEntries: path=$requestedPath, isRefresh=$isRefreshing")
         loadJob?.cancel()
         spinnerDelayJob?.cancel()
+        showSpinner = false
+        isLoading = true
         error = null
+        currentOnCapabilitiesChange(DirectoryCapabilities())
         loadJob = scope.launch {
             try {
                 spinnerDelayJob = launch {
@@ -157,13 +180,36 @@ fun FileListScreen(
                 }
                 val result = withContext(Dispatchers.IO) { FileRepository.list(requestedPath) }
                 if (generation != loadGeneration || requestedPath != currentPath) return@launch
+                val capabilities = withContext(Dispatchers.IO) {
+                    FileRepository.directoryCapabilities(requestedPath)
+                }
+                if (generation != loadGeneration || requestedPath != currentPath) return@launch
                 val raw = result.getOrDefault(emptyList())
                 val newEntries = sort(raw)
+                val directoryInfo = withContext(Dispatchers.IO) {
+                    FileRepository.info(requestedPath, raw)
+                }
+                if (generation != loadGeneration || requestedPath != currentPath) return@launch
+                val directoryChanged = loadedPath != requestedPath
+                val visibleEntries = if (filterText.isBlank()) newEntries
+                    else newEntries.filter { it.name.contains(filterText, ignoreCase = true) }
+                val returnPath = loadedPath?.takeIf {
+                    Path.parse(it).navigate("..") == Path.parse(requestedPath)
+                }
+                val firstVisible = if (directoryChanged) {
+                    visibleEntries.indexOfFirst { returnPath != null && Path.parse(it.path) == Path.parse(returnPath) }
+                        .coerceAtLeast(0)
+                } else listState.firstVisibleItemIndex
+                if (directoryChanged) listState.requestScrollToItem(firstVisible)
+                loadedPath = requestedPath
+                loadedCapabilities = capabilities
+                currentOnNavigationLoaded(requestedPath)
+                currentOnCapabilitiesChange(capabilities)
                 isInternal = newEntries.firstOrNull()?.realPath?.let { isInternalStoragePath(it) } ?: false
                 val shouldAnimate = animateNextLoad
                 if (shouldAnimate) {
-                    val firstVisible = listState.firstVisibleItemIndex
-                    animatedIndices = (firstVisible until (firstVisible + 24).coerceAtMost(newEntries.size)).toSet()
+                    animationStartIndex = firstVisible
+                    animatedIndices = (firstVisible until (firstVisible + 24).coerceAtMost(visibleEntries.size)).toSet()
                     animationRun++
                     activeAnimationRun = animationRun
                 } else {
@@ -175,19 +221,42 @@ fun FileListScreen(
                 loadSequence++
                 animateNextLoad = false
                 error = result.exceptionOrNull()
-                val directoryInfo = withContext(Dispatchers.IO) {
-                    FileRepository.info(requestedPath, raw)
-                }
                 onInfoChange(directoryInfo)
                 Log.d("FileListScreen", "loadEntries: done, entries=${newEntries.size}, error=${result.exceptionOrNull()}, isRefreshing=$isRefreshing")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (generation == loadGeneration && requestedPath == currentPath) {
+                    if (loadedPath != requestedPath) listState.requestScrollToItem(0)
+                    loadedPath = requestedPath
+                    loadedCapabilities = DirectoryCapabilities()
+                    currentOnNavigationLoaded(requestedPath)
+                    currentOnCapabilitiesChange(loadedCapabilities)
+                    entries = emptyList()
+                    onEntriesChange(emptyList())
+                    onInfoChange(DirectoryInfo())
+                    error = e
+                }
             } finally {
                 if (generation == loadGeneration) {
                     spinnerDelayJob?.cancel()
                     showSpinner = false
                     isRefreshing = false
+                    isLoading = false
                 }
             }
         }
+    }
+
+    fun cancelLoading() {
+        ++loadGeneration
+        loadJob?.cancel()
+        spinnerDelayJob?.cancel()
+        showSpinner = false
+        isLoading = false
+        isRefreshing = false
+        currentOnCapabilitiesChange(loadedCapabilities)
+        currentOnNavigationCancelled()
     }
 
     LaunchedEffect(path, refreshToken, animationToken, sortMode, sortReverse) {
@@ -199,6 +268,16 @@ fun FileListScreen(
         lastPath = path
         lastRefreshToken = refreshToken
         lastAnimationToken = animationToken
+        if (pathChanged && path == loadedPath && !refreshChanged && !animationChanged) {
+            ++loadGeneration
+            loadJob?.cancel()
+            spinnerDelayJob?.cancel()
+            showSpinner = false
+            isLoading = false
+            isRefreshing = false
+            currentOnCapabilitiesChange(loadedCapabilities)
+            return@LaunchedEffect
+        }
         if (refreshChanged) {
             isRefreshing = true
         }
@@ -207,7 +286,7 @@ fun FileListScreen(
 
     LaunchedEffect(activeAnimationRun, animatedIndices) {
         if (activeAnimationRun > 0 && animatedIndices.isNotEmpty()) {
-            val maxDelay = animatedIndices.maxOf { (it * 7).coerceAtMost(56) }
+            val maxDelay = animatedIndices.maxOf { ((it - animationStartIndex) * 7).coerceAtMost(56) }
             delay(maxDelay + 160L)
             activeAnimationRun = 0
             animatedIndices = emptySet()
@@ -258,10 +337,12 @@ fun FileListScreen(
                 }
                 else -> itemsIndexed(filteredEntries, key = { i, entry -> "${i}_${entry.path}" }) { index, entry ->
                     val onClick = {
-                        if (entry.isDirectory) onDirectoryClick(entry.path)
-                        else onFileClick(entry)
+                        if (!isLoading && path == committedPath) {
+                            if (entry.isDirectory) onDirectoryClick(entry.path)
+                            else onFileClick(entry)
+                        }
                     }
-                    val onLongPress = { onLongPress(entry) }
+                    val onLongPress = { if (!isLoading && path == committedPath) onLongPress(entry) }
                     if (activeAnimationRun > 0 && index in animatedIndices) {
                         key(activeAnimationRun, entry.path) {
                             AnimatedFileRow(
@@ -269,12 +350,12 @@ fun FileListScreen(
                                 isInternal = isInternal,
                                 selected = entry.path in selectedPaths,
                                 selectionMode = selectionMode,
-                                index = index,
+                                index = index - animationStartIndex,
                                 animationSeed = activeAnimationRun,
                                 onClick = onClick,
                                 onLongPress = onLongPress,
-                                onToggleSelection = { onToggleSelection(entry) },
-                                onRangeSelect = { onRangeSelect(entry) }
+                                onToggleSelection = { if (!isLoading && path == committedPath) onToggleSelection(entry) },
+                                onRangeSelect = { if (!isLoading && path == committedPath) onRangeSelect(entry) }
                             )
                         }
                     } else {
@@ -285,12 +366,28 @@ fun FileListScreen(
                             selectionMode = selectionMode,
                             onClick = onClick,
                             onLongPress = onLongPress,
-                            onToggleSelection = { onToggleSelection(entry) },
-                            onRangeSelect = { onRangeSelect(entry) }
+                            onToggleSelection = { if (!isLoading && path == committedPath) onToggleSelection(entry) },
+                            onRangeSelect = { if (!isLoading && path == committedPath) onRangeSelect(entry) }
                         )
                     }
                 }
             }
+        }
+        if (isLoading) {
+            val scrimColor = MaterialTheme.colorScheme.scrim
+            Box(
+                Modifier.fillMaxSize()
+                    .drawBehind {
+                        if (showSpinner) drawRect(scrimColor.copy(alpha = loadingScrimAlpha))
+                    }
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                awaitPointerEvent().changes.forEach { it.consume() }
+                            }
+                        }
+                    }
+            )
         }
         if (showSpinner) {
             Box(
@@ -300,10 +397,7 @@ fun FileListScreen(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(modifier = Modifier.size(36.dp))
                     Spacer(Modifier.padding(vertical = 4.dp))
-                    TextButton(onClick = {
-                        spinnerDelayJob?.cancel()
-                        showSpinner = false
-                    }) {
+                    TextButton(onClick = ::cancelLoading) {
                         Text(stringResource(R.string.cancel))
                     }
                 }

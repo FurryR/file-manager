@@ -27,9 +27,12 @@ native/
 - **Single-threaded async** — `tokio::main(flavor = "current_thread")`; concurrency is tasks, not threads
 - **Multi-client** — the daemon serves many concurrent connections. Each has its own
   read loop, write half and response channel; PTYs/handles/broker are shared via `Shared`.
-  A client disconnecting only ends *that* connection — the daemon keeps running.
-- **Shutdown is explicit** — an `ExitRequest` from *any* connection (or SIGTERM/SIGHUP/SIGINT)
-  stops the listener, flushes acks, closes all PTYs and exits. Disconnecting never does.
+  Disconnecting one client does not affect other authenticated clients.
+- **Connection-owned lifetime**: exit after 10 seconds without a first successful
+  authentication, or when the last authenticated client disconnects. Pending or
+  failed authentication does not keep the daemon alive. An `ExitRequest` from
+  any authenticated client (or SIGTERM/SIGHUP/SIGINT) also shuts down the daemon.
+  Shutdown closes the listener, cancels requests, closes PTYs/handles and exits.
 - **Protobuf codegen** via `prost-build` in `build.rs` — output at compile time
 - **Error → `Response.ok=false` + `error` string** — no exceptions across IPC
 - **Framed protocol** — 4-byte big-endian length prefix + protobuf payload

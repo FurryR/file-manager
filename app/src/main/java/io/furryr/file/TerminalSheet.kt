@@ -28,10 +28,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardReturn
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -78,11 +78,9 @@ import io.furryr.file.agent.TerminalViewComposable
 import io.furryr.file.core.DaemonManager
 import android.app.Activity
 import android.content.Context
-import android.content.Intent
 import android.util.Log
 import android.view.KeyEvent
 import android.view.inputmethod.InputMethodManager
-import io.furryr.file.ui.screens.SettingsActivity
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -378,7 +376,6 @@ private fun ContentWithDrawer(
     onNewTab: () -> Unit,
 ) {
     val inputState = remember { TerminalInputState() }
-    val context = LocalContext.current
     Box(modifier = modifier) {
         Box(
             modifier = Modifier
@@ -417,7 +414,6 @@ private fun ContentWithDrawer(
                             inputState = inputState,
                             enabled = enabled,
                             onOpenDrawer = onOpenDrawer,
-                            onOpenSettings = { context.startActivity(Intent(context, SettingsActivity::class.java)) },
                         )
                     }
                 }
@@ -462,7 +458,6 @@ internal fun TerminalExtraKeys(
     inputState: TerminalInputState,
     enabled: Boolean,
     onOpenDrawer: () -> Unit,
-    onOpenSettings: () -> Unit,
 ) {
     val rows = listOf(
         listOf(
@@ -513,7 +508,10 @@ internal fun TerminalExtraKeys(
                     }
                 }
                 TextButton(
-                    onClick = if (rowIndex == 0) onOpenDrawer else onOpenSettings,
+                    onClick = {
+                        if (rowIndex == 0) onOpenDrawer()
+                        else inputState.sendKey(KeyEvent.KEYCODE_ENTER)
+                    },
                     enabled = enabled,
                     contentPadding = PaddingValues(0.dp),
                     shape = MaterialTheme.shapes.small,
@@ -522,10 +520,10 @@ internal fun TerminalExtraKeys(
                         .focusProperties { canFocus = false },
                 ) {
                     Icon(
-                        imageVector = if (rowIndex == 0) Icons.Default.Menu else Icons.Default.Settings,
+                        imageVector = if (rowIndex == 0) Icons.Default.Menu else Icons.AutoMirrored.Filled.KeyboardReturn,
                         modifier = Modifier.size(16.dp),
                         contentDescription = stringResource(
-                            if (rowIndex == 0) R.string.terminal_drawer_title else R.string.settings,
+                            if (rowIndex == 0) R.string.terminal_drawer_title else R.string.terminal_key_enter,
                         ),
                     )
                 }

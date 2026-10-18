@@ -16,11 +16,11 @@ import io.furryr.file.agent.SessionManager
 /**
  * Foreground service shown while at least one terminal session is active.
  *
- * Keeps the process alive when the app is backgrounded and holds a
- * [PowerManager.WakeLock] for its whole lifetime so long-running commands keep
- * running with the screen off. The notification exposes two actions:
+ * Keeps the process in the foreground while the app is backgrounded. Users can
+ * opt into a [PowerManager.WakeLock] so commands keep running with the screen
+ * off. The notification exposes two actions:
  *
- * - toggle the wake lock ("Hold WakeLock" / "Release WakeLock"; held by default),
+ * - toggle the wake lock ("Hold WakeLock" / "Release WakeLock"; released by default),
  * - exit, which closes every terminal session and stops the service.
  *
  * Lifetime is owned by the service itself: [SessionManager] starts it when the
@@ -73,11 +73,9 @@ class TerminalForegroundService : Service() {
         super.onCreate()
         createChannel()
         SessionManager.addSessionChangeListener(sessionChangeListener)
-        // Hold the partial wake lock for the whole lifetime of the service so
-        // long-running terminal commands keep executing with the screen off.
-        // This is the actual "keep alive" guarantee; the foreground
-        // notification alone only prevents the process from being reclaimed.
-        setWakeLockHeld(true)
+        // Each new service starts without a wake lock. Notification refreshes
+        // and additional sessions preserve the user's choice for this lifetime.
+        setWakeLockHeld(false)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

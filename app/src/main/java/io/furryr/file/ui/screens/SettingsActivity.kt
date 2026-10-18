@@ -363,6 +363,9 @@ private fun SettingsMainPage(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
             )
 
+            AgentSettingsItem()
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+
             val fontPickerLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.OpenDocument()
             ) { uri: Uri? ->

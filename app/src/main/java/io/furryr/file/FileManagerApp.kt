@@ -79,6 +79,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -89,6 +90,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 
 import io.furryr.file.model.CopyMoveSource
 import io.furryr.file.model.CopyMoveState
@@ -151,6 +155,8 @@ fun FileManagerApp(
     var operationTaskIds: List<Long>? = null  // kept only for notification UI reference
     var operationHidden by remember { mutableStateOf(false) }
     var highlightPath by remember { mutableStateOf<String?>(null) }
+    var highlightDirectory by remember { mutableStateOf<String?>(null) }
+    var highlightRefreshToken by remember { mutableStateOf<Int?>(null) }
     var pendingScrollPath by remember { mutableStateOf<String?>(null) }
     var showTerminalSheet by remember { mutableStateOf(false) }
     LaunchedEffect(terminalOpenRequest) {
@@ -244,6 +250,10 @@ fun FileManagerApp(
     fun navigateTo(path: String) {
         val tab = currentTab()
         if (path == tab.path || pendingNavigation != null) return
+        highlightPath = null
+        highlightDirectory = null
+        highlightRefreshToken = null
+        pendingScrollPath = null
         pendingNavigation = tab.copy(path = path, backStack = tab.backStack + tab.path, forwardStack = emptyList())
     }
 
@@ -283,6 +293,42 @@ fun FileManagerApp(
     fun refreshFileList(animate: Boolean = true) {
         refreshTrigger++
         if (animate) animationTrigger++
+    }
+
+    val handleHereRequest by rememberUpdatedState(newValue = { request: HereNavigation.Request ->
+        val tab = currentTab()
+        // A here request supersedes an in-flight navigation in the current tab.
+        pendingNavigation = null
+        filterText = ""
+        searchMode = false
+        contextMenuEntry = null
+        showTerminalSheet = false
+        highlightPath = request.selectedPath
+        highlightDirectory = request.directory
+        pendingScrollPath = request.selectedPath
+        val destination = tab.copy(
+            path = request.directory,
+            selectedPaths = emptySet(),
+            lastSelectedIndex = -1,
+            backStack = if (tab.path == request.directory) tab.backStack else tab.backStack + tab.path,
+            forwardStack = if (tab.path == request.directory) tab.forwardStack else emptyList(),
+        )
+        if (tab.path == request.directory) replaceCurrent(destination)
+        else pendingNavigation = destination
+        // Refresh even within the same directory so newly created entries can
+        // be selected once the matching asynchronous listing is committed.
+        refreshFileList()
+        highlightRefreshToken = refreshTrigger
+    })
+    val activityLifecycle = (context as? LifecycleOwner)?.lifecycle
+    LaunchedEffect(activityLifecycle) {
+        if (activityLifecycle != null) {
+            activityLifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                HereNavigation.requests.collect { handleHereRequest(it) }
+            }
+        } else {
+            HereNavigation.requests.collect { handleHereRequest(it) }
+        }
     }
 
     fun closeTab(index: Int) {
@@ -440,6 +486,10 @@ fun FileManagerApp(
     LaunchedEffect(selectedTabIndex) {
         if (lastRefreshedTabIndex != selectedTabIndex) {
             lastRefreshedTabIndex = selectedTabIndex
+            highlightPath = null
+            highlightDirectory = null
+            highlightRefreshToken = null
+            pendingScrollPath = null
             refreshFileList(animate = false)
         }
     }
@@ -1042,18 +1092,29 @@ fun FileManagerApp(
                         directoryCapabilities = it
                         if (!it.canCreate) showCreateDialog = false
                     },
-                    onEntriesChange = { entries ->
-                        currentEntries = entries
+                    onEntriesChange = entriesChanged@{ loadedPath, loadedRefreshToken, entries ->
                         val curTab = currentTab()
+                        if (loadedPath != curTab.path) return@entriesChanged
+                        if (highlightDirectory == loadedPath &&
+                            (highlightRefreshToken ?: Int.MIN_VALUE) > loadedRefreshToken) return@entriesChanged
+                        currentEntries = entries
                         var newPaths = curTab.selectedPaths intersect entries.map { it.path }.toSet()
-                        if (highlightPath != null) {
+                        var selectionIndex = curTab.lastSelectedIndex
+                        if ((highlightPath != null || highlightDirectory != null) &&
+                            (highlightDirectory == null || highlightDirectory == loadedPath)) {
                             val found = entries.any { it.path == highlightPath }
                             if (found) {
                                 newPaths = newPaths + highlightPath!!
+                                selectionIndex = entries.indexOfFirst { it.path == highlightPath }
                             }
                             highlightPath = null
+                            highlightDirectory = null
+                            highlightRefreshToken = null
                         }
-                        replaceCurrent(curTab.copy(selectedPaths = newPaths))
+                        replaceCurrent(curTab.copy(
+                            selectedPaths = newPaths,
+                            lastSelectedIndex = selectionIndex,
+                        ))
                     },
                     onDirectoryClick = ::navigateTo,
                     onFileClick = { openFile(context, it) },
@@ -1087,6 +1148,8 @@ fun FileManagerApp(
                             } else {
                                 navigateTo(parent)
                                 highlightPath = path
+                                highlightDirectory = parent
+                                highlightRefreshToken = null
                                 pendingScrollPath = path
                             }
                         }

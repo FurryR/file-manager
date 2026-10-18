@@ -24,6 +24,29 @@ object ProotRunner {
     fun bindMounts(context: Context, container: Container): List<BindMount> =
         standardMounts() + runtimeMounts(context, container) + container.bindMounts
 
+    /** Existing container-private paths, without creating dirs or rewriting configuration. */
+    fun privateRuntimeMounts(context: Context, container: Container): List<BindMount> {
+        val runtime = runtimePath(context, container)
+        return listOf(
+            BindMount(File(runtime, "tmp/guest").absolutePath, "/tmp"),
+            BindMount(File(runtime, "tmp/run").absolutePath, "/run"),
+            BindMount(File(runtime, "resolv.conf").absolutePath, "/etc/resolv.conf"),
+            BindMount(File(runtime, "hub.sh").absolutePath, "/etc/profile.d/hub.sh"),
+        )
+    }
+
+    /** Guest paths which can cover rootfs entries; inspecting these never prepares a mount. */
+    fun overlaidGuestPaths(context: Context, container: Container): List<String> {
+        val configured = (standardMounts() + privateRuntimeMounts(context, container) + container.bindMounts)
+            .map { it.dstContainerPath }
+        // Native chroot binds all of /dev and /linkerconfig, mounts a fresh
+        // /proc and creates private tmpfs at /tmp and /run (container.rs).
+        val nativeMounts = if (container.backend == ContainerBackend.CHROOT) {
+            listOf("/dev", "/linkerconfig", "/proc", "/tmp", "/run")
+        } else emptyList()
+        return (configured + nativeMounts).distinct()
+    }
+
     /**
      * Binds passed to the native chroot backend via `--bind`. The chroot daemon
      * mounts `/tmp` and `/run` as tmpfs itself, so only the resolver, profile and user mounts are
@@ -138,13 +161,17 @@ object ProotRunner {
     }
 
     private fun runtimeDir(context: Context, container: Container): File {
-        val id = container.name.map { c ->
-            if (c.isLetterOrDigit() || c == '-' || c == '_') c else '_'
-        }.joinToString("").ifEmpty { "container" }
-        val dir = File(context.cacheDir, "container/$id")
+        val dir = runtimePath(context, container)
         if (!dir.exists() && !dir.mkdirs()) {
             throw IllegalStateException("Failed to create container runtime directory: ${dir.absolutePath}")
         }
         return dir
+    }
+
+    private fun runtimePath(context: Context, container: Container): File {
+        val id = container.name.map { c ->
+            if (c.isLetterOrDigit() || c == '-' || c == '_') c else '_'
+        }.joinToString("").ifEmpty { "container" }
+        return File(context.cacheDir, "container/$id")
     }
 }

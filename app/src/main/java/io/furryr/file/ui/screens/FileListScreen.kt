@@ -103,7 +103,7 @@ fun FileListScreen(
     scrollToPath: String? = null,
     onScrollConsumed: () -> Unit = {},
     onInfoChange: (DirectoryInfo) -> Unit,
-    onEntriesChange: (List<FileEntry>) -> Unit = {},
+    onEntriesChange: (String, Int, List<FileEntry>) -> Unit = { _, _, _ -> },
     onCapabilitiesChange: (DirectoryCapabilities) -> Unit = {},
     onDirectoryClick: (String) -> Unit,
     onFileClick: (FileEntry) -> Unit,
@@ -135,6 +135,7 @@ fun FileListScreen(
     val currentOnCapabilitiesChange by rememberUpdatedState(onCapabilitiesChange)
     val currentOnNavigationLoaded by rememberUpdatedState(onNavigationLoaded)
     val currentOnNavigationCancelled by rememberUpdatedState(onNavigationCancelled)
+    val currentOnEntriesChange by rememberUpdatedState(onEntriesChange)
     val listState = rememberLazyListState()
     val filteredEntries = remember(entries, filterText) {
         if (filterText.isBlank()) entries
@@ -161,6 +162,7 @@ fun FileListScreen(
 
     fun loadEntries() {
         val requestedPath = path
+        val requestedRefreshToken = refreshToken
         val generation = ++loadGeneration
         Log.d("FileListScreen", "loadEntries: path=$requestedPath, isRefresh=$isRefreshing")
         loadJob?.cancel()
@@ -217,7 +219,7 @@ fun FileListScreen(
                     activeAnimationRun = 0
                 }
                 entries = newEntries
-                onEntriesChange(newEntries)
+                currentOnEntriesChange(requestedPath, requestedRefreshToken, newEntries)
                 loadSequence++
                 animateNextLoad = false
                 error = result.exceptionOrNull()
@@ -233,7 +235,7 @@ fun FileListScreen(
                     currentOnNavigationLoaded(requestedPath)
                     currentOnCapabilitiesChange(loadedCapabilities)
                     entries = emptyList()
-                    onEntriesChange(emptyList())
+                    currentOnEntriesChange(requestedPath, requestedRefreshToken, emptyList())
                     onInfoChange(DirectoryInfo())
                     error = e
                 }
@@ -293,13 +295,11 @@ fun FileListScreen(
         }
     }
 
-    var consumedScrollPath by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(scrollToPath, entries) {
-        if (scrollToPath != null && scrollToPath != consumedScrollPath && entries.isNotEmpty()) {
-            val index = entries.indexOfFirst { it.path == scrollToPath }
+    LaunchedEffect(scrollToPath, filteredEntries, loadedPath, loadSequence, isLoading) {
+        if (scrollToPath != null && !isLoading && loadedPath == path) {
+            val index = filteredEntries.indexOfFirst { it.path == scrollToPath }
             if (index >= 0) {
                 listState.animateScrollToItem(index, 0)
-                consumedScrollPath = scrollToPath
                 onScrollConsumed()
             }
         }

@@ -155,6 +155,7 @@
     <string name="container_state_failed">失败</string>
     <string name="container_state_deleted">已删除</string>
     <string name="terminal_drawer_title">终端</string>
+    <string name="terminal_key_enter">回车</string>
     <string name="wizard_pull_title">从 Docker Hub 拉取 Linux rootfs</string>
     <string name="wizard_pull_desc">输入 Docker 镜像引用以创建容器。</string>
     <string name="wizard_image_placeholder">library/alpine:latest</string>
@@ -185,4 +186,14 @@
     <string name="terminal_wakelock_hold">保持唤醒</string>
     <string name="terminal_wakelock_release">释放唤醒</string>
     <string name="terminal_notification_exit">退出</string>
+    <string name="agent_settings">AI Agent</string>
+    <string name="agent_settings_desc">配置终端 Agent 使用的 AI 接口和模型</string>
+    <string name="agent_base_url">API 基础地址</string>
+    <string name="agent_model">模型</string>
+    <string name="agent_api_key">API Key（可选）</string>
+    <string name="agent_endpoint_hint">填写兼容 Chat Completions 的 API 基础地址（如接口需要，请包含 /v1）。在终端运行 agent 即可对话。</string>
+    <string name="agent_config_required">请先在设置中配置 AI 接口地址和模型。</string>
+    <string name="agent_invalid_endpoint">请填写 HTTP 或 HTTPS 基础地址，不含账号密码、查询参数或片段。</string>
+    <string name="agent_config_read_error">无法读取已保存的密钥，请重新填写配置。</string>
+    <string name="agent_config_save_error">无法安全保存配置，请重试。</string>
 </resources>

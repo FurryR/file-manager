@@ -2,7 +2,9 @@ package io.furryr.file.provider
 
 import android.content.Context
 import io.furryr.file.FileRepository
+import io.furryr.file.HereNavigation
 import io.furryr.file.agent.ContainerDaemonLauncher
+import io.furryr.file.agent.AgentSettings
 import io.furryr.file.core.DaemonManager
 
 /**
@@ -16,6 +18,7 @@ fun installFileProviders(context: Context) {
     val prefs = appContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
     DaemonManager.init(appContext)
+    AgentSettings.install(appContext)
     DaemonManager.configure(
         rootEnabled = prefs.getBoolean("root_enabled", false),
         shellEnabled = prefs.getBoolean("shell_enabled", false),
@@ -35,4 +38,5 @@ fun installFileProviders(context: Context) {
     FileRepository.register("ftp", FtpProvider)
     SftpProvider.init(appContext)
     FileRepository.register("sftp", SftpProvider)
+    HereNavigation.install(appContext)
 }

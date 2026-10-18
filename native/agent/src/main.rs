@@ -58,7 +58,7 @@ async fn main() {
 }
 
 fn config_from_hub() -> io::Result<AiConfigResponse> {
-    let socket = hub_client::connect_from_env()?;
+    let (socket, _root) = hub_client::connect_from_env()?;
     let response = hub_client::round_trip(
         socket.as_raw_fd(),
         HubRequest {

@@ -24,6 +24,19 @@ object ProotRunner {
     fun bindMounts(context: Context, container: Container): List<BindMount> =
         standardMounts() + runtimeMounts(context, container) + container.bindMounts
 
+    /** Inspect the configured namespace without preparing runtime files. */
+    fun pathMounts(context: Context, container: Container): List<BindMount> =
+        if (container.backend == ContainerBackend.PROOT) {
+            standardMounts() + privateRuntimeMounts(context, container) + container.bindMounts
+        } else {
+            listOf("/dev", "/sys", "/system", "/apex", "/linkerconfig", "/vendor", "/storage", "/data")
+                .map { BindMount(it, it) } +
+                BindMount("/storage/emulated/0", "/sdcard") +
+                privateRuntimeMounts(context, container).filter {
+                    it.dstContainerPath != "/tmp" && it.dstContainerPath != "/run"
+                } + container.bindMounts
+        }
+
     /** Existing container-private paths, without creating dirs or rewriting configuration. */
     fun privateRuntimeMounts(context: Context, container: Container): List<BindMount> {
         val runtime = runtimePath(context, container)
@@ -33,18 +46,6 @@ object ProotRunner {
             BindMount(File(runtime, "resolv.conf").absolutePath, "/etc/resolv.conf"),
             BindMount(File(runtime, "hub.sh").absolutePath, "/etc/profile.d/hub.sh"),
         )
-    }
-
-    /** Guest paths which can cover rootfs entries; inspecting these never prepares a mount. */
-    fun overlaidGuestPaths(context: Context, container: Container): List<String> {
-        val configured = (standardMounts() + privateRuntimeMounts(context, container) + container.bindMounts)
-            .map { it.dstContainerPath }
-        // Native chroot binds all of /dev and /linkerconfig, mounts a fresh
-        // /proc and creates private tmpfs at /tmp and /run (container.rs).
-        val nativeMounts = if (container.backend == ContainerBackend.CHROOT) {
-            listOf("/dev", "/linkerconfig", "/proc", "/tmp", "/run")
-        } else emptyList()
-        return (configured + nativeMounts).distinct()
     }
 
     /**

@@ -1,6 +1,7 @@
 //! Shared hub wire protocol for the native terminal utilities.
 use prost::Message;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::{env, io, mem};
 
 pub mod filehub {
@@ -8,12 +9,11 @@ pub mod filehub {
 }
 use filehub::{HubRequest, HubResponse};
 
-pub fn connect_from_env() -> io::Result<OwnedFd> {
+pub fn connect_from_env() -> io::Result<(OwnedFd, filehub::CallerRoot)> {
     let name = env::var("HUB_SOCKET").map_err(|_| {
         io::Error::other("$HUB_SOCKET is not set; invoke this command from an app-spawned terminal")
     })?;
     let socket = connect_abstract(&name)?;
-    use std::os::fd::AsRawFd;
     let timeout = libc::timeval {
         tv_sec: 10,
         tv_usec: 0,
@@ -32,7 +32,27 @@ pub fn connect_from_env() -> io::Result<OwnedFd> {
             return Err(io::Error::last_os_error());
         }
     }
-    Ok(socket)
+    let root = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open("/")?;
+    let (response, _) = round_trip_with_attached_fd(
+        socket.as_raw_fd(),
+        HubRequest {
+            id: 0,
+            op: Some(filehub::hub_request::Op::Hello(filehub::HelloRequest {
+                terminal_id: env::var("HUB_TERMINAL").unwrap_or_default(),
+            })),
+        },
+        Some(root.as_raw_fd()),
+    )?;
+    if !response.ok {
+        return Err(io::Error::other(response.error));
+    }
+    match response.result {
+        Some(filehub::hub_response::Result::CallerRoot(root)) => Ok((socket, root)),
+        _ => Err(io::Error::other("hub returned no caller root")),
+    }
 }
 pub fn round_trip(fd: RawFd, request: HubRequest) -> io::Result<HubResponse> {
     let (response, _attached) = round_trip_with_fd(fd, request)?;

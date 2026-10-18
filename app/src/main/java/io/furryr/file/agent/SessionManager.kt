@@ -12,6 +12,7 @@ import com.termux.terminal.TerminalSessionClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.UUID
+import java.io.Closeable
 
 /**
  * Singleton managing all active terminal sessions.
@@ -39,6 +40,7 @@ object SessionManager {
     /** Active sessions keyed by UUID string. */
     private val sessions = mutableMapOf<String, SessionInfo>()
     private val mutex = Any()
+    private val terminalTargets = mutableMapOf<String, MutableList<Pair<String, String>>>()
 
     /** Listeners notified when a session's content changes (needs redraw). */
     private val textChangedListeners = mutableSetOf<(TerminalSession) -> Unit>()
@@ -137,9 +139,9 @@ object SessionManager {
 
                 val terminalSession = when (type) {
                     is SessionType.AppShell ->
-                        createTerminalSession(type.command, context, customCwd = type.cwd)
+                        createTerminalSession(type.command, context, customCwd = type.cwd, terminalId = sessionId)
 
-                    is SessionType.Container -> createContainerTerminal(type.containerName, context)
+                    is SessionType.Container -> createContainerTerminal(type.containerName, context, sessionId)
                 }
 
                 val info = SessionInfo(
@@ -223,6 +225,7 @@ object SessionManager {
 
         val info: SessionInfo = synchronized(mutex) {
             val removed = sessions.remove(sessionId)
+            terminalTargets.remove(sessionId)
             if (removed != null) sessionChangeListeners.forEach { it() }
             removed
         } ?: return@runCatching
@@ -287,6 +290,29 @@ object SessionManager {
         sessions.values.toList()
     }
 
+    /** Nested run0 commands temporarily change the filesystem accepting input. */
+    fun trackTerminalTarget(sessionId: String, target: String): Closeable {
+        val token = UUID.randomUUID().toString()
+        synchronized(mutex) {
+            if (sessionId in sessions) terminalTargets.getOrPut(sessionId) { mutableListOf() }.add(token to target)
+        }
+        return Closeable {
+            synchronized(mutex) {
+                terminalTargets[sessionId]?.let { targets ->
+                    targets.removeAll { it.first == token }
+                    if (targets.isEmpty()) terminalTargets.remove(sessionId)
+                }
+            }
+        }
+    }
+
+    fun terminalTarget(sessionId: String): String = synchronized(mutex) {
+        terminalTargets[sessionId]?.lastOrNull()?.second ?: when (val type = sessions[sessionId]?.type) {
+            is SessionType.Container -> type.containerName
+            else -> "app"
+        }
+    }
+
     /**
      * Destroy every active session and clear the session map.
      *
@@ -327,6 +353,7 @@ object SessionManager {
     private suspend fun createContainerTerminal(
         containerName: String,
         context: Context,
+        terminalId: String,
     ): TerminalSession {
         // Fail early with a clear message. The shell itself is spawned by
         // ProcessHelper on the container's dedicated daemon via the marker
@@ -337,7 +364,7 @@ object SessionManager {
         // Warm the container daemon off the main thread so the synchronous
         // spawn inside TerminalSession is fast.
         withContext(Dispatchers.IO) { DaemonManager.warmNamed(containerName).getOrThrow() }
-        return createTerminalSession("container://$containerName", context, customCwd = "/")
+        return createTerminalSession("container://$containerName", context, customCwd = "/", terminalId = terminalId)
     }
 
     /**
@@ -352,6 +379,7 @@ object SessionManager {
         context: Context,
         args: List<String>? = null,
         customCwd: String? = null,
+        terminalId: String,
     ): TerminalSession {
         val cwd = customCwd ?: context.filesDir.absolutePath
         Hub.start(context)
@@ -361,6 +389,7 @@ object SessionManager {
             add("PROOT_TMP_DIR=$tmpDir")
             // Publish the hub endpoint and packaged utilities to the shell.
             Hub.environment().forEach { (key, value) -> add("$key=$value") }
+            add("HUB_TERMINAL=$terminalId")
             Hub.binDir?.let { dir ->
                 val pathIndex = indexOfFirst { it.startsWith("PATH=") }
                 if (pathIndex >= 0) {

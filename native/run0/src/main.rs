@@ -20,7 +20,7 @@ use prost::Message;
 use filehub::hub_request::Op as HubOp;
 use filehub::{ExecRequest, HubRequest, WaitRequest};
 use hub_client::{
-    connect_abstract, filehub, receive_response, round_trip, round_trip_with_attached_fd,
+    connect_from_env, filehub, receive_response, round_trip, round_trip_with_attached_fd,
     send_frame,
 };
 
@@ -161,44 +161,33 @@ fn command_spec(args: &Args) -> (String, Vec<String>) {
     (String::new(), shell_args)
 }
 
-fn working_directory(chdir: Option<&str>) -> io::Result<(String, bool, Option<File>)> {
+fn working_directory(chdir: Option<&str>) -> io::Result<(String, Option<File>)> {
     match chdir {
-        Some("~") => Ok(("~".to_string(), false, None)),
-        Some(path) if Path::new(path).is_absolute() => Ok((path.to_string(), false, None)),
-        Some(path) => open_caller_directory(&env::current_dir()?.join(path)),
-        None => open_caller_directory(&env::current_dir()?),
+        Some(path) if path == "~" || Path::new(path).is_absolute() => Ok((path.to_string(), None)),
+        path => {
+            let directory = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)
+                .open(path.unwrap_or("."))?;
+            Ok((String::new(), Some(directory)))
+        }
     }
 }
 
-fn open_caller_directory(path: &Path) -> io::Result<(String, bool, Option<File>)> {
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)
-        .open(path)?;
-    Ok((String::new(), true, Some(directory)))
-}
-
 fn run(args: Args) -> io::Result<i32> {
-    let socket_name = env::var("HUB_SOCKET").map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "$HUB_SOCKET is not set; invoke run0 from an app-spawned terminal",
-        )
-    })?;
-
     let (rows, cols) = tty_size(libc::STDIN_FILENO);
     let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
 
     // Let the target shell resolve commands and report its own execution errors.
     let (command, command_args) = command_spec(&args);
-    let (cwd, cwd_fd, cwd_handle) = working_directory(args.chdir.as_deref())?;
+    let (cwd, cwd_handle) = working_directory(args.chdir.as_deref())?;
 
     let mut env_map = HashMap::new();
     for (name, value) in args.setenv {
         env_map.insert(name, value);
     }
 
-    let control = connect_abstract(&socket_name)?;
+    let (control, _root) = connect_from_env()?;
     let fd = control.as_raw_fd();
     ignore_sigpipe();
 
@@ -223,7 +212,7 @@ fn run(args: Args) -> io::Result<i32> {
         args: command_args,
         env: env_map,
         cwd,
-        cwd_fd,
+        cwd_fd: cwd_handle.is_some(),
         user: args.user,
         term,
         rows,

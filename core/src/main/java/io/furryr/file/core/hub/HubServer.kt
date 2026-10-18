@@ -6,6 +6,8 @@ import io.furryr.file.core.DaemonManager
 import io.furryr.file.core.DaemonTarget
 import io.furryr.file.proto.hub.AiConfigResponse
 import io.furryr.file.core.HubActions
+import io.furryr.file.core.HubCallerRoot
+import io.furryr.file.proto.hub.CallerRoot
 import io.furryr.file.core.ipc.DaemonConnection
 import io.furryr.file.proto.hub.ExecResponse
 import io.furryr.file.proto.hub.HubRequest
@@ -68,7 +70,8 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                             if (request == null) {
                                 send(client, Reply(failure(0, "malformed hub request")))
                             } else if (request.opCase != HubRequest.OpCase.EXEC &&
-                                request.opCase != HubRequest.OpCase.HERE && event.frame.fds.isNotEmpty()) {
+                                request.opCase != HubRequest.OpCase.HERE &&
+                                request.opCase != HubRequest.OpCase.HELLO && event.frame.fds.isNotEmpty()) {
                                 send(client, Reply(failure(request.id, "unexpected hub descriptors")))
                             } else if (request.opCase == HubRequest.OpCase.WAIT) {
                                 // Capture ownership in request order, before later CLOSE/SELECT_TARGET.
@@ -83,6 +86,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                                 pty.connection.waitPty(pty.id).getOrThrow()
                                             }
                                             state.ptys.remove(handle, pty)
+                                            pty.terminalTarget?.close()
                                             Reply(
                                                 HubResponse.newBuilder().setId(request.id).setOk(true)
                                                     .setWait(WaitResponse.newBuilder().setExitCode(code)).build(),
@@ -120,6 +124,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
             coroutineContext.cancelChildren()
             runCatching { client.close() }
             state.ptys.values.forEach { pty ->
+                pty.terminalTarget?.close()
                 pty.connection.closePty(pty.id).onFailure {
                     Log.w(TAG, "hub PTY cleanup failed", it)
                 }
@@ -141,6 +146,22 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
         val id = request.id
         return runCatching {
             when (request.opCase) {
+                HubRequest.OpCase.HELLO -> {
+                    require(state.root == null) { "caller root is already registered" }
+                    require(fds.size == 1) { "hello requires exactly one root descriptor" }
+                    val root = requireNotNull(HubActions.resolveRoot) {
+                        "filesystem resolution is unavailable"
+                    }.invoke(fds.single())
+                    state.root = root
+                    state.terminalId = request.hello.terminalId
+                    Reply(
+                        HubResponse.newBuilder().setId(id).setOk(true).setCallerRoot(
+                            CallerRoot.newBuilder().setContainerName(root.containerName.orEmpty())
+                                .setHostPath(root.hostPath),
+                        ).build(),
+                    )
+                }
+
                 HubRequest.OpCase.LIST_TARGETS ->
                     Reply(
                         HubResponse.newBuilder().setId(id).setOk(true)
@@ -176,21 +197,28 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     val exec = request.exec
                     require(fds.size == if (exec.cwdFd) 1 else 0) { "invalid cwd descriptor count" }
                     require(!exec.cwdFd || exec.cwd.isEmpty()) { "cwd path and descriptor are mutually exclusive" }
+                    val cwd = if (exec.cwdFd) {
+                        requireNotNull(HubActions.resolveCwd) { "filesystem resolution is unavailable" }
+                            .invoke(fds.single(), requireNotNull(state.root) { "hello is required" }, state.target)
+                    } else exec.cwd.ifBlank { null }
                     val connection = DaemonManager.connection(target(state.target))
                     val pty = connection.spawnPty(
                         command = exec.command,
                         args = exec.argsList,
-                        env = exec.envMap + Hub.environment(),
+                        env = exec.envMap + Hub.environment() +
+                            mapOf("HUB_TERMINAL" to state.terminalId),
                         termType = exec.term,
                         rows = exec.rows,
                         cols = exec.cols,
-                        cwd = exec.cwd.ifBlank { null },
+                        cwd = cwd,
                         user = if (exec.hasUser()) exec.user else null,
                         nice = if (exec.hasNice()) exec.nice else null,
-                        cwdFd = fds.singleOrNull(),
                     ).getOrThrow()
                     val handle = state.nextHandle++
-                    state.ptys[handle] = OwnedPty(connection, pty.ptyId)
+                    state.ptys[handle] = OwnedPty(
+                        connection, pty.ptyId,
+                        HubActions.onTerminalTarget?.invoke(state.terminalId, state.target),
+                    )
                     Reply(
                         HubResponse.newBuilder().setId(id).setOk(true)
                             .setExec(
@@ -213,7 +241,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     val fd = fds.single()
                     require(Os.fstat(fd).st_nlink > 0) { "the selected entry has been deleted" }
                     val reveal = HubActions.onHere ?: error("file navigation is unavailable")
-                    reveal(fd)
+                    reveal(fd, requireNotNull(state.root) { "hello is required" })
                     Reply(ok(id))
                 }
 
@@ -229,6 +257,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     val pty = state.pty(handle)
                     pty.connection.closePty(pty.id).getOrThrow()
                     state.ptys.remove(handle, pty)
+                    pty.terminalTarget?.close()
                     Reply(ok(id))
                 }
 
@@ -258,6 +287,8 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
     }
 
     private class ConnectionState {
+        var root: HubCallerRoot? = null
+        var terminalId: String = ""
         var target: String = "primary"
         var nextHandle: Long = 1
         val ptys = ConcurrentHashMap<Long, OwnedPty>()
@@ -266,7 +297,11 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
             ptys[handle] ?: error("PTY not owned by client")
     }
 
-    private class OwnedPty(val connection: DaemonConnection, val id: Long)
+    private class OwnedPty(
+        val connection: DaemonConnection,
+        val id: Long,
+        val terminalTarget: Closeable?,
+    )
 
     private class Reply(val response: HubResponse, val fd: FileDescriptor? = null)
 

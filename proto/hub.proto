@@ -24,6 +24,7 @@ message HubRequest {
     CloseRequest close = 8;
     HereRequest here = 9;
     GetAiConfigRequest get_ai_config = 10;
+    HelloRequest hello = 11;
   }
 }
 
@@ -36,7 +37,20 @@ message HubResponse {
     ExecResponse exec = 5;
     WaitResponse wait = 6;
     AiConfigResponse ai_config = 7;
+    CallerRoot caller_root = 8;
   }
+}
+
+// Exactly one O_PATH | O_DIRECTORY descriptor for the caller's / accompanies
+// this handshake. The hub resolves its identity, not a client-supplied path.
+message HelloRequest {
+  string terminal_id = 1;
+}
+
+message CallerRoot {
+  // Empty for the host filesystem.
+  string container_name = 1;
+  string host_path = 2;
 }
 
 // ── Target selection ──────────────────────────────────────────────
@@ -77,7 +91,8 @@ message ExecRequest {
   // be root.
   optional int32 nice = 9;
   // One SCM_RIGHTS directory fd accompanies this request. Resolve it to a
-  // reachable pathname in the selected target; do not directly fchdir to it.
+  // reachable pathname in the selected target using the caller root registered
+  // by Hello. The daemon receives that pathname, never the borrowed descriptor.
   bool cwd_fd = 10;
 }
 

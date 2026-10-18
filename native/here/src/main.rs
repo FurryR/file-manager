@@ -4,7 +4,6 @@ use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
 
 use hub_client::filehub::{hub_request::Op, HereRequest, HubRequest};
 
@@ -32,19 +31,13 @@ fn run() -> io::Result<()> {
     if args.next().is_some() {
         return Err(io::Error::other(USAGE));
     }
-    let path = PathBuf::from(path);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        env::current_dir()?.join(path)
-    };
     // Do not canonicalize: the selected entry may itself be a (broken) symlink.
     // SCM_RIGHTS lets the hub resolve this descriptor outside proot/chroot.
     let target = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?;
-    let socket = hub_client::connect_from_env()?;
+    let (socket, _root) = hub_client::connect_from_env()?;
     let (response, _) = hub_client::round_trip_with_attached_fd(
         socket.as_raw_fd(),
         HubRequest {

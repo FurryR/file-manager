@@ -9,6 +9,9 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.border
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -49,10 +52,14 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.toAndroidDragEvent
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -73,6 +80,9 @@ import androidx.compose.ui.unit.sp
 import com.termux.terminal.TerminalSession
 import io.furryr.file.agent.SessionManager
 import io.furryr.file.agent.ContainerUriResolver
+import io.furryr.file.agent.ContainerPaths
+import io.furryr.file.core.model.FileEntry
+import io.furryr.file.core.shellQuote
 import io.furryr.file.agent.TerminalInputState
 import io.furryr.file.agent.TerminalViewComposable
 import io.furryr.file.core.DaemonManager
@@ -81,6 +91,10 @@ import android.content.Context
 import android.util.Log
 import android.view.KeyEvent
 import android.view.inputmethod.InputMethodManager
+import android.widget.Toast
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -101,6 +115,7 @@ private fun sessionLabel(type: SessionManager.SessionType): String = when (type)
     is SessionManager.SessionType.AppShell -> "Local"
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TerminalSheet(
     visible: Boolean,
@@ -118,6 +133,43 @@ fun TerminalSheet(
     var activeTabIndex by remember { mutableIntStateOf(-1) }
     var showDrawer by remember { mutableStateOf(false) }
     var sessionError by remember { mutableStateOf<String?>(null) }
+    var dropHovered by remember { mutableStateOf(false) }
+    val currentDropTab by rememberUpdatedState(tabs.getOrNull(activeTabIndex))
+    val currentVisible by rememberUpdatedState(visible)
+    val dropTarget = remember {
+        object : DragAndDropTarget {
+            override fun onEntered(event: DragAndDropEvent) { dropHovered = true }
+            override fun onExited(event: DragAndDropEvent) { dropHovered = false }
+            override fun onEnded(event: DragAndDropEvent) { dropHovered = false }
+
+            override fun onDrop(event: DragAndDropEvent): Boolean {
+                dropHovered = false
+                val entry = event.toAndroidDragEvent().localState as? FileEntry ?: return false
+                val tab = currentDropTab?.takeIf { currentVisible && it.session.isRunning } ?: return false
+                val target = SessionManager.terminalTarget(tab.sessionId)
+                scope.launch {
+                    try {
+                        val path = withContext(Dispatchers.IO) {
+                            ContainerPaths.terminalPath(context, entry.path, target, entry.isDirectory)
+                        }
+                        check(path.none { it.code < 32 || it.code == 127 }) { "path contains terminal control characters" }
+                        check(currentDropTab?.session === tab.session && tab.session.isRunning &&
+                            currentVisible && SessionManager.terminalTarget(tab.sessionId) == target) {
+                            "terminal target changed during path resolution"
+                        }
+                        val completion = path + if (entry.isDirectory && !path.endsWith('/')) "/" else ""
+                        tab.session.emulator?.paste(shellQuote(completion) + " ")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Cannot insert dropped path", e)
+                        Toast.makeText(context, e.message ?: "Cannot insert path", Toast.LENGTH_LONG).show()
+                    }
+                }
+                return true
+            }
+        }
+    }
 
     val screenHeightPx = with(density) { configuration.screenHeightDp.dp.toPx() }
     val smallTargetPx = screenHeightPx * SmallRatio
@@ -241,10 +293,7 @@ fun TerminalSheet(
         }
     }
 
-    if (sheetHeightPx.value == 0f && !visible) return
-
-
-
+    // Keep the drop target attached while collapsed so a file drag can open it.
     Box(modifier = Modifier.fillMaxSize()) {
         if (sheetHeightPx.value > 0f) {
             val alpha = ((sheetHeightPx.value / smallTargetPx).coerceIn(0f, 1f) * 0.4f)
@@ -252,7 +301,7 @@ fun TerminalSheet(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black.copy(alpha = alpha))
-                    .pointerInput(Unit) { detectTapGestures { onDismiss() } }
+                    // Pointer-transparent: icons above the terminal remain draggable.
             )
         }
 
@@ -271,6 +320,14 @@ fun TerminalSheet(
                         MaterialTheme.colorScheme.surfaceColorAtElevation(3.dp),
                         RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
                     )
+                    .dragAndDropTarget(
+                        shouldStartDragAndDrop = { it.toAndroidDragEvent().localState is FileEntry },
+                        target = dropTarget,
+                    )
+                    .then(if (dropHovered) Modifier.border(
+                        2.dp, MaterialTheme.colorScheme.primary,
+                        RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                    ) else Modifier)
             ) {
                 // Handle row
                 Row(

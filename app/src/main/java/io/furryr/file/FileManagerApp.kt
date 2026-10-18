@@ -1123,6 +1123,7 @@ fun FileManagerApp(
                     selectedPaths = currentTab().selectedPaths,
                     onToggleSelection = if (copyMoveState == null) ::toggleSelection else {{}},
                     onRangeSelect = if (copyMoveState == null) ::rangeSelectTo else {{}},
+                    onFileDragStart = { showTerminalSheet = true },
                 )
             }
         }

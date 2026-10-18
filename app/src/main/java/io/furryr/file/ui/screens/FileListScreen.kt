@@ -68,6 +68,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 import android.util.Log
+import android.content.ClipData
+import androidx.compose.foundation.draganddrop.dragAndDropSource
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.draganddrop.DragAndDropTransferData
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -111,7 +115,8 @@ fun FileListScreen(
     selectionMode: Boolean = false,
     selectedPaths: Set<String> = emptySet(),
     onToggleSelection: (FileEntry) -> Unit = {},
-    onRangeSelect: (FileEntry) -> Unit = {}
+    onRangeSelect: (FileEntry) -> Unit = {},
+    onFileDragStart: () -> Unit = {},
 ) {
     var entries by remember { mutableStateOf<List<FileEntry>>(emptyList()) }
     var error by remember { mutableStateOf<Throwable?>(null) }
@@ -350,6 +355,7 @@ fun FileListScreen(
                                 isInternal = isInternal,
                                 selected = entry.path in selectedPaths,
                                 selectionMode = selectionMode,
+                                onFileDragStart = onFileDragStart,
                                 index = index - animationStartIndex,
                                 animationSeed = activeAnimationRun,
                                 onClick = onClick,
@@ -364,6 +370,7 @@ fun FileListScreen(
                             isInternal = isInternal,
                             selected = entry.path in selectedPaths,
                             selectionMode = selectionMode,
+                            onFileDragStart = onFileDragStart,
                             onClick = onClick,
                             onLongPress = onLongPress,
                             onToggleSelection = { if (!isLoading && path == committedPath) onToggleSelection(entry) },
@@ -418,6 +425,7 @@ private fun AnimatedFileRow(
     isInternal: Boolean,
     selected: Boolean,
     selectionMode: Boolean,
+    onFileDragStart: () -> Unit,
     index: Int,
     animationSeed: Int,
     onClick: () -> Unit,
@@ -457,6 +465,7 @@ private fun AnimatedFileRow(
             isInternal = isInternal,
             selected = selected,
             selectionMode = selectionMode,
+            onFileDragStart = onFileDragStart,
             onClick = onClick,
             onLongPress = onLongPress,
             onToggleSelection = onToggleSelection,
@@ -472,12 +481,14 @@ private fun FileRow(
     isInternal: Boolean,
     selected: Boolean,
     selectionMode: Boolean,
+    onFileDragStart: () -> Unit,
     onClick: () -> Unit,
     onLongPress: () -> Unit,
     onToggleSelection: () -> Unit,
     onRangeSelect: () -> Unit
 ) {
     val isDir = entry.isDirectory
+    val currentOnFileDragStart by rememberUpdatedState(onFileDragStart)
     var rowDragOffset by remember { mutableStateOf(0f) }
     val swipeOffset by animateFloatAsState(
         targetValue = rowDragOffset,
@@ -522,7 +533,21 @@ private fun FileRow(
             imageVector = iconForFile(entry.name, isDir),
             contentDescription = null,
             tint = if (isDir) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = if (selectionMode) {
+                Modifier
+            } else Modifier.dragAndDropSource {
+                detectDragGestures(
+                    onDragStart = {
+                        startTransfer(DragAndDropTransferData(
+                            clipData = ClipData.newPlainText(entry.name, entry.path),
+                            localState = entry,
+                        ))
+                        currentOnFileDragStart()
+                    },
+                    onDrag = { change, _ -> change.consume() },
+                )
+            },
         )
         Spacer(Modifier.width(12.dp))
         Text(

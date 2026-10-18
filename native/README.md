@@ -38,6 +38,18 @@ The build requires Rust with the `aarch64-linux-android` target, `protoc`, and a
 Android NDK. The script also supplies the NDK C compiler and archiver to the TLS
 dependency used by `agent`.
 
+All utilities start with a shared hub handshake: they open `/` with
+`O_PATH | O_DIRECTORY` and send that descriptor with SCM_RIGHTS. The app matches
+its device/inode against the host and registered container roots and returns the
+container identity and host root path. Container runtime and bind mapping remain
+in the app, not in the protocol/transport layers or duplicated in each binary.
+
+`run0` sends its current directory (or a relative `--chdir`) as another directory
+descriptor. The hub maps it into the selected target before spawning the command;
+absolute `--chdir` and `~` retain their target-relative semantics. Unreachable
+paths, such as another chroot's private tmpfs, fail rather than select an unrelated
+directory. The default target remains `primary`.
+
 ## here
 
 ```sh
@@ -53,6 +65,14 @@ Descriptor resolution retains the underlying path across proot/chroot boundaries
 The app then collapses the terminal, opens the selected entry's parent in the
 current file-manager tab, and selects that entry. A directory is selected in its
 parent rather than opened.
+
+File-list icons can also be dragged into the terminal to insert a shell-quoted
+path without executing it. Selection mode disables dragging. The app uses the
+same namespace mapper for local/container paths, including configured binds and
+cross-container paths through `/data`. `HUB_TERMINAL` associates nested `run0`
+commands with their terminal so drops follow its current target and return to the
+parent target when the command exits. Remote and SAF URIs are not filesystem paths
+and are rejected on drop.
 
 ## agent
 

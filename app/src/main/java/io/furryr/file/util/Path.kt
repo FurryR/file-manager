@@ -37,7 +37,11 @@ class Path private constructor(
          * ```
          */
         fun parse(raw: String): Path {
-            val trimmed = raw.trim()
+            // Absolute paths and provider URIs are exact filesystem names:
+            // trailing spaces are significant, and a bare filename may contain
+            // "://" without becoming a URI.
+            if (raw.startsWith('/')) return parseBarePath(raw)
+            val trimmed = if (raw.contains("://")) raw else raw.trim()
             if (trimmed.isEmpty() || trimmed == "/") return ROOT
 
             val schemeEnd = trimmed.indexOf("://")

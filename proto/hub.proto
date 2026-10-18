@@ -22,6 +22,8 @@ message HubRequest {
     SignalRequest signal = 6;
     WaitRequest wait = 7;
     CloseRequest close = 8;
+    HereRequest here = 9;
+    GetAiConfigRequest get_ai_config = 10;
   }
 }
 
@@ -33,6 +35,7 @@ message HubResponse {
     ListTargetsResponse targets = 4;
     ExecResponse exec = 5;
     WaitResponse wait = 6;
+    AiConfigResponse ai_config = 7;
   }
 }
 
@@ -107,4 +110,17 @@ message WaitResponse {
 
 message CloseRequest {
   uint64 pty_id = 1;
+}
+
+// Reveal the entry represented by exactly one O_PATH | O_NOFOLLOW descriptor.
+// The hub resolves the descriptor in its host namespace; no client pathname is
+// trusted, and the final symlink itself (including a dangling link) is retained.
+message HereRequest {}
+
+message GetAiConfigRequest {}
+
+message AiConfigResponse {
+  string base_url = 1;
+  string api_key = 2;
+  string model = 3;
 }

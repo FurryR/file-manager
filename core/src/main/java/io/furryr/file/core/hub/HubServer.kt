@@ -4,6 +4,8 @@ import android.system.Os
 import android.util.Log
 import io.furryr.file.core.DaemonManager
 import io.furryr.file.core.DaemonTarget
+import io.furryr.file.proto.hub.AiConfigResponse
+import io.furryr.file.core.HubActions
 import io.furryr.file.core.ipc.DaemonConnection
 import io.furryr.file.proto.hub.ExecResponse
 import io.furryr.file.proto.hub.HubRequest
@@ -65,7 +67,8 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                             }
                             if (request == null) {
                                 send(client, Reply(failure(0, "malformed hub request")))
-                            } else if (request.opCase != HubRequest.OpCase.EXEC && event.frame.fds.isNotEmpty()) {
+                            } else if (request.opCase != HubRequest.OpCase.EXEC &&
+                                request.opCase != HubRequest.OpCase.HERE && event.frame.fds.isNotEmpty()) {
                                 send(client, Reply(failure(request.id, "unexpected hub descriptors")))
                             } else if (request.opCase == HubRequest.OpCase.WAIT) {
                                 // Capture ownership in request order, before later CLOSE/SELECT_TARGET.
@@ -156,6 +159,19 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     Reply(ok(id))
                 }
 
+                HubRequest.OpCase.GET_AI_CONFIG -> {
+                    val config = requireNotNull(HubActions.aiConfigProvider) {
+                        "AI configuration is unavailable"
+                    }.invoke()
+                    Reply(
+                        HubResponse.newBuilder().setId(id).setOk(true)
+                            .setAiConfig(
+                                AiConfigResponse.newBuilder().setBaseUrl(config.baseUrl)
+                                    .setApiKey(config.apiKey).setModel(config.model),
+                            ).build(),
+                    )
+                }
+
                 HubRequest.OpCase.EXEC -> {
                     val exec = request.exec
                     require(fds.size == if (exec.cwdFd) 1 else 0) { "invalid cwd descriptor count" }
@@ -189,6 +205,15 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     val r = request.resize
                     val pty = state.pty(r.ptyId)
                     pty.connection.resizePty(pty.id, r.rows, r.cols).getOrThrow()
+                    Reply(ok(id))
+                }
+
+                HubRequest.OpCase.HERE -> {
+                    require(fds.size == 1) { "here requires exactly one file descriptor" }
+                    val fd = fds.single()
+                    require(Os.fstat(fd).st_nlink > 0) { "the selected entry has been deleted" }
+                    val reveal = HubActions.onHere ?: error("file navigation is unavailable")
+                    reveal(fd)
                     Reply(ok(id))
                 }
 

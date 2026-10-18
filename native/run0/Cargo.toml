@@ -11,6 +11,4 @@ path = "src/main.rs"
 [dependencies]
 libc = "0.2"
 prost = "0.13"
-
-[build-dependencies]
-prost-build = "0.13"
+hub-client = { path = "../hub-client" }

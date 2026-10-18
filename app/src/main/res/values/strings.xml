@@ -157,6 +157,7 @@
     <string name="container_state_failed">Failed</string>
     <string name="container_state_deleted">Deleted</string>
     <string name="terminal_drawer_title">Terminals</string>
+    <string name="terminal_key_enter">Enter</string>
     <string name="wizard_pull_title">Pull a Linux rootfs from Docker Hub</string>
     <string name="wizard_pull_desc">Enter a Docker image reference to create a container.</string>
     <string name="wizard_image_placeholder">library/alpine:latest</string>
@@ -187,4 +188,14 @@
     <string name="terminal_wakelock_hold">Hold WakeLock</string>
     <string name="terminal_wakelock_release">Release WakeLock</string>
     <string name="terminal_notification_exit">Exit</string>
+    <string name="agent_settings">AI agent</string>
+    <string name="agent_settings_desc">Configure the terminal agent API and model</string>
+    <string name="agent_base_url">API base URL</string>
+    <string name="agent_model">Model</string>
+    <string name="agent_api_key">API key (optional)</string>
+    <string name="agent_endpoint_hint">Use a Chat Completions compatible API base URL (including /v1 if required). Run agent in the terminal to chat.</string>
+    <string name="agent_config_required">Configure the AI API URL and model in Settings first.</string>
+    <string name="agent_invalid_endpoint">Enter an HTTP or HTTPS base URL without credentials, query or fragment.</string>
+    <string name="agent_config_read_error">The saved key could not be read. Enter your configuration again.</string>
+    <string name="agent_config_save_error">Could not save the configuration securely. Please try again.</string>
 </resources>

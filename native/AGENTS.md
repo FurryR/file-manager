@@ -1,15 +1,19 @@
 # AGENTS.md — native/
 
-**Single Rust binary** — file daemon for privileged file operations.
+**Rust workspace** — file daemon and terminal utilities, managed and built together.
 
 ## STRUCTURE
 
 ```
 native/
 ├── src/main.rs      # All daemon logic (~580 lines)
-├── Cargo.toml       # Tokio + libc + prost
+├── Cargo.toml       # Workspace root + file_daemon (Tokio + libc + prost)
+├── run0/src/main.rs # Privileged command client + local tty bridge
+├── here/src/main.rs # Reveal a path via one O_PATH descriptor sent to the hub
+├── agent/src/main.rs # Single-file async terminal AI chat UI
+├── hub-client/      # Shared hub protocol codegen, socket I/O and SCM_RIGHTS
 ├── build.rs         # Prost protobuf codegen
-├── build-android-aarch64.sh  # Cross-compile Rust daemon for Android ARM64 → app/jniLibs/libfiledaemon.so
+├── build-android-aarch64.sh  # Build workspace; stage daemon + original-name utilities
 └── build-proot.sh            # Cross-compile proot for Android ARM64 → app/jniLibs/libproot.so
 ```
 
@@ -21,6 +25,8 @@ native/
 - **Abstract socket**: `create_abstract_server()` + `bind_abstract_socket()` (name derived from `--key`/`--id`)
 - **UID check** for data path: `maybe_android_data_path()` — skips `/Android/data` UID trick when root
 - **Progress tracking**: `TaskState` in `HashMap`, tasks spawn via `tokio::spawn`
+- **Terminal utilities**: `run0/`, `here/`, `agent/`; common wire transport in `hub-client/`
+- **Agent input/network**: single-file `agent/src/main.rs`, `AsyncFd` + system DNS
 
 ## CONVENTIONS
 
@@ -41,11 +47,14 @@ native/
 ## ANTI-PATTERNS
 
 - `unsafe { libc::... }` is required for abstract socket setup — keep isolated in `create_abstract_server()` / `bind_abstract_socket()`
-- Do NOT add threads — `current_thread` runtime is intentional
+- Do NOT add threads to the daemon — `current_thread` runtime is intentional.
+  The `agent` utility also uses a `current_thread` task runtime, but permits
+  Reqwest's system DNS resolver to use Tokio's blocking pool. This preserves
+  Android network/VPN DNS without `/etc/resolv.conf` or public DNS fallbacks.
 
 ## BUILD
 
 ```bash
-bash build-android-aarch64.sh    # → app/src/main/jniLibs/arm64-v8a/libfiledaemon.so
+bash build-android-aarch64.sh    # → jniLibs/.../libfiledaemon.so + executables/lib/.../{run0,here,agent}
 bash build-proot.sh              # → app/src/main/jniLibs/arm64-v8a/libproot.so
 ```

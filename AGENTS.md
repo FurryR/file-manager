@@ -28,14 +28,16 @@ file-manager/
 │   └── src/main/
 │       ├── java/io/furryr/file/  # UI + providers + agent + app facades
 │       └── jniLibs/arm64-v8a/    # Prebuilt native binaries (libfiledaemon.so, libproot.so)
-├── native/              # Rust daemon binary (standalone, no NDK)
+├── native/              # Rust workspace: daemon + hub terminal utilities
 │   ├── src/main.rs      # Accept loop + per-connection state
 │   ├── src/handlers.rs  # Command dispatch (incl. CancelRequest)
 │   ├── Cargo.toml
 │   ├── build-android-aarch64.sh  # Cross-compile Rust → Android ARM64
-│   └── build-proot.sh            # Cross-compile proot from source
-├── run0/                # Rust run0 CLI (separate subproject; hub-protocol client)
-│   └── src/main.rs      # arg parsing + hub protocol + local tty bridge
+│   ├── build-proot.sh            # Cross-compile proot from source
+│   ├── run0/src/main.rs  # arg parsing + hub protocol + local tty bridge
+│   ├── here/src/main.rs  # reveal a path in the current file-manager tab
+│   ├── agent/src/main.rs # single-file terminal AI chat UI
+│   └── hub-client/       # shared hub wire protocol and descriptor transport
 ├── proto/               # Protobuf IPC (generated into :core)
 │   ├── file_daemon.proto  # daemon protocol
 │   └── hub.proto          # run0 hub attach handshake
@@ -69,7 +71,10 @@ file-manager/
 | Daemon facade | `core/.../DaemonManager.kt` | Lifecycle, targets, launcher SPI, hub |
 | UDS transport | `uds/.../UdsTransport.kt` | Frames + fd passing; `UdsClient`/`UdsServer` |
 | run0 hub server | `core/.../hub/HubServer.kt` | Interprets the hub protocol, translates to daemons |
-| run0 CLI | `run0/src/main.rs` | Rust client: hub protocol + local tty bridge |
+| run0 CLI | `native/run0/src/main.rs` | Rust client: hub protocol + local tty bridge |
+| here CLI | `native/here/src/main.rs` | Open target descriptor + request file-manager navigation |
+| agent CLI | `native/agent/src/main.rs` | Single-file terminal AI chat UI |
+| Hub client transport | `native/hub-client/src/lib.rs` | Shared framing, abstract sockets and SCM_RIGHTS |
 | Hub protocol | `proto/hub.proto` | run0/agent protocol (list/select/exec/resize/signal/wait/close) |
 | run0 bootstrap | `core/.../hub/Hub.kt` | Installs the binary, starts the hub, env contract |
 | Unified exec/PTY | `core/.../process/ExecService.kt` | `CommandSpec` → `ProcessChannel` |
@@ -122,8 +127,9 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   the selected daemon — it never exposes the daemon's file protocol. run0 (and,
   later, agents) attach to it; the hub holds the app identity, so it
   authenticates to the daemon on the client's behalf. The `run0` Rust CLI is a
-  separate subproject (`run0/`), staged under `app/src/main/executables/` and
-  packaged through Java resources as `lib/<abi>/run0` before APK signing. This
+  workspace member (`native/run0/`), alongside `native/here/` and `native/agent/`.
+  All three are staged under `app/src/main/executables/` and packaged through
+  Java resources as `lib/<abi>/{run0,here,agent}` before APK signing. This
   bypasses AGP's JNI filename filter. The current debuggable build types allow
   Android to extract this original name into `nativeLibraryDir`; non-debuggable
   builds do not extract arbitrary executable names. App-spawned shells get

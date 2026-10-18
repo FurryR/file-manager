@@ -1,0 +1,9 @@
+[package]
+name = "here"
+version = "0.1.0"
+edition = "2021"
+description = "Reveal a terminal path in the file manager"
+
+[dependencies]
+libc = "0.2"
+hub-client = { path = "../hub-client" }

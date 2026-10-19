@@ -12,6 +12,10 @@ native/
 ├── here/src/main.rs # Reveal a path via one O_PATH descriptor sent to the hub
 ├── agent/src/main.rs # Single-file async terminal AI chat UI
 ├── hub-client/      # Shared hub protocol codegen, socket I/O and SCM_RIGHTS
+├── systemctl/       # Container service control through the app hub
+├── src/services.rs # Supervised service subset, D-Bus startup and unit persistence
+├── src/pipes.rs    # Connection-owned byte-transparent process streams
+├── src/reaper.rs   # Subreaper; only waitpid on untracked adopted children
 ├── build.rs         # Prost protobuf codegen
 ├── build-android-aarch64.sh  # Build workspace; stage daemon + original-name utilities
 └── build-proot.sh            # Cross-compile proot for Android ARM64 → app/jniLibs/libproot.so
@@ -27,6 +31,12 @@ native/
 - **Progress tracking**: `TaskState` in `HashMap`, tasks spawn via `tokio::spawn`
 - **Terminal utilities**: `run0/`, `here/`, `agent/`; common wire transport in `hub-client/`
 - **Agent input/network**: single-file `agent/src/main.rs`, `AsyncFd` + system DNS
+- **Container services**: `services.rs`; see `SERVICES.md` for supported unit directives.
+- **Child exit ownership**: register every spawned child with `reaper::track` before yielding.
+  Tokio children and PTY watchers exclusively reap their registered PID. The
+  orphan sweep must never call `waitpid(-1)` or consume a managed exit status.
+- **Pipe execution**: each authenticated connection owns a `PipeManager`; reads
+  of stdout/stderr and stdin writes have independent locks and close cancellation.
 
 ## CONVENTIONS
 

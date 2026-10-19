@@ -103,6 +103,8 @@ fun FileDrawer(
     onCreateContainer: (name: String, image: String, backend: ContainerBackend) -> Unit = { _, _, _ -> },
     rootAvailable: Boolean = DaemonManager.isRootAvailable(),
     onSettingsClick: () -> Unit,
+    onToolsClick: () -> Unit = {},
+    onRemoteConnectionsClick: () -> Unit = {},
     onContainerRename: (oldName: String, newName: String) -> Unit = { _, _ -> },
     onContainerDelete: (name: String) -> Unit = {},
     onContainerKill: (name: String) -> Unit = {},
@@ -331,6 +333,9 @@ fun FileDrawer(
                 Spacer(Modifier.height(4.dp))
             }
 
+            item {
+                TextButton(onClick = onRemoteConnectionsClick, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.tools_remote)) }
+            }
             // ── Group: 本地 (0) ─────────────────────────────────────────
             item {
                 GroupHeader(
@@ -722,12 +727,9 @@ fun FileDrawer(
             }
             if (3 !in collapsedGroups) {
                 item {
-                    Text(
-                        text = stringResource(R.string.drawer_tools_placeholder),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                    )
+                    TextButton(onClick = onToolsClick, modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+                        Text(stringResource(R.string.tools_title))
+                    }
                 }
             }
 

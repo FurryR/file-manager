@@ -72,6 +72,14 @@ cp "$NATIVE_DIR/target/aarch64-linux-android/release/file_daemon" \
 # Java resources bypass JNI filename filtering while preserving original names.
 UTILITY_DIR="$ROOT_DIR/app/src/main/executables/lib/arm64-v8a"
 mkdir -p "$UTILITY_DIR"
-for utility in run0 here agent; do
+for utility in run0 here agent systemctl virgl_bridge; do
   cp "$NATIVE_DIR/target/aarch64-linux-android/release/$utility" "$UTILITY_DIR/$utility"
 done
+
+# The native GPU bridge needs a real Android EGL/GLES host renderer in the APK.
+if [[ "$HOST_TAG" == "windows-x86_64" ]]; then
+  PYTHON_BIN="${PYTHON_BIN:-python}"
+else
+  PYTHON_BIN="${PYTHON_BIN:-python3}"
+fi
+"$PYTHON_BIN" "$NATIVE_DIR/build-virgl.py" --ndk "$NDK_ROOT" --work "$NATIVE_DIR/target/virgl-build"

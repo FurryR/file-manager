@@ -1,0 +1,26 @@
+<resources>
+    <string name="tools_title">Toolbox</string>
+    <string name="tools_ftp">FTP server</string>
+    <string name="tools_ftp_description">Share the selected directory over passive FTP. FTP sends passwords and files without encryption; use a trusted local network.</string>
+    <string name="tools_shared_root">Shared directory</string>
+    <string name="tools_port">Port</string>
+    <string name="tools_username">Username</string>
+    <string name="tools_password">Password</string>
+    <string name="tools_show_password">Show password</string>
+    <string name="tools_loopback">Local device only</string>
+    <string name="tools_start">Start</string>
+    <string name="tools_stop">Stop</string>
+    <string name="tools_services">Container services</string>
+    <string name="tools_desktop">Wayland desktop</string>
+    <string name="tools_graphics">VirGL acceleration</string>
+    <string name="tools_remote">AList / SSH connections</string>
+    <string name="tools_open_with">Open with…</string>
+    <string name="archive_tools">Archive manager</string>
+    <string name="archive_create">Create ZIP</string>
+    <string name="archive_extract">Extract</string>
+    <string name="archive_browse">Browse archive</string>
+    <string name="archive_destination">Destination path</string>
+    <string name="archive_password">Archive password (optional)</string>
+    <string name="archive_password_needed">Enter the archive password to continue.</string>
+    <string name="archive_overwrite">Overwrite existing files</string>
+</resources>

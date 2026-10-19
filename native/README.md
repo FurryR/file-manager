@@ -6,6 +6,7 @@ This Cargo workspace manages the daemon and all terminal utilities together:
 - `run0`: run a command through the hub, optionally as another user/container.
 - `here`: reveal a file or directory in the app's current tab.
 - `agent`: a small, single-file Rust TUI for an OpenAI-compatible Chat Completions API.
+- `systemctl`: the container service-manager command subset described in [SERVICES.md](SERVICES.md).
 - `hub-client`: shared Protobuf framing, abstract sockets and SCM_RIGHTS transport.
 
 Rust subprocess daemon for file operations and command execution. The app starts
@@ -30,7 +31,7 @@ bash native/build-android-aarch64.sh
 The script stages the daemon as
 `app/src/main/jniLibs/arm64-v8a/libfiledaemon.so` for APK packaging and extraction
 into `nativeLibraryDir`. The utilities keep their original names (`run0`, `here`,
-`agent`) under `app/src/main/executables/lib/arm64-v8a/`; the existing Java-resource
+`agent`, `systemctl`) under `app/src/main/executables/lib/arm64-v8a/`; the existing Java-resource
 packaging preserves those names in the APK's `lib/arm64-v8a/` directory. All
 workspace build artifacts and the shared dependency lockfile live under `native/`.
 

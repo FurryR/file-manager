@@ -1,0 +1,6 @@
+*.sh text eol=lf
+*.py text eol=lf
+# Preserve upstream patch context and license notices verbatim.
+native/virgl/patches/*.patch text eol=lf -whitespace
+native/virgl/licenses/* text eol=lf -whitespace
+app/src/main/assets/native-licenses/* text eol=lf -whitespace

@@ -1,0 +1,49 @@
+{
+  "name": "File Manager markup",
+  "scopeName": "source.fm-markup",
+  "patterns": [
+    {
+      "name": "comment.block",
+      "begin": "<!--",
+      "end": "-->"
+    },
+    {
+      "name": "constant.numeric",
+      "match": "\\b(?:0[xX][0-9a-fA-F]+|\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)\\b"
+    },
+    {
+      "name": "string.quoted.double",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "string.quoted.single",
+      "begin": "'",
+      "end": "'",
+      "patterns": [
+        {
+          "name": "constant.character.escape",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "entity.name.tag",
+      "match": "</?[\\w:.-]+|/?>"
+    },
+    {
+      "name": "entity.other.attribute-name",
+      "match": "[\\w:.-]+(?=\\s*=)"
+    },
+    {
+      "name": "constant.character.entity",
+      "match": "&(?:#\\d+|\\w+);"
+    }
+  ]
+}

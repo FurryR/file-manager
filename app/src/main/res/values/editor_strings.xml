@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="editor_close">Close editor</string>
+    <string name="editor_save">Save</string>
+    <string name="editor_saved">File saved</string>
+    <string name="editor_undo">Undo</string>
+    <string name="editor_redo">Redo</string>
+    <string name="editor_search">Search and replace</string>
+    <string name="editor_more">Editor options</string>
+    <string name="editor_find">Find</string>
+    <string name="editor_replace">Replace</string>
+    <string name="editor_replace_all">All</string>
+    <string name="editor_unsaved">Unsaved changes</string>
+    <string name="editor_unsaved_message">Save your changes before closing?</string>
+    <string name="editor_discard">Discard</string>
+    <string name="editor_conflict">File changed outside the editor</string>
+    <string name="editor_conflict_message">The current file differs from the version you opened. Keep editing or explicitly overwrite it with this buffer.</string>
+    <string name="editor_overwrite">Overwrite</string>
+    <string name="editor_error">Editor error</string>
+    <string name="editor_wrap">Toggle word wrap</string>
+    <string name="editor_font_larger">Larger font</string>
+    <string name="editor_font_smaller">Smaller font</string>
+    <string name="editor_goto">Go to line</string>
+    <string name="editor_complete">Show completions</string>
+    <string name="editor_diagnostics">Diagnostics (%1$d)</string>
+    <string name="editor_no_diagnostics">No current diagnostics.</string>
+    <string name="editor_lsp_settings">Container language server</string>
+    <string name="editor_lsp_container">Container</string>
+    <string name="editor_lsp_command">Server command (stdio)</string>
+    <string name="editor_lsp_root">Workspace path inside container</string>
+    <string name="editor_lsp_document">Document path inside container</string>
+    <string name="editor_lsp_hint">Start an installed server such as clangd, rust-analyzer or pylsp using raw standard I/O. The document path must match the file as seen inside this container; remote files are not copied there automatically. Configuration is remembered per language.</string>
+    <string name="editor_lsp_connect">Connect</string>
+    <string name="editor_lsp_disconnect">Disconnect language server</string>
+    <string name="editor_lsp_disconnected">LSP disconnected · syntax highlighting available</string>
+    <string name="editor_lsp_connecting">Starting language server…</string>
+    <string name="editor_lsp_connected">LSP connected · %1$s</string>
+</resources>

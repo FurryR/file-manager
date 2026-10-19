@@ -1,5 +1,5 @@
 [workspace]
-members = ["run0", "here", "agent", "hub-client"]
+members = ["run0", "here", "agent", "hub-client", "systemctl", "graphics-bridge"]
 resolver = "2"
 
 [package]

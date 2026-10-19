@@ -190,7 +190,10 @@ fun ContextMenu(
     onDelete: () -> Unit,
     onProperties: () -> Unit,
     onShare: () -> Unit,
-    canShare: Boolean = true
+    canShare: Boolean = true,
+    onOpenWith: () -> Unit = {},
+    onArchive: () -> Unit = {},
+    onExtract: (() -> Unit)? = null,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -208,6 +211,10 @@ fun ContextMenu(
                     ActionButton(stringResource(R.string.properties), Icons.Default.Info, onProperties, Modifier.weight(1f))
                     ActionButton(stringResource(R.string.share), Icons.Default.Share, onClick = onShare, modifier = Modifier.weight(1f), enabled = canShare)
                 }
+                HorizontalDivider()
+                if (!entry.isDirectory) TextButton(onClick = onOpenWith) { Text(stringResource(R.string.tools_open_with)) }
+                TextButton(onClick = onArchive) { Text(stringResource(R.string.archive_create)) }
+                onExtract?.let { action -> TextButton(onClick = action) { Text(stringResource(R.string.archive_extract)) } }
             }
         },
         confirmButton = {},

@@ -117,6 +117,7 @@ object ContainerManager {
                 Log.w(TAG, "Container '$name' directory missing during delete")
                 return@withContext Result.success(Unit)
             }
+            ContainerServiceForegroundService.stopContainer(context, name)
 
             // A chroot rootfs is root-owned, so the app UID cannot unlink it;
             // delegate the recursive removal to the root daemon.
@@ -165,6 +166,7 @@ object ContainerManager {
                     IllegalStateException("Container '$newName' already exists")
                 )
             }
+            ContainerServiceForegroundService.stopContainer(context, oldName)
 
             if (!containerDir.renameTo(newDir)) {
                 return@withContext Result.failure(
@@ -203,7 +205,7 @@ object ContainerManager {
                     if (distroFile.exists()) {
                         try {
                             val container = loadContainer(dir)
-                            val liveState = if (SessionManager.hasContainerSession(container.name)) {
+                            val liveState = if (SessionManager.hasContainerSession(container.name) || DaemonManager.isNamedConnected(container.name)) {
                                 ContainerState.RUNNING
                             } else {
                                 container.state

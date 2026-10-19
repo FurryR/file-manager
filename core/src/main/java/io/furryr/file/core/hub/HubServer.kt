@@ -146,6 +146,26 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
         val id = request.id
         return runCatching {
             when (request.opCase) {
+                HubRequest.OpCase.SERVICE_CONTROL -> {
+                    require(fds.isEmpty()) { "service control does not take descriptors" }
+                    val name = if (state.target !in listOf("primary", "app")) state.target
+                        else requireNotNull(state.root?.containerName) { "systemctl requires a container or --machine" }
+                    val operation = request.serviceControl
+                    val result = DaemonManager.connection(DaemonTarget.Named(name)).request(
+                        io.furryr.file.proto.Request.newBuilder().setServiceControl(
+                            io.furryr.file.proto.ServiceControlRequest.newBuilder().setAction(operation.action)
+                                .addAllUnits(operation.unitsList).setContent(operation.content),
+                        ).build(),
+                    ).response.serviceControl
+                    Reply(HubResponse.newBuilder().setId(id).setOk(true).setServiceControl(
+                        io.furryr.file.proto.hub.ServiceControlResponse.newBuilder().setText(result.text).setExitCode(result.exitCode)
+                            .addAllServices(result.servicesList.map { service ->
+                                io.furryr.file.proto.hub.ServiceStatus.newBuilder().setName(service.name).setState(service.state)
+                                    .setEnabled(service.enabled).setPid(service.pid).setExitCode(service.exitCode)
+                                    .setDetail(service.detail).setDescription(service.description).build()
+                            }),
+                    ).build())
+                }
                 HubRequest.OpCase.HELLO -> {
                     require(state.root == null) { "caller root is already registered" }
                     require(fds.size == 1) { "hello requires exactly one root descriptor" }
@@ -191,6 +211,12 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                     .setApiKey(config.apiKey).setModel(config.model),
                             ).build(),
                     )
+                }
+
+                HubRequest.OpCase.OPEN_GRAPHICS -> {
+                    val socket = requireNotNull(HubActions.graphicsConnector) { "VirGL renderer is not running" }.invoke()
+                    Reply(HubResponse.newBuilder().setId(id).setOk(true)
+                        .setGraphicsConnection(io.furryr.file.proto.hub.GraphicsConnectionResponse.getDefaultInstance()).build(), socket)
                 }
 
                 HubRequest.OpCase.EXEC -> {

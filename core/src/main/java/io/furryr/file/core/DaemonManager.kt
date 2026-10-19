@@ -264,6 +264,9 @@ object DaemonManager {
     fun execService(target: DaemonTarget = DaemonTarget.Primary): ExecService =
         ExecService { connection(target) }
 
+    fun containerServices(name: String): ContainerServices =
+        ContainerServices { connection(DaemonTarget.Named(name)) }
+
     // ── Internal ──────────────────────────────────────────────────────
 
     internal fun connection(target: DaemonTarget): DaemonConnection = synchronized(lock) {

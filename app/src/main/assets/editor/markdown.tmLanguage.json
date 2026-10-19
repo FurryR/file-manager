@@ -1,0 +1,32 @@
+{
+  "name": "File Manager markdown",
+  "scopeName": "source.fm-markdown",
+  "patterns": [
+    {
+      "name": "markup.heading",
+      "match": "^#{1,6}\\s.*$"
+    },
+    {
+      "name": "markup.raw.block",
+      "begin": "^\\s*```",
+      "end": "^\\s*```"
+    },
+    {
+      "name": "markup.raw.inline",
+      "begin": "`",
+      "end": "`"
+    },
+    {
+      "name": "markup.bold",
+      "match": "\\*\\*.+?\\*\\*"
+    },
+    {
+      "name": "markup.italic",
+      "match": "(?<!\\*)\\*[^*]+\\*"
+    },
+    {
+      "name": "string.other.link",
+      "match": "\\[[^\\]]*\\]\\([^)]*\\)"
+    }
+  ]
+}

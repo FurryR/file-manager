@@ -119,6 +119,13 @@ object ContainerDaemonProvider : FileProvider {
         files(segments.first()).open(daemonPath(segments), mode).getOrThrow()
     }
 
+    override suspend fun prepareReplacement(original: String, replacement: String): Result<Unit> = runCatching {
+        val source = containerSegments(original)
+        val target = containerSegments(replacement)
+        require(source.first() == target.first()) { "replacement must stay in the same container" }
+        files(source.first()).prepareReplacement(daemonPath(source), daemonPath(target)).getOrThrow()
+    }
+
     override fun copy(from: String, to: String, isCopy: Boolean): Flow<CopyProgress> {
         val fromSegments = containerSegments(from)
         val toSegments = containerSegments(to)

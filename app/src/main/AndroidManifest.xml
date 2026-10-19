@@ -12,6 +12,7 @@
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 
     <application
+        android:usesCleartextTraffic="true"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -19,6 +20,16 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.FileManager">
+        <activity android:name=".editor.EditorActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
+        <activity android:name=".provider.remote.RemoteLocationsActivity" android:exported="false" />
+        <activity android:name=".tools.ToolboxActivity" android:exported="false" />
+        <activity android:name=".desktop.DesktopActivity" android:exported="false" android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize|keyboardHidden" />
+        <activity android:name=".graphics.GraphicsActivity" android:exported="false" />
+        <service android:name=".graphics.GraphicsForegroundService" android:exported="false" android:foregroundServiceType="specialUse" />
+        <activity android:name=".archive.ArchiveToolsActivity" android:exported="false" />
+        <activity android:name=".agent.ContainerServicesActivity" android:exported="false" />
+        <service android:name=".tools.LocalFtpService" android:exported="false" android:foregroundServiceType="specialUse" />
+        <service android:name=".agent.ContainerServiceForegroundService" android:exported="false" android:foregroundServiceType="specialUse" />
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="io.furryr.file.provider"

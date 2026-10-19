@@ -25,6 +25,8 @@ message HubRequest {
     HereRequest here = 9;
     GetAiConfigRequest get_ai_config = 10;
     HelloRequest hello = 11;
+    ServiceControlRequest service_control = 12;
+    OpenGraphicsRequest open_graphics = 13;
   }
 }
 
@@ -38,6 +40,8 @@ message HubResponse {
     WaitResponse wait = 6;
     AiConfigResponse ai_config = 7;
     CallerRoot caller_root = 8;
+    ServiceControlResponse service_control = 9;
+    GraphicsConnectionResponse graphics_connection = 10;
   }
 }
 
@@ -139,3 +143,12 @@ message AiConfigResponse {
   string api_key = 2;
   string model = 3;
 }
+
+message ServiceControlRequest { string action = 1; repeated string units = 2; string content = 3; }
+message ServiceStatus { string name = 1; string state = 2; bool enabled = 3; uint32 pid = 4; int32 exit_code = 5; string detail = 6; string description = 7; }
+message ServiceControlResponse { repeated ServiceStatus services = 1; string text = 2; int32 exit_code = 3; }
+
+// A connected host VirGL vtest socket is returned as one SCM_RIGHTS descriptor.
+// Bytes and ancillary descriptors flow directly after this handshake.
+message OpenGraphicsRequest {}
+message GraphicsConnectionResponse {}

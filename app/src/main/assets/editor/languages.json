@@ -1,0 +1,40 @@
+{
+  "languages": [
+    {
+      "grammar": "editor/code.tmLanguage.json",
+      "name": "code",
+      "scopeName": "source.fm-code",
+      "languageConfiguration": "editor/language-configuration.json"
+    },
+    {
+      "grammar": "editor/python.tmLanguage.json",
+      "name": "python",
+      "scopeName": "source.fm-python",
+      "languageConfiguration": "editor/language-configuration.json"
+    },
+    {
+      "grammar": "editor/shell.tmLanguage.json",
+      "name": "shell",
+      "scopeName": "source.fm-shell",
+      "languageConfiguration": "editor/language-configuration.json"
+    },
+    {
+      "grammar": "editor/config.tmLanguage.json",
+      "name": "config",
+      "scopeName": "source.fm-config",
+      "languageConfiguration": "editor/language-configuration.json"
+    },
+    {
+      "grammar": "editor/markup.tmLanguage.json",
+      "name": "markup",
+      "scopeName": "source.fm-markup",
+      "languageConfiguration": "editor/language-configuration.json"
+    },
+    {
+      "grammar": "editor/markdown.tmLanguage.json",
+      "name": "markdown",
+      "scopeName": "source.fm-markdown",
+      "languageConfiguration": "editor/language-configuration.json"
+    }
+  ]
+}

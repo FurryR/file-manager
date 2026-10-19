@@ -217,10 +217,10 @@ object FtpProvider : FileProvider {
         val ftp = client(server)
         val output = ftp.storeFileStream(remotePath)
             ?: throw IllegalStateException("Cannot open destination: $destPath")
+        var copied = 0L
         try {
             output.use { outs ->
                 var offset = 0L
-                var copied = 0L
                 while (true) {
                     val data = src.readChunk(offset, COPY_BUFFER_SIZE)
                     if (data.isEmpty()) break
@@ -229,10 +229,12 @@ object FtpProvider : FileProvider {
                     copied += data.size
                     emit(CopyProgress(src.size, copied, destPath, false, isCopy))
                 }
-                emit(CopyProgress(src.size, copied, destPath, true, isCopy))
             }
-        } finally {
-            runCatching { ftp.completePendingCommand() }
+            check(ftp.completePendingCommand()) { "FTP server did not confirm the upload" }
+            emit(CopyProgress(src.size, copied, destPath, true, isCopy))
+        } catch (failure: Exception) {
+            runCatching { ftp.disconnect() }.onFailure { android.util.Log.w("FtpProvider", "FTP cleanup failed", it) }
+            throw failure
         }
     }.flowOn(Dispatchers.IO)
 

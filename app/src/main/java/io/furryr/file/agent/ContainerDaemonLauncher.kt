@@ -7,6 +7,8 @@ import io.furryr.file.core.DaemonLaunchRequest
 import io.furryr.file.core.DaemonManager
 import io.furryr.file.core.isSuAvailable
 import io.furryr.file.core.shellQuote
+import io.furryr.file.core.hub.Hub
+import io.furryr.file.graphics.GraphicsManager
 
 /**
  * App-owned daemon launcher: builds the daemon argv for a container,
@@ -23,6 +25,9 @@ object ContainerDaemonLauncher {
 
     fun command(context: Context, request: DaemonLaunchRequest): DaemonCommand? {
         val container = ContainerManager.getContainer(context, request.name) ?: return null
+        GraphicsManager.ensureHostIfEnabled(context, request.name)
+        DaemonManager.startHub()
+        ContainerServiceForegroundService.track(context, request.name)
         return when (container.backend) {
             ContainerBackend.CHROOT -> chrootCommand(context, request, container)
             ContainerBackend.PROOT -> prootCommand(context, request, container)
@@ -48,7 +53,8 @@ object ContainerDaemonLauncher {
             tokens.add(shellQuote("$source:$target"))
         }
         val su = request.suPath.ifBlank { "su" }
-        val command = "export PATH=${shellQuote(daemonPath(context))}; exec ${tokens.joinToString(" ")}"
+        val hubEnvironment = Hub.environment().entries.joinToString(" ") { "${it.key}=${shellQuote(it.value)}" }
+        val command = "export PATH=${shellQuote(daemonPath(context))} $hubEnvironment; exec ${tokens.joinToString(" ")}"
         return DaemonCommand(listOf(su, "-c", command))
     }
 
@@ -67,7 +73,7 @@ object ContainerDaemonLauncher {
             id = request.id,
         )
         // proot needs a writable host temp dir; Android has no /tmp.
-        val env = mapOf(
+        val env = Hub.environment() + mapOf(
             "PROOT_TMP_DIR" to ProotRunner.prootTmpDir(context, container).absolutePath,
             "PATH" to daemonPath(context),
         )
@@ -75,5 +81,5 @@ object ContainerDaemonLauncher {
     }
 
     private fun daemonPath(context: Context): String =
-        "$DEFAULT_PATH:${context.applicationInfo.nativeLibraryDir}"
+        "${context.applicationInfo.nativeLibraryDir}:$DEFAULT_PATH"
 }

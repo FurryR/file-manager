@@ -12,6 +12,7 @@ import io.furryr.file.core.source.OpenMode
 import io.furryr.file.core.source.openDaemonSource
 import io.furryr.file.proto.HandleMode
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -36,6 +37,15 @@ class FileService internal constructor(private val resolve: () -> DaemonConnecti
     suspend fun delete(path: String): Result<Unit> = resolve().deleteEntry(path)
 
     suspend fun rename(path: String, newName: String): Result<Unit> = resolve().renameEntry(path, newName)
+
+    suspend fun prepareReplacement(original: String, replacement: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            resolve().request(io.furryr.file.proto.Request.newBuilder().setPrepareReplacement(
+                io.furryr.file.proto.PrepareReplacementRequest.newBuilder().setOriginal(original).setReplacement(replacement),
+            ).build())
+            Unit
+        }
+    }
 
     suspend fun open(path: String, mode: OpenMode): Result<FileSource> = runCatching {
         openDaemonSource(path, mode) { resolve() }

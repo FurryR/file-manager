@@ -389,12 +389,16 @@ object SessionManager {
             add("PROOT_TMP_DIR=$tmpDir")
             // Publish the hub endpoint and packaged utilities to the shell.
             Hub.environment().forEach { (key, value) -> add("$key=$value") }
+            if (shell.startsWith("container://")) {
+                io.furryr.file.graphics.GraphicsManager.containerEnvironment(context, shell.removePrefix("container://").trimEnd('/'))
+                    .forEach { (key, value) -> add("$key=$value") }
+            }
             add("HUB_TERMINAL=$terminalId")
             Hub.binDir?.let { dir ->
                 val pathIndex = indexOfFirst { it.startsWith("PATH=") }
                 if (pathIndex >= 0) {
                     this[pathIndex] =
-                        "PATH=${this[pathIndex].removePrefix("PATH=")}:${dir.absolutePath}"
+                        "PATH=${dir.absolutePath}:${this[pathIndex].removePrefix("PATH=")}"
                 } else {
                     add("PATH=${dir.absolutePath}")
                 }

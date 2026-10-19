@@ -1,0 +1,9 @@
+[package]
+name = "systemctl"
+version = "0.1.0"
+edition = "2021"
+description = "Control file-manager container services through its hub"
+
+[dependencies]
+hub-client = { path = "../hub-client" }
+libc = "0.2"

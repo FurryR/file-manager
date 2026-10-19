@@ -9,6 +9,7 @@ import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
+import org.gradle.api.tasks.Exec
 
 plugins {
     id("com.android.application")
@@ -67,6 +68,26 @@ android {
     // Package standalone executables before signing, preserving lib/<abi>/<name>.
     // The JNI input pipeline filters out filenames without a .so suffix.
     sourceSets.getByName("main").resources.srcDir("src/main/executables")
+}
+
+val buildNativeDaemon = tasks.register<Exec>("buildNativeDaemon") {
+    group = "build"
+    description = "Builds libfiledaemon.so and copies it into app/src/main/jniLibs/arm64-v8a before Android packaging."
+    workingDir = rootProject.projectDir
+    commandLine("bash", rootProject.file("native/build-android-aarch64.sh").absolutePath)
+
+    inputs.file(rootProject.file("native/build-android-aarch64.sh"))
+    inputs.file(rootProject.file("native/Cargo.toml"))
+    inputs.file(rootProject.file("native/Cargo.lock"))
+    inputs.file(rootProject.file("native/build.rs"))
+    inputs.dir(rootProject.file("native/src"))
+    inputs.file(rootProject.file("proto/file_daemon.proto"))
+
+    outputs.file(rootProject.file("app/src/main/jniLibs/arm64-v8a/libfiledaemon.so"))
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(buildNativeDaemon)
 }
 
 androidComponents {

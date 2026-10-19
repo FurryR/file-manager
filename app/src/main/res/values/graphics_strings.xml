@@ -1,0 +1,9 @@
+<resources>
+    <string name="graphics_host_notification">Host renderer available through the Hub</string>
+    <string name="graphics_binary_missing">The bundled VirGL renderer is missing. Build native/build-virgl before packaging the APK.</string>
+    <string name="graphics_description">Share the Android EGL/GLES renderer with a container through the Hub. The container needs Mesa with the virpipe driver. New terminals and desktop sessions use the bridge after enabling; restart existing graphical applications. GPU support depends on the device driver.</string>
+    <string name="graphics_running">Host renderer running</string>
+    <string name="graphics_stopped">Host renderer stopped</string>
+    <string name="graphics_logs">Bridge logs</string>
+    <string name="graphics_no_containers">Create a container first.</string>
+</resources>

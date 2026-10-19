@@ -390,6 +390,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "graphics-bridge"
+version = "0.1.0"
+dependencies = [
+ "hub-client",
+ "libc",
+ "prost",
+ "tokio",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1314,6 +1324,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "systemctl"
+version = "0.1.0"
+dependencies = [
+ "hub-client",
+ "libc",
 ]
 
 [[package]]

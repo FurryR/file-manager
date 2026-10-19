@@ -48,6 +48,9 @@ class DaemonFileProvider : FileProvider {
 
     override suspend fun rename(path: String, newName: String): Result<Unit> = files.rename(path, newName)
 
+    override suspend fun prepareReplacement(original: String, replacement: String): Result<Unit> =
+        files.prepareReplacement(original, replacement)
+
     override suspend fun open(path: String, mode: OpenMode): Result<FileSource> = files.open(path, mode)
 
     override fun copy(from: String, to: String, isCopy: Boolean): Flow<CopyProgress> =

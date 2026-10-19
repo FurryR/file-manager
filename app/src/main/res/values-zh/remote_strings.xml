@@ -1,0 +1,32 @@
+<resources>
+    <string name="remote_locations">远程位置</string>
+    <string name="remote_edit">编辑连接</string>
+    <string name="remote_add_alist">添加 AList</string>
+    <string name="remote_add_ssh">添加 SSH</string>
+    <string name="remote_empty">添加服务器后，点击连接即可浏览文件。</string>
+    <string name="remote_remove">移除连接</string>
+    <string name="remote_remove_confirm">移除 %1$s 及其保存的凭据？远程文件保持不变。</string>
+    <string name="remote_store_error">无法读取或保存此设备上的加密连接配置。</string>
+    <string name="remote_connect_error">无法连接服务器。</string>
+    <string name="remote_host_title">验证 SSH 主机密钥</string>
+    <string name="remote_host_confirm">首次连接 %1$s。接受前，请通过可信来源核对服务器指纹。\n\n%2$s\n%3$s</string>
+    <string name="remote_host_changed">SSH 主机密钥发生变化，连接已阻止。请联系服务器管理员核实。\n新指纹：%1$s</string>
+    <string name="remote_trust">信任此密钥并继续</string>
+    <string name="remote_name">连接名称</string>
+    <string name="remote_endpoint">AList 服务器地址</string>
+    <string name="remote_username">用户名</string>
+    <string name="remote_password">密码</string>
+    <string name="remote_token">AList API Token（优先于用户名和密码）</string>
+    <string name="remote_directory_password">AList 目录密码（可选）</string>
+    <string name="remote_host">SSH 主机名或 IP 地址</string>
+    <string name="remote_port">SSH 端口</string>
+    <string name="remote_private_key">私钥（PEM/OpenSSH，可选）</string>
+    <string name="remote_import_key">导入私钥文件</string>
+    <string name="remote_passphrase">私钥口令（可选）</string>
+    <string name="remote_key_pinned">已固定此前验证的主机密钥。更改主机或端口后需要重新验证。</string>
+    <string name="remote_base_path">起始目录（绝对路径）</string>
+    <string name="remote_save">保存</string>
+    <string name="remote_save_open">保存并连接</string>
+    <string name="remote_alist_help">使用 AList v3 HTTP API。填写服务器基础地址，可包含部署路径前缀。启用双重验证的账户请使用 API Token；留空凭据可尝试访客访问。凭据在本地加密保存。</string>
+    <string name="remote_ssh_help">通过 SSH 命令通道传输文件，无需 SFTP。服务器需要 POSIX shell、find、stat（GNU/BusyBox 或 BSD）、cat、wc、mkdir、rm、mv 和 chmod。密码和私钥在本地加密保存。</string>
+</resources>

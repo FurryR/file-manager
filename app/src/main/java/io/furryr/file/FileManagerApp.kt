@@ -4,6 +4,10 @@ import io.furryr.file.ui.components.*
 import io.furryr.file.ui.screens.*
 import io.furryr.file.ui.util.*
 import io.furryr.file.util.Path
+import io.furryr.file.archive.ArchiveProvider
+import io.furryr.file.archive.ArchiveToolsActivity
+import io.furryr.file.provider.remote.RemoteLocationsActivity
+import io.furryr.file.tools.ToolboxActivity
 
 import io.furryr.file.core.DaemonManager
 import io.furryr.file.core.DaemonStatus
@@ -159,6 +163,12 @@ fun FileManagerApp(
     var highlightRefreshToken by remember { mutableStateOf<Int?>(null) }
     var pendingScrollPath by remember { mutableStateOf<String?>(null) }
     var showTerminalSheet by remember { mutableStateOf(false) }
+    var externalDirectory by remember { mutableStateOf<String?>(null) }
+    val locationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) externalDirectory =
+            result.data?.getStringExtra(RemoteLocationsActivity.EXTRA_URI)
+                ?: result.data?.getStringExtra(ArchiveToolsActivity.EXTRA_URI)
+    }
     LaunchedEffect(terminalOpenRequest) {
         if (terminalOpenRequest > 0) showTerminalSheet = true
     }
@@ -293,6 +303,21 @@ fun FileManagerApp(
     fun refreshFileList(animate: Boolean = true) {
         refreshTrigger++
         if (animate) animationTrigger++
+    }
+
+    LaunchedEffect(externalDirectory) {
+        externalDirectory?.let { destination ->
+            pendingNavigation = null
+            if (currentTab().path != destination) navigateTo(destination)
+            refreshFileList()
+            externalDirectory = null
+        }
+    }
+    fun archiveAction(mode: String, paths: List<String>) {
+        locationLauncher.launch(Intent(context, ArchiveToolsActivity::class.java)
+            .putExtra(ArchiveToolsActivity.EXTRA_MODE, mode)
+            .putStringArrayListExtra(ArchiveToolsActivity.EXTRA_PATHS, ArrayList(paths))
+            .putExtra(ArchiveToolsActivity.EXTRA_DESTINATION, currentTab().path))
     }
 
     val handleHereRequest by rememberUpdatedState(newValue = { request: HereNavigation.Request ->
@@ -649,6 +674,12 @@ fun FileManagerApp(
                     drawerSortMode = false
                     context.startActivity(Intent(context, SettingsActivity::class.java))
                 },
+                onToolsClick = {
+                    context.startActivity(Intent(context, ToolboxActivity::class.java).putExtra("path", currentTab().path))
+                },
+                onRemoteConnectionsClick = {
+                    locationLauncher.launch(Intent(context, RemoteLocationsActivity::class.java))
+                },
                 onContainerRename = { oldName, newName ->
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
@@ -687,9 +718,8 @@ fun FileManagerApp(
                         ) return@launch
                         // Close every terminal session of the container first,
                         // then tear down its dedicated daemon (kills the process tree).
-                        SessionManager.destroyContainerSessions(name)
                         withContext(Dispatchers.IO) {
-                            DaemonManager.closeNamedConnection(name)
+                            io.furryr.file.agent.ContainerServiceForegroundService.stopContainer(context, name)
                         }
                         // Any tab browsing into the killed container is now
                         // invalid; drop it (and reopen home if none remain).
@@ -1117,7 +1147,7 @@ fun FileManagerApp(
                         ))
                     },
                     onDirectoryClick = ::navigateTo,
-                    onFileClick = { openFile(context, it) },
+                    onFileClick = { if (ArchiveProvider.supports(it.name)) archiveAction("open", listOf(it.path)) else openFile(context, it) },
                     onLongPress = { contextMenuEntry = it },
                     selectionMode = copyMoveState == null && currentTab().selectedPaths.isNotEmpty(),
                     selectedPaths = currentTab().selectedPaths,
@@ -1208,7 +1238,12 @@ fun FileManagerApp(
             onDelete = { executeEntryAction(entry, "delete") },
             onProperties = { executeEntryAction(entry, "properties") },
             onShare = { executeEntryAction(entry, "share") },
-            canShare = sharesForMenu.all { !it.isDirectory }
+            canShare = sharesForMenu.all { !it.isDirectory },
+            onOpenWith = { contextMenuEntry = null; openFileWithSystem(context, entry) },
+            onArchive = { contextMenuEntry = null; archiveAction("create", sharesForMenu.map { it.path }) },
+            onExtract = if (!entry.isDirectory && ArchiveProvider.supports(entry.name)) {
+                { contextMenuEntry = null; archiveAction("extract", listOf(entry.path)) }
+            } else null,
         )
     }
 

@@ -33,6 +33,9 @@ interface FileProvider {
     suspend fun delete(path: String): Result<Unit>
     suspend fun rename(path: String, newName: String): Result<Unit>
 
+    /** Preserve backend-specific metadata on a staged file before replacing [original]. */
+    suspend fun prepareReplacement(original: String, replacement: String): Result<Unit> = Result.success(Unit)
+
     /** Open a file and return a universally readable/writable [FileSource]. */
     suspend fun open(path: String, mode: OpenMode): Result<FileSource>
 

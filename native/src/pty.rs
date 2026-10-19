@@ -16,21 +16,34 @@ fn reopen_cwd(fd: RawFd) -> io::Result<OwnedFd> {
         return Err(io::Error::last_os_error());
     }
     if original.st_mode & libc::S_IFMT != libc::S_IFDIR {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "cwd fd is not a directory"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cwd fd is not a directory",
+        ));
     }
     let path = std::fs::read_link(format!("/proc/self/fd/{fd}"))?;
     if !path.is_absolute() || path.as_os_str().as_bytes().ends_with(b" (deleted)") {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "cwd fd pathname is deleted or unreachable"));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "cwd fd pathname is deleted or unreachable",
+        ));
     }
     let candidate = CString::new(path.as_os_str().as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     // Resolve in the daemon's own filesystem. Never fchdir the received fd:
     // it may refer to a private mount or a directory outside the target root.
-    let reopened = unsafe { libc::open(candidate.as_ptr(), libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    let reopened = unsafe {
+        libc::open(
+            candidate.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
     if reopened < 0 {
         let error = io::Error::last_os_error();
-        return Err(io::Error::new(error.kind(),
-            format!("cannot reopen cwd {} in target: {error}", path.display())));
+        return Err(io::Error::new(
+            error.kind(),
+            format!("cannot reopen cwd {} in target: {error}", path.display()),
+        ));
     }
     Ok(unsafe { OwnedFd::from_raw_fd(reopened) })
 }
@@ -47,9 +60,13 @@ unsafe fn enter_fd_cwd(fd: RawFd, buffer: &mut [libc::c_char]) -> bool {
     if buffer[0] != b'/' as libc::c_char {
         // Linux can report "(unreachable)/..." for a cwd outside the root.
         #[cfg(not(target_os = "android"))]
-        { *libc::__errno_location() = libc::ENOENT; }
+        {
+            *libc::__errno_location() = libc::ENOENT;
+        }
         #[cfg(target_os = "android")]
-        { *libc::__errno() = libc::ENOENT; }
+        {
+            *libc::__errno() = libc::ENOENT;
+        }
         return false;
     }
     true
@@ -68,14 +85,21 @@ fn cstr_to_string(ptr: *const libc::c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
-    unsafe { CStr::from_ptr(ptr) }.to_str().ok().map(str::to_owned)
+    unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .ok()
+        .map(str::to_owned)
 }
 
 fn parse_passwd(contents: &str, user: &str) -> Option<RunAs> {
     let requested_uid = user.parse::<libc::uid_t>().ok();
     contents.lines().find_map(|line| {
         let fields: Vec<_> = line.split(':').collect();
-        if fields.len() != 7 || fields[0].is_empty() || fields[0].starts_with('#') || line.contains('\0') {
+        if fields.len() != 7
+            || fields[0].is_empty()
+            || fields[0].starts_with('#')
+            || line.contains('\0')
+        {
             return None;
         }
         let uid = fields[2].parse::<libc::uid_t>().ok()?;
@@ -126,10 +150,17 @@ fn resolve_user(user: &str) -> io::Result<RunAs> {
                 shell = cstr_to_string((*passwd).pw_shell);
             }
         }
-        return Ok(RunAs { uid, gid, name, home, shell });
+        return Ok(RunAs {
+            uid,
+            gid,
+            name,
+            home,
+            shell,
+        });
     }
 
-    let requested = CString::new(user).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let requested =
+        CString::new(user).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let passwd = unsafe { libc::getpwnam(requested.as_ptr()) };
     if passwd.is_null() {
         return Err(io::Error::new(
@@ -156,16 +187,28 @@ fn resolve_shell(passwd_shell: Option<&str>) -> io::Result<String> {
     use std::os::unix::fs::PermissionsExt;
 
     // The daemon already lives in the target filesystem, including containers.
-    passwd_shell.into_iter().chain(["/bin/sh", "/system/bin/sh"])
+    passwd_shell
+        .into_iter()
+        .chain(["/bin/sh", "/system/bin/sh"])
         .find(|shell| {
             std::path::Path::new(shell).is_absolute()
-                && std::fs::metadata(shell).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                && std::fs::metadata(shell)
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         })
         .map(str::to_owned)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "target user has no executable shell"))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "target user has no executable shell",
+            )
+        })
 }
 
-fn build_environment(req: &SpawnPtyRequest, target: Option<&RunAs>, command: &str) -> HashMap<String, String> {
+fn build_environment(
+    req: &SpawnPtyRequest,
+    target: Option<&RunAs>,
+    command: &str,
+) -> HashMap<String, String> {
     let mut env: HashMap<String, String> = if req.command.is_empty() {
         let path = if command.starts_with("/system/") {
             "/system/bin:/system/xbin"
@@ -174,7 +217,10 @@ fn build_environment(req: &SpawnPtyRequest, target: Option<&RunAs>, command: &st
         };
         let mut env = HashMap::from([
             ("SHELL".into(), command.into()),
-            ("PATH".into(), std::env::var("PATH").unwrap_or_else(|_| path.into())),
+            (
+                "PATH".into(),
+                std::env::var("PATH").unwrap_or_else(|_| path.into()),
+            ),
         ]);
         if std::path::Path::new("/tmp").is_dir() {
             env.insert("TMPDIR".into(), "/tmp".into());
@@ -195,6 +241,9 @@ fn build_environment(req: &SpawnPtyRequest, target: Option<&RunAs>, command: &st
         env.insert("TERM".into(), req.term_type.clone());
     }
     env.extend(req.env.clone());
+    for (key, value) in crate::services::bus_environment() {
+        env.entry(key).or_insert(value);
+    }
     env
 }
 
@@ -205,6 +254,7 @@ pub struct PtyManager {
 
 #[derive(Debug)]
 struct PtyHandle {
+    exit: tokio::sync::watch::Receiver<Option<i32>>,
     master_fd: RawFd,
     child_pid: u32,
     #[allow(dead_code)]
@@ -219,19 +269,32 @@ impl PtyManager {
     }
 
     pub(crate) fn spawn_pty_with_cwd_fd(
-        &mut self, req: SpawnPtyRequest, attached_fd: Option<OwnedFd>,
+        &mut self,
+        req: SpawnPtyRequest,
+        attached_fd: Option<OwnedFd>,
     ) -> io::Result<(u64, RawFd, u32)> {
         let cwd_fd = match (req.cwd_fd, attached_fd) {
             (true, Some(fd)) => Some(reopen_cwd(fd.as_raw_fd())?),
-            (true, None) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "missing cwd fd")),
-            (false, Some(_)) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "unexpected cwd fd")),
+            (true, None) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "missing cwd fd",
+                ))
+            }
+            (false, Some(_)) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unexpected cwd fd",
+                ))
+            }
             (false, None) => None,
         };
         // The original descriptor has been dropped, including on validation
         // errors. Only the reopened CLOEXEC descriptor is inherited by fork.
         let mut cwd_buffer = [0 as libc::c_char; libc::PATH_MAX as usize];
         // 1. Open a PTY master
-        let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+        let master_fd =
+            unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
         if master_fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -248,7 +311,14 @@ impl PtyManager {
 
         // 3. Get slave path
         let mut slave_buf = [0u8; 128];
-        if unsafe { libc::ptsname_r(master_fd, slave_buf.as_mut_ptr() as *mut libc::c_char, slave_buf.len()) } != 0 {
+        if unsafe {
+            libc::ptsname_r(
+                master_fd,
+                slave_buf.as_mut_ptr() as *mut libc::c_char,
+                slave_buf.len(),
+            )
+        } != 0
+        {
             return Err(io::Error::last_os_error());
         }
         let slave_ptr = slave_buf.as_ptr();
@@ -288,8 +358,11 @@ impl PtyManager {
         } else {
             &command
         };
-        let argv: Vec<CString> = std::iter::once(argv0).chain(req.args.iter().map(String::as_str))
-            .map(|arg| CString::new(arg).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e)))
+        let argv: Vec<CString> = std::iter::once(argv0)
+            .chain(req.args.iter().map(String::as_str))
+            .map(|arg| {
+                CString::new(arg).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+            })
             .collect::<io::Result<_>>()?;
 
         // A negative nice level requires CAP_SYS_NICE (root).
@@ -314,18 +387,33 @@ impl PtyManager {
             let default_path = "/system/bin:/system/xbin";
             #[cfg(not(target_os = "android"))]
             let default_path = "/bin:/usr/bin";
-            env_map.get("PATH").map(String::as_str).unwrap_or(default_path)
+            env_map
+                .get("PATH")
+                .map(String::as_str)
+                .unwrap_or(default_path)
                 .split(':')
-                .map(|dir| if dir.is_empty() { command.clone() } else { format!("{dir}/{command}") })
+                .map(|dir| {
+                    if dir.is_empty() {
+                        command.clone()
+                    } else {
+                        format!("{dir}/{command}")
+                    }
+                })
                 .collect()
-        }.into_iter()
-            .map(|command| CString::new(command).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e)))
-            .collect::<io::Result<_>>()?;
+        }
+        .into_iter()
+        .map(|command| {
+            CString::new(command).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+        })
+        .collect::<io::Result<_>>()?;
 
         let mut envp: Vec<CString> = Vec::with_capacity(env_map.len() + 1);
         for (k, v) in &env_map {
             let entry = format!("{}={}", k, v);
-            envp.push(CString::new(entry.as_bytes()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?);
+            envp.push(
+                CString::new(entry.as_bytes())
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+            );
         }
 
         // Convert to raw pointer arrays for execve
@@ -341,7 +429,8 @@ impl PtyManager {
         } else if req.cwd == "~" {
             let home = match target {
                 Some(target) => target.home.clone(),
-                None => resolve_user(&unsafe { libc::geteuid() }.to_string())?.home
+                None => resolve_user(&unsafe { libc::geteuid() }.to_string())?
+                    .home
                     .or_else(|| env_map.get("HOME").cloned()),
             };
             home.filter(|home| !home.is_empty()).ok_or_else(|| {
@@ -465,10 +554,37 @@ impl PtyManager {
         // ── PARENT ────────────────────────────────────────────────────
         // Allocate PTY id and store handle
         let child_pid = pid as u32;
+        crate::reaper::track(child_pid);
+        let (exit_tx, exit) = tokio::sync::watch::channel(None);
+        tokio::spawn(async move {
+            loop {
+                let mut status = 0;
+                let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+                if result == pid {
+                    let code = if libc::WIFEXITED(status) {
+                        libc::WEXITSTATUS(status)
+                    } else if libc::WIFSIGNALED(status) {
+                        -libc::WTERMSIG(status)
+                    } else {
+                        -1
+                    };
+                    crate::reaper::release(child_pid);
+                    exit_tx.send_replace(Some(code));
+                    break;
+                }
+                if result < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                    crate::reaper::release(child_pid);
+                    exit_tx.send_replace(Some(-1));
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
         let pty_id = NEXT_PTY_ID.fetch_add(1, Ordering::SeqCst);
         self.ptys.insert(
             pty_id,
             PtyHandle {
+                exit,
                 master_fd: master.into_raw_fd(),
                 child_pid,
                 container_name: None,
@@ -482,10 +598,7 @@ impl PtyManager {
     /// so it re-reads the terminal dimensions.
     pub fn resize_pty(&mut self, pty_id: u64, rows: u32, cols: u32) -> io::Result<()> {
         let handle = self.ptys.get(&pty_id).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("pty {} not found", pty_id),
-            )
+            io::Error::new(io::ErrorKind::NotFound, format!("pty {} not found", pty_id))
         })?;
 
         let winsize = libc::winsize {
@@ -511,20 +624,18 @@ impl PtyManager {
     /// handle from the manager.
     pub fn close_pty(&mut self, pty_id: u64) -> io::Result<()> {
         let handle = self.ptys.remove(&pty_id).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("pty {} not found", pty_id),
-            )
+            io::Error::new(io::ErrorKind::NotFound, format!("pty {} not found", pty_id))
         })?;
 
         // Kill the entire process group (negative pid → process group)
         // SIGHUP first to give processes a chance to clean up
         unsafe {
-            libc::kill(-(handle.child_pid as i32), libc::SIGHUP);
-            // SIGKILL to ensure termination
-            libc::kill(-(handle.child_pid as i32), libc::SIGKILL);
-            // The parent can close a fresh PTY before the child has called setsid().
-            libc::kill(handle.child_pid as i32, libc::SIGKILL);
+            if handle.exit.borrow().is_none() {
+                libc::kill(-(handle.child_pid as i32), libc::SIGHUP);
+                libc::kill(-(handle.child_pid as i32), libc::SIGKILL);
+                // The child might not have called setsid() yet.
+                libc::kill(handle.child_pid as i32, libc::SIGKILL);
+            }
             libc::close(handle.master_fd);
         }
 
@@ -535,12 +646,12 @@ impl PtyManager {
     /// attach path via the hub, which needs more than SIGHUP/SIGKILL.
     pub fn signal_pty(&mut self, pty_id: u64, signal: i32) -> io::Result<()> {
         let handle = self.ptys.get(&pty_id).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("pty {} not found", pty_id),
-            )
+            io::Error::new(io::ErrorKind::NotFound, format!("pty {} not found", pty_id))
         })?;
         // Negative pid targets the whole process group.
+        if handle.exit.borrow().is_some() {
+            return Ok(());
+        }
         unsafe {
             libc::kill(-(handle.child_pid as i32), signal);
         }
@@ -553,22 +664,17 @@ impl PtyManager {
             let _ = self.close_pty(pty_id);
         }
     }
-    /// Get the child pid for a PTY without removing the handle.
-    pub fn get_child_pid(&self, pty_id: u64) -> io::Result<u32> {
-        self.ptys.get(&pty_id).map(|h| h.child_pid).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("pty {} not found", pty_id),
-            )
-        })
+    pub fn exit_receiver(&self, pty_id: u64) -> Option<tokio::sync::watch::Receiver<Option<i32>>> {
+        self.ptys.get(&pty_id).map(|handle| handle.exit.clone())
     }
-
     /// Remove a PTY handle and close the master fd.
     /// Called after the child has already been reaped.
     pub fn remove_pty(&mut self, pty_id: u64) -> Option<RawFd> {
         self.ptys.remove(&pty_id).map(|h| {
             let fd = h.master_fd;
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
             fd
         })
     }
@@ -659,11 +765,17 @@ pub(crate) fn recv_fd(socket_fd: RawFd) -> io::Result<RawFd> {
 
     let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
     if cmsg.is_null() {
-        return Err(io::Error::new(io::ErrorKind::Other, "no ancillary data received"));
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "no ancillary data received",
+        ));
     }
     unsafe {
         if (*cmsg).cmsg_level != libc::SOL_SOCKET || (*cmsg).cmsg_type != libc::SCM_RIGHTS {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "expected SCM_RIGHTS"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "expected SCM_RIGHTS",
+            ));
         }
         let fd = *(libc::CMSG_DATA(cmsg) as *const RawFd);
         Ok(fd)

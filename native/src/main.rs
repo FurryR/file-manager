@@ -3,8 +3,8 @@ use std::env;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, watch, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
@@ -18,13 +18,17 @@ mod copy;
 mod handlers;
 mod handles;
 mod list;
+mod metadata;
+mod pipes;
 mod protocol;
 mod pty;
+mod reaper;
+mod services;
 mod socket;
 
 use handles::HandleTable;
-use pty::PtyManager;
 use protocol::{FrameReader, OutboundResponse};
+use pty::PtyManager;
 
 static TERMINATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -48,7 +52,10 @@ impl AuthenticatedClient {
     fn new(clients: Arc<Clients>, shutdown: watch::Sender<bool>) -> io::Result<Self> {
         let mut active = clients.active.lock().unwrap();
         if *shutdown.borrow() {
-            return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "daemon is shutting down"));
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "daemon is shutting down",
+            ));
         }
         *active += 1;
         clients.has_authenticated.store(true, Ordering::Relaxed);
@@ -69,6 +76,7 @@ impl Drop for AuthenticatedClient {
 
 /// PTYs and handles are shared across clients, but not across daemon launches.
 struct Shared {
+    services: Arc<services::ServiceManager>,
     pty_manager: Arc<Mutex<PtyManager>>,
     handles: Arc<Mutex<HandleTable>>,
     source_read_broker: copy::SourceReadBroker,
@@ -85,6 +93,7 @@ async fn main() -> io::Result<()> {
     let socket_name = auth::derive_socket_name(&public_key, &id);
     let chroot_rootfs = parse_value_arg("--chroot");
     let proot_mode = has_flag("--proot");
+    let container_mode = chroot_rootfs.is_some() || proot_mode;
 
     eprintln!(
         "[file-daemon] v{} pid={}",
@@ -95,8 +104,11 @@ async fn main() -> io::Result<()> {
     // Container daemons own the process tree: become a session/group leader so
     // the whole container can be signalled as a unit. Ignore failure (e.g. when
     // already a group leader).
-    if chroot_rootfs.is_some() || proot_mode {
-        unsafe { libc::setsid(); }
+    if container_mode {
+        unsafe {
+            libc::setsid();
+        }
+        reaper::enable()?;
         list::set_container_mode(true);
     }
 
@@ -118,6 +130,7 @@ async fn main() -> io::Result<()> {
     };
 
     let shared = Arc::new(Shared {
+        services: services::ServiceManager::new(container_mode),
         pty_manager: Arc::new(Mutex::new(PtyManager::new())),
         handles: Arc::new(Mutex::new(HandleTable::new())),
         source_read_broker: copy::SourceReadBroker::default(),
@@ -130,6 +143,10 @@ async fn main() -> io::Result<()> {
 }
 
 async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
+    let services = shared.services.clone();
+    let boot = tokio::spawn(async move {
+        services.boot().await;
+    });
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut main_shutdown = shutdown_rx.clone();
     let mut connections: JoinSet<()> = JoinSet::new();
@@ -171,6 +188,7 @@ async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
                 }
             }
             _ = signal_check.tick() => {
+                reaper::reap_orphans();
                 if TERMINATE_REQUESTED.load(Ordering::Relaxed) {
                     break;
                 }
@@ -184,11 +202,15 @@ async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
     // `exit` ack) before tearing the process tree down.
     let _ = shutdown_tx.send(true);
     let drain = async { while connections.join_next().await.is_some() {} };
-    let _ = tokio::time::timeout(std::time::Duration::from_millis(1000), drain).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(200), drain).await;
     connections.abort_all();
     while connections.join_next().await.is_some() {}
 
     shared.pty_manager.lock().await.close_all();
+    boot.abort();
+    let _ = boot.await;
+    shared.services.shutdown().await;
+    reaper::reap_orphans();
     *shared.handles.lock().await = HandleTable::new();
     shared.source_read_broker.lock().await.clear();
     Ok(())
@@ -209,6 +231,7 @@ async fn handle_connection(
     let mut auth_permit = Some(auth_permit);
     let mut authenticated_client = None;
     let mut requests = JoinSet::new();
+    let pipes = Arc::new(pipes::PipeManager::default());
     // Duplicate fd for independent read/write halves.
     let raw_fd = stream.as_raw_fd();
     let write_fd = unsafe { libc::fcntl(raw_fd, libc::F_DUPFD_CLOEXEC, 0) };
@@ -234,10 +257,16 @@ async fn handle_connection(
     let hello = proto::Response {
         id: 0,
         ok: true,
-        server_hello: Some(proto::ServerHello { nonce: nonce.to_vec() }),
+        server_hello: Some(proto::ServerHello {
+            nonce: nonce.to_vec(),
+        }),
         ..Default::default()
     };
-    tokio::time::timeout_at(auth_deadline, protocol::write_frame(&mut write_stream, hello)).await??;
+    tokio::time::timeout_at(
+        auth_deadline,
+        protocol::write_frame(&mut write_stream, hello),
+    )
+    .await??;
     let mut authed = false;
 
     let result = loop {
@@ -247,7 +276,9 @@ async fn handle_connection(
             while let Ok(r) = response_rx.try_recv() {
                 if let Some(fd) = r.attached_fd {
                     let _ = protocol::write_response_with_fd(write_fd, &r.response, fd);
-                    unsafe { libc::close(fd); }
+                    unsafe {
+                        libc::close(fd);
+                    }
                 } else {
                     let _ = protocol::write_frame(&mut write_stream, r.response).await;
                 }
@@ -314,11 +345,13 @@ async fn handle_connection(
                         let shared = shared.clone();
                         let shutdown = shutdown_tx.clone();
                         let cancel_flags = cancel_flags.clone();
+                        let pipes = pipes.clone();
                         let is_exit = matches!(&incoming.request.command, Some(proto::request::Command::Exit(_)));
                         let handler = async move {
                             handlers::handle_streaming(
                                 incoming.request, incoming.attached_fd,
                                 &shared.pty_manager, &shared.handles,
+                                &pipes, &shared.services,
                                 cancel_flags, &shared.source_read_broker, tx,
                                 &shutdown,
                             ).await;
@@ -360,11 +393,14 @@ async fn handle_connection(
     };
 
     requests.abort_all();
+    pipes.close_all().await;
     while requests.join_next().await.is_some() {}
     response_rx.close();
     while let Ok(response) = response_rx.try_recv() {
         if let Some(fd) = response.attached_fd {
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
         }
     }
     // Connection gone: cancel whatever is still in flight on it.
@@ -380,15 +416,12 @@ async fn handle_connection(
 }
 
 fn parse_identity_args() -> io::Result<(Vec<u8>, String)> {
-    let key = parse_value_arg("--key").ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "missing --key argument")
-    })?;
-    let public_key = auth::parse_hex(&key).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "--key must be a hex string")
-    })?;
-    let id = parse_value_arg("--id").ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "missing --id argument")
-    })?;
+    let key = parse_value_arg("--key")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing --key argument"))?;
+    let public_key = auth::parse_hex(&key)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--key must be a hex string"))?;
+    let id = parse_value_arg("--id")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing --id argument"))?;
     Ok((public_key, id))
 }
 

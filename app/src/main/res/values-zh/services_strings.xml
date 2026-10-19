@@ -1,0 +1,19 @@
+<resources>
+    <string name="container_services_title">容器服务</string>
+    <string name="container_services_stop_all">停止所有容器</string>
+    <string name="container_services_empty">请先创建容器。</string>
+    <string name="container_services_scope">服务子集支持 simple、exec、oneshot、After/Requires/Wants 和重启策略，不是完整 systemd。关闭终端后容器继续运行。</string>
+    <string name="container_services_refresh">刷新</string>
+    <string name="container_services_stop_container">停止容器</string>
+    <string name="container_services_unit_name">服务名称</string>
+    <string name="container_services_unit_content">服务单元配置</string>
+    <string name="container_services_save">保存配置</string>
+    <string name="container_services_edit">编辑</string>
+    <string name="container_services_logs">日志</string>
+    <string name="container_services_start">启动</string>
+    <string name="container_services_stop">停止</string>
+    <string name="container_services_restart">重启</string>
+    <string name="container_services_enable">启用自启动</string>
+    <string name="container_services_disable">禁用自启动</string>
+    <string name="container_services_reload">重载配置</string>
+</resources>

@@ -1,0 +1,26 @@
+<resources>
+    <string name="tools_title">工具箱</string>
+    <string name="tools_ftp">FTP 服务器</string>
+    <string name="tools_ftp_description">通过被动 FTP 共享指定目录。FTP 明文传输密码和文件，请在可信局域网内使用。</string>
+    <string name="tools_shared_root">共享目录</string>
+    <string name="tools_port">端口</string>
+    <string name="tools_username">用户名</string>
+    <string name="tools_password">密码</string>
+    <string name="tools_show_password">显示密码</string>
+    <string name="tools_loopback">仅允许本机连接</string>
+    <string name="tools_start">启动</string>
+    <string name="tools_stop">停止</string>
+    <string name="tools_services">容器服务</string>
+    <string name="tools_desktop">Wayland 桌面</string>
+    <string name="tools_graphics">VirGL 显卡加速</string>
+    <string name="tools_remote">AList / SSH 连接</string>
+    <string name="tools_open_with">打开方式…</string>
+    <string name="archive_tools">压缩包管理</string>
+    <string name="archive_create">创建 ZIP 压缩包</string>
+    <string name="archive_extract">解压</string>
+    <string name="archive_browse">浏览压缩包</string>
+    <string name="archive_destination">目标路径</string>
+    <string name="archive_password">压缩包密码（可选）</string>
+    <string name="archive_password_needed">请输入压缩包密码。</string>
+    <string name="archive_overwrite">覆盖已存在的文件</string>
+</resources>

@@ -1,0 +1,9 @@
+<resources>
+    <string name="graphics_host_notification">宿主渲染服务已通过 Hub 提供连接</string>
+    <string name="graphics_binary_missing">安装包缺少 VirGL 渲染服务，请重新构建包含渲染组件的安装包。</string>
+    <string name="graphics_description">通过 Hub 将 Android EGL/GLES 渲染服务连接到容器。容器需要支持 virpipe 的 Mesa。启用后，新终端和桌面会话会使用加速桥；已经运行的图形程序需要重启。GPU 能力取决于设备驱动。</string>
+    <string name="graphics_running">宿主渲染服务运行中</string>
+    <string name="graphics_stopped">宿主渲染服务未运行</string>
+    <string name="graphics_logs">查看桥接日志</string>
+    <string name="graphics_no_containers">请先创建容器。</string>
+</resources>

@@ -1,0 +1,14 @@
+[package]
+name = "graphics-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "virgl_bridge"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+prost = "0.13"
+hub-client = { path = "../hub-client" }
+tokio = { version = "1.41", features = ["macros", "rt", "net", "signal", "time"] }

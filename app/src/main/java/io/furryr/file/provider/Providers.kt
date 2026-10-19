@@ -3,6 +3,8 @@ package io.furryr.file.provider
 import android.content.Context
 import io.furryr.file.FileRepository
 import io.furryr.file.HereNavigation
+import io.furryr.file.archive.ArchiveProvider
+import io.furryr.file.provider.remote.RemoteProviders
 import io.furryr.file.agent.ContainerDaemonLauncher
 import io.furryr.file.agent.AgentSettings
 import io.furryr.file.core.DaemonManager
@@ -39,4 +41,6 @@ fun installFileProviders(context: Context) {
     SftpProvider.init(appContext)
     FileRepository.register("sftp", SftpProvider)
     HereNavigation.install(appContext)
+    RemoteProviders.install(appContext)
+    ArchiveProvider.install(appContext)
 }

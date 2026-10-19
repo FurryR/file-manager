@@ -3,6 +3,8 @@ package io.furryr.file.core.process
 import io.furryr.file.core.ipc.DaemonConnection
 import io.furryr.file.core.model.ExecResult
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.io.Closeable
 import java.io.FileDescriptor
@@ -66,6 +68,28 @@ interface ProcessChannel : Closeable {
  * [io.furryr.file.core.DaemonManager.execService].
  */
 class ExecService internal constructor(private val resolve: () -> DaemonConnection) {
+
+    /** Byte-transparent stdin/stdout/stderr; no PTY echo or newline conversion. */
+    suspend fun spawnPipe(spec: CommandSpec): Result<PipeProcessChannel> {
+        var opened: PipeProcessChannel? = null
+        try {
+            return withContext(Dispatchers.IO) {
+                runCatching {
+                    require(spec.user == null && spec.nice == null) { "pipe execution inherits the daemon's user and priority" }
+                    DaemonPipeProcessChannel.open(resolve(), spec).also { opened = it }
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            // withContext may discard a successfully opened channel when its
+            // caller is cancelled during the dispatch back to the UI thread.
+            withContext(NonCancellable + Dispatchers.IO) {
+                runCatching { opened?.close() }.onFailure {
+                    android.util.Log.w("ExecService", "Closing a cancelled pipe process", it)
+                }
+            }
+            throw cancelled
+        }
+    }
 
     /** Start a process and return its live [ProcessChannel]. */
     suspend fun spawn(spec: CommandSpec): Result<ProcessChannel> = withContext(Dispatchers.IO) {

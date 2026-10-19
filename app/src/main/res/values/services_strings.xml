@@ -1,0 +1,19 @@
+<resources>
+    <string name="container_services_title">Container services</string>
+    <string name="container_services_stop_all">Stop all containers</string>
+    <string name="container_services_empty">Create a container first.</string>
+    <string name="container_services_scope">Service subset: simple, exec and oneshot; After/Requires/Wants; restart policies. This is not systemd. Containers continue running after their terminals close.</string>
+    <string name="container_services_refresh">Refresh</string>
+    <string name="container_services_stop_container">Stop container</string>
+    <string name="container_services_unit_name">Service name</string>
+    <string name="container_services_unit_content">Service unit</string>
+    <string name="container_services_save">Save unit</string>
+    <string name="container_services_edit">Edit</string>
+    <string name="container_services_logs">Logs</string>
+    <string name="container_services_start">Start</string>
+    <string name="container_services_stop">Stop</string>
+    <string name="container_services_restart">Restart</string>
+    <string name="container_services_enable">Enable</string>
+    <string name="container_services_disable">Disable</string>
+    <string name="container_services_reload">Reload units</string>
+</resources>

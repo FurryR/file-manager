@@ -5,6 +5,8 @@ import java.io.Closeable
 
 /** App-owned actions exposed through the hub, without app/provider dependencies. */
 object HubActions {
+    /** Transfer a newly connected host renderer socket; never accepts client paths. */
+    @Volatile var graphicsConnector: (() -> FileDescriptor)? = null
     /**
      * Invoked on the hub's IO thread. The borrowed descriptor is valid only for
      * this call; resolve it synchronously before queuing any UI work. Throw to

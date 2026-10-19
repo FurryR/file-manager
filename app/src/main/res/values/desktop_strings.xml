@@ -1,0 +1,27 @@
+<resources>
+    <string name="desktop_title">Wayland desktop</string>
+    <string name="desktop_help">Start a headless wlroots desktop inside a container and view it natively. Install labwc (or another compatible compositor) and wayvnc first. GNOME, KDE and Weston are not supported by wayvnc. Pinch to zoom, use two fingers to scroll, or enable Pan to move the viewport.</string>
+    <string name="desktop_container">Container desktop</string>
+    <string name="desktop_no_container">No containers available</string>
+    <string name="desktop_command">Compositor command (for example labwc)</string>
+    <string name="desktop_port">VNC port</string>
+    <string name="desktop_start">Start container desktop</string>
+    <string name="desktop_existing">Connect to an existing VNC server</string>
+    <string name="desktop_host">Hostname or IP address</string>
+    <string name="desktop_password">VNC password (optional, not saved)</string>
+    <string name="desktop_auth_help">Container sessions listen only on 127.0.0.1. Existing servers may use legacy VNC password authentication (first 8 password bytes, no transport encryption). Unauthenticated connections are allowed only on loopback.</string>
+    <string name="desktop_connect">Connect</string>
+    <string name="desktop_connecting">Connecting to desktop…</string>
+    <string name="desktop_starting">Starting compositor and wayvnc…</string>
+    <string name="desktop_disconnected">Disconnected</string>
+    <string name="desktop_disconnect">Disconnect / stop owned desktop</string>
+    <string name="desktop_reconnect">Reconnect viewer</string>
+    <string name="desktop_start_again">This desktop has stopped. Start a new container desktop.</string>
+    <string name="desktop_connect_error">Could not connect to the desktop.</string>
+    <string name="desktop_start_error">Could not start the container desktop.</string>
+    <string name="desktop_logs">Startup output</string>
+    <string name="desktop_keyboard">Keyboard</string>
+    <string name="desktop_fit">Fit</string>
+    <string name="desktop_pan">Pan</string>
+    <string name="desktop_right_click">Right click</string>
+</resources>

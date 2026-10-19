@@ -3,6 +3,8 @@ package io.furryr.file.agent
 import android.content.Context
 import android.net.ConnectivityManager
 import java.io.File
+import io.furryr.file.graphics.GraphicsManager
+import io.furryr.file.core.shellQuote
 
 /**
  * Builds the proot command line used to launch a **container daemon**.
@@ -149,14 +151,18 @@ object ProotRunner {
         return BindMount(resolverFile.absolutePath, "/etc/resolv.conf")
     }
 
+    fun refreshHubProfile(context: Context, container: Container) { hubProfileMount(context, container) }
+
     private fun hubProfileMount(context: Context, container: Container): BindMount {
         val profileFile = File(runtimeDir(context, container), "hub.sh")
         // Login profiles can replace the inherited PATH even with `login -p`.
         profileFile.writeText(
             "if [ -n \"\${HUB_PATH-}\" ]; then\n" +
-                "    export PATH=\"\${PATH:+\$PATH:}\$HUB_PATH\"\n" +
+                "    export PATH=\"\$HUB_PATH\${PATH:+:\$PATH}\"\n" +
                 "    unset HUB_PATH\n" +
-                "fi\n",
+                "fi\n" + GraphicsManager.containerEnvironment(context, container.name).entries.joinToString("") {
+                    "export ${it.key}=${shellQuote(it.value)}\n"
+                },
         )
         return BindMount(profileFile.absolutePath, "/etc/profile.d/hub.sh")
     }

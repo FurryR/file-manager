@@ -4,6 +4,13 @@ import android.net.Uri
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
+import io.furryr.file.core.source.StreamFileSource
+import java.io.ByteArrayInputStream
+import java.io.InputStream
+import java.io.IOException
+import java.security.MessageDigest
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import io.furryr.file.model.DirectoryInfo
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.provider.FileProvider
@@ -12,12 +19,14 @@ import io.furryr.file.core.PermissionDeniedException
 import io.furryr.file.provider.ResolvedProvider
 import io.furryr.file.util.Path
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.runBlocking
 
 object FileRepository {
+    private val writeLocks = ConcurrentHashMap<String, Any>()
     private val providers = mutableMapOf<String, FileProvider>()
     private var default: FileProvider? = null
 
@@ -50,6 +59,80 @@ object FileRepository {
     fun list(path: String) = dispatch(path) { p, ip -> runBlocking { p.list(ip) } }
 
     fun stat(path: String) = dispatch(path) { p, ip -> runBlocking { p.stat(ip) } }
+
+    /** Stage beside the destination; a failed transfer never truncates the original. */
+    fun writeStream(path: String, input: InputStream, size: Long, expectedDigest: String? = null,
+        beforePublish: () -> Unit = {}): Result<Unit> = runCatching {
+        StreamFileSource(input, size).use { source -> synchronized(writeLocks.computeIfAbsent(path) { Any() }) {
+            val target = resolve(path).getOrThrow()
+            val parent = target.path.parent() ?: error("Cannot replace a provider root")
+            val name = target.path.name ?: error("Missing file name")
+            val marker = UUID.randomUUID().toString()
+            val temporaryName = ".${name.take(48)}.fm-$marker.tmp"
+            val backupName = ".${name.take(48)}.fm-$marker.bak"
+            val temporary = resolve(parent.child(temporaryName).toString()).getOrThrow()
+            val backup = resolve(parent.child(backupName).toString()).getOrThrow()
+            runBlocking(Dispatchers.IO) {
+                val original = target.provider.stat(target.innerPath).getOrThrow()
+                require(!original.isDirectory) { "Cannot write a directory" }
+                var staged = false; var movedOriginal = false; var published = false
+                try {
+                    target.provider.copy(source, temporary.innerPath, true).collect { }
+                    staged = true
+                    if (expectedDigest != null) check(digest(path).getOrThrow() == expectedDigest) { "The file changed while saving; reopen it before overwriting" }
+                    val current = target.provider.stat(target.innerPath).getOrThrow()
+                    check(current.exists == original.exists && !current.isDirectory) { "Destination changed while saving" }
+                    if (original.exists) target.provider.prepareReplacement(target.innerPath, temporary.innerPath).getOrThrow()
+                    beforePublish()
+                    if (original.exists) {
+                        target.provider.rename(target.innerPath, backupName).getOrThrow()
+                        movedOriginal = true
+                    }
+                    target.provider.rename(temporary.innerPath, name).getOrThrow()
+                    published = true
+                    if (movedOriginal) target.provider.delete(backup.innerPath).onFailure {
+                        android.util.Log.w("FileRepository", "Saved file, but the previous version remains at ${backup.path}", it)
+                    }
+                } catch (failure: Exception) {
+                    if (movedOriginal && !published) {
+                        try {
+                            if (!target.provider.stat(target.innerPath).getOrThrow().exists) {
+                                target.provider.rename(backup.innerPath, name).getOrThrow()
+                                movedOriginal = false
+                            }
+                        } catch (rollback: Exception) { failure.addSuppressed(rollback) }
+                    }
+                    if (!staged || failure is CancellationException && !movedOriginal && !published) {
+                        target.provider.delete(temporary.innerPath)
+                            .onSuccess { staged = false }
+                            .onFailure { android.util.Log.w("FileRepository", "Incomplete save staging file could not be removed", it) }
+                    }
+                    val recovery = buildList {
+                        if (staged && !published) add(temporary.path.toString())
+                        if (movedOriginal && !published) add(backup.path.toString())
+                    }
+                    if (failure is CancellationException) throw failure
+                    throw IOException((failure.message ?: "Save failed") + if (recovery.isEmpty()) "" else "\nRecovery files: ${recovery.joinToString(", ")}", failure)
+                }
+            }
+        } }
+    }
+
+    fun writeBytes(path: String, bytes: ByteArray, expectedDigest: String? = null): Result<Unit> =
+        writeStream(path, ByteArrayInputStream(bytes), bytes.size.toLong(), expectedDigest)
+
+    fun digest(path: String): Result<String> = runCatching {
+        val target = resolve(path).getOrThrow()
+        val digest = MessageDigest.getInstance("SHA-256")
+        runBlocking { target.provider.open(target.innerPath, OpenMode.READ).getOrThrow() }.use { source ->
+            var offset = 0L
+            while (true) {
+                val bytes = source.readChunk(offset, 256 * 1024); if (bytes.isEmpty()) break
+                digest.update(bytes); offset += bytes.size
+            }
+        }
+        digest.digest().joinToString("") { "%02x".format(it) }
+    }
 
     suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
         val resolved = resolve(path).getOrNull() ?: return DirectoryCapabilities()

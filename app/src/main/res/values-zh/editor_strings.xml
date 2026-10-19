@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="editor_close">关闭编辑器</string>
+    <string name="editor_save">保存</string>
+    <string name="editor_saved">文件已保存</string>
+    <string name="editor_undo">撤销</string>
+    <string name="editor_redo">重做</string>
+    <string name="editor_search">搜索和替换</string>
+    <string name="editor_more">编辑器选项</string>
+    <string name="editor_find">查找</string>
+    <string name="editor_replace">替换</string>
+    <string name="editor_replace_all">全部替换</string>
+    <string name="editor_unsaved">尚未保存</string>
+    <string name="editor_unsaved_message">关闭前保存更改？</string>
+    <string name="editor_discard">放弃更改</string>
+    <string name="editor_conflict">文件已被其他程序修改</string>
+    <string name="editor_conflict_message">当前文件与打开时的版本不同。可以继续编辑，或明确选择用编辑器内容覆盖当前文件。</string>
+    <string name="editor_overwrite">覆盖</string>
+    <string name="editor_error">编辑器错误</string>
+    <string name="editor_wrap">切换自动换行</string>
+    <string name="editor_font_larger">增大字号</string>
+    <string name="editor_font_smaller">减小字号</string>
+    <string name="editor_goto">跳转到行</string>
+    <string name="editor_complete">显示代码补全</string>
+    <string name="editor_diagnostics">诊断（%1$d）</string>
+    <string name="editor_no_diagnostics">当前没有诊断信息。</string>
+    <string name="editor_lsp_settings">容器语言服务器</string>
+    <string name="editor_lsp_container">容器</string>
+    <string name="editor_lsp_command">服务器命令（stdio）</string>
+    <string name="editor_lsp_root">容器内工作区路径</string>
+    <string name="editor_lsp_document">容器内文档路径</string>
+    <string name="editor_lsp_hint">通过原始标准输入输出启动已安装的服务器，如 clangd、rust-analyzer 或 pylsp。文档路径必须对应容器内可见的文件；远程文件不会自动复制到容器。配置按语言保存。</string>
+    <string name="editor_lsp_connect">连接</string>
+    <string name="editor_lsp_disconnect">断开语言服务器</string>
+    <string name="editor_lsp_disconnected">LSP 未连接 · 可使用语法高亮</string>
+    <string name="editor_lsp_connecting">正在启动语言服务器…</string>
+    <string name="editor_lsp_connected">LSP 已连接 · %1$s</string>
+</resources>

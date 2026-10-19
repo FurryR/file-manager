@@ -134,6 +134,11 @@ fun LicensesScreen(modifier: Modifier = Modifier) {
                 url = "https://github.com/str4d/ed25519-java",
                 license = "CC0 1.0 / Public Domain"
             )
+            LicenseEntry("Sora Editor / TextMate", "https://github.com/Rosemoe/sora-editor/tree/0.23.5", "LGPL 2.1 or later")
+            LicenseEntry("Zip4j", "https://github.com/srikanth-lingala/zip4j", "Apache License 2.0")
+            LicenseEntry("Apache Commons Compress", "https://commons.apache.org/proper/commons-compress/", "Apache License 2.0")
+            LicenseEntry("XZ for Java", "https://tukaani.org/xz/java.html", "0BSD")
+            LicenseEntry("VirGL renderer / libepoxy", "https://gitlab.freedesktop.org/virgl/virglrenderer", "MIT; bundled notices in assets/native-licenses")
         }
     }
 }

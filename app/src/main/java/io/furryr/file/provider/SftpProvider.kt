@@ -173,6 +173,21 @@ object SftpProvider : FileProvider {
         }
     }
 
+    override suspend fun prepareReplacement(original: String, replacement: String): Result<Unit> = runCatching {
+        val (server, oldPath) = resolveServerPath(original)
+        val (other, newPath) = resolveServerPath(replacement)
+        require(server.host == other.host) { "Replacement must stay on the same server" }
+        val ch = channel(server)
+        try {
+            val old = ch.lstat(oldPath)
+            val staged = ch.lstat(newPath)
+            require(!old.isLink && !old.isDir && !staged.isLink && !staged.isDir) { "Replacement requires regular files" }
+            if (old.uId != staged.uId) ch.chown(old.uId, newPath)
+            if (old.gId != staged.gId) ch.chgrp(old.gId, newPath)
+            ch.chmod(old.permissions and 0xFFF, newPath)
+        } finally { ch.disconnect() }
+    }
+
     override suspend fun open(path: String, mode: OpenMode): Result<FileSource> = runCatching {
         if (mode != OpenMode.READ) throw UnsupportedOperationException("SftpProvider supports READ only")
         val (server, remotePath) = resolveServerPath(path)

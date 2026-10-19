@@ -18,11 +18,13 @@ object HereNavigation {
 
     fun install(context: Context) {
         val appContext = context.applicationContext
-        HubActions.resolveRoot = { ContainerPaths.callerRoot(appContext, it) }
-        HubActions.resolveCwd = { fd, root, target -> ContainerPaths.workingDirectory(appContext, fd, root, target) }
+        HubActions.resolveRoot = { containerId -> ContainerPaths.callerRoot(appContext, containerId) }
+        HubActions.resolveCwd = { root, target, path ->
+            ContainerPaths.workingDirectory(appContext, root, target, path)
+        }
         HubActions.onTerminalTarget = SessionManager::trackTerminalTarget
-        HubActions.onHere = { fd, root ->
-            val selected = ContainerPaths.revealPath(appContext, fd, root)
+        HubActions.onHere = { path, root ->
+            val selected = ContainerPaths.revealPath(appContext, path, root)
             val path = Path.parse(selected)
             val request = when {
                 selected == "/" -> Request("/", null)

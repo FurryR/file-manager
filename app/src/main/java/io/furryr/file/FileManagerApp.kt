@@ -159,6 +159,8 @@ fun FileManagerApp(
     var highlightRefreshToken by remember { mutableStateOf<Int?>(null) }
     var pendingScrollPath by remember { mutableStateOf<String?>(null) }
     var showTerminalSheet by remember { mutableStateOf(false) }
+    var terminalDropAccepted by remember { mutableStateOf(false) }
+    var terminalDragGeneration by remember { mutableIntStateOf(0) }
     LaunchedEffect(terminalOpenRequest) {
         if (terminalOpenRequest > 0) showTerminalSheet = true
     }
@@ -1123,7 +1125,22 @@ fun FileManagerApp(
                     selectedPaths = currentTab().selectedPaths,
                     onToggleSelection = if (copyMoveState == null) ::toggleSelection else {{}},
                     onRangeSelect = if (copyMoveState == null) ::rangeSelectTo else {{}},
-                    onFileDragStart = { showTerminalSheet = true },
+                    onFileDragStart = {
+                        terminalDragGeneration++
+                        terminalDropAccepted = false
+                        showTerminalSheet = true
+                    },
+                    onFileDragEnd = {
+                        val generation = terminalDragGeneration
+                        scope.launch {
+                            // Give the platform drop (ACTION_DROP) a chance to arrive
+                            // before deciding whether this drag was cancelled.
+                            delay(150)
+                            if (generation == terminalDragGeneration && !terminalDropAccepted) {
+                                showTerminalSheet = false
+                            }
+                        }
+                    },
                 )
             }
         }
@@ -1332,6 +1349,8 @@ fun FileManagerApp(
     TerminalSheet(
         visible = showTerminalSheet,
         onDismiss = { showTerminalSheet = false },
+        onShow = { showTerminalSheet = true },
+        onDropAccepted = { terminalDropAccepted = true },
         currentPath = currentTab().path
     )
 

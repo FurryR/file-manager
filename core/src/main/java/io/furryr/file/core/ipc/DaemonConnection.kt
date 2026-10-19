@@ -88,6 +88,7 @@ internal class DaemonConnection internal constructor(
     process: Process?,
 ) {
     internal val socketName: String get() = identity.socketName
+    internal val key: String get() = identity.key
     internal val daemonProcess: Process? = process
 
     @Volatile

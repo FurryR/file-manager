@@ -6,12 +6,9 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
 use std::process::exit;
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -20,8 +17,7 @@ use prost::Message;
 use filehub::hub_request::Op as HubOp;
 use filehub::{ExecRequest, HubRequest, WaitRequest};
 use hub_client::{
-    connect_from_env, filehub, receive_response, round_trip, round_trip_with_attached_fd,
-    send_frame,
+    connect_from_env, filehub, receive_response, round_trip_with_attached_fd, send_frame,
 };
 
 const TIOCGWINSZ: libc::c_ulong = 0x5413;
@@ -161,16 +157,34 @@ fn command_spec(args: &Args) -> (String, Vec<String>) {
     (String::new(), shell_args)
 }
 
-fn working_directory(chdir: Option<&str>) -> io::Result<(String, Option<File>)> {
+fn working_directory(chdir: Option<&str>) -> io::Result<Option<String>> {
     match chdir {
-        Some(path) if path == "~" || Path::new(path).is_absolute() => Ok((path.to_string(), None)),
-        path => {
-            let directory = OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)
-                .open(path.unwrap_or("."))?;
-            Ok((String::new(), Some(directory)))
+        // Preserve the caller's directory; the daemon's own cwd belongs to the app process.
+        None => Ok(env::current_dir()
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned())),
+        Some(path) if path == "~" || path.starts_with("~/") => Ok(Some(path.to_string())),
+        Some(path) => {
+            let path = std::path::Path::new(path);
+            if path.is_absolute() {
+                Ok(Some(path.to_string_lossy().into_owned()))
+            } else {
+                Ok(Some(
+                    env::current_dir()?
+                        .join(path)
+                        .to_string_lossy()
+                        .into_owned(),
+                ))
+            }
         }
+    }
+}
+
+fn container_id(machine: Option<&str>) -> io::Result<String> {
+    match machine {
+        None => Ok("host".to_string()),
+        Some("") => Err(io::Error::other("empty --machine value")),
+        Some(value) => Ok(format!("container-{value}")),
     }
 }
 
@@ -180,7 +194,8 @@ fn run(args: Args) -> io::Result<i32> {
 
     // Let the target shell resolve commands and report its own execution errors.
     let (command, command_args) = command_spec(&args);
-    let (cwd, cwd_handle) = working_directory(args.chdir.as_deref())?;
+    let cwd = working_directory(args.chdir.as_deref())?;
+    let container_id = container_id(args.machine.as_deref())?;
 
     let mut env_map = HashMap::new();
     for (name, value) in args.setenv {
@@ -191,41 +206,23 @@ fn run(args: Args) -> io::Result<i32> {
     let fd = control.as_raw_fd();
     ignore_sigpipe();
 
-    if let Some(machine) = args.machine.as_deref() {
-        let request = HubRequest {
-            id: 1,
-            op: Some(HubOp::SelectTarget(filehub::SelectTargetRequest {
-                target: machine.to_string(),
-            })),
-        };
-        let response = round_trip(fd, request)?;
-        if !response.ok {
-            return Err(io::Error::other(format!(
-                "cannot select '{}': {}",
-                machine, response.error
-            )));
-        }
-    }
-
     let exec = ExecRequest {
         command,
         args: command_args,
         env: env_map,
-        cwd,
-        cwd_fd: cwd_handle.is_some(),
+        cwd: cwd.unwrap_or_default(),
         user: args.user,
         term,
         rows,
         cols,
         nice: args.nice,
+        container_id,
     };
     let request = HubRequest {
         id: 2,
         op: Some(HubOp::Exec(exec)),
     };
-    let (response, master) =
-        round_trip_with_attached_fd(fd, request, cwd_handle.as_ref().map(AsRawFd::as_raw_fd))?;
-    drop(cwd_handle);
+    let (response, master) = round_trip_with_attached_fd(fd, request, None)?;
     if !response.ok {
         return Err(io::Error::other(response.error));
     }

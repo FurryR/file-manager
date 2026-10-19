@@ -122,7 +122,7 @@ object ContainerManager {
             // delegate the recursive removal to the root daemon.
             val container = runCatching { loadContainer(containerDir) }.getOrNull()
             if (container?.backend == ContainerBackend.CHROOT && DaemonManager.isRootAvailable()) {
-                val result = DaemonManager.execService(DaemonTarget.Primary).run(
+                val result = DaemonManager.execService(DaemonTarget.Host).run(
                     CommandSpec(
                         command = "/system/bin/toybox",
                         args = listOf("rm", "-rf", containerDir.absolutePath),
@@ -350,7 +350,7 @@ object ContainerManager {
         runCatching {
             val uid = android.os.Process.myUid()
             val gid = android.system.Os.getgid()
-            val exec = DaemonManager.execService(DaemonTarget.Primary)
+            val exec = DaemonManager.execService(DaemonTarget.Host)
             // Rootfs contents -> root:0 ...
             val chownAll = exec.run(
                 CommandSpec(

@@ -1,14 +1,13 @@
 package io.furryr.file.core.hub
 
-import android.system.Os
 import android.util.Log
 import io.furryr.file.core.DaemonManager
 import io.furryr.file.core.DaemonTarget
-import io.furryr.file.proto.hub.AiConfigResponse
 import io.furryr.file.core.HubActions
 import io.furryr.file.core.HubCallerRoot
-import io.furryr.file.proto.hub.CallerRoot
 import io.furryr.file.core.ipc.DaemonConnection
+import io.furryr.file.proto.hub.AiConfigResponse
+import io.furryr.file.proto.hub.CallerRoot
 import io.furryr.file.proto.hub.ExecResponse
 import io.furryr.file.proto.hub.HubRequest
 import io.furryr.file.proto.hub.HubResponse
@@ -34,14 +33,14 @@ import java.io.FileDescriptor
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * The communication hub: an unauthenticated UDS server for local clients.
+ * The communication hub: a local UDS server.
  *
- * Unlike a transparent relay, the hub speaks its **own** protocol
- * ([io.furryr.file.proto.hub.HubRequest]) and translates each operation onto the
- * daemon the connection selected — spawning PTYs, forwarding signals, reaping
- * children. The daemon's own file protocol is never exposed here, and the hub
- * holds the app identity, so it authenticates to the daemon on the client's
- * behalf. Each connection owns its PTY handles and keeps its own selected target.
+ * The socket address is open; a connection proves which daemon spawned its
+ * caller by presenting that daemon's key in Hello. Every operation requires
+ * authentication first. The hub translates each operation onto the selected
+ * daemon — spawning PTYs, forwarding signals, reaping children — and never
+ * exposes the daemon's own file protocol. Each connection owns its PTY handles
+ * and keeps its own authenticated caller root.
  */
 class HubServer internal constructor(private val server: UdsServer) : Closeable {
 
@@ -67,14 +66,21 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                             } catch (_: Exception) {
                                 null
                             }
-                            if (request == null) {
-                                send(client, Reply(failure(0, "malformed hub request")))
-                            } else if (request.opCase != HubRequest.OpCase.EXEC &&
-                                request.opCase != HubRequest.OpCase.HERE &&
-                                request.opCase != HubRequest.OpCase.HELLO && event.frame.fds.isNotEmpty()) {
-                                send(client, Reply(failure(request.id, "unexpected hub descriptors")))
-                            } else if (request.opCase == HubRequest.OpCase.WAIT) {
-                                // Capture ownership in request order, before later CLOSE/SELECT_TARGET.
+                            val failure = when {
+                                request == null -> failure(0, "malformed hub request")
+                                event.frame.descriptorsTruncated -> failure(request.id,
+                                    "hub descriptor transfer was truncated (MSG_CTRUNC); received=${event.frame.fds.size}")
+                                event.frame.fds.isNotEmpty() -> failure(request.id, "unexpected hub descriptors")
+                                request.opCase != HubRequest.OpCase.HELLO && !state.authenticated ->
+                                    failure(request.id, "authentication required")
+                                request.opCase == HubRequest.OpCase.HELLO && state.authenticated ->
+                                    failure(request.id, "caller is already authenticated")
+                                else -> null
+                            }
+                            if (failure != null) {
+                                send(client, Reply(failure))
+                            } else if (request!!.opCase == HubRequest.OpCase.WAIT) {
+                                // Capture ownership in request order, before a later CLOSE.
                                 val handle = request.wait.ptyId
                                 val pty = state.ptys[handle]
                                 if (pty == null) {
@@ -107,7 +113,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                     }
                                 }
                             } else {
-                                send(client, dispatch(request, state, event.frame.fds))
+                                send(client, dispatch(request!!, state))
                             }
                         } finally {
                             event.frame.close()
@@ -138,26 +144,30 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
             client.send(reply.response.toByteArray(), listOfNotNull(reply.fd))
         } finally {
             // SCM_RIGHTS duplicates the descriptor; drop our copy even on send failure.
-            reply.fd?.let { runCatching { Os.close(it) } }
+            reply.fd?.let { runCatching { android.system.Os.close(it) } }
         }
     }
 
-    private fun dispatch(request: HubRequest, state: ConnectionState, fds: List<FileDescriptor>): Reply {
+    private fun dispatch(request: HubRequest, state: ConnectionState): Reply {
         val id = request.id
         return runCatching {
             when (request.opCase) {
                 HubRequest.OpCase.HELLO -> {
-                    require(state.root == null) { "caller root is already registered" }
-                    require(fds.size == 1) { "hello requires exactly one root descriptor" }
+                    require(request.hello.key.isNotBlank()) { "missing daemon key" }
+                    val target = requireNotNull(DaemonManager.targetForKey(request.hello.key)) {
+                        "unknown daemon key"
+                    }
+                    val containerId = DaemonManager.hubId(target)
                     val root = requireNotNull(HubActions.resolveRoot) {
                         "filesystem resolution is unavailable"
-                    }.invoke(fds.single())
+                    }.invoke(containerId)
+                    state.authenticated = true
                     state.root = root
+                    state.target = target
                     state.terminalId = request.hello.terminalId
                     Reply(
                         HubResponse.newBuilder().setId(id).setOk(true).setCallerRoot(
-                            CallerRoot.newBuilder().setContainerName(root.containerName.orEmpty())
-                                .setHostPath(root.hostPath),
+                            CallerRoot.newBuilder().setContainerId(containerId),
                         ).build(),
                     )
                 }
@@ -175,11 +185,6 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                             ).build(),
                     )
 
-                HubRequest.OpCase.SELECT_TARGET -> {
-                    state.target = request.selectTarget.target.ifBlank { "primary" }
-                    Reply(ok(id))
-                }
-
                 HubRequest.OpCase.GET_AI_CONFIG -> {
                     val config = requireNotNull(HubActions.aiConfigProvider) {
                         "AI configuration is unavailable"
@@ -195,17 +200,18 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
 
                 HubRequest.OpCase.EXEC -> {
                     val exec = request.exec
-                    require(fds.size == if (exec.cwdFd) 1 else 0) { "invalid cwd descriptor count" }
-                    require(!exec.cwdFd || exec.cwd.isEmpty()) { "cwd path and descriptor are mutually exclusive" }
-                    val cwd = if (exec.cwdFd) {
+                    val targetId = exec.containerId.ifBlank { "host" }
+                    val target = target(targetId)
+                    val root = requireNotNull(state.root) { "hello is required" }
+                    val cwd = exec.cwd.ifBlank { null }?.let {
                         requireNotNull(HubActions.resolveCwd) { "filesystem resolution is unavailable" }
-                            .invoke(fds.single(), requireNotNull(state.root) { "hello is required" }, state.target)
-                    } else exec.cwd.ifBlank { null }
-                    val connection = DaemonManager.connection(target(state.target))
+                            .invoke(root, targetId, it)
+                    }
+                    val connection = DaemonManager.connection(target)
                     val pty = connection.spawnPty(
                         command = exec.command,
                         args = exec.argsList,
-                        env = exec.envMap + Hub.environment() +
+                        env = exec.envMap + Hub.environment(target) +
                             mapOf("HUB_TERMINAL" to state.terminalId),
                         termType = exec.term,
                         rows = exec.rows,
@@ -217,7 +223,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     val handle = state.nextHandle++
                     state.ptys[handle] = OwnedPty(
                         connection, pty.ptyId,
-                        HubActions.onTerminalTarget?.invoke(state.terminalId, state.target),
+                        HubActions.onTerminalTarget?.invoke(state.terminalId, targetId),
                     )
                     Reply(
                         HubResponse.newBuilder().setId(id).setOk(true)
@@ -237,11 +243,10 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                 }
 
                 HubRequest.OpCase.HERE -> {
-                    require(fds.size == 1) { "here requires exactly one file descriptor" }
-                    val fd = fds.single()
-                    require(Os.fstat(fd).st_nlink > 0) { "the selected entry has been deleted" }
+                    val path = request.here.path
+                    require(path.startsWith('/')) { "here requires an absolute path" }
                     val reveal = HubActions.onHere ?: error("file navigation is unavailable")
-                    reveal(fd, requireNotNull(state.root) { "hello is required" })
+                    reveal(path, requireNotNull(state.root) { "hello is required" })
                     Reply(ok(id))
                 }
 
@@ -269,10 +274,15 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
         }
     }
 
-    private fun target(name: String): DaemonTarget = when (name) {
-        "primary" -> DaemonTarget.Primary
+    private fun target(containerId: String): DaemonTarget = when (containerId) {
+        "host" -> DaemonTarget.Host
         "app" -> DaemonTarget.App
-        else -> DaemonTarget.Named(name)
+        else -> {
+            require(containerId.startsWith(CONTAINER_PREFIX)) {
+                "invalid container id '$containerId'"
+            }
+            DaemonTarget.Named(containerId.removePrefix(CONTAINER_PREFIX))
+        }
     }
 
     private fun ok(id: Int): HubResponse =
@@ -287,9 +297,10 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
     }
 
     private class ConnectionState {
+        var authenticated: Boolean = false
         var root: HubCallerRoot? = null
         var terminalId: String = ""
-        var target: String = "primary"
+        var target: DaemonTarget = DaemonTarget.Host
         var nextHandle: Long = 1
         val ptys = ConcurrentHashMap<Long, OwnedPty>()
 
@@ -307,6 +318,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
 
     companion object {
         private const val TAG = "HubServer"
+        private const val CONTAINER_PREFIX = "container-"
 
         /** Bind [endpoint] and start serving. */
         fun listen(endpoint: UdsEndpoint): HubServer = HubServer(UdsServer.listen(endpoint))

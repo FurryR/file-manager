@@ -15,7 +15,7 @@ import kotlinx.coroutines.flow.Flow
  * only maps it onto the [FileProvider] contract.
  */
 class DaemonFileProvider : FileProvider {
-    private val files: FileService get() = DaemonManager.fileService(DaemonTarget.Primary)
+    private val files: FileService get() = DaemonManager.fileService(DaemonTarget.Host)
 
     override val scheme: String get() = "file"
     override val authority: String? get() = null

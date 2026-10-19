@@ -1,9 +1,8 @@
 //! Reveal a path in the app, preserving the caller's filesystem identity.
 use std::env;
-use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
 
 use hub_client::filehub::{hub_request::Op, HereRequest, HubRequest};
 
@@ -32,19 +31,20 @@ fn run() -> io::Result<()> {
         return Err(io::Error::other(USAGE));
     }
     // Do not canonicalize: the selected entry may itself be a (broken) symlink.
-    // SCM_RIGHTS lets the hub resolve this descriptor outside proot/chroot.
-    let target = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?;
+    let path = PathBuf::from(path);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()?.join(path)
+    };
+    let path = path.to_string_lossy().into_owned();
     let (socket, _root) = hub_client::connect_from_env()?;
-    let (response, _) = hub_client::round_trip_with_attached_fd(
+    let response = hub_client::round_trip(
         socket.as_raw_fd(),
         HubRequest {
             id: 1,
-            op: Some(Op::Here(HereRequest {})),
+            op: Some(Op::Here(HereRequest { path })),
         },
-        Some(target.as_raw_fd()),
     )?;
     if !response.ok {
         return Err(io::Error::other(response.error));

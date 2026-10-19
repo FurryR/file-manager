@@ -1,74 +1,97 @@
 package io.furryr.file.agent
 
 import android.content.Context
-import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.system.OsConstants
 import android.system.StructStat
 import io.furryr.file.core.HubCallerRoot
 import java.io.File
-import java.io.FileDescriptor
 
 /** App-owned filesystem namespace mapping shared by here, run0 and terminal drops. */
 object ContainerPaths {
-    fun callerRoot(context: Context, fd: FileDescriptor): HubCallerRoot {
-        val stat = Os.fstat(fd)
-        require(OsConstants.S_ISDIR(stat.st_mode) && stat.st_nlink > 0) { "invalid caller root" }
-        if (sameEntry(stat, Os.stat("/"))) return HubCallerRoot(null, "/")
-        val container = ContainerManager.listContainers(context).getOrThrow().firstOrNull {
-            File(it.rootfsPath).isDirectory && sameEntry(stat, Os.stat(it.rootfsPath))
-        } ?: error("caller root is not a registered container")
+    /** Resolve an authenticated hub container id to the caller's filesystem root. */
+    fun callerRoot(context: Context, containerId: String): HubCallerRoot {
+        if (containerId == "host" || containerId == "app") return HubCallerRoot(null, "/")
+        val name = containerId.removePrefix(CONTAINER_PREFIX)
+        require(name != containerId && name.isNotEmpty()) { "invalid container id '$containerId'" }
+        val container = ContainerManager.getContainer(context, name)
+            ?: error("container '$name' not found")
         return HubCallerRoot(container.name, File(container.rootfsPath).canonicalPath)
     }
 
-    fun revealPath(context: Context, fd: FileDescriptor, root: HubCallerRoot): String {
-        val host = descriptorPath(fd)
-        val stat = Os.fstat(fd)
-        val containers = ContainerManager.listContainers(context).getOrThrow()
-        // The caller root disambiguates shared binds and private chroot mounts.
-        val caller = containers.firstOrNull { it.name == root.containerName }
-        if (caller != null) {
-            guestPath(context, caller, host, stat)?.let { return "container://${caller.name}$it" }
+    fun revealPath(context: Context, path: String, root: HubCallerRoot): String {
+        require(path.startsWith('/')) { "here requires an absolute path" }
+        val guest = normalize(path)
+        val caller = root.containerName?.let {
+            ContainerManager.getContainer(context, it) ?: error("container '$it' not found")
         }
-        val candidates = containers.filter { it.name != root.containerName }
-            .sortedByDescending { File(it.rootfsPath).canonicalPath.length }
-        for (container in candidates) {
-            val guest = guestPath(context, container, host, stat, privateOnly = true) ?: continue
-            return "container://${container.name}$guest"
+        val host = if (caller != null) {
+            val mappings = mappings(context, caller)
+            val mapping = effectiveMapping(mappings, guest)
+            // A private mount has no host pathname; keep the caller's view.
+            if (mapping.host == null) return "container://${caller.name}$guest"
+            hostPath(mappings, guest, followFinal = false)
+        } else {
+            guest
+        }
+        val stat = runCatching { Os.lstat(host) }.getOrElse {
+            throw IllegalArgumentException("the selected entry does not exist")
+        }
+        val containers = ContainerManager.listContainers(context).getOrThrow()
+        if (caller != null) {
+            // A bind mount can expose another container's private mount.
+            val other = containers.filter { it.name != caller.name }
+                .sortedByDescending { File(it.rootfsPath).canonicalPath.length }
+                .firstNotNullOfOrNull { container ->
+                    guestPath(context, container, host, stat, privateOnly = true)
+                        ?.let { "container://${container.name}$it" }
+                }
+            if (other != null) return other
+            return "container://${caller.name}$guest"
+        }
+        for (container in containers.sortedByDescending { File(it.rootfsPath).canonicalPath.length }) {
+            val containerPath = guestPath(context, container, host, stat, privateOnly = true)
+                ?: continue
+            return "container://${container.name}$containerPath"
         }
         return host
     }
 
-    fun workingDirectory(context: Context, fd: FileDescriptor, root: HubCallerRoot, target: String): String {
-        val stat = Os.fstat(fd)
-        require(OsConstants.S_ISDIR(stat.st_mode)) { "cwd descriptor is not a directory" }
-        val host = descriptorPath(fd)
-        root.containerName?.let { name ->
-            val caller = ContainerManager.getContainer(context, name) ?: error("container '$name' not found")
-            val guest = requireNotNull(guestPath(context, caller, host, stat)) { "cwd is outside the caller root" }
-            if (target == name) return guest
-            require(effectiveMapping(mappings(context, caller), guest).host != null) {
-                "cwd is private to container '$name'"
-            }
+    fun workingDirectory(context: Context, root: HubCallerRoot, target: String, path: String): String {
+        if (path == "~" || path.startsWith("~/")) return path
+        require(path.startsWith('/')) { "cwd is not an absolute path" }
+        val guest = normalize(path)
+        val caller = root.containerName?.let {
+            ContainerManager.getContainer(context, it) ?: error("container '$it' not found")
         }
-        // A descriptor already has a physical host pathname. Do not walk it
-        // again as the app UID: run0 may be elevating from a protected directory.
-        if (target == "primary" || target == "app") return host
-        val container = ContainerManager.getContainer(context, target) ?: error("container '$target' not found")
-        return guestPath(context, container, host) ?: error("cwd is not reachable in container '$target'")
+        val host = if (caller != null) {
+            hostPath(mappings(context, caller), guest, followFinal = true)
+        } else {
+            guest
+        }
+        if (root.containerName != null && target == "$CONTAINER_PREFIX${root.containerName}") return guest
+        if (target == "host" || target == "app") return host
+        val container = containerForTarget(context, target)
+        return guestPath(context, container, host)
+            ?: error("cwd is not reachable in container '${container.name}'")
     }
 
     /** Convert only reachable filesystem paths, never remote/SAF URIs. */
     fun terminalPath(context: Context, path: String, target: String, isDirectory: Boolean): String {
-        val targetContainer = if (target == "primary" || target == "app") null else
-            ContainerManager.getContainer(context, target) ?: error("container '$target' not found")
+        val targetContainer = containerNameForTarget(target)?.let {
+            ContainerManager.getContainer(context, it)
+                ?: error("container '$it' not found")
+        }
+        var sourceRoot: String? = null
         val host = if (path.startsWith("container://")) {
             val source = ContainerUriResolver.resolveContainerUri(path).getOrThrow()
             val name = requireNotNull(source.containerName) { "select a container entry" }
             if (name == targetContainer?.name) return source.containerPath
             val container = ContainerManager.getContainer(context, name) ?: error("container '$name' not found")
-            val mappings = mappings(context, container)
-            hostPath(mappings, source.containerPath, followFinal = isDirectory)
+            // A bind mount that the target cannot see still exists in the source
+            // rootfs, which every container reaches through its /data bind.
+            sourceRoot = append(File(container.rootfsPath).canonicalPath, source.containerPath)
+            hostPath(mappings(context, container), source.containerPath, followFinal = isDirectory)
         } else {
             require(path.startsWith('/')) { "only local and container paths can be inserted into a terminal" }
             // Retain file symlinks, but resolve directory aliases such as /sdcard.
@@ -78,14 +101,20 @@ object ContainerPaths {
         }
         if (targetContainer == null) return host
         return guestPath(context, targetContainer, host)
+            ?: sourceRoot?.let { guestPath(context, targetContainer, it) }
             ?: error("path is not reachable in container '${targetContainer.name}'")
     }
 
-    private fun descriptorPath(fd: FileDescriptor): String {
-        require(Os.fstat(fd).st_nlink > 0) { "the selected entry has been deleted" }
-        val path = ParcelFileDescriptor.dup(fd).use { Os.readlink("/proc/self/fd/${it.fd}") }
-        require(path.startsWith('/')) { "descriptor has no filesystem path" }
-        return path
+    private fun containerNameForTarget(target: String): String? = when {
+        target == "host" || target == "app" -> null
+        target.startsWith(CONTAINER_PREFIX) -> target.removePrefix(CONTAINER_PREFIX)
+        else -> target
+    }
+
+    private fun containerForTarget(context: Context, target: String): Container {
+        val name = requireNotNull(containerNameForTarget(target)) { "invalid container id '$target'" }
+        return ContainerManager.getContainer(context, name)
+            ?: error("container '$name' not found")
     }
 
     private fun hostPath(mappings: List<Mapping>, guest: String, followFinal: Boolean): String {
@@ -175,4 +204,6 @@ object ContainerPaths {
     }
 
     private data class Mapping(val host: String?, val guest: String, val privateToContainer: Boolean)
+
+    private const val CONTAINER_PREFIX = "container-"
 }

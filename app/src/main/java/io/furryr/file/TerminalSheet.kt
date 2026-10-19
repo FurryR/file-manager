@@ -61,8 +61,12 @@ import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.toAndroidDragEvent
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -120,6 +124,8 @@ private fun sessionLabel(type: SessionManager.SessionType): String = when (type)
 fun TerminalSheet(
     visible: Boolean,
     onDismiss: () -> Unit,
+    onShow: () -> Unit,
+    onDropAccepted: () -> Unit = {},
     currentPath: String = "",
 ) {
     val context = LocalContext.current
@@ -134,17 +140,57 @@ fun TerminalSheet(
     var showDrawer by remember { mutableStateOf(false) }
     var sessionError by remember { mutableStateOf<String?>(null) }
     var dropHovered by remember { mutableStateOf(false) }
+    var dragDropped by remember { mutableStateOf(false) }
+    var dragBounds by remember { mutableStateOf(Rect.Zero) }
+    val screenHeightPx = with(density) { configuration.screenHeightDp.dp.toPx() }
+    val smallTargetPx = screenHeightPx * SmallRatio
+    val largeTargetPx = screenHeightPx * LargeRatio
+    val currentSmallTargetPx by rememberUpdatedState(smallTargetPx)
     val currentDropTab by rememberUpdatedState(tabs.getOrNull(activeTabIndex))
     val currentVisible by rememberUpdatedState(visible)
+    val currentOnShow by rememberUpdatedState(onShow)
+    val currentOnDismiss by rememberUpdatedState(onDismiss)
+    val currentOnDropAccepted by rememberUpdatedState(onDropAccepted)
+    fun inDropZone(position: Offset): Boolean {
+        if (dragBounds.height <= 0f) return false
+        val top = (dragBounds.bottom - currentSmallTargetPx).coerceAtLeast(dragBounds.top)
+        return position.x in dragBounds.left..dragBounds.right && position.y in top..dragBounds.bottom
+    }
     val dropTarget = remember {
         object : DragAndDropTarget {
-            override fun onEntered(event: DragAndDropEvent) { dropHovered = true }
+            override fun onStarted(event: DragAndDropEvent) {
+                dragDropped = false
+                if (!currentVisible) currentOnShow()
+            }
+
+            override fun onEntered(event: DragAndDropEvent) {
+                if (!currentVisible) currentOnShow()
+            }
+
+            override fun onMoved(event: DragAndDropEvent) {
+                val drag = event.toAndroidDragEvent()
+                dropHovered = currentVisible && inDropZone(Offset(drag.x, drag.y))
+            }
+
             override fun onExited(event: DragAndDropEvent) { dropHovered = false }
-            override fun onEnded(event: DragAndDropEvent) { dropHovered = false }
+
+            override fun onEnded(event: DragAndDropEvent) {
+                dropHovered = false
+                if (!dragDropped) currentOnDismiss()
+                dragDropped = false
+            }
 
             override fun onDrop(event: DragAndDropEvent): Boolean {
                 dropHovered = false
-                val entry = event.toAndroidDragEvent().localState as? FileEntry ?: return false
+                val drag = event.toAndroidDragEvent()
+                if (!inDropZone(Offset(drag.x, drag.y))) {
+                    // A release outside the terminal is a cancelled drop.
+                    currentOnDismiss()
+                    return false
+                }
+                val entry = drag.localState as? FileEntry ?: return false
+                dragDropped = true
+                currentOnDropAccepted()
                 val tab = currentDropTab?.takeIf { currentVisible && it.session.isRunning } ?: return false
                 val target = SessionManager.terminalTarget(tab.sessionId)
                 scope.launch {
@@ -171,9 +217,6 @@ fun TerminalSheet(
         }
     }
 
-    val screenHeightPx = with(density) { configuration.screenHeightDp.dp.toPx() }
-    val smallTargetPx = screenHeightPx * SmallRatio
-    val largeTargetPx = screenHeightPx * LargeRatio
     val sheetHeightPx = remember { Animatable(0f) }
     var wasVisible by remember { mutableStateOf(false) }
 
@@ -183,9 +226,7 @@ fun TerminalSheet(
         val isClosing = wasVisible && !visible
         wasVisible = visible
         if (visible) {
-            if (sheetHeightPx.value == 0f) {
-                sheetHeightPx.animateTo(smallTargetPx, spring(dampingRatio = Spring.DampingRatioLowBouncy))
-            }
+            sheetHeightPx.animateTo(smallTargetPx, spring(dampingRatio = Spring.DampingRatioLowBouncy))
         } else {
             if (isClosing) {
                 val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
@@ -232,9 +273,10 @@ fun TerminalSheet(
 
     fun resolveSessionType(path: String): Pair<SessionManager.SessionType, String> {
         return if (path.startsWith("container://")) {
-            val name = ContainerUriResolver.resolveContainerUri(path).getOrThrow().containerName
+            val resolved = ContainerUriResolver.resolveContainerUri(path).getOrThrow()
+            val name = resolved.containerName
             if (name != null) {
-                SessionManager.SessionType.Container(name) to name
+                SessionManager.SessionType.Container(name, resolved.containerPath) to name
             } else {
                 SessionManager.SessionType.AppShell(cwd = "/sdcard") to "Local"
             }
@@ -293,15 +335,22 @@ fun TerminalSheet(
         }
     }
 
-    // Keep the drop target attached while collapsed so a file drag can open it.
-    Box(modifier = Modifier.fillMaxSize()) {
+    // Observe the whole drag area even while the terminal is collapsed.
+    Box(modifier = Modifier
+        .fillMaxSize()
+        .onGloballyPositioned { dragBounds = it.boundsInRoot() }
+        .dragAndDropTarget(
+            shouldStartDragAndDrop = { it.toAndroidDragEvent().localState is FileEntry },
+            target = dropTarget,
+        )
+    ) {
         if (sheetHeightPx.value > 0f) {
             val alpha = ((sheetHeightPx.value / smallTargetPx).coerceIn(0f, 1f) * 0.4f)
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black.copy(alpha = alpha))
-                    // Pointer-transparent: icons above the terminal remain draggable.
+                    .pointerInput(Unit) { detectTapGestures { currentOnDismiss() } }
             )
         }
 
@@ -319,10 +368,6 @@ fun TerminalSheet(
                     .background(
                         MaterialTheme.colorScheme.surfaceColorAtElevation(3.dp),
                         RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
-                    )
-                    .dragAndDropTarget(
-                        shouldStartDragAndDrop = { it.toAndroidDragEvent().localState is FileEntry },
-                        target = dropTarget,
                     )
                     .then(if (dropHovered) Modifier.border(
                         2.dp, MaterialTheme.colorScheme.primary,

@@ -25,6 +25,9 @@ internal class DaemonIdentity(val id: String) {
     private val publicKey: ByteArray
     val socketName: String
 
+    /** Per-daemon key published through HUB_SOCKET (`<hub>@<key>`). */
+    val key: String
+
     init {
         val seed = ByteArray(32).also { SecureRandom().nextBytes(it) }
         val privateKeySpec = EdDSAPrivateKeySpec(seed, spec)
@@ -35,6 +38,11 @@ internal class DaemonIdentity(val id: String) {
         digest.update(0)
         digest.update(id.toByteArray(Charsets.UTF_8))
         socketName = "file-daemon-${toHex(digest.digest())}"
+        key = MessageDigest.getInstance("SHA-256").run {
+            update(publicKey)
+            update(id.toByteArray(Charsets.UTF_8))
+            toHex(digest())
+        }
     }
 
     /** Hex-encoded public key, as passed to a daemon via `--key`. */

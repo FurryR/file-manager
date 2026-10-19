@@ -21,6 +21,7 @@ import java.nio.ByteOrder
 internal class UdsSocket(val fd: FileDescriptor) {
 
     private val scratch: ByteBuffer = ByteBuffer.allocateDirect(SCRATCH)
+    private var descriptorsTruncated = false
 
     @Volatile private var closed = false
 
@@ -48,6 +49,7 @@ internal class UdsSocket(val fd: FileDescriptor) {
     fun receiveFrame(): Frame {
         if (closed) throw IOException("socket closed")
         val fds = ArrayList<FileDescriptor>(1)
+        descriptorsTruncated = false
         try {
             val header = ByteArray(HEADER_SIZE)
             readFully(header, fds)
@@ -58,7 +60,7 @@ internal class UdsSocket(val fd: FileDescriptor) {
             if (size < 0 || size > MAX_FRAME) throw IOException("invalid frame size: $size")
             val payload = ByteArray(size)
             readFully(payload, fds)
-            return Frame(payload, fds)
+            return Frame(payload, fds, descriptorsTruncated)
         } catch (e: Throwable) {
             // recvmsg may have delivered descriptors before a partial frame fails.
             fds.forEach { runCatching { Os.close(it) } }
@@ -101,6 +103,7 @@ internal class UdsSocket(val fd: FileDescriptor) {
             }
         }
         if (UdsNative.msgFlags(msg) and UdsNative.MSG_CTRUNC != 0) {
+            descriptorsTruncated = true
             Log.w(TAG, "SCM_RIGHTS truncated; descriptor dropped")
         }
         return n

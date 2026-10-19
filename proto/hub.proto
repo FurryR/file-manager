@@ -7,16 +7,14 @@ option java_multiple_files = true;
 
 // The hub's own request/response protocol.
 //
-// The hub is a stable, long-lived, unauthenticated local server (run0 today,
-// agents later). It deliberately exposes only a curated command/signal surface
-// and translates each request onto the right daemon internally; the daemon's
-// own file protocol is never exposed here. After a successful Exec, the PTY
-// master fd travels as SCM_RIGHTS on the response frame.
+// The hub is a stable, long-lived local server (run0 today, agents later). Its
+// socket name is an open address; the per-daemon key carried by Hello is the
+// credential. Every operation requires Hello first. After a successful Exec,
+// the PTY master fd travels as SCM_RIGHTS on the response frame.
 message HubRequest {
   uint32 id = 1;
   oneof op {
     ListTargetsRequest list_targets = 2;
-    SelectTargetRequest select_target = 3;
     ExecRequest exec = 4;
     ResizeRequest resize = 5;
     SignalRequest signal = 6;
@@ -41,19 +39,20 @@ message HubResponse {
   }
 }
 
-// Exactly one O_PATH | O_DIRECTORY descriptor for the caller's / accompanies
-// this handshake. The hub resolves its identity, not a client-supplied path.
+// The handshake. `key` is the per-daemon key embedded after `@` in
+// HUB_SOCKET. The hub resolves it to a live daemon, and returns the caller's
+// current container id. No file descriptor is attached.
 message HelloRequest {
   string terminal_id = 1;
+  string key = 2;
 }
 
 message CallerRoot {
-  // Empty for the host filesystem.
-  string container_name = 1;
-  string host_path = 2;
+  // `host`, `app`, or `container-<name>`.
+  string container_id = 1;
 }
 
-// ── Target selection ──────────────────────────────────────────────
+// ── Targets ──────────────────────────────────────────────────────
 
 message ListTargetsRequest {}
 
@@ -62,13 +61,9 @@ message ListTargetsResponse {
 }
 
 message Target {
+  // `host`, `app`, or `container-<name>`.
   string name = 1;
   bool elevated = 2;
-}
-
-// Select the daemon target for this connection. Defaults to `primary`.
-message SelectTargetRequest {
-  string target = 1;
 }
 
 // ── Command execution ─────────────────────────────────────────────
@@ -90,10 +85,8 @@ message ExecRequest {
   // Nice level for the spawned process. Negative values require the daemon to
   // be root.
   optional int32 nice = 9;
-  // One SCM_RIGHTS directory fd accompanies this request. Resolve it to a
-  // reachable pathname in the selected target using the caller root registered
-  // by Hello. The daemon receives that pathname, never the borrowed descriptor.
-  bool cwd_fd = 10;
+  // `host` (default when empty), `app`, or `container-<name>`.
+  string container_id = 10;
 }
 
 // The PTY master fd rides this response as SCM_RIGHTS.
@@ -127,10 +120,11 @@ message CloseRequest {
   uint64 pty_id = 1;
 }
 
-// Reveal the entry represented by exactly one O_PATH | O_NOFOLLOW descriptor.
-// The hub resolves the descriptor in its host namespace; no client pathname is
-// trusted, and the final symlink itself (including a dangling link) is retained.
-message HereRequest {}
+// Reveal an entry by its path in the caller's namespace. The final symlink
+// itself (including a dangling link) is retained.
+message HereRequest {
+  string path = 1;
+}
 
 message GetAiConfigRequest {}
 

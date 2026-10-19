@@ -69,6 +69,8 @@ import kotlinx.coroutines.withContext
 
 import android.util.Log
 import android.content.ClipData
+import android.view.View
+import io.furryr.file.provider.ForwardFileProvider
 import androidx.compose.foundation.draganddrop.dragAndDropSource
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.ui.draganddrop.DragAndDropTransferData
@@ -84,6 +86,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
@@ -117,6 +120,7 @@ fun FileListScreen(
     onToggleSelection: (FileEntry) -> Unit = {},
     onRangeSelect: (FileEntry) -> Unit = {},
     onFileDragStart: () -> Unit = {},
+    onFileDragEnd: () -> Unit = {},
 ) {
     var entries by remember { mutableStateOf<List<FileEntry>>(emptyList()) }
     var error by remember { mutableStateOf<Throwable?>(null) }
@@ -356,6 +360,7 @@ fun FileListScreen(
                                 selected = entry.path in selectedPaths,
                                 selectionMode = selectionMode,
                                 onFileDragStart = onFileDragStart,
+                                onFileDragEnd = onFileDragEnd,
                                 index = index - animationStartIndex,
                                 animationSeed = activeAnimationRun,
                                 onClick = onClick,
@@ -371,6 +376,7 @@ fun FileListScreen(
                             selected = entry.path in selectedPaths,
                             selectionMode = selectionMode,
                             onFileDragStart = onFileDragStart,
+                            onFileDragEnd = onFileDragEnd,
                             onClick = onClick,
                             onLongPress = onLongPress,
                             onToggleSelection = { if (!isLoading && path == committedPath) onToggleSelection(entry) },
@@ -426,6 +432,7 @@ private fun AnimatedFileRow(
     selected: Boolean,
     selectionMode: Boolean,
     onFileDragStart: () -> Unit,
+    onFileDragEnd: () -> Unit,
     index: Int,
     animationSeed: Int,
     onClick: () -> Unit,
@@ -466,6 +473,7 @@ private fun AnimatedFileRow(
             selected = selected,
             selectionMode = selectionMode,
             onFileDragStart = onFileDragStart,
+            onFileDragEnd = onFileDragEnd,
             onClick = onClick,
             onLongPress = onLongPress,
             onToggleSelection = onToggleSelection,
@@ -482,13 +490,16 @@ private fun FileRow(
     selected: Boolean,
     selectionMode: Boolean,
     onFileDragStart: () -> Unit,
+    onFileDragEnd: () -> Unit,
     onClick: () -> Unit,
     onLongPress: () -> Unit,
     onToggleSelection: () -> Unit,
     onRangeSelect: () -> Unit
 ) {
     val isDir = entry.isDirectory
+    val context = LocalContext.current
     val currentOnFileDragStart by rememberUpdatedState(onFileDragStart)
+    val currentOnFileDragEnd by rememberUpdatedState(onFileDragEnd)
     var rowDragOffset by remember { mutableStateOf(0f) }
     val swipeOffset by animateFloatAsState(
         targetValue = rowDragOffset,
@@ -539,13 +550,26 @@ private fun FileRow(
             } else Modifier.dragAndDropSource {
                 detectDragGestures(
                     onDragStart = {
+                        // Files carry a tokenized content URI so other apps
+                        // (e.g. ColorOS Content Portal) can read the bytes.
+                        val clip = if (isDir) {
+                            ClipData.newPlainText(entry.name, entry.path)
+                        } else {
+                            ClipData.newUri(
+                                context.contentResolver,
+                                entry.name,
+                                ForwardFileProvider.buildUri(entry.path),
+                            )
+                        }
                         startTransfer(DragAndDropTransferData(
-                            clipData = ClipData.newPlainText(entry.name, entry.path),
+                            clipData = clip,
                             localState = entry,
+                            flags = View.DRAG_FLAG_GLOBAL or View.DRAG_FLAG_GLOBAL_URI_READ,
                         ))
                         currentOnFileDragStart()
                     },
                     onDrag = { change, _ -> change.consume() },
+                    onDragEnd = { currentOnFileDragEnd() },
                 )
             },
         )

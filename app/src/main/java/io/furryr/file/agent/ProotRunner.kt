@@ -156,6 +156,10 @@ object ProotRunner {
             "if [ -n \"\${HUB_PATH-}\" ]; then\n" +
                 "    export PATH=\"\${PATH:+\$PATH:}\$HUB_PATH\"\n" +
                 "    unset HUB_PATH\n" +
+                "fi\n" +
+                "if [ -n \"\${CONTAINER_START_PATH-}\" ]; then\n" +
+                "    cd \"\$CONTAINER_START_PATH\" 2>/dev/null\n" +
+                "    unset CONTAINER_START_PATH\n" +
                 "fi\n",
         )
         return BindMount(profileFile.absolutePath, "/etc/profile.d/hub.sh")

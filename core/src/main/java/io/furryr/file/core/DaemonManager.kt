@@ -19,8 +19,8 @@ import java.util.UUID
 
 /** Which daemon a caller wants to talk to. */
 sealed interface DaemonTarget {
-    /** The elevated daemon (root via `su`, else Shizuku) when available, otherwise the app daemon. */
-    data object Primary : DaemonTarget
+    /** The host daemon (elevated via `su`/Shizuku when available, otherwise the app daemon). */
+    data object Host : DaemonTarget
 
     /** A daemon forced to run under the app UID (never elevated). */
     data object App : DaemonTarget
@@ -166,16 +166,38 @@ object DaemonManager {
     fun liveEndpoints(): List<DaemonEndpoint> = synchronized(lock) {
         val list = ArrayList<DaemonEndpoint>()
         primary?.takeIf { it.isAlive() }?.let {
-            list.add(DaemonEndpoint("primary", it.socketName, rootActive))
+            list.add(DaemonEndpoint("host", it.socketName, rootActive))
         }
         app?.takeIf { it.isAlive() }?.let {
             list.add(DaemonEndpoint("app", it.socketName, false))
         }
         named.forEach { (name, connection) ->
-            if (connection.isAlive()) list.add(DaemonEndpoint(name, connection.socketName, false))
+            if (connection.isAlive()) {
+                list.add(DaemonEndpoint("container-$name", connection.socketName, false))
+            }
         }
         list
     }
+
+    /** Stable hub id for a target: `host`, `app`, or `container-<name>`. */
+    fun hubId(target: DaemonTarget): String = when (target) {
+        DaemonTarget.Host -> "host"
+        DaemonTarget.App -> "app"
+        is DaemonTarget.Named -> "container-${target.name}"
+    }
+
+    /** Resolve the per-daemon key to a live target, if any. */
+    internal fun targetForKey(key: String): DaemonTarget? = synchronized(lock) {
+        primary?.takeIf { it.isAlive() && it.key == key }?.let { return DaemonTarget.Host }
+        app?.takeIf { it.isAlive() && it.key == key }?.let { return DaemonTarget.App }
+        named.entries.firstOrNull { it.value.isAlive() && it.value.key == key }?.let {
+            return DaemonTarget.Named(it.key)
+        }
+        null
+    }
+
+    /** Key of the live daemon for [target], starting it if necessary. */
+    fun hubKey(target: DaemonTarget): String = connection(target).key
 
     /**
      * Start the communication hub on a fresh random abstract endpoint.
@@ -215,7 +237,7 @@ object DaemonManager {
     // ── Lifecycle ─────────────────────────────────────────────────────
 
     /** Start (or reuse) the primary daemon and retain its connection. */
-    fun warmUp(): Result<Unit> = runCatching { connection(DaemonTarget.Primary) }
+    fun warmUp(): Result<Unit> = runCatching { connection(DaemonTarget.Host) }
 
     /** Start (or reuse) a named daemon (e.g. a container) without using it. */
     fun warmNamed(name: String): Result<Unit> = runCatching { connection(DaemonTarget.Named(name)) }
@@ -248,9 +270,9 @@ object DaemonManager {
      * Ask an already-connected daemon to shut down gracefully. Does not start
      * one. Any client may send this; the daemon exits on the first one.
      */
-    fun exit(target: DaemonTarget = DaemonTarget.Primary) = synchronized(lock) {
+    fun exit(target: DaemonTarget = DaemonTarget.Host) = synchronized(lock) {
         when (target) {
-            DaemonTarget.Primary -> primary?.exit()
+            DaemonTarget.Host -> primary?.exit()
             DaemonTarget.App -> app?.exit()
             is DaemonTarget.Named -> named[target.name]?.exit()
         }
@@ -258,17 +280,17 @@ object DaemonManager {
 
     // ── Service facades ───────────────────────────────────────────────
 
-    fun fileService(target: DaemonTarget = DaemonTarget.Primary): FileService =
+    fun fileService(target: DaemonTarget = DaemonTarget.Host): FileService =
         FileService { connection(target) }
 
-    fun execService(target: DaemonTarget = DaemonTarget.Primary): ExecService =
+    fun execService(target: DaemonTarget = DaemonTarget.Host): ExecService =
         ExecService { connection(target) }
 
     // ── Internal ──────────────────────────────────────────────────────
 
     internal fun connection(target: DaemonTarget): DaemonConnection = synchronized(lock) {
         when (target) {
-            DaemonTarget.Primary -> primary?.takeIf { it.isAlive() } ?: startPrimaryLocked()
+            DaemonTarget.Host -> primary?.takeIf { it.isAlive() } ?: startPrimaryLocked()
             DaemonTarget.App -> {
                 if (!rootEnabled && !shellEnabled) {
                     primary?.takeIf { it.isAlive() } ?: startPrimaryLocked()

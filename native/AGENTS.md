@@ -10,7 +10,7 @@ native/
 ├── Cargo.toml       # Workspace root + file_daemon (Tokio + libc + prost)
 ├── run0/src/main.rs # Privileged command client + local tty bridge
 ├── here/src/main.rs # Reveal a path via one O_PATH descriptor sent to the hub
-├── agent/src/main.rs # Single-file async terminal AI chat UI
+├── agent/src/        # Modular ratatui + crossterm terminal AI chat UI
 ├── hub-client/      # Shared hub protocol codegen, socket I/O and SCM_RIGHTS
 ├── build.rs         # Prost protobuf codegen
 ├── build-android-aarch64.sh  # Build workspace; stage daemon + original-name utilities
@@ -26,7 +26,7 @@ native/
 - **UID check** for data path: `maybe_android_data_path()` — skips `/Android/data` UID trick when root
 - **Progress tracking**: `TaskState` in `HashMap`, tasks spawn via `tokio::spawn`
 - **Terminal utilities**: `run0/`, `here/`, `agent/`; common wire transport in `hub-client/`
-- **Agent input/network**: single-file `agent/src/main.rs`, `AsyncFd` + system DNS
+- **Agent UI/network**: ratatui + crossterm UI in `agent/src/{ui,terminal,app}.rs`, HTTP in `agent/src/api.rs`, system DNS via reqwest
 
 ## CONVENTIONS
 

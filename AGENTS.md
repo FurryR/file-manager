@@ -36,7 +36,7 @@ file-manager/
 │   ├── build-proot.sh            # Cross-compile proot from source
 │   ├── run0/src/main.rs  # arg parsing + hub protocol + local tty bridge
 │   ├── here/src/main.rs  # reveal a path in the current file-manager tab
-│   ├── agent/src/main.rs # single-file terminal AI chat UI
+│   ├── agent/src/        # modular ratatui + crossterm terminal AI chat UI
 │   └── hub-client/       # shared hub wire protocol and descriptor transport
 ├── proto/               # Protobuf IPC (generated into :core)
 │   ├── file_daemon.proto  # daemon protocol
@@ -73,7 +73,7 @@ file-manager/
 | run0 hub server | `core/.../hub/HubServer.kt` | Interprets the hub protocol, translates to daemons |
 | run0 CLI | `native/run0/src/main.rs` | Rust client: hub protocol + local tty bridge |
 | here CLI | `native/here/src/main.rs` | Open target descriptor + request file-manager navigation |
-| agent CLI | `native/agent/src/main.rs` | Single-file terminal AI chat UI |
+| agent CLI | `native/agent/src/ui.rs` | Modular ratatui + crossterm terminal AI chat UI |
 | Hub client transport | `native/hub-client/src/lib.rs` | Shared framing, abstract sockets and SCM_RIGHTS |
 | Hub protocol | `proto/hub.proto` | run0/agent protocol (list/select/exec/resize/signal/wait/close) |
 | run0 bootstrap | `core/.../hub/Hub.kt` | Installs the binary, starts the hub, env contract |

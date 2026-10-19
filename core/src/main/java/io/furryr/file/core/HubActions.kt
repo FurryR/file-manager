@@ -1,24 +1,23 @@
 package io.furryr.file.core
 
-import java.io.FileDescriptor
 import java.io.Closeable
 
 /** App-owned actions exposed through the hub, without app/provider dependencies. */
 object HubActions {
     /**
-     * Invoked on the hub's IO thread. The borrowed descriptor is valid only for
-     * this call; resolve it synchronously before queuing any UI work. Throw to
-     * return a failure to the client.
+     * Invoked on the hub's IO thread. [containerId] is `host`, `app`, or
+     * `container-<name>`. Throw to return a failure to the client.
      */
     @Volatile
-    var onHere: ((FileDescriptor, HubCallerRoot) -> Unit)? = null
+    var resolveRoot: ((String) -> HubCallerRoot)? = null
 
+    /** Resolve a caller-relative path to a path in the selected target. */
     @Volatile
-    var resolveRoot: ((FileDescriptor) -> HubCallerRoot)? = null
+    var resolveCwd: ((HubCallerRoot, String, String) -> String)? = null
 
-    /** Resolve a borrowed cwd descriptor to a pathname in the selected target. */
+    /** Reveal [path], expressed in the caller's namespace. */
     @Volatile
-    var resolveCwd: ((FileDescriptor, HubCallerRoot, String) -> String)? = null
+    var onHere: ((String, HubCallerRoot) -> Unit)? = null
 
     /** A lease for the foreground run0 target; closing it restores its parent. */
     @Volatile

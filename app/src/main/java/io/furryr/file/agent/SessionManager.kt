@@ -67,7 +67,11 @@ object SessionManager {
         data class AppShell(val command: String = "/system/bin/sh", val cwd: String? = null) : SessionType()
 
         /** Proot container process run directly as the PTY shell. */
-        data class Container(val containerName: String) : SessionType()
+        data class Container(
+            val containerName: String,
+            /** Directory to enter once the container login profile runs. */
+            val startPath: String? = null,
+        ) : SessionType()
     }
 
     /**
@@ -141,7 +145,8 @@ object SessionManager {
                     is SessionType.AppShell ->
                         createTerminalSession(type.command, context, customCwd = type.cwd, terminalId = sessionId)
 
-                    is SessionType.Container -> createContainerTerminal(type.containerName, context, sessionId)
+                    is SessionType.Container ->
+                        createContainerTerminal(type.containerName, type.startPath, context, sessionId)
                 }
 
                 val info = SessionInfo(
@@ -191,7 +196,10 @@ object SessionManager {
         if (existing != null) return existing.session
 
         val type: SessionType = if (containerName != null && containerName.isNotBlank()) {
-            SessionType.Container(containerName)
+            val startPath = runCatching {
+                ContainerUriResolver.resolveContainerUri(currentPath).getOrThrow().containerPath
+            }.getOrNull()
+            SessionType.Container(containerName, startPath)
         } else {
             SessionType.AppShell("/system/bin/sh")
         }
@@ -308,7 +316,7 @@ object SessionManager {
 
     fun terminalTarget(sessionId: String): String = synchronized(mutex) {
         terminalTargets[sessionId]?.lastOrNull()?.second ?: when (val type = sessions[sessionId]?.type) {
-            is SessionType.Container -> type.containerName
+            is SessionType.Container -> "container-${type.containerName}"
             else -> "app"
         }
     }
@@ -352,6 +360,7 @@ object SessionManager {
      */
     private suspend fun createContainerTerminal(
         containerName: String,
+        startPath: String?,
         context: Context,
         terminalId: String,
     ): TerminalSession {
@@ -364,7 +373,13 @@ object SessionManager {
         // Warm the container daemon off the main thread so the synchronous
         // spawn inside TerminalSession is fast.
         withContext(Dispatchers.IO) { DaemonManager.warmNamed(containerName).getOrThrow() }
-        return createTerminalSession("container://$containerName", context, customCwd = "/", terminalId = terminalId)
+        return createTerminalSession(
+            "container://$containerName",
+            context,
+            customCwd = "/",
+            startPath = startPath,
+            terminalId = terminalId,
+        )
     }
 
     /**
@@ -379,6 +394,7 @@ object SessionManager {
         context: Context,
         args: List<String>? = null,
         customCwd: String? = null,
+        startPath: String? = null,
         terminalId: String,
     ): TerminalSession {
         val cwd = customCwd ?: context.filesDir.absolutePath
@@ -387,9 +403,9 @@ object SessionManager {
             context.cacheDir.mkdirs()
             val tmpDir = context.cacheDir.absolutePath
             add("PROOT_TMP_DIR=$tmpDir")
-            // Publish the hub endpoint and packaged utilities to the shell.
-            Hub.environment().forEach { (key, value) -> add("$key=$value") }
+            // HUB_SOCKET is added by ProcessHelper once the target is known.
             add("HUB_TERMINAL=$terminalId")
+            startPath?.let { add("CONTAINER_START_PATH=$it") }
             Hub.binDir?.let { dir ->
                 val pathIndex = indexOfFirst { it.startsWith("PATH=") }
                 if (pathIndex >= 0) {

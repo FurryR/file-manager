@@ -48,6 +48,7 @@ object ProcessHelper {
         } else {
             DaemonTarget.App
         }
+        val hubEnv = Hub.environment(target)
 
         // Initialize a clean target environment before an interactive container login.
         // Command execution through the hub bypasses login and its MOTD output.
@@ -57,11 +58,11 @@ object ProcessHelper {
                 listOf("-c", "exec /bin/login -p -f root")
             } else (args?.toList() ?: emptyList()),
             env = if (containerName != null) {
-                env.filterKeys { it == "TERM" || it == "HUB_TERMINAL" } + Hub.environment() + buildMap {
+                env.filterKeys { it == "TERM" || it == "HUB_TERMINAL" || it == "CONTAINER_START_PATH" } + hubEnv + buildMap {
                     put("PATH", ContainerDaemonLauncher.DEFAULT_PATH)
                     Hub.binDir?.let { put("HUB_PATH", it.absolutePath) }
                 }
-            } else env,
+            } else env + hubEnv,
             cwd = if (containerName != null) "~" else cwd,
             user = if (containerName != null) "root" else null,
             rows = rows,

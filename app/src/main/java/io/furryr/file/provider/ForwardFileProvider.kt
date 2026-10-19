@@ -49,7 +49,7 @@ class ForwardFileProvider : ContentProvider() {
     // ── ContentProvider ─────────────────────────────────────────────
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
-        val path = pathOf(uri) ?: throw FileNotFoundException("Missing path in $uri")
+        val path = pathOf(uri) ?: throw FileNotFoundException("Invalid or expired URI: $uri")
         if (!mode.contains('r')) {
             throw FileNotFoundException("ForwardFileProvider is read-only: $path")
         }
@@ -160,17 +160,29 @@ class ForwardFileProvider : ContentProvider() {
     companion object {
         private const val TAG = "ForwardFileProvider"
         private const val QUERY_PATH = "path"
+        private const val QUERY_EXPIRES = "expires"
+        private const val QUERY_TOKEN = "token"
         private const val COPY_BUFFER_SIZE = 256 * 1024
 
-        /** Build a shareable `content://` URI for an arbitrary source path. */
-        fun buildUri(path: String): Uri = Uri.Builder()
-            .scheme("content")
-            .authority(ForwardProviderAuthority)
-            .appendPath("file")
-            .appendQueryParameter(QUERY_PATH, path)
-            .build()
+        /** Build a short-lived, token-authorized `content://` URI. */
+        fun buildUri(path: String): Uri {
+            val (expires, token) = ShareToken.sign(path)
+            return Uri.Builder()
+                .scheme("content")
+                .authority(ForwardProviderAuthority)
+                .appendPath("file")
+                .appendQueryParameter(QUERY_PATH, path)
+                .appendQueryParameter(QUERY_EXPIRES, expires.toString())
+                .appendQueryParameter(QUERY_TOKEN, token)
+                .build()
+        }
 
-        private fun pathOf(uri: Uri): String? = uri.getQueryParameter(QUERY_PATH)
+        private fun pathOf(uri: Uri): String? {
+            val path = uri.getQueryParameter(QUERY_PATH) ?: return null
+            val expires = uri.getQueryParameter(QUERY_EXPIRES)?.toLongOrNull() ?: return null
+            val token = uri.getQueryParameter(QUERY_TOKEN) ?: return null
+            return path.takeIf { ShareToken.verify(path, expires, token) }
+        }
 
         private fun mimeTypeOf(path: String): String {
             val extension = path.substringAfterLast('.', "").lowercase(Locale.ROOT)

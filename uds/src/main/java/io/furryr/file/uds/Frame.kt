@@ -14,6 +14,8 @@ import java.io.FileDescriptor
 class Frame(
     val payload: ByteArray,
     val fds: List<FileDescriptor> = emptyList(),
+    /** The payload arrived, but SCM_RIGHTS delivery was incomplete. */
+    val descriptorsTruncated: Boolean = false,
 ) {
     /** Close every attached descriptor. */
     fun close() {

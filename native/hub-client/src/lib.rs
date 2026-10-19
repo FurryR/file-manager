@@ -1,7 +1,6 @@
 //! Shared hub wire protocol for the native terminal utilities.
 use prost::Message;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::OpenOptionsExt;
 use std::{env, io, mem};
 
 pub mod filehub {
@@ -10,10 +9,16 @@ pub mod filehub {
 use filehub::{HubRequest, HubResponse};
 
 pub fn connect_from_env() -> io::Result<(OwnedFd, filehub::CallerRoot)> {
-    let name = env::var("HUB_SOCKET").map_err(|_| {
+    let value = env::var("HUB_SOCKET").map_err(|_| {
         io::Error::other("$HUB_SOCKET is not set; invoke this command from an app-spawned terminal")
     })?;
-    let socket = connect_abstract(&name)?;
+    let (name, key) = value
+        .split_once('@')
+        .ok_or_else(|| io::Error::other("$HUB_SOCKET is missing its daemon key"))?;
+    if name.is_empty() || key.is_empty() {
+        return Err(io::Error::other("$HUB_SOCKET is malformed"));
+    }
+    let socket = connect_abstract(name)?;
     let timeout = libc::timeval {
         tv_sec: 10,
         tv_usec: 0,
@@ -32,19 +37,15 @@ pub fn connect_from_env() -> io::Result<(OwnedFd, filehub::CallerRoot)> {
             return Err(io::Error::last_os_error());
         }
     }
-    let root = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)
-        .open("/")?;
-    let (response, _) = round_trip_with_attached_fd(
+    let response = round_trip(
         socket.as_raw_fd(),
         HubRequest {
             id: 0,
             op: Some(filehub::hub_request::Op::Hello(filehub::HelloRequest {
                 terminal_id: env::var("HUB_TERMINAL").unwrap_or_default(),
+                key: key.to_string(),
             })),
         },
-        Some(root.as_raw_fd()),
     )?;
     if !response.ok {
         return Err(io::Error::other(response.error));

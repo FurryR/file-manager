@@ -177,6 +177,7 @@ internal class TerminalInputView(context: Context, private val inputState: Termi
         released = true
         if (inputState.onInputModeChanged === modeChanged) inputState.onInputModeChanged = null
         connection?.closeConnection()
+        connection = null
     }
 
     override fun onCheckIsTextEditor(): Boolean = true
@@ -201,38 +202,52 @@ internal class TerminalInputConnection(
     private var closed = false
     private var forwardedComposition: String? = null
 
-    fun cancelComposition() {
-        super.finishComposingText()
-        resetToPlaceholder()
-    }
-
-    override fun closeConnection() {
-        cancelComposition()
-        closed = true
-        super.closeConnection()
-    }
-
     init {
         val e = getEditable()
         if (e != null) e.append(PLACEHOLDER)
     }
 
+    fun cancelComposition() {
+        forwardedComposition = null
+        super.finishComposingText()
+        resetToPlaceholder()
+    }
+
+    override fun closeConnection() {
+        if (closed) return
+        closed = true
+        cancelComposition()
+        super.closeConnection()
+    }
+
     override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
         if (closed) return false
-        if (forwardedComposition == text.toString()) {
-            forwardedComposition = null
-            resetToPlaceholder()
-            return true
-        }
+        val pending = text.toString()
+        val forwarded = forwardedComposition
         forwardedComposition = null
         val result = super.commitText(text, newCursorPosition)
-        if (text.isNotEmpty()) inputState.commitText(text)
+        // Text streamed during a composing update must not be sent twice. If the
+        // IME commits a longer value, only forward the part that is still missing.
+        val remaining = when {
+            forwarded == null -> pending
+            pending.startsWith(forwarded) -> pending.substring(forwarded.length)
+            else -> pending
+        }
+        if (remaining.isNotEmpty()) inputState.commitText(remaining)
         resetToPlaceholder()
         return result
     }
 
     override fun finishComposingText(): Boolean {
         if (closed) return false
+        if (forwardedComposition != null) {
+            // Already streamed while a modifier was active; just clear the flag so
+            // it cannot swallow the next composition.
+            forwardedComposition = null
+            val result = super.finishComposingText()
+            resetToPlaceholder()
+            return result
+        }
         val e = getEditable()
         val start = e?.let { getComposingSpanStart(it) } ?: -1
         val end = e?.let { getComposingSpanEnd(it) } ?: -1
@@ -249,8 +264,11 @@ internal class TerminalInputConnection(
     override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
         if (closed) return false
         if (inputState.directInput || forwardedComposition != null) {
-            if (forwardedComposition != text.toString()) inputState.commitText(text)
-            forwardedComposition = text.toString()
+            val pending = text.toString()
+            val previous = forwardedComposition ?: ""
+            val delta = if (pending.startsWith(previous)) pending.substring(previous.length) else pending
+            forwardedComposition = pending
+            if (delta.isNotEmpty()) inputState.commitText(delta)
             resetToPlaceholder()
             return true
         }
@@ -259,10 +277,15 @@ internal class TerminalInputConnection(
 
     override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
         if (closed) return false
-        val deleteKey = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL)
-        repeat(beforeLength) { inputState.dispatchKeyEvent(deleteKey) }
-        val result = super.deleteSurroundingText(beforeLength, afterLength)
         val e = getEditable()
+        // While the IME is composing, the text only exists in the editor buffer
+        // and has not reached the terminal yet; deleting it must not send DEL.
+        val composing = e != null && getComposingSpanStart(e) >= 0
+        if (!composing) {
+            val deleteKey = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL)
+            repeat(beforeLength) { inputState.dispatchKeyEvent(deleteKey) }
+        }
+        val result = super.deleteSurroundingText(beforeLength, afterLength)
         if (e != null && e.isEmpty()) e.append(PLACEHOLDER)
         return result
     }

@@ -2,6 +2,7 @@ package io.furryr.file.agent
 
 import android.content.Context
 import android.net.ConnectivityManager
+import io.furryr.file.virgl.VirglManager
 import java.io.File
 
 /**
@@ -54,7 +55,11 @@ object ProotRunner {
      * forwarded.
      */
     fun chrootBinds(context: Context, container: Container): List<Pair<String, String>> =
-        (listOf(resolverMount(context, container), hubProfileMount(context, container)) + container.bindMounts)
+        (listOfNotNull(
+            resolverMount(context, container),
+            hubProfileMount(context, container),
+            VirglManager.bindMount(context),
+        ) + container.bindMounts)
             .filter { File(it.srcAndroidPath).exists() }
             .map { it.srcAndroidPath to it.dstContainerPath }
 
@@ -76,6 +81,10 @@ object ProotRunner {
         // atomically via O_TMPFILE + linkat("/proc/self/fd/N"), so without
         // this every `apk` index/database write fails with "Permission denied".
         val args = mutableListOf(prootPath, "-l", "-0", "-r", container.rootfsPath)
+        // proot file bindings are most reliable when the guest target exists.
+        val virglTarget = File(container.rootfsPath, "dev/virgl")
+        virglTarget.parentFile?.mkdirs()
+        if (!virglTarget.exists()) virglTarget.createNewFile()
         for (mount in bindMounts(context, container)) {
             if (!File(mount.srcAndroidPath).exists()) continue
             args.add("-b")
@@ -118,9 +127,10 @@ object ProotRunner {
     )
 
     private fun runtimeMounts(context: Context, container: Container): List<BindMount> =
-        listOf(
+        listOfNotNull(
             BindMount(tempSubdir(context, container, "guest").absolutePath, "/tmp"),
             BindMount(tempSubdir(context, container, "run").absolutePath, "/run"),
+            VirglManager.bindMount(context),
             resolverMount(context, container),
             hubProfileMount(context, container),
         )

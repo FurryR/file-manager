@@ -90,6 +90,14 @@ file-manager/
 - **No ViewModel** — State lives in `FileManagerApp.kt` as `remember`/`mutableStateOf`. Single-activity.
 - **All daemon I/O is blocking** — Kotlin wraps in `Dispatchers.IO`; Rust uses `current_thread` tokio.
 - **Proto lives in `:core`** — the `app` module must not enable the protobuf plugin.
+- **Container-visible names stay generic** — never expose `file-manager` in
+  container paths, sockets, services, or environment values. VirGL is always
+  enabled, runs in the `:virgl` process, and is exposed at `/dev/virgl`. The
+  Kotlin service owns the socket and serves each accepted connection on a
+  bounded native thread pool (default 4; 1 is serial); every session owns its
+  own `virgl_instance` and EGL context, so renderer state must stay per-instance.
+  Pass `VTEST_SOCKET_NAME=/dev/virgl` directly in the process environment; do
+  not write VirGL settings into `/etc/profile.d`.
 
 ## ANTI-PATTERNS (THIS PROJECT)
 

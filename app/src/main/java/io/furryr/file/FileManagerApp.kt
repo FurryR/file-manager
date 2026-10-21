@@ -14,6 +14,7 @@ import io.furryr.file.agent.SessionManager
 import io.furryr.file.model.SafLocation
 import io.furryr.file.model.FtpServer
 import io.furryr.file.model.SftpServer
+import io.furryr.file.provider.remote.RemoteLocation
 import android.app.Activity
 import android.Manifest
 import android.content.Context
@@ -193,6 +194,15 @@ fun FileManagerApp(
         safLocations = withContext(Dispatchers.IO) { LocationsRepository.safLocations() }
     }
 
+    var localLocations by remember { mutableStateOf<List<LocalLocation>>(emptyList()) }
+    var localRefreshKey by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(localRefreshKey) {
+        localLocations = withContext(Dispatchers.IO) {
+            runCatching { LocationsRepository.localLocations() }.getOrDefault(emptyList())
+        }
+    }
+
     var ftpLocations by remember { mutableStateOf<List<FtpServer>>(emptyList()) }
     var ftpRefreshKey by remember { mutableIntStateOf(0) }
 
@@ -205,6 +215,15 @@ fun FileManagerApp(
 
     LaunchedEffect(sftpRefreshKey) {
         sftpLocations = withContext(Dispatchers.IO) { LocationsRepository.sftpServers() }
+    }
+
+    var remoteLocations by remember { mutableStateOf<List<RemoteLocation>>(emptyList()) }
+    var remoteRefreshKey by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(remoteRefreshKey) {
+        remoteLocations = withContext(Dispatchers.IO) {
+            runCatching { LocationsRepository.remoteLocations() }.getOrDefault(emptyList())
+        }
     }
 
     LaunchedEffect(operationHidden, operationJob) {
@@ -742,9 +761,51 @@ fun FileManagerApp(
                             .setPackage("com.android.documentsui")
                     )
                 },
-                onLocalPath = { path ->
-                    navigateTo(path)
+                localLocations = localLocations,
+                localOrder = localLocations.map { it.id },
+                onAddLocalPath = { path ->
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching { LocationsRepository.insertLocal(path) }
+                        }
+                        if (result.isFailure) {
+                            Toast.makeText(
+                                context,
+                                result.exceptionOrNull()?.message ?: "Failed to add local location",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                        localRefreshKey++
+                    }
+                },
+                onLocalClick = { location ->
+                    navigateTo(location.path)
                     scope.launch { drawerState.close() }
+                },
+                onLocalRename = { id, newName ->
+                    scope.launch {
+                        withContext(Dispatchers.IO) { LocationsRepository.renameLocal(id, newName) }
+                        localRefreshKey++
+                    }
+                },
+                onLocalDelete = { id ->
+                    scope.launch {
+                        withContext(Dispatchers.IO) { LocationsRepository.deleteLocal(id) }
+                        localRefreshKey++
+                    }
+                },
+                onLocalReorder = { from, to ->
+                    val mutable = localLocations.toMutableList()
+                    if (from in mutable.indices && to in mutable.indices) {
+                        val item = mutable.removeAt(from)
+                        mutable.add(to, item)
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                LocationsRepository.reorderLocal(mutable.map { it.id })
+                            }
+                            localRefreshKey++
+                        }
+                    }
                 },
                 onSafClick = { hexId ->
                     navigateTo("saf://$hexId/")
@@ -881,6 +942,68 @@ fun FileManagerApp(
                                 LocationsRepository.reorderSftp(mutable.map { it.host })
                             }
                             sftpRefreshKey++
+                        }
+                    }
+                },
+                remoteLocations = remoteLocations,
+                onAddRemote = { location ->
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching { LocationsRepository.insertRemote(location) }
+                        }
+                        Toast.makeText(
+                            context,
+                            if (result.isSuccess) "Added remote location"
+                            else result.exceptionOrNull()?.message ?: "Failed to add",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        remoteRefreshKey++
+                    }
+                },
+                onRemoteSave = { location ->
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching { LocationsRepository.updateRemote(location) }
+                        }
+                        Toast.makeText(
+                            context,
+                            if (result.isSuccess) "Updated remote location"
+                            else result.exceptionOrNull()?.message ?: "Failed to update",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        remoteRefreshKey++
+                    }
+                },
+                onRemoteClick = { location ->
+                    navigateTo(location.uri)
+                    scope.launch { drawerState.close() }
+                },
+                onRemoteDelete = { id ->
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching { LocationsRepository.deleteRemote(id) }
+                        }
+                        if (result.isFailure) {
+                            Toast.makeText(
+                                context,
+                                result.exceptionOrNull()?.message ?: "Failed to delete",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                        remoteRefreshKey++
+                    }
+                },
+                remoteOrder = remoteLocations.map { it.id },
+                onRemoteReorder = { from, to ->
+                    val mutable = remoteLocations.toMutableList()
+                    if (from in mutable.indices && to in mutable.indices) {
+                        val item = mutable.removeAt(from)
+                        mutable.add(to, item)
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                LocationsRepository.reorderRemote(mutable.map { it.id })
+                            }
+                            remoteRefreshKey++
                         }
                     }
                 },

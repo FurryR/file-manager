@@ -7,6 +7,7 @@ import io.furryr.file.core.DaemonLaunchRequest
 import io.furryr.file.core.DaemonManager
 import io.furryr.file.core.isSuAvailable
 import io.furryr.file.core.shellQuote
+import io.furryr.file.virgl.VirglManager
 
 /**
  * App-owned daemon launcher: builds the daemon argv for a container,
@@ -23,6 +24,7 @@ object ContainerDaemonLauncher {
 
     fun command(context: Context, request: DaemonLaunchRequest): DaemonCommand? {
         val container = ContainerManager.getContainer(context, request.name) ?: return null
+        VirglManager.ensureHost(context)
         return when (container.backend) {
             ContainerBackend.CHROOT -> chrootCommand(context, request, container)
             ContainerBackend.PROOT -> prootCommand(context, request, container)
@@ -48,7 +50,11 @@ object ContainerDaemonLauncher {
             tokens.add(shellQuote("$source:$target"))
         }
         val su = request.suPath.ifBlank { "su" }
-        val command = "export PATH=${shellQuote(daemonPath(context))}; exec ${tokens.joinToString(" ")}"
+        val virgl = VirglManager.environment().entries.joinToString(" ") {
+            "${it.key}=${shellQuote(it.value)}"
+        }
+        val command = "export PATH=${shellQuote(daemonPath(context))}${if (virgl.isEmpty()) "" else " $virgl"}; " +
+            "exec ${tokens.joinToString(" ")}"
         return DaemonCommand(listOf(su, "-c", command))
     }
 
@@ -70,7 +76,7 @@ object ContainerDaemonLauncher {
         val env = mapOf(
             "PROOT_TMP_DIR" to ProotRunner.prootTmpDir(context, container).absolutePath,
             "PATH" to daemonPath(context),
-        )
+        ) + VirglManager.environment()
         return DaemonCommand(argv, env)
     }
 

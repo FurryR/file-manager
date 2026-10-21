@@ -13,10 +13,9 @@ use std::ffi::CString;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Directory binds. chroot runs as real root, so the whole `/dev` can be bound
-/// (per-device mounts are only needed for the unprivileged proot backend).
+/// Directory binds.  `/dev` gets a container-private tmpfs and is populated
+/// separately, so `/dev/virgl` never reaches the host device tree.
 const DIRS: &[(&str, &str)] = &[
-    ("/dev", "/dev"),
     ("/sys", "/sys"),
     ("/system", "/system"),
     ("/apex", "/apex"),
@@ -59,6 +58,8 @@ pub fn enter_chroot(rootfs: &str, binds: &[(String, String)]) -> io::Result<()> 
         }
     }
 
+    mount_dev(&rootfs_path)?;
+
     proc_mount(&rootfs_path, "/proc")?;
     tmpfs_mount(&rootfs_path, "/tmp", "1777")?;
     tmpfs_mount(&rootfs_path, "/run", "0755")?;
@@ -83,6 +84,69 @@ pub fn enter_chroot(rootfs: &str, binds: &[(String, String)]) -> io::Result<()> 
 }
 
 // ── mount helpers ────────────────────────────────────────────────────
+
+/// Replace `/dev` with a container-private tmpfs, then populate it from the
+/// host device tree.  Mount points are created before any bind mount and
+/// nothing is ever written to the host `/dev`.
+fn mount_dev(rootfs: &Path) -> io::Result<()> {
+    // Snapshot the host entries before /dev is shadowed in this namespace.
+    // `/dev/ptmx` is handled separately below: it must not become a mount
+    // point of its own.
+    let entries: Vec<_> = std::fs::read_dir("/dev")?
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            name != "virgl" && name != "ptmx"
+        })
+        .collect();
+
+    fs_mount(rootfs, "/dev", "tmpfs", "tmpfs",
+             libc::MS_NOSUID as libc::c_ulong, "mode=0755")?;
+
+    // The kernel resolves the legacy ptmx device by searching the devpts
+    // mount below the mount containing `/dev/ptmx`. A file bind mount of
+    // host `/dev/ptmx` would make `/dev/ptmx` its own mount root, hiding the
+    // sibling `/dev/pts` mount and making open("/dev/ptmx") fail with
+    // ENOENT. Use the standard devpts symlink instead.
+    let ptmx = rootfs.join("dev").join("ptmx");
+    let _ = std::fs::remove_file(&ptmx);
+    let _ = std::fs::remove_dir(&ptmx);
+    std::os::unix::fs::symlink("pts/ptmx", &ptmx)?;
+
+    // Create every mount point first: files for devices, directories for
+    // folders, and real symlinks for entries such as /dev/fd.
+    for entry in &entries {
+        let name = entry.file_name();
+        let guest = format!("/dev/{}", name.to_string_lossy());
+        let result = match entry.file_type() {
+            Ok(file_type) if file_type.is_symlink() => {
+                let link = rootfs.join("dev").join(&name);
+                let _ = std::fs::remove_file(&link);
+                std::fs::read_link(entry.path())
+                    .and_then(|destination| std::os::unix::fs::symlink(destination, &link))
+            }
+            _ => ensure_target(rootfs, &guest, entry.path().is_dir()).map(|_| ()),
+        };
+        if let Err(error) = result {
+            eprintln!("container: cannot create mount point {guest}: {error}");
+        }
+    }
+
+    // Then bind the host entries onto the prepared mount points.
+    for entry in &entries {
+        if entry.file_type().is_ok_and(|file_type| file_type.is_symlink()) {
+            continue;
+        }
+        let source = entry.path();
+        let guest = format!("/dev/{}", entry.file_name().to_string_lossy());
+        if let Err(error) = bind_mount(
+            &source.to_string_lossy(), rootfs, &guest, source.is_dir(),
+        ) {
+            eprintln!("container: cannot bind {}: {error}", source.display());
+        }
+    }
+    Ok(())
+}
 
 fn ensure_target(rootfs: &Path, guest: &str, is_dir: bool) -> io::Result<PathBuf> {
     let host = rootfs.join(guest.trim_start_matches('/'));

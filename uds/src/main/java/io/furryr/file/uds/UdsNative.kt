@@ -140,4 +140,8 @@ internal object UdsNative {
 
     fun intBytes(value: Int): ByteArray =
         ByteBuffer.allocate(4).order(ByteOrder.nativeOrder()).putInt(value).array()
+
+    fun closeRaw(fd: Int) {
+        runCatching { Os.close(fileDescriptorOf(fd)) }
+    }
 }

@@ -75,5 +75,11 @@
             android:name=".TerminalForegroundService"
             android:exported="false"
             android:foregroundServiceType="specialUse" />
+
+        <service
+            android:name=".virgl.VirglService"
+            android:exported="false"
+            android:process=":virgl"
+            android:foregroundServiceType="specialUse" />
     </application>
 </manifest>

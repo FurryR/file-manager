@@ -129,7 +129,7 @@
     <string name="drawer_add_unified_location">添加位置</string>
     <string name="use_external_storage">使用外部存储</string>
     <string name="location_path">位置路径</string>
-    <string name="location_path_hint">/storage/emulated/0 或 ftp://user:password@host:21/</string>
+    <string name="location_path_hint">/storage/emulated/0 或 ftp://host/</string>
     <string name="location_scheme">协议</string>
     <string name="location_invalid">请输入本地路径、ftp:// 或 sftp:// 地址</string>
     <string name="drawer_add_ftp">添加 FTP 位置</string>
@@ -196,4 +196,7 @@
     <string name="agent_invalid_endpoint">请填写 HTTP 或 HTTPS 基础地址，不含账号密码、查询参数或片段。</string>
     <string name="agent_config_read_error">无法读取已保存的密钥，请重新填写配置。</string>
     <string name="agent_config_save_error">无法安全保存配置，请重试。</string>
+    <string name="virgl_notification_channel">VirGL 渲染器</string>
+    <string name="virgl_notification_title">VirGL 渲染器运行中</string>
+    <string name="virgl_notification_text">VirGL 宿主渲染器运行中</string>
 </resources>

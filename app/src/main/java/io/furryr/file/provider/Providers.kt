@@ -3,9 +3,12 @@ package io.furryr.file.provider
 import android.content.Context
 import io.furryr.file.FileRepository
 import io.furryr.file.HereNavigation
+import io.furryr.file.LocalLocationStore
+import io.furryr.file.provider.remote.RemoteProviders
 import io.furryr.file.agent.ContainerDaemonLauncher
 import io.furryr.file.agent.AgentSettings
 import io.furryr.file.core.DaemonManager
+import io.furryr.file.virgl.VirglManager
 
 /**
  * Wire up the daemon configuration and register every [FileProvider].
@@ -18,6 +21,7 @@ fun installFileProviders(context: Context) {
     val prefs = appContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
     DaemonManager.init(appContext)
+    LocalLocationStore.init(appContext)
     AgentSettings.install(appContext)
     DaemonManager.configure(
         rootEnabled = prefs.getBoolean("root_enabled", false),
@@ -39,4 +43,6 @@ fun installFileProviders(context: Context) {
     SftpProvider.init(appContext)
     FileRepository.register("sftp", SftpProvider)
     HereNavigation.install(appContext)
+    RemoteProviders.install(appContext)
+    VirglManager.ensureHost(appContext)
 }

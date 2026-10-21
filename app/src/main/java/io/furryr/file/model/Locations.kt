@@ -27,3 +27,11 @@ data class SftpServer(
     val password: String,
     val sortOrder: Int,
 )
+
+/** A persisted absolute local filesystem path. */
+data class LocalLocation(
+    val id: String,
+    val name: String,
+    val path: String,
+    val sortOrder: Int,
+)

@@ -75,3 +75,9 @@ mkdir -p "$UTILITY_DIR"
 for utility in run0 here agent; do
   cp "$NATIVE_DIR/target/aarch64-linux-android/release/$utility" "$UTILITY_DIR/$utility"
 done
+
+# Per-instance VirGL host library.  Set SKIP_VIRGL=1 to skip this long step.
+if [[ "${SKIP_VIRGL:-0}" != "1" ]]; then
+  VIRGL_JOBS="${VIRGL_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
+  python3 "$NATIVE_DIR/build-virgl.py" --ndk "$NDK_ROOT" --work "$NATIVE_DIR/target/virgl-build" --jobs "$VIRGL_JOBS"
+fi

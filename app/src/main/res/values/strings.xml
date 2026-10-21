@@ -131,7 +131,7 @@
     <string name="drawer_add_unified_location">Add location</string>
     <string name="use_external_storage">Use external storage</string>
     <string name="location_path">Location path</string>
-    <string name="location_path_hint">/storage/emulated/0 or ftp://user:password@host:21/</string>
+    <string name="location_path_hint">/storage/emulated/0 or ftp://host/</string>
     <string name="location_scheme">Protocol</string>
     <string name="location_invalid">Enter a local path, ftp:// URL, or sftp:// URL</string>
     <string name="drawer_add_ftp">Add FTP location</string>
@@ -198,4 +198,7 @@
     <string name="agent_invalid_endpoint">Enter an HTTP or HTTPS base URL without credentials, query or fragment.</string>
     <string name="agent_config_read_error">The saved key could not be read. Enter your configuration again.</string>
     <string name="agent_config_save_error">Could not save the configuration securely. Please try again.</string>
+    <string name="virgl_notification_channel">VirGL renderer</string>
+    <string name="virgl_notification_title">VirGL renderer running</string>
+    <string name="virgl_notification_text">VirGL host renderer is active</string>
 </resources>

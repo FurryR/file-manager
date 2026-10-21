@@ -71,6 +71,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -83,13 +84,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.furryr.file.agent.ContainerManager
+import io.furryr.file.LocationsRepository
+import io.furryr.file.provider.remote.RemoteKind
+import io.furryr.file.provider.remote.RemoteLocation
+import io.furryr.file.provider.remote.SshHostKeyApprovalRequired
+import io.furryr.file.provider.remote.SshHostKeyChangedException
 import kotlin.math.abs
 import io.furryr.file.model.SafLocation
+import io.furryr.file.model.LocalLocation
 import io.furryr.file.model.FtpServer
 import io.furryr.file.model.SftpServer
 import io.furryr.file.model.LocationAddress
 import io.furryr.file.model.LocationAddressParser
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -115,7 +123,13 @@ fun FileDrawer(
     safRefreshKey: Int = 0,
     onAddLocation: () -> Unit = {},
     onUseExternalStorage: () -> Unit = {},
-    onLocalPath: (String) -> Unit = {},
+    localLocations: List<LocalLocation> = emptyList(),
+    localOrder: List<String> = emptyList(),
+    onAddLocalPath: (String) -> Unit = {},
+    onLocalClick: (LocalLocation) -> Unit = {},
+    onLocalRename: (id: String, newName: String) -> Unit = { _, _ -> },
+    onLocalDelete: (id: String) -> Unit = {},
+    onLocalReorder: (from: Int, to: Int) -> Unit = { _, _ -> },
     onSafClick: (hexId: String) -> Unit = {},
     onSafRename: (hexId: String, newName: String) -> Unit = { _, _ -> },
     onSafDelete: (hexId: String) -> Unit = {},
@@ -137,6 +151,13 @@ fun FileDrawer(
     onSftpDelete: (host: String) -> Unit = {},
     sftpOrder: List<String> = emptyList(),
     onSftpReorder: (from: Int, to: Int) -> Unit = { _, _ -> },
+    remoteLocations: List<RemoteLocation> = emptyList(),
+    onAddRemote: (RemoteLocation) -> Unit = {},
+    onRemoteSave: (RemoteLocation) -> Unit = {},
+    onRemoteClick: (RemoteLocation) -> Unit = {},
+    onRemoteDelete: (id: String) -> Unit = {},
+    remoteOrder: List<String> = emptyList(),
+    onRemoteReorder: (from: Int, to: Int) -> Unit = { _, _ -> },
 ) {
     val configuration = LocalConfiguration.current
     val context = LocalContext.current
@@ -162,6 +183,14 @@ fun FileDrawer(
     var draggedSafHex by remember { mutableStateOf<String?>(null) }
     var safDragOffsetDp by remember { mutableStateOf(0f) }
 
+    // Local path dialog states
+    var localContextMenuTarget by remember { mutableStateOf<String?>(null) }
+    var localDeleteTarget by remember { mutableStateOf<String?>(null) }
+    var localRenameTarget by remember { mutableStateOf<String?>(null) }
+    var localRenameText by remember { mutableStateOf("") }
+    var draggedLocalId by remember { mutableStateOf<String?>(null) }
+    var localDragOffsetDp by remember { mutableStateOf(0f) }
+
     // FTP dialog states
     var showAddFtpDialog by remember { mutableStateOf(false) }
     var ftpContextMenuTarget by remember { mutableStateOf<String?>(null) }
@@ -177,6 +206,26 @@ fun FileDrawer(
     var sftpDeleteTarget by remember { mutableStateOf<String?>(null) }
     var draggedSftpHost by remember { mutableStateOf<String?>(null) }
     var sftpDragOffsetDp by remember { mutableStateOf(0f) }
+
+    // Remote (AList / SSH) dialog states
+    val scope = rememberCoroutineScope()
+    var remoteEditTarget by remember { mutableStateOf<String?>(null) }
+    var remoteDeleteTarget by remember { mutableStateOf<String?>(null) }
+    var remoteContextMenuTarget by remember { mutableStateOf<String?>(null) }
+    var remoteApproval by remember { mutableStateOf<RemoteHostApproval?>(null) }
+    var remoteBusyId by remember { mutableStateOf<String?>(null) }
+    var remoteError by remember { mutableStateOf<String?>(null) }
+    var draggedRemoteId by remember { mutableStateOf<String?>(null) }
+    var remoteDragOffsetDp by remember { mutableStateOf(0f) }
+
+    // Display order for pinned local paths
+    val displayLocalLocations = remember(localLocations, localOrder, sortMode) {
+        if (sortMode && localOrder.isNotEmpty()) {
+            localOrder.mapNotNull { id -> localLocations.find { it.id == id } }
+        } else {
+            localLocations.sortedBy { it.sortOrder }
+        }
+    }
 
     // Display order: root and home fixed first, then SAF items in order
     val displaySafLocations = remember(safLocations, safOrder, sortMode) {
@@ -205,15 +254,28 @@ fun FileDrawer(
         }
     }
 
+    // Display order for encrypted remote locations (AList / SSH)
+    val displayRemoteLocations = remember(remoteLocations, remoteOrder, sortMode) {
+        if (sortMode && remoteOrder.isNotEmpty()) {
+            remoteOrder.mapNotNull { id -> remoteLocations.find { it.id == id } }
+        } else {
+            remoteLocations.sortedBy { it.sortOrder }
+        }
+    }
+
     // Stable references for drag gesture handlers
     val currentContainerOrder by rememberUpdatedState(containerOrder)
     val currentOnReorder by rememberUpdatedState(onContainerReorder)
     val currentSafOrder by rememberUpdatedState(safOrder)
     val currentOnSafReorder by rememberUpdatedState(onSafReorder)
+    val currentLocalOrder by rememberUpdatedState(localOrder)
+    val currentOnLocalReorder by rememberUpdatedState(onLocalReorder)
     val currentFtpOrder by rememberUpdatedState(ftpOrder)
     val currentOnFtpReorder by rememberUpdatedState(onFtpReorder)
     val currentSftpOrder by rememberUpdatedState(sftpOrder)
     val currentOnSftpReorder by rememberUpdatedState(onSftpReorder)
+    val currentRemoteOrder by rememberUpdatedState(remoteOrder)
+    val currentOnRemoteReorder by rememberUpdatedState(onRemoteReorder)
 
     // Ordered container list for sort mode
     val displayContainers = remember(containers, containerOrder, sortMode) {
@@ -232,6 +294,25 @@ fun FileDrawer(
             collapsedGroups - index
         } else {
             collapsedGroups + index
+        }
+    }
+
+    fun openRemote(location: RemoteLocation) {
+        if (remoteBusyId != null) return
+        remoteBusyId = location.id
+        scope.launch {
+            val result = LocationsRepository.verifyRemote(location)
+            remoteBusyId = null
+            result.onSuccess {
+                onRemoteClick(location)
+            }.onFailure { failure ->
+                when (failure) {
+                    is SshHostKeyApprovalRequired -> remoteApproval = RemoteHostApproval(location, failure)
+                    is SshHostKeyChangedException -> remoteError =
+                        context.getString(R.string.remote_host_changed, failure.fingerprint)
+                    else -> remoteError = failure.message ?: context.getString(R.string.remote_connect_error)
+                }
+            }
         }
     }
 
@@ -368,6 +449,79 @@ fun FileDrawer(
                         onClick = onHomeClick,
                     )
                 }
+                // Pinned local paths (sortable among themselves)
+                itemsIndexed(
+                    displayLocalLocations,
+                    key = { _, loc -> "local_${loc.id}" }
+                ) { _, loc ->
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        LocalLocationItem(
+                            name = loc.name,
+                            path = loc.path,
+                            onClick = { onLocalClick(loc) },
+                            onLongClick = { localContextMenuTarget = loc.id },
+                            sortMode = sortMode,
+                            isDragging = draggedLocalId == loc.id,
+                            dragOffsetDp = if (draggedLocalId == loc.id) localDragOffsetDp else 0f,
+                            dragHandleModifier = if (sortMode) {
+                                Modifier.pointerInput(loc.id) {
+                                    detectVerticalDragGestures(
+                                        onDragStart = { draggedLocalId = loc.id },
+                                        onVerticalDrag = { change, dragAmount ->
+                                            change.consume()
+                                            localDragOffsetDp += dragAmount.toDp().value
+                                        },
+                                        onDragEnd = {
+                                            val id = draggedLocalId
+                                            if (id != null) {
+                                                val from = currentLocalOrder.indexOf(id)
+                                                if (from >= 0) {
+                                                    val itemH = 56f
+                                                    val steps = (localDragOffsetDp / itemH).toInt()
+                                                    val to = (from + steps).coerceIn(currentLocalOrder.indices)
+                                                    if (to != from) currentOnLocalReorder(from, to)
+                                                }
+                                            }
+                                            draggedLocalId = null
+                                            localDragOffsetDp = 0f
+                                        },
+                                        onDragCancel = { draggedLocalId = null; localDragOffsetDp = 0f },
+                                    )
+                                }
+                            } else Modifier,
+                        )
+                        DropdownMenu(
+                            expanded = localContextMenuTarget == loc.id,
+                            onDismissRequest = { localContextMenuTarget = null }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.drawer_rename)) },
+                                leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
+                                onClick = {
+                                    localRenameTarget = loc.id
+                                    localRenameText = loc.name
+                                    localContextMenuTarget = null
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.drawer_delete)) },
+                                leadingIcon = { Icon(Icons.Default.Delete, null) },
+                                onClick = {
+                                    localDeleteTarget = loc.id
+                                    localContextMenuTarget = null
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.drawer_sort)) },
+                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
+                                onClick = {
+                                    localContextMenuTarget = null
+                                    onToggleSortMode()
+                                }
+                            )
+                        }
+                    }
+                }
                 // SAF locations (sortable among themselves)
                 itemsIndexed(
                     displaySafLocations,
@@ -453,7 +607,16 @@ fun FileDrawer(
                 )
             }
             if (1 !in collapsedGroups) {
-                if (displayFtpLocations.isEmpty() && displaySftpLocations.isEmpty()) {
+                if (remoteBusyId != null) {
+                    item {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
+                        )
+                    }
+                }
+                if (displayFtpLocations.isEmpty() && displaySftpLocations.isEmpty() &&
+                    displayRemoteLocations.isEmpty()
+                ) {
                     item {
                         Text(
                             text = stringResource(R.string.no_locations),
@@ -470,8 +633,7 @@ fun FileDrawer(
                         Box(modifier = Modifier.fillMaxWidth()) {
                             RemoteLocationItem(
                                 name = server.name,
-                                scheme = "ftp",
-                                host = server.host,
+                                detail = "ftp://${server.host}/",
                                 onClick = { onFtpClick(server.host) },
                                 onLongClick = { ftpContextMenuTarget = server.host },
                                 sortMode = sortMode,
@@ -542,8 +704,7 @@ fun FileDrawer(
                             Box(modifier = Modifier.fillMaxWidth()) {
                                 RemoteLocationItem(
                                     name = server.name,
-                                    scheme = "sftp",
-                                    host = server.host,
+                                    detail = "sftp://${server.host}/",
                                     onClick = { onSftpClick(server.host) },
                                     onLongClick = { sftpContextMenuTarget = server.host },
                                     sortMode = sortMode,
@@ -607,6 +768,84 @@ fun FileDrawer(
                                 }
                             }
                         }
+                    itemsIndexed(
+                        displayRemoteLocations,
+                        key = { _, location -> "remote_${location.id}" }
+                    ) { _, location ->
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            RemoteLocationItem(
+                                name = location.name,
+                                detail = if (location.kind == RemoteKind.ALIST) {
+                                    "AList · ${location.endpoint}"
+                                } else {
+                                    "SSH · ${location.username}@${location.host}:${location.port}"
+                                },
+                                onClick = { openRemote(location) },
+                                onLongClick = { remoteContextMenuTarget = location.id },
+                                sortMode = sortMode,
+                                isDragging = draggedRemoteId == location.id,
+                                dragOffsetDp = if (draggedRemoteId == location.id) remoteDragOffsetDp else 0f,
+                                dragHandleModifier = if (sortMode) {
+                                    Modifier.pointerInput(location.id) {
+                                        detectVerticalDragGestures(
+                                            onDragStart = { draggedRemoteId = location.id },
+                                            onVerticalDrag = { change, dragAmount ->
+                                                change.consume()
+                                                remoteDragOffsetDp += dragAmount.toDp().value
+                                            },
+                                            onDragEnd = {
+                                                val id = draggedRemoteId
+                                                if (id != null) {
+                                                    val from = currentRemoteOrder.indexOf(id)
+                                                    if (from >= 0) {
+                                                        val itemH = 56f
+                                                        val steps = (remoteDragOffsetDp / itemH).toInt()
+                                                        val to = (from + steps).coerceIn(currentRemoteOrder.indices)
+                                                        if (to != from) currentOnRemoteReorder(from, to)
+                                                    }
+                                                }
+                                                draggedRemoteId = null
+                                                remoteDragOffsetDp = 0f
+                                            },
+                                            onDragCancel = {
+                                                draggedRemoteId = null
+                                                remoteDragOffsetDp = 0f
+                                            },
+                                        )
+                                    }
+                                } else Modifier,
+                            )
+                            DropdownMenu(
+                                expanded = remoteContextMenuTarget == location.id,
+                                onDismissRequest = { remoteContextMenuTarget = null },
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.drawer_rename)) },
+                                    leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
+                                    onClick = {
+                                        remoteEditTarget = location.id
+                                        remoteContextMenuTarget = null
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.drawer_delete)) },
+                                    leadingIcon = { Icon(Icons.Default.Delete, null) },
+                                    onClick = {
+                                        remoteDeleteTarget = location.id
+                                        remoteContextMenuTarget = null
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.drawer_sort)) },
+                                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
+                                    onClick = {
+                                        remoteContextMenuTarget = null
+                                        onToggleSortMode()
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
@@ -800,6 +1039,60 @@ fun FileDrawer(
         )
     }
 
+    // ── Local path delete dialog ────────────────────────────────────────────
+    if (localDeleteTarget != null) {
+        val id = localDeleteTarget
+        AlertDialog(
+            onDismissRequest = { localDeleteTarget = null },
+            title = { Text(stringResource(R.string.delete_location_title)) },
+            text = { Text(stringResource(R.string.delete_location_confirm)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        id?.let { onLocalDelete(it) }
+                        localDeleteTarget = null
+                    }
+                ) { Text(stringResource(R.string.delete)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { localDeleteTarget = null }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
+
+    // ── Local path rename dialog ─────────────────────────────────────────────
+    if (localRenameTarget != null) {
+        val id = localRenameTarget
+        val current = localLocations.find { it.id == id }
+        AlertDialog(
+            onDismissRequest = { localRenameTarget = null },
+            title = { Text(stringResource(R.string.rename_location_title)) },
+            text = {
+                OutlinedTextField(
+                    value = localRenameText,
+                    onValueChange = { localRenameText = it },
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.name_label)) },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        id?.let { onLocalRename(it, localRenameText.ifBlank { current?.name ?: it }) }
+                        localRenameTarget = null
+                    }
+                ) { Text("OK") }
+            },
+            dismissButton = {
+                TextButton(onClick = { localRenameTarget = null }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
+
     // ── SAF delete dialog ───────────────────────────────────────────────────
     if (safDeleteTarget != null) {
         val hex = safDeleteTarget
@@ -967,6 +1260,103 @@ fun FileDrawer(
         )
     }
 
+    // ── Remote edit dialog ─────────────────────────────────────────────────
+    remoteEditTarget?.let { id ->
+        remoteLocations.find { it.id == id }?.let { location ->
+            RemoteLocationDialog(
+                initial = location,
+                title = stringResource(R.string.remote_edit),
+                onDismiss = { remoteEditTarget = null },
+                onConfirm = { updated ->
+                    onRemoteSave(updated)
+                    remoteEditTarget = null
+                },
+            )
+        }
+    }
+
+    // ── Remote delete dialog ───────────────────────────────────────────────
+    remoteDeleteTarget?.let { id ->
+        val location = remoteLocations.find { it.id == id }
+        AlertDialog(
+            onDismissRequest = { remoteDeleteTarget = null },
+            title = { Text(stringResource(R.string.drawer_delete)) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.remote_remove_confirm,
+                        location?.name ?: id,
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onRemoteDelete(id)
+                        remoteDeleteTarget = null
+                    },
+                ) { Text(stringResource(R.string.delete)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { remoteDeleteTarget = null }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
+
+    // ── SSH host key verification ──────────────────────────────────────────
+    remoteApproval?.let { pending ->
+        AlertDialog(
+            onDismissRequest = { remoteApproval = null },
+            title = { Text(stringResource(R.string.remote_host_title)) },
+            text = {
+                Text(
+                    context.getString(
+                        R.string.remote_host_confirm,
+                        "${pending.location.host}:${pending.location.port}",
+                        pending.key.algorithm,
+                        pending.key.fingerprint,
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val trusted = pending.location.copy(hostKey = pending.key.keyBase64)
+                        remoteApproval = null
+                        scope.launch {
+                            val saved = withContext(Dispatchers.IO) {
+                                runCatching { LocationsRepository.updateRemote(trusted) }
+                            }
+                            saved.onSuccess { openRemote(trusted) }.onFailure {
+                                remoteError = it.message ?: context.getString(R.string.remote_store_error)
+                            }
+                        }
+                    },
+                ) { Text(stringResource(R.string.remote_trust)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { remoteApproval = null }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
+
+    remoteError?.let { message ->
+        AlertDialog(
+            onDismissRequest = { remoteError = null },
+            title = { Text(stringResource(R.string.remote_locations)) },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { remoteError = null }) {
+                    Text(stringResource(R.string.confirm))
+                }
+            },
+        )
+    }
+
     if (showContainerDialog) {
         ContainerCreateDialog(
             rootAvailable = rootAvailable,
@@ -990,7 +1380,9 @@ fun FileDrawer(
                 when (address.scheme) {
                     "ftp" -> onAddFtp(address.host, address.name.ifBlank { address.host }, address.port ?: 21, address.username, address.password)
                     "sftp" -> onAddSftp(address.host, address.name.ifBlank { address.host }, address.port ?: 22, address.username, address.password)
-                    else -> onLocalPath(address.path)
+                    "ssh" -> onAddRemote(remoteLocationFrom(address, RemoteKind.SSH))
+                    "alist" -> onAddRemote(remoteLocationFrom(address, RemoteKind.ALIST))
+                    else -> onAddLocalPath(address.path)
                 }
             },
         )
@@ -1087,7 +1479,7 @@ private fun AddLocationDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.drawer_add_unified_location)) },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 OutlinedTextField(
                     value = path,
                     onValueChange = ::updatePath,
@@ -1101,10 +1493,33 @@ private fun AddLocationDialog(
                     Spacer(Modifier.height(8.dp))
                     Text(stringResource(R.string.location_scheme) + ": ${address.scheme}", style = MaterialTheme.typography.labelLarge)
                     OutlinedTextField(address.name, { updateRemote(address.copy(name = it)) }, label = { Text(stringResource(R.string.ftp_name_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(address.host, { updateRemote(address.copy(host = it)) }, label = { Text(stringResource(R.string.ftp_host_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(
+                        address.host,
+                        { updateRemote(address.copy(host = it)) },
+                        label = {
+                            Text(stringResource(if (address.scheme == "alist") R.string.remote_endpoint else R.string.ftp_host_label))
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                     OutlinedTextField(address.port?.toString().orEmpty(), { updateRemote(address.copy(port = it.toIntOrNull())) }, label = { Text(stringResource(R.string.ftp_port_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(address.username, { updateRemote(address.copy(username = it)) }, label = { Text(stringResource(R.string.ftp_username_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(address.password, { updateRemote(address.copy(password = it)) }, label = { Text(stringResource(R.string.ftp_password_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(address.path, { updateRemote(address.copy(path = it)) }, label = { Text(stringResource(R.string.remote_base_path)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    if (address.scheme == "alist") {
+                        OutlinedTextField(address.token, { updateRemote(address.copy(token = it)) }, label = { Text(stringResource(R.string.remote_token)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                        OutlinedTextField(address.directoryPassword, { updateRemote(address.copy(directoryPassword = it)) }, label = { Text(stringResource(R.string.remote_directory_password)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    }
+                    if (address.scheme == "ssh") {
+                        OutlinedTextField(
+                            address.privateKey,
+                            { updateRemote(address.copy(privateKey = it)) },
+                            label = { Text(stringResource(R.string.remote_private_key)) },
+                            maxLines = 5,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(address.passphrase, { updateRemote(address.copy(passphrase = it)) }, label = { Text(stringResource(R.string.remote_passphrase)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    }
                 }
                 if (invalid) Text(stringResource(R.string.location_invalid), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
@@ -1123,7 +1538,9 @@ private fun AddLocationDialog(
                 }
                 TextButton(onClick = {
                     val parsed = LocationAddressParser.parse(path)
-                    if (parsed == null || (parsed.isRemote && parsed.host.isBlank())) invalid = true else onConfirm(parsed)
+                    val missingHost = parsed != null && parsed.isRemote && parsed.host.isBlank()
+                    val missingSshUser = parsed?.scheme == "ssh" && parsed.username.isBlank()
+                    if (parsed == null || missingHost || missingSshUser) invalid = true else onConfirm(parsed)
                 }) { Text(stringResource(R.string.confirm)) }
             }
         },
@@ -1257,6 +1674,68 @@ private fun ContainerItem(
             )
             Text(
                 text = "${container.distroId} ($backendLabel) · $stateLabel",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (sortMode) {
+            Spacer(Modifier.width(8.dp))
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(36.dp)
+                    .then(dragHandleModifier),
+            ) {
+                Icon(
+                    Icons.Default.Menu,
+                    contentDescription = "Drag to reorder",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun LocalLocationItem(
+    name: String,
+    path: String,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
+    sortMode: Boolean = false,
+    isDragging: Boolean = false,
+    dragOffsetDp: Float = 0f,
+    dragHandleModifier: Modifier = Modifier,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (isDragging) Modifier.offset(y = dragOffsetDp.dp) else Modifier)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+            )
+            .padding(horizontal = 20.dp, vertical = 8.dp),
+    ) {
+        Icon(
+            Icons.Default.Folder,
+            contentDescription = null,
+            modifier = Modifier.width(24.dp)
+        )
+        Spacer(Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = path,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -1429,8 +1908,7 @@ private fun RemoteServerDialog(
 @Composable
 private fun RemoteLocationItem(
     name: String,
-    scheme: String,
-    host: String,
+    detail: String,
     onClick: () -> Unit,
     onLongClick: () -> Unit = {},
     sortMode: Boolean = false,
@@ -1463,7 +1941,7 @@ private fun RemoteLocationItem(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = "$scheme://$host/",
+                text = detail,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -1487,3 +1965,43 @@ private fun RemoteLocationItem(
         }
     }
 }
+
+private fun remoteLocationFrom(address: LocationAddress, kind: RemoteKind): RemoteLocation {
+    val host = address.host.trim().trimEnd('/')
+    val name = address.name.ifBlank { host }
+    return if (kind == RemoteKind.ALIST) {
+        val endpoint = if (host.startsWith("http://") || host.startsWith("https://")) {
+            host
+        } else {
+            val port = address.port?.takeIf { it > 0 && it != 443 }
+            "https://$host" + if (port == null) "" else ":$port"
+        }
+        RemoteLocation(
+            name = name,
+            kind = kind,
+            basePath = address.path,
+            endpoint = endpoint,
+            username = address.username,
+            password = address.password,
+            token = address.token,
+            directoryPassword = address.directoryPassword,
+        )
+    } else {
+        RemoteLocation(
+            name = name,
+            kind = kind,
+            basePath = address.path,
+            host = host,
+            port = address.port ?: 22,
+            username = address.username,
+            password = address.password,
+            privateKey = address.privateKey,
+            passphrase = address.passphrase,
+        )
+    }
+}
+
+private data class RemoteHostApproval(
+    val location: RemoteLocation,
+    val key: SshHostKeyApprovalRequired,
+)

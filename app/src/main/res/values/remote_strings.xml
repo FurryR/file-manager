@@ -1,0 +1,32 @@
+<resources>
+    <string name="remote_locations">Remote locations</string>
+    <string name="remote_edit">Edit connection</string>
+    <string name="remote_add_alist">Add AList</string>
+    <string name="remote_add_ssh">Add SSH</string>
+    <string name="remote_empty">Add a server, then select it to browse files.</string>
+    <string name="remote_remove">Remove connection</string>
+    <string name="remote_remove_confirm">Remove %1$s and its saved credentials? Remote files remain unchanged.</string>
+    <string name="remote_store_error">Could not read or save encrypted connections on this device.</string>
+    <string name="remote_connect_error">Could not connect to the server.</string>
+    <string name="remote_host_title">Verify SSH host key</string>
+    <string name="remote_host_confirm">First connection to %1$s. Compare this fingerprint with a trusted server source before accepting.\n\n%2$s\n%3$s</string>
+    <string name="remote_host_changed">SSH host key changed. The connection is blocked. Verify the server with its administrator.\nNew fingerprint: %1$s</string>
+    <string name="remote_trust">Trust key and continue</string>
+    <string name="remote_name">Connection name</string>
+    <string name="remote_endpoint">AList server URL</string>
+    <string name="remote_username">Username</string>
+    <string name="remote_password">Password</string>
+    <string name="remote_token">AList API token (overrides username/password)</string>
+    <string name="remote_directory_password">AList directory password (optional)</string>
+    <string name="remote_host">SSH hostname or IP address</string>
+    <string name="remote_port">SSH port</string>
+    <string name="remote_private_key">Private key (PEM/OpenSSH, optional)</string>
+    <string name="remote_import_key">Import private key file</string>
+    <string name="remote_passphrase">Private key passphrase (optional)</string>
+    <string name="remote_key_pinned">The previously verified host key is pinned. Changing the host or port requires a new verification.</string>
+    <string name="remote_base_path">Starting directory (absolute path)</string>
+    <string name="remote_save">Save</string>
+    <string name="remote_save_open">Save and connect</string>
+    <string name="remote_alist_help">AList v3 HTTP API. Use the server base URL, optionally including its URL prefix. Use an API token for accounts requiring 2FA, or leave credentials empty for guest access. Credentials are encrypted locally.</string>
+    <string name="remote_ssh_help">Files are transferred through SSH command channels, without SFTP. The server needs a POSIX shell, find, stat (GNU/BusyBox or BSD), cat, wc, mkdir, rm, mv and chmod. Passwords and private keys are encrypted locally.</string>
+</resources>

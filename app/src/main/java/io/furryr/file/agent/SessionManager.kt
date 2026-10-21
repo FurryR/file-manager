@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.util.Log
 import io.furryr.file.TerminalForegroundService
+import io.furryr.file.virgl.VirglManager
 import io.furryr.file.core.DaemonManager
 import io.furryr.file.core.hub.Hub
 import com.termux.terminal.TerminalSession
@@ -403,6 +404,9 @@ object SessionManager {
             context.cacheDir.mkdirs()
             val tmpDir = context.cacheDir.absolutePath
             add("PROOT_TMP_DIR=$tmpDir")
+            if (shell.startsWith("container://")) {
+                VirglManager.environment().forEach { (key, value) -> add("$key=$value") }
+            }
             // HUB_SOCKET is added by ProcessHelper once the target is known.
             add("HUB_TERMINAL=$terminalId")
             startPath?.let { add("CONTAINER_START_PATH=$it") }

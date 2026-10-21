@@ -8,8 +8,12 @@ data class LocationAddress(
     val username: String = "",
     val password: String = "",
     val path: String = "/",
+    val token: String = "",
+    val directoryPassword: String = "",
+    val privateKey: String = "",
+    val passphrase: String = "",
 ) {
-    val isRemote: Boolean get() = scheme == "ftp" || scheme == "sftp"
+    val isRemote: Boolean get() = scheme in RemoteSchemes
 
     fun toUrl(): String {
         if (!isRemote) return path
@@ -24,11 +28,13 @@ data class LocationAddress(
     }
 }
 
+private val RemoteSchemes = setOf("ftp", "sftp", "ssh", "alist")
+
 object LocationAddressParser {
     fun parse(raw: String): LocationAddress? {
         val value = raw.trim()
         if (value.isBlank()) return null
-        if (!value.startsWith("ftp://") && !value.startsWith("sftp://")) {
+        if (RemoteSchemes.none { value.startsWith("$it://") }) {
             return LocationAddress(path = value)
         }
         val schemeEnd = value.indexOf("://")
@@ -58,7 +64,6 @@ object LocationAddressParser {
                 port = null
             }
         }
-        if (host.isBlank()) return null
         return LocationAddress(
             scheme = scheme,
             name = host,

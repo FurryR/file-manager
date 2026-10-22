@@ -1,10 +1,26 @@
+use std::collections::HashMap;
 use std::io;
 use std::os::fd::OwnedFd;
 
 use hub_client::filehub::{
-    self, hub_request::Op, hub_response, ExecRequest, GetAiConfigRequest, GlobRequest, HubRequest,
-    ListTargetsRequest, ReadFileRequest, SetAiSelectionRequest, WaitExecRequest, WriteFileRequest,
+    self, chat_event, hub_request::Op, hub_response, ChatRequest, CloseExecRequest,
+    CopyFileRequest, ExecRequest, GetActiveSessionRequest, GetAiConfigRequest,
+    GetCapabilitiesRequest, GetHistoryRequest, GetModelsRequest, GlobRequest, HubRequest,
+    ListDirectoryRequest, ListSessionsRequest, ListTargetsRequest, McpHttpRequest, McpServerConfig,
+    ReadFileRequest, SetActiveSessionRequest, SetAiSelectionRequest, SetHistoryRequest,
+    SubscribeSessionEventsRequest, WaitExecRequest, WriteFileRequest,
 };
+use serde_json::Value;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+
+use crate::model::{AgentEvent, Message, ToolCall, Usage};
+use crate::model_info::ModelCatalog;
+
+/// User-facing target name. The `container-` prefix is an internal transport
+/// id and must not leak into the agent UI or model-visible tool output.
+pub fn display_target(name: &str) -> &str {
+    name.strip_prefix("container-").unwrap_or(name)
+}
 
 /// A control connection to the file-manager hub, with the caller's container.
 pub struct Hub {
@@ -19,11 +35,39 @@ pub struct ExecStream {
     pub exec_id: u64,
 }
 
+/// Server-pushed session titles on a dedicated hub connection.
+pub struct TitleStream {
+    receiver: UnboundedReceiver<(String, String)>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl TitleStream {
+    pub async fn recv(&mut self) -> Option<(String, String)> {
+        self.receiver.recv().await
+    }
+}
+
+impl Drop for TitleStream {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 #[derive(Clone)]
 pub struct Target {
     pub name: String,
     pub running: bool,
     pub elevated: bool,
+    pub kind: String,
+    pub label: String,
+    pub root: String,
+}
+
+#[derive(Clone)]
+pub struct SessionEntry {
+    pub id: String,
+    pub title: String,
+    pub message_count: u32,
 }
 
 impl Hub {
@@ -81,6 +125,85 @@ impl Hub {
         }
     }
 
+    pub async fn list_sessions(&mut self) -> Result<Vec<SessionEntry>, String> {
+        let response = self
+            .request(Op::ListSessions(ListSessionsRequest {}))
+            .await?;
+        match response.result {
+            Some(hub_response::Result::Sessions(sessions)) => Ok(sessions
+                .sessions
+                .into_iter()
+                .map(|session| SessionEntry {
+                    id: session.id,
+                    title: session.title,
+                    message_count: session.message_count,
+                })
+                .collect()),
+            _ => Err("hub returned no sessions".to_owned()),
+        }
+    }
+
+    pub async fn active_session(&mut self) -> Result<Option<String>, String> {
+        let response = self
+            .request(Op::GetActiveSession(GetActiveSessionRequest {}))
+            .await?;
+        match response.result {
+            Some(hub_response::Result::ActiveSession(session)) => {
+                Ok((!session.session_id.is_empty()).then_some(session.session_id))
+            }
+            _ => Err("hub returned no active session".to_owned()),
+        }
+    }
+
+    pub async fn set_active_session(&mut self, session_id: &str) -> Result<(), String> {
+        self.request(Op::SetActiveSession(SetActiveSessionRequest {
+            session_id: session_id.to_owned(),
+        }))
+        .await?;
+        Ok(())
+    }
+
+    pub async fn subscribe_titles() -> Result<TitleStream, String> {
+        let (connection, _) = hub_client::Connection::connect_from_env()
+            .await
+            .map_err(|error| error.to_string())?;
+        let id = 1;
+        connection
+            .send_request(HubRequest {
+                id,
+                op: Some(Op::SubscribeSessionEvents(SubscribeSessionEventsRequest {})),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let (response, _) = connection
+            .receive_response(id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !response.ok {
+            return Err(if response.error.is_empty() {
+                "hub rejected the session event subscription".to_owned()
+            } else {
+                response.error
+            });
+        }
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            loop {
+                match connection.receive_response(id).await {
+                    Ok((response, _)) if response.ok => {
+                        if let Some(hub_response::Result::SessionTitle(title)) = response.result {
+                            if sender.send((title.session_id, title.title)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        });
+        Ok(TitleStream { receiver, task })
+    }
+
     pub async fn set_ai_selection(&mut self, model: &str, effort: &str) -> Result<(), String> {
         self.request(Op::SetAiSelection(SetAiSelectionRequest {
             model: model.to_owned(),
@@ -100,6 +223,9 @@ impl Hub {
                     name: target.name,
                     running: target.running,
                     elevated: target.elevated,
+                    kind: target.kind,
+                    label: target.label,
+                    root: target.root,
                 })
                 .collect()),
             _ => Err("hub returned no target list".to_owned()),
@@ -108,7 +234,6 @@ impl Hub {
 
     pub async fn read(
         &mut self,
-        container_id: &str,
         path: &str,
         offset: u64,
         length: u32,
@@ -118,7 +243,6 @@ impl Hub {
                 path: path.to_owned(),
                 offset,
                 length,
-                container_id: container_id.to_owned(),
             }))
             .await?;
         match response.result {
@@ -127,17 +251,26 @@ impl Hub {
         }
     }
 
-    pub async fn write(
+    pub async fn list_directory(
         &mut self,
-        container_id: &str,
         path: &str,
-        data: Vec<u8>,
-    ) -> Result<u64, String> {
+    ) -> Result<filehub::ListDirectoryResponse, String> {
+        let response = self
+            .request(Op::ListDirectory(ListDirectoryRequest {
+                path: path.to_owned(),
+            }))
+            .await?;
+        match response.result {
+            Some(hub_response::Result::ListDirectory(list)) => Ok(list),
+            _ => Err("hub returned no directory result".to_owned()),
+        }
+    }
+
+    pub async fn write(&mut self, path: &str, data: Vec<u8>) -> Result<u64, String> {
         let response = self
             .request(Op::WriteFile(WriteFileRequest {
                 path: path.to_owned(),
                 data,
-                container_id: container_id.to_owned(),
             }))
             .await?;
         match response.result {
@@ -146,9 +279,21 @@ impl Hub {
         }
     }
 
+    pub async fn copy(&mut self, from: &str, to: &str) -> Result<u64, String> {
+        let response = self
+            .request(Op::CopyFile(CopyFileRequest {
+                from: from.to_owned(),
+                to: to.to_owned(),
+            }))
+            .await?;
+        match response.result {
+            Some(hub_response::Result::CopyFile(copy)) => Ok(copy.bytes_copied),
+            _ => Err("hub returned no copy result".to_owned()),
+        }
+    }
+
     pub async fn glob(
         &mut self,
-        container_id: &str,
         pattern: &str,
         path: &str,
         max_results: u32,
@@ -158,7 +303,6 @@ impl Hub {
                 pattern: pattern.to_owned(),
                 path: path.to_owned(),
                 max_results,
-                container_id: container_id.to_owned(),
             }))
             .await?;
         match response.result {
@@ -215,4 +359,233 @@ impl Hub {
             _ => Err("hub returned no wait result".to_owned()),
         }
     }
+
+    pub async fn close_exec(&mut self, exec_id: u64) -> Result<(), String> {
+        self.request(Op::CloseExec(CloseExecRequest { exec_id }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn chat(
+        &mut self,
+        session_id: &str,
+        model: &str,
+        effort: &str,
+        system: &str,
+        messages: &[Message],
+        tools: &Value,
+        events: &UnboundedSender<AgentEvent>,
+        append: bool,
+        base_count: u32,
+    ) -> Result<Message, String> {
+        let messages_json = serde_json::to_string(messages).map_err(|error| error.to_string())?;
+        let request = ChatRequest {
+            session_id: session_id.to_owned(),
+            model: model.to_owned(),
+            effort: effort.to_owned(),
+            system: system.to_owned(),
+            messages_json,
+            tools_json: tools.to_string(),
+            append,
+            base_count,
+        };
+        let id = self.next_request_id();
+        self.connection
+            .send_request(HubRequest {
+                id,
+                op: Some(Op::Chat(request)),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let mut content = String::new();
+        let mut calls: Vec<ToolCall> = Vec::new();
+        let mut error: Option<String> = None;
+        loop {
+            let (response, _) = self
+                .connection
+                .receive_response(id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if !response.ok {
+                return Err(if response.error.is_empty() {
+                    "hub chat failed".to_owned()
+                } else {
+                    response.error
+                });
+            }
+            match response.result {
+                Some(hub_response::Result::Chat(event)) => match event.event {
+                    Some(chat_event::Event::ReasoningDelta(text)) => {
+                        let _ = events.send(AgentEvent::ReasoningDelta(text));
+                    }
+                    Some(chat_event::Event::ContentDelta(text)) => {
+                        content.push_str(&text);
+                        let _ = events.send(AgentEvent::AnswerDelta(text));
+                    }
+                    Some(chat_event::Event::ToolCalling(_)) => {
+                        let _ = events.send(AgentEvent::ToolCalling);
+                    }
+                    Some(chat_event::Event::Usage(usage)) => {
+                        let _ = events.send(AgentEvent::Usage(Usage {
+                            prompt_tokens: usage.prompt_tokens,
+                            completion_tokens: usage.completion_tokens,
+                        }));
+                    }
+                    Some(chat_event::Event::ToolCallsJson(json)) => {
+                        calls = serde_json::from_str(&json)
+                            .map_err(|_| "hub returned invalid tool calls".to_owned())?;
+                    }
+                    Some(chat_event::Event::Error(message)) => error = Some(message),
+                    Some(chat_event::Event::Done(_)) => break,
+                    None => {}
+                },
+                _ => return Err("hub returned no chat result".to_owned()),
+            }
+        }
+        if let Some(error) = error {
+            return Err(error);
+        }
+        let message = Message {
+            role: "assistant".to_owned(),
+            content: (!content.is_empty()).then_some(content),
+            tool_calls: (!calls.is_empty()).then_some(calls),
+            tool_call_id: None,
+        };
+        if message.content_text().trim().is_empty() && !message.has_tools() {
+            return Err("API returned no assistant message.".to_owned());
+        }
+        Ok(message)
+    }
+
+    pub async fn load_history(&mut self, session_id: &str) -> Result<(String, String), String> {
+        let response = self
+            .request(Op::GetHistory(GetHistoryRequest {
+                session_id: session_id.to_owned(),
+            }))
+            .await?;
+        match response.result {
+            Some(hub_response::Result::History(history)) => {
+                Ok((history.messages_json, history.title))
+            }
+            _ => Err("hub returned no history".to_owned()),
+        }
+    }
+
+    pub async fn save_history(
+        &mut self,
+        session_id: &str,
+        messages: &[Message],
+    ) -> Result<(), String> {
+        let messages_json = serde_json::to_string(messages).map_err(|error| error.to_string())?;
+        self.request(Op::SetHistory(SetHistoryRequest {
+            session_id: session_id.to_owned(),
+            messages_json,
+        }))
+        .await?;
+        Ok(())
+    }
+
+    pub async fn catalog(&mut self) -> Result<ModelCatalog, String> {
+        let response = self.request(Op::GetModels(GetModelsRequest {})).await?;
+        match response.result {
+            Some(hub_response::Result::Models(models)) => {
+                Ok(ModelCatalog::from_json(&models.catalog_json))
+            }
+            _ => Err("hub returned no model catalog".to_owned()),
+        }
+    }
+
+    pub async fn capabilities(&mut self, cwd: &str) -> Result<Vec<McpServerConfig>, String> {
+        let response = self
+            .request(Op::GetCapabilities(GetCapabilitiesRequest {
+                cwd: cwd.to_owned(),
+            }))
+            .await?;
+        match response.result {
+            Some(hub_response::Result::Capabilities(capabilities)) => Ok(capabilities.mcp_servers),
+            _ => Err("hub returned no capabilities".to_owned()),
+        }
+    }
+
+    pub async fn mcp_http(
+        &mut self,
+        server: &str,
+        cwd: &str,
+        method: &str,
+        path: &str,
+        headers: &HashMap<String, String>,
+        body: Vec<u8>,
+    ) -> Result<McpHttpResult, String> {
+        let request = McpHttpRequest {
+            server: server.to_owned(),
+            cwd: cwd.to_owned(),
+            method: method.to_owned(),
+            path: path.to_owned(),
+            headers: headers.clone(),
+            body,
+        };
+        let id = self.next_request_id();
+        self.connection
+            .send_request(HubRequest {
+                id,
+                op: Some(Op::McpHttp(request)),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut result = McpHttpResult::default();
+        let mut error: Option<String> = None;
+        loop {
+            let (response, _) = self
+                .connection
+                .receive_response(id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if !response.ok {
+                return Err(if response.error.is_empty() {
+                    "hub MCP request failed".to_owned()
+                } else {
+                    response.error
+                });
+            }
+            match response.result {
+                Some(hub_response::Result::McpHttp(event)) => {
+                    if event.status != 0 {
+                        result.status = event.status;
+                    }
+                    result.headers.extend(event.headers);
+                    if !event.data.is_empty() {
+                        result.body.extend_from_slice(&event.data);
+                    }
+                    if !event.error.is_empty() {
+                        error = Some(event.error);
+                    }
+                    if event.done {
+                        break;
+                    }
+                }
+                _ => return Err("hub returned no MCP response".to_owned()),
+            }
+        }
+        if let Some(error) = error {
+            return Err(error);
+        }
+        Ok(result)
+    }
+
+    fn next_request_id(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        if self.next_id == 0 {
+            self.next_id = 1;
+        }
+        id
+    }
+}
+
+#[derive(Default)]
+pub struct McpHttpResult {
+    pub status: i32,
+    pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
 }

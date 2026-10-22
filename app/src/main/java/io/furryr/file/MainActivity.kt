@@ -16,9 +16,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import io.furryr.file.core.DaemonManager
-import io.furryr.file.core.hub.Hub
-import io.furryr.file.provider.installFileProviders
+import io.furryr.file.daemon.DaemonManager
+import io.furryr.file.hub.Hub
 import io.furryr.file.ui.theme.FileManagerTheme
 import io.furryr.file.ui.util.OperationNotification
 import io.furryr.file.ui.util.ContainerNotification

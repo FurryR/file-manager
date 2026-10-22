@@ -88,13 +88,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.termux.terminal.TerminalSession
 import io.furryr.file.agent.SessionManager
-import io.furryr.file.agent.ContainerUriResolver
-import io.furryr.file.agent.ContainerPaths
+import io.furryr.file.container.ContainerUriResolver
+import io.furryr.file.container.ContainerPaths
 import io.furryr.file.core.model.FileEntry
-import io.furryr.file.core.shellQuote
+import io.furryr.file.daemon.shellQuote
 import io.furryr.file.agent.TerminalInputState
 import io.furryr.file.agent.TerminalViewComposable
-import io.furryr.file.core.DaemonManager
+import io.furryr.file.daemon.DaemonManager
 import android.app.Activity
 import android.content.Context
 import android.util.Log
@@ -111,11 +111,13 @@ import kotlin.math.abs
 
 private const val SmallRatio = 0.50f
 private const val LargeRatio = 0.90f
-private val DrawerWidth = 180.dp
+internal const val KEY_REPEAT_DELAY_MS = 400L
+internal const val KEY_REPEAT_INTERVAL_MS = 60L
+internal val DrawerWidth = 180.dp
 private const val TAG = "TerminalSheet"
-private const val DRAWER_DRAG_THRESHOLD = 50f
+internal const val DRAWER_DRAG_THRESHOLD = 50f
 
-private data class TerminalTab(
+internal data class TerminalTab(
     val sessionId: String,
     val session: TerminalSession,
     val baseLabel: String,
@@ -523,101 +525,6 @@ fun TerminalSheet(
 }
 
 @Composable
-private fun ContentWithDrawer(
-    modifier: Modifier = Modifier,
-    showDrawer: Boolean,
-    sessionError: String?,
-    tabs: List<TerminalTab>,
-    activeTabIndex: Int,
-    enabled: Boolean,
-    onSwitchTab: (Int) -> Unit,
-    onCloseTab: (TerminalTab) -> Unit,
-    onDismissDrawer: () -> Unit,
-    onOpenDrawer: () -> Unit,
-    onNewTab: () -> Unit,
-) {
-    val inputState = remember { TerminalInputState() }
-    Box(modifier = modifier) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 4.dp)
-                .pointerInput(Unit) {
-                    detectHorizontalDragGestures(
-                        onDragEnd = { },
-                        onHorizontalDrag = { change, dragAmount ->
-                            if (!showDrawer && dragAmount > DRAWER_DRAG_THRESHOLD) {
-                                change.consume()
-                                onOpenDrawer()
-                            }
-                        }
-                    )
-                }
-        ) {
-            when {
-                sessionError != null -> {
-                    Text(
-                        sessionError,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.align(Alignment.Center).padding(16.dp),
-                    )
-                }
-                tabs.getOrNull(activeTabIndex) != null -> {
-                    val currentTab = tabs[activeTabIndex]
-                    Column(Modifier.fillMaxSize()) {
-                        TerminalViewComposable(
-                            session = currentTab.session,
-                            modifier = Modifier.weight(1f).fillMaxWidth(),
-                            enabled = enabled,
-                            inputState = inputState,
-                        )
-                        TerminalExtraKeys(
-                            inputState = inputState,
-                            enabled = enabled,
-                            onOpenDrawer = onOpenDrawer,
-                        )
-                    }
-                }
-            }
-        }
-
-        // Overlay to dismiss drawer when tapping right half
-        if (showDrawer) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .pointerInput(Unit) { detectTapGestures { onDismissDrawer() } }
-                    .background(Color.Transparent)
-            )
-        }
-
-        AnimatedVisibility(
-            visible = showDrawer,
-            enter = slideInHorizontally { -it },
-            exit = slideOutHorizontally { -it }
-        ) {
-            Box(
-                modifier = Modifier
-                    .width(DrawerWidth)
-                    .fillMaxHeight()
-                    .background(MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp))
-            ) {
-                DrawerContent(
-                    tabs = tabs,
-                    activeTabIndex = activeTabIndex,
-                    onSwitchTab = onSwitchTab,
-                    onCloseTab = onCloseTab,
-                    onNewTab = onNewTab,
-                )
-            }
-        }
-    }
-}
-
-private const val KEY_REPEAT_DELAY_MS = 400L
-private const val KEY_REPEAT_INTERVAL_MS = 60L
-
-@Composable
 internal fun TerminalExtraKeys(
     inputState: TerminalInputState,
     enabled: Boolean,
@@ -762,63 +669,3 @@ internal fun TerminalExtraKeys(
     }
 }
 
-@Composable
-private fun DrawerContent(
-    tabs: List<TerminalTab>,
-    activeTabIndex: Int,
-    onSwitchTab: (Int) -> Unit,
-    onCloseTab: (TerminalTab) -> Unit,
-    onNewTab: () -> Unit,
-) {
-    Column(modifier = Modifier.fillMaxSize()) {
-        Text(
-            stringResource(R.string.terminal_drawer_title),
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-        )
-        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            itemsIndexed(tabs, key = { i, t -> "${i}_${t.sessionId}" }) { idx, tab ->
-                val isActive = idx == activeTabIndex
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onSwitchTab(idx) }
-                        .background(
-                            if (isActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
-                            else Color.Transparent
-                        )
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                ) {
-                    Text(
-                        "[${idx + 1}] ${tab.label}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
-                        color = if (isActive) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (tabs.size > 1) {
-                        Text(
-                            "×",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 16.sp,
-                            modifier = Modifier.clickable { onCloseTab(tab) }
-                        )
-                    }
-                }
-            }
-        }
-        Button(
-            onClick = onNewTab,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-        ) {
-            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.padding(end = 4.dp))
-            Text(stringResource(R.string.drawer_new_terminal), maxLines = 1)
-        }
-    }
-}

@@ -13,5 +13,5 @@ val DefaultPath: String
 
 const val ProviderAuthority = "io.furryr.file.provider"
 
-/** Authority of [io.furryr.file.provider.ForwardFileProvider]. */
+/** Authority of [io.furryr.file.forward.ForwardFileProvider]. */
 const val ForwardProviderAuthority = "io.furryr.file.forward"

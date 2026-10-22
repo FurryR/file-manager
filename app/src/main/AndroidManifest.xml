@@ -30,7 +30,7 @@
         </provider>
 
         <provider
-            android:name=".provider.ForwardFileProvider"
+            android:name=".forward.ForwardFileProvider"
             android:authorities="io.furryr.file.forward"
             android:exported="false"
             android:grantUriPermissions="true" />
@@ -49,6 +49,18 @@
 
         <activity
             android:name=".ui.screens.AgentProvidersActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:exported="false"
+            android:theme="@style/Theme.FileManager" />
+
+        <activity
+            android:name=".ui.screens.AgentMcpActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:exported="false"
+            android:theme="@style/Theme.FileManager" />
+
+        <activity
+            android:name=".ui.screens.AgentSessionsActivity"
             android:enableOnBackInvokedCallback="true"
             android:exported="false"
             android:theme="@style/Theme.FileManager" />

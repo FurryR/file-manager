@@ -49,7 +49,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.furryr.file.R
 import io.furryr.file.AppLocale
-import io.furryr.file.core.DaemonManager
+import io.furryr.file.container.ContainerBackend
+import io.furryr.file.container.ContainerManager
+import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.ui.theme.FileManagerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch

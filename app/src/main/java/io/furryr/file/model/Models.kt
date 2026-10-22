@@ -2,7 +2,8 @@ package io.furryr.file.model
 import android.content.Context
 import io.furryr.file.R
 import io.furryr.file.ui.util.formatSize
-import io.furryr.file.util.Path
+import io.furryr.file.core.DirectoryStats
+import io.furryr.file.core.Path
 
 data class FileTab(
     val path: String,
@@ -15,26 +16,18 @@ data class FileTab(
         get() {
             val p = Path.parse(path)
             p.name?.let { return it }
-            if (p.host != null) return p.host
+            p.host?.let { return it }
             return if (p.isRoot) "/" else path
         }
 }
 
-data class DirectoryInfo(
-    val folderCount: Int = 0,
-    val fileCount: Int = 0,
-    val usableBytes: Long = 0L,
-    val totalBytes: Long = 0L,
-    val refreshToken: Int = 0
-) {
-    fun summary(context: Context): String = context.getString(
-        R.string.directory_summary,
-        folderCount,
-        fileCount,
-        formatSize(usableBytes),
-        formatSize(totalBytes),
-    )
-}
+fun DirectoryStats.summary(context: Context): String = context.getString(
+    R.string.directory_summary,
+    folderCount,
+    fileCount,
+    formatSize(usableBytes),
+    formatSize(totalBytes),
+)
 
 data class CopyMoveSource(
     val path: String,

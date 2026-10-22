@@ -1,37 +1,40 @@
 # AGENTS.md — app/.../io/furryr/file/
 
-**61 files** — Kotlin + Compose UI in a flat package with subpackages for agent/daemon/provider.
+**UI shell** — Compose rendering + tab/selection state only. File routing and
+operations live in `:core` (`io.furryr.file.core.Vfs`); this module wires
+platform services and calls the library.
 
 ## STRUCTURE
 
 | Directory | Contents |
 |-----------|----------|
-| `.` (root) | `MainActivity.kt`, `FileManagerApp.kt`, `Constants.kt`, `FileRepository.kt`, `LocationsRepository.kt` |
-| `agent/` | Session, container, PTY bridge, terminal, wizard, distro, proot — all agent/container logic |
-| `model/` | `Models.kt`, `Locations.kt`, `ErrorState.kt` |
-| `provider/` | SAF, container, daemon, document, forward, FTP, SFTP file providers + location DBs |
+| `.` (root) | `MainActivity.kt`, `FileManagerApp.kt`, `Constants.kt`, `Providers.kt` |
+| `agent/` | Session/PTY bridge, terminal, container wizard, settings, path utils |
+| `forward/` | `ForwardFileProvider` + per-process share-token signing |
+| `model/` | `Models.kt`, `LocationAddress.kt`, `ErrorState.kt` |
 | `ui/components/` | `BottomToolbar.kt`, `TopBarContent.kt`, `FileDrawer.kt`, `Dialogs.kt` |
 | `ui/screens/` | `FileListScreen.kt`, `SettingsActivity.kt`, `LicensesScreen.kt` |
 | `ui/theme/` | `FileManagerTheme.kt` (Material3 dark/light) |
 | `ui/util/` | `Formatters.kt`, `FileIcons.kt`, `FileOpen.kt`, `OperationNotification.kt` |
 
-> The proto-agnostic UDS transport lives in the `:uds` module
-> (`io.furryr.file.uds.*`); the daemon protocol, sources and the unified exec
-> API live in `:core` (`io.furryr.file.core.*`). The old `daemon/` and `copy/`
-> packages were removed.
+> The VFS abstraction lives in `:core`; protocol providers (Local/FTP/SFTP/
+> SAF/remote) live in `:provider`; containers and the single `ContainerProvider`
+> live in `:container`; daemon IPC lives in `:daemon`; the hub lives in `:hub`;
+> VirGL lives in `:virgl`. `Providers.kt` only wires platform services.
 
 ## WHERE TO LOOK
 
-- **Add new file operation**: define proto message → `:core/FileService.kt` → `FileRepository.kt` helper → call from `FileManagerApp.kt`
+- **Add new file operation**: define proto message → `:daemon/FileService.kt` → `:core/Vfs.kt` helper → call from `FileManagerApp.kt`
 - **Add UI toggle**: `SettingsActivity.kt` (prefs-based, `DaemonManager.reset()` on change)
-- **Change IPC protocol**: `proto/file_daemon.proto` (both sides need rebuild)
+- **Change IPC protocol**: `proto/file_daemon.proto` in `:daemon` (both sides need rebuild)
 - **Selection logic**: `FileManagerApp.kt` lines 200-218 (`toggleSelection`, `rangeSelectTo`)
 - **Terminal sessions**: `agent/SessionManager.kt` — session lifecycle, container session cleanup
-- **Container management**: `agent/ContainerManager.kt` — process tracking, kill
-- **Container daemon launch**: `agent/ContainerDaemonLauncher.kt` — proot/chroot argv (app-owned SPI)
+- **Container management**: `:container/ContainerManager.kt` — create/list/exec/bind mounts
+- **Container provider**: `:container/ContainerProvider.kt` — one provider for all containers
+- **Container daemon launch**: `:container/ContainerDaemonLauncher.kt` — proot/chroot argv
 - **Terminal panel**: `TerminalSheet.kt` — bottom sheet with terminals; `RuntimeForegroundService.kt` keeps sessions and container daemons alive
-- **Exec/PTY**: `:core/process/ExecService.kt` — `CommandSpec` → `ProcessChannel` (one path for terminal + command exec)
-- **Native daemon entry**: `:core/DaemonManager.kt` — starts `libfiledaemon.so` from `nativeLibraryDir`
+- **Exec/PTY**: `:daemon/process/ExecService.kt` — `CommandSpec` → `ProcessChannel` (one path for terminal + command exec)
+- **Native daemon entry**: `:daemon/DaemonManager.kt` — starts `libfiledaemon.so` from `nativeLibraryDir`
 
 ## CONVENTIONS
 
@@ -42,7 +45,7 @@
 - **Protobuf lite** — `com.google.protobuf:protobuf-javalite` (generated in `:core`).
 - **No `enum` for screens** — uses `private enum class` in Activity files.
 - **SessionManager singleton** — `object`, not DI. Manual wiring via `configure()`.
-- **Native binaries as jniLibs** — `libfiledaemon.so` and `libproot.so` in `jniLibs/arm64-v8a/`.
+- **Native binaries as jniLibs** — `libfiledaemon.so` and `libproot.so` in `jniLibs/arm64-v8a/` here; `libvirglhost.so` ships with `:virgl`.
 
 ## ANTI-PATTERNS
 

@@ -62,6 +62,13 @@ impl Connection {
         Ok(response)
     }
 
+    /// Send a request without waiting for its response. Used by streaming
+    /// requests such as Chat, whose responses are read with
+    /// [Self::receive_response].
+    pub async fn send_request(&self, request: HubRequest) -> io::Result<()> {
+        self.send_frame(&request.encode_to_vec(), &[]).await
+    }
+
     pub async fn round_trip_with_fd(
         &self,
         request: HubRequest,

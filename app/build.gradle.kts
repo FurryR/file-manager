@@ -82,8 +82,12 @@ androidComponents {
 }
 
 dependencies {
+    implementation(project(":container"))
     implementation(project(":core"))
-    implementation(project(":uds"))
+    implementation(project(":daemon"))
+    implementation(project(":hub"))
+    implementation(project(":provider"))
+    implementation(project(":virgl"))
     implementation(platform("androidx.compose:compose-bom:2024.10.00"))
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.compose.material3:material3")
@@ -95,9 +99,6 @@ dependencies {
     implementation("dev.rikka.shizuku:provider:13.1.5")
     implementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.1")
     implementation("com.termux.termux-app:terminal-view:0.118.0")
-    implementation("androidx.documentfile:documentfile:1.0.1")
-    implementation("commons-net:commons-net:3.13.0")
-    implementation("com.github.mwiede:jsch:2.28.5")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
 

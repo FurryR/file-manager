@@ -7,6 +7,12 @@ use crate::model::{Entry, Role};
 use crate::text::{sanitize, wrap_segments};
 use crate::theme;
 
+mod inline;
+mod table;
+
+use inline::inline;
+use table::{is_table_line, render_table};
+
 pub struct Rendered {
     pub lines: Vec<Line<'static>>,
     pub reasoning_headers: Vec<(usize, usize)>,
@@ -45,7 +51,7 @@ pub fn render(entries: &[Entry], width: usize, spinner: usize) -> Rendered {
             Role::Assistant => {
                 render_entry(&mut output, &entry.content, width, theme::text());
             }
-            Role::Tool => render_tool(&mut output, &mut tool_headers, index, entry, width),
+            Role::Tool => render_tool(&mut output, &mut tool_headers, index, entry, width, spinner),
             Role::Notice => {
                 render_entry(&mut output, &entry.content, width, theme::notice());
             }
@@ -150,7 +156,12 @@ fn render_tool(
     index: usize,
     entry: &Entry,
     width: usize,
+    spinner: usize,
 ) {
+    if let Some(write) = &entry.write {
+        render_write(output, entry, write, width);
+        return;
+    }
     let Some(tool) = &entry.tool else {
         let style = if entry.started.is_some() {
             theme::tool_active()
@@ -179,20 +190,26 @@ fn render_tool(
         );
         output.push(exec_block_line(Vec::new(), width));
     }
+    let running = entry.started.is_some() && !tool.failed;
     let command_style = if tool.failed {
         theme::error()
-    } else if entry.started.is_some() {
+    } else if running {
         theme::tool_active()
     } else {
         theme::text()
     };
+    let (marker, marker_style) = if running {
+        (format!("{} ", theme::spinner(spinner)), theme::loading())
+    } else {
+        ("$ ".to_owned(), theme::accent())
+    };
     exec_marked(
         output,
         width,
-        "$ ",
+        &marker,
         &tool.command,
         command_style,
-        theme::accent(),
+        marker_style,
     );
     output.push(exec_block_line(Vec::new(), width));
 
@@ -214,7 +231,9 @@ fn render_tool(
     for line in rendered {
         output.push(exec_block_line(line.spans, width));
     }
-    if truncated || line_truncated {
+    let clipped = truncated || line_truncated;
+    let expandable = entry.expanded || clipped;
+    if clipped {
         output.push(exec_block_line(
             vec![Span::styled("…", theme::muted())],
             width,
@@ -222,19 +241,87 @@ fn render_tool(
     }
 
     output.push(exec_block_line(Vec::new(), width));
-    let label = if entry.expanded {
-        "Click to collapse"
-    } else {
-        "Click to expand"
-    };
-    let style = if tool.failed {
-        theme::error()
-    } else {
-        theme::muted()
-    };
-    output.push(exec_block_line(vec![Span::styled(label, style)], width));
+    if expandable {
+        let label = if entry.expanded {
+            "Click to collapse"
+        } else {
+            "Click to expand"
+        };
+        let style = if tool.failed {
+            theme::error()
+        } else {
+            theme::muted()
+        };
+        output.push(exec_block_line(vec![Span::styled(label, style)], width));
+        output.push(exec_block_line(Vec::new(), width));
+        headers.extend((block_start..output.len()).map(|line| (line, index)));
+    }
+}
+
+fn render_write(
+    output: &mut Vec<Line<'static>>,
+    entry: &Entry,
+    write: &crate::model::WriteBlock,
+    width: usize,
+) {
     output.push(exec_block_line(Vec::new(), width));
-    headers.extend((block_start..output.len()).map(|line| (line, index)));
+    let path_style = if write.failed {
+        theme::error()
+    } else if entry.started.is_some() {
+        theme::tool_active()
+    } else {
+        theme::text()
+    };
+    exec_marked(
+        output,
+        width,
+        "✎ ",
+        &write.path,
+        path_style,
+        if write.failed {
+            theme::error()
+        } else {
+            theme::accent()
+        },
+    );
+    output.push(exec_block_line(Vec::new(), width));
+
+    if let Some(diff) = &write.diff {
+        if diff.is_empty() {
+            output.push(exec_block_line(
+                vec![Span::styled("No changes", theme::muted())],
+                width,
+            ));
+        } else {
+            write_lines(output, width, diff, true);
+        }
+    } else {
+        write_lines(output, width, &write.content, false);
+    }
+
+    output.push(exec_block_line(Vec::new(), width));
+}
+
+fn write_lines(output: &mut Vec<Line<'static>>, width: usize, text: &str, diff: bool) {
+    for line in text.lines() {
+        if line.is_empty() {
+            output.push(exec_block_line(Vec::new(), width));
+            continue;
+        }
+        let style = if diff {
+            match line.as_bytes().first() {
+                Some(b'+') => theme::diff_add(),
+                Some(b'-') => theme::diff_del(),
+                _ => theme::exec_output(),
+            }
+        } else {
+            theme::exec_output()
+        };
+        let (wrapped, _) = plain_lines(line, width, style, usize::MAX);
+        for wrapped_line in wrapped {
+            output.push(exec_block_line(wrapped_line.spans, width));
+        }
+    }
 }
 
 fn display_bytes(bytes: &[u8]) -> String {
@@ -358,7 +445,7 @@ fn render_reasoning(
         theme::reasoning()
     };
     headers.push((output.len(), index));
-    output.push(Line::from(Span::styled(format!("{sign}{label}"), style)));
+    output.push(Line::from(Span::styled(format!("  {sign}{label}"), style)));
     if entry.expanded {
         output.push(Line::default());
         let start = output.len();
@@ -421,218 +508,6 @@ fn render_entry(output: &mut Vec<Line<'static>>, content: &str, width: usize, st
     if output.len() == start {
         output.push(Line::default());
     }
-}
-
-fn is_table_line(line: &str) -> bool {
-    line.trim_start().starts_with('|')
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Align {
-    Left,
-    Center,
-    Right,
-}
-
-fn render_table(output: &mut Vec<Line<'static>>, rows: &[&str], width: usize, base: Style) {
-    let parsed: Vec<Vec<String>> = rows.iter().map(|row| parse_row(row)).collect();
-    let columns = parsed.iter().map(Vec::len).max().unwrap_or(0);
-    if columns == 0 {
-        return;
-    }
-
-    let mut alignments = vec![Align::Left; columns];
-    let mut body = Vec::with_capacity(parsed.len());
-    for (index, cells) in parsed.into_iter().enumerate() {
-        if index > 0 {
-            if let Some(found) = separator(&cells) {
-                for (column, alignment) in found.into_iter().enumerate().take(columns) {
-                    alignments[column] = alignment;
-                }
-                continue;
-            }
-        }
-        body.push(cells);
-    }
-    if body.is_empty() {
-        return;
-    }
-
-    let widths = column_widths(&body, columns, width);
-    let border = theme::border_idle();
-    output.push(border_line(&widths, '┌', '┬', '┐', border));
-
-    for (row_index, cells) in body.iter().enumerate() {
-        let mut wrapped = Vec::with_capacity(columns);
-        for (column, width) in widths.iter().enumerate() {
-            let text = cells.get(column).map(String::as_str).unwrap_or("");
-            let style = if row_index == 0 {
-                base.add_modifier(Modifier::BOLD)
-            } else {
-                base
-            };
-            let segments = inline(text, style);
-            wrapped.push(wrap_segments(&segments, *width, true));
-        }
-        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
-        for line_index in 0..height {
-            let mut spans = vec![Span::styled("│", border)];
-            for (column, lines) in wrapped.iter().enumerate() {
-                spans.push(Span::styled(" ", base));
-                let content = lines.get(line_index);
-                let used: usize = content
-                    .map(|line| {
-                        line.spans
-                            .iter()
-                            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-                            .sum()
-                    })
-                    .unwrap_or(0);
-                let extra = widths[column].saturating_sub(used);
-                let (left, right) = match alignments[column] {
-                    Align::Left => (0, extra),
-                    Align::Right => (extra, 0),
-                    Align::Center => (extra / 2, extra - extra / 2),
-                };
-                if left > 0 {
-                    spans.push(Span::styled(" ".repeat(left), base));
-                }
-                if let Some(line) = content {
-                    spans.extend(line.spans.iter().cloned());
-                }
-                if right > 0 {
-                    spans.push(Span::styled(" ".repeat(right), base));
-                }
-                spans.push(Span::styled(" ", base));
-                spans.push(Span::styled("│", border));
-            }
-            output.push(Line::from(spans));
-        }
-        if row_index == 0 && body.len() > 1 {
-            output.push(border_line(&widths, '├', '┼', '┤', border));
-        }
-    }
-
-    output.push(border_line(&widths, '└', '┴', '┘', border));
-}
-
-fn border_line(
-    widths: &[usize],
-    left: char,
-    middle: char,
-    right: char,
-    style: Style,
-) -> Line<'static> {
-    let mut text = String::new();
-    text.push(left);
-    for (index, width) in widths.iter().enumerate() {
-        if index > 0 {
-            text.push(middle);
-        }
-        text.push_str(&"─".repeat(*width + 2));
-    }
-    text.push(right);
-    Line::from(Span::styled(text, style))
-}
-
-fn parse_row(line: &str) -> Vec<String> {
-    let mut cells = Vec::new();
-    let mut current = String::new();
-    let mut content = line.trim();
-    if let Some(rest) = content.strip_prefix('|') {
-        content = rest;
-    }
-    let mut chars = content.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' if chars.peek() == Some(&'|') => {
-                chars.next();
-                current.push('|');
-            }
-            '|' => {
-                cells.push(current.trim().to_owned());
-                current.clear();
-            }
-            c => current.push(c),
-        }
-    }
-    let tail = current.trim();
-    if !tail.is_empty() {
-        cells.push(tail.to_owned());
-    }
-    cells
-}
-
-fn separator(cells: &[String]) -> Option<Vec<Align>> {
-    if cells.is_empty() {
-        return None;
-    }
-    let mut output = Vec::with_capacity(cells.len());
-    for cell in cells {
-        let trimmed = cell.trim();
-        let left = trimmed.starts_with(':');
-        let right = trimmed.ends_with(':');
-        let dashes = trimmed.trim_start_matches(':').trim_end_matches(':');
-        if dashes.is_empty() || !dashes.chars().all(|c| c == '-') {
-            return None;
-        }
-        output.push(match (left, right) {
-            (true, true) => Align::Center,
-            (false, true) => Align::Right,
-            _ => Align::Left,
-        });
-    }
-    Some(output)
-}
-
-fn plain_width(text: &str) -> usize {
-    let cleaned = text.replace("**", "").replace('`', "");
-    UnicodeWidthStr::width(cleaned.as_str())
-}
-
-fn column_widths(rows: &[Vec<String>], columns: usize, width: usize) -> Vec<usize> {
-    let overhead = columns * 3 + 1;
-    let mut natural = vec![1usize; columns];
-    for row in rows {
-        for (column, cell) in row.iter().enumerate().take(columns) {
-            natural[column] = natural[column].max(plain_width(cell).max(1));
-        }
-    }
-    if overhead >= width {
-        return vec![1; columns];
-    }
-    let available = width - overhead;
-    let total: usize = natural.iter().sum();
-    if total <= available {
-        return natural;
-    }
-    let mut widths = vec![1usize; columns];
-    let pool = available.saturating_sub(columns);
-    if pool == 0 {
-        return widths;
-    }
-    let total = total.max(columns);
-    let mut remainders = Vec::with_capacity(columns);
-    let mut used = 0;
-    for (width, natural) in widths.iter_mut().zip(natural.iter()) {
-        let share = pool * natural / total;
-        *width += share;
-        used += share;
-        remainders.push((pool * natural) % total);
-    }
-    let mut leftover = pool.saturating_sub(used);
-    while leftover > 0 {
-        let mut best = 0;
-        for column in 1..columns {
-            if remainders[column] > remainders[best] {
-                best = column;
-            }
-        }
-        widths[best] += 1;
-        remainders[best] = 0;
-        leftover -= 1;
-    }
-    widths
 }
 
 fn code_lines(line: &str, width: usize) -> Vec<Line<'static>> {
@@ -727,41 +602,4 @@ fn prefixed(
             .insert(0, Span::styled(prefix.to_owned(), prefix_style));
     }
     lines
-}
-
-fn inline(text: &str, base: Style) -> Vec<(Style, String)> {
-    let mut output = Vec::new();
-    let mut normal = String::new();
-    let mut index = 0;
-
-    while index < text.len() {
-        let rest = &text[index..];
-        if let Some(after) = rest.strip_prefix('`') {
-            if let Some(end) = after.find('`') {
-                push_normal(&mut output, &mut normal, base);
-                output.push((theme::inline_code(), after[..end].to_owned()));
-                index += 1 + end + 1;
-                continue;
-            }
-        } else if let Some(after) = rest.strip_prefix("**") {
-            if let Some(end) = after.find("**") {
-                push_normal(&mut output, &mut normal, base);
-                output.push((base.add_modifier(Modifier::BOLD), after[..end].to_owned()));
-                index += 2 + end + 2;
-                continue;
-            }
-        }
-        let c = rest.chars().next().unwrap();
-        normal.push(c);
-        index += c.len_utf8();
-    }
-    push_normal(&mut output, &mut normal, base);
-    output
-}
-
-fn push_normal(output: &mut Vec<(Style, String)>, normal: &mut String, style: Style) {
-    if normal.is_empty() {
-        return;
-    }
-    output.push((style, std::mem::take(normal)));
 }

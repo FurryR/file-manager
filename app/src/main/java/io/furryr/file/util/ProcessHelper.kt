@@ -2,12 +2,12 @@ package io.furryr.file.util
 
 import android.system.Os
 import android.util.Log
-import io.furryr.file.agent.ContainerDaemonLauncher
-import io.furryr.file.core.DaemonManager
-import io.furryr.file.core.DaemonTarget
-import io.furryr.file.core.hub.Hub
-import io.furryr.file.core.process.CommandSpec
-import io.furryr.file.core.process.ProcessChannel
+import io.furryr.file.container.ContainerDaemonLauncher
+import io.furryr.file.daemon.DaemonManager
+import io.furryr.file.daemon.DaemonTarget
+import io.furryr.file.hub.Hub
+import io.furryr.file.daemon.process.CommandSpec
+import io.furryr.file.daemon.process.ProcessChannel
 import io.furryr.file.virgl.VirglManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking

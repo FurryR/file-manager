@@ -3,17 +3,21 @@ import io.furryr.file.model.*
 import io.furryr.file.ui.components.*
 import io.furryr.file.ui.screens.*
 import io.furryr.file.ui.util.*
-import io.furryr.file.util.Path
+import io.furryr.file.ui.state.rememberLocationCollections
+import io.furryr.file.core.Path
 
-import io.furryr.file.core.DaemonManager
-import io.furryr.file.core.DaemonStatus
-import io.furryr.file.agent.ContainerManager
-import io.furryr.file.agent.ContainerBackend
-import io.furryr.file.provider.DirectoryCapabilities
+import io.furryr.file.daemon.DaemonManager
+import io.furryr.file.daemon.DaemonStatus
+import io.furryr.file.container.ContainerManager
+import io.furryr.file.container.ContainerBackend
+import io.furryr.file.core.DirectoryCapabilities
 import io.furryr.file.agent.SessionManager
-import io.furryr.file.model.SafLocation
-import io.furryr.file.model.FtpServer
-import io.furryr.file.model.SftpServer
+import io.furryr.file.provider.model.LocalLocation
+import io.furryr.file.provider.model.SafLocation
+import io.furryr.file.provider.model.FtpServer
+import io.furryr.file.provider.model.SftpServer
+import io.furryr.file.provider.LocationsRepository
+import io.furryr.file.core.Vfs
 import io.furryr.file.provider.remote.RemoteLocation
 import android.app.Activity
 import android.Manifest
@@ -97,7 +101,7 @@ import androidx.lifecycle.repeatOnLifecycle
 
 import io.furryr.file.model.CopyMoveSource
 import io.furryr.file.model.CopyMoveState
-import io.furryr.file.model.DirectoryInfo
+import io.furryr.file.core.DirectoryStats
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.model.FileTab
 import io.furryr.file.model.OperationProgress
@@ -128,7 +132,7 @@ fun FileManagerApp(
     val context = LocalContext.current
     val tabs = remember { mutableStateListOf(FileTab(path = DefaultPath)) }
     var selectedTabIndex by remember { mutableIntStateOf(0) }
-    var currentInfo by remember { mutableStateOf(DirectoryInfo()) }
+    var currentInfo by remember { mutableStateOf(DirectoryStats()) }
     var showJumpDialog by remember { mutableStateOf(false) }
     var showInfoDialog by remember { mutableStateOf(false) }
     var showCreateDialog by remember { mutableStateOf(false) }
@@ -174,8 +178,7 @@ fun FileManagerApp(
     // recovery) this counter increments, triggering file list + drawer refresh.
     var lastRefreshDaemonGen by remember { mutableIntStateOf(DaemonManager.generation) }
 
-    var safLocations by remember { mutableStateOf<List<SafLocation>>(emptyList()) }
-    var safRefreshKey by remember { mutableIntStateOf(0) }
+    val locations = rememberLocationCollections()
 
     val safFolderLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -183,48 +186,15 @@ fun FileManagerApp(
         val uri = result.data?.data
         if (uri != null) {
             context.contentResolver.takePersistableUriPermission(
-                uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                uri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
             )
             LocationsRepository.insertSaf(uri.toString())
-            safRefreshKey++
+            locations.refreshSaf()
         }
     }
 
-    LaunchedEffect(safRefreshKey) {
-        safLocations = withContext(Dispatchers.IO) { LocationsRepository.safLocations() }
-    }
-
-    var localLocations by remember { mutableStateOf<List<LocalLocation>>(emptyList()) }
-    var localRefreshKey by remember { mutableIntStateOf(0) }
-
-    LaunchedEffect(localRefreshKey) {
-        localLocations = withContext(Dispatchers.IO) {
-            runCatching { LocationsRepository.localLocations() }.getOrDefault(emptyList())
-        }
-    }
-
-    var ftpLocations by remember { mutableStateOf<List<FtpServer>>(emptyList()) }
-    var ftpRefreshKey by remember { mutableIntStateOf(0) }
-
-    LaunchedEffect(ftpRefreshKey) {
-        ftpLocations = withContext(Dispatchers.IO) { LocationsRepository.ftpServers() }
-    }
-
-    var sftpLocations by remember { mutableStateOf<List<SftpServer>>(emptyList()) }
-    var sftpRefreshKey by remember { mutableIntStateOf(0) }
-
-    LaunchedEffect(sftpRefreshKey) {
-        sftpLocations = withContext(Dispatchers.IO) { LocationsRepository.sftpServers() }
-    }
-
-    var remoteLocations by remember { mutableStateOf<List<RemoteLocation>>(emptyList()) }
-    var remoteRefreshKey by remember { mutableIntStateOf(0) }
-
-    LaunchedEffect(remoteRefreshKey) {
-        remoteLocations = withContext(Dispatchers.IO) {
-            runCatching { LocationsRepository.remoteLocations() }.getOrDefault(emptyList())
-        }
-    }
 
     LaunchedEffect(operationHidden, operationJob) {
         if (operationHidden && operationJob != null) {
@@ -304,7 +274,7 @@ fun FileManagerApp(
 
     fun goParent() {
         val path = pendingNavigation?.path ?: currentTab().path
-        val parent = FileRepository.navigate(path, "..") ?: return
+        val parent = Vfs.navigate(path, "..") ?: return
         pendingNavigation = null
         highlightPath = null
         pendingScrollPath = null
@@ -439,9 +409,9 @@ fun FileManagerApp(
                     ensureActive()
                     operationProgress = OperationProgress(0, 0, source.name, state.isCopy)
                     val flow = if (state.isCopy) {
-                        FileRepository.copy(source.path, targetDir)
+                        Vfs.copy(source.path, targetDir)
                     } else {
-                        FileRepository.move(source.path, targetDir)
+                        Vfs.move(source.path, targetDir)
                     }
                     flow.collect { progress ->
                         ensureActive()
@@ -572,7 +542,7 @@ fun FileManagerApp(
             pendingScrollPath = null
         } else {
             val currentPath = currentTab().path
-            if (FileRepository.navigate(currentPath, "..") != null) {
+            if (Vfs.navigate(currentPath, "..") != null) {
                 goParent()
             } else if (tabs.size > 1) {
                 closeTab(selectedTabIndex)
@@ -580,41 +550,6 @@ fun FileManagerApp(
                 (context as? Activity)?.finish()
             }
         }
-    }
-
-    @Composable
-    fun TabContent(index: Int, tab: FileTab) {
-        Tab(
-            selected = index == selectedTabIndex,
-            onClick = { selectedTabIndex = index },
-            text = {
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = tab.title,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(
-                            end = if (tabs.size > 1) 18.dp else 0.dp
-                        )
-                    )
-                    if (tabs.size > 1) {
-                        Icon(
-                            Icons.Default.Close,
-                            contentDescription = "Close tab",
-                            modifier = Modifier
-                                .align(Alignment.CenterEnd)
-                                .size(16.dp)
-                                .clickable { closeTab(index) },
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-        )
     }
 
     ModalNavigationDrawer(
@@ -747,8 +682,8 @@ fun FileManagerApp(
                     }
                 },
                 refreshKey = containerRefreshKey,
-                safLocations = safLocations,
-                safRefreshKey = safRefreshKey,
+                safLocations = locations.safLocations,
+                safRefreshKey = locations.safRefreshKey,
                 onAddLocation = {
                     safFolderLauncher.launch(
                         Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
@@ -761,8 +696,8 @@ fun FileManagerApp(
                             .setPackage("com.android.documentsui")
                     )
                 },
-                localLocations = localLocations,
-                localOrder = localLocations.map { it.id },
+                localLocations = locations.localLocations,
+                localOrder = locations.localLocations.map { it.id },
                 onAddLocalPath = { path ->
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
@@ -775,7 +710,7 @@ fun FileManagerApp(
                                 Toast.LENGTH_SHORT,
                             ).show()
                         }
-                        localRefreshKey++
+                        locations.refreshLocal()
                     }
                 },
                 onLocalClick = { location ->
@@ -785,17 +720,17 @@ fun FileManagerApp(
                 onLocalRename = { id, newName ->
                     scope.launch {
                         withContext(Dispatchers.IO) { LocationsRepository.renameLocal(id, newName) }
-                        localRefreshKey++
+                        locations.refreshLocal()
                     }
                 },
                 onLocalDelete = { id ->
                     scope.launch {
                         withContext(Dispatchers.IO) { LocationsRepository.deleteLocal(id) }
-                        localRefreshKey++
+                        locations.refreshLocal()
                     }
                 },
                 onLocalReorder = { from, to ->
-                    val mutable = localLocations.toMutableList()
+                    val mutable = locations.localLocations.toMutableList()
                     if (from in mutable.indices && to in mutable.indices) {
                         val item = mutable.removeAt(from)
                         mutable.add(to, item)
@@ -803,7 +738,7 @@ fun FileManagerApp(
                             withContext(Dispatchers.IO) {
                                 LocationsRepository.reorderLocal(mutable.map { it.id })
                             }
-                            localRefreshKey++
+                            locations.refreshLocal()
                         }
                     }
                 },
@@ -814,18 +749,18 @@ fun FileManagerApp(
                 onSafRename = { hexId, newName ->
                     scope.launch {
                         withContext(Dispatchers.IO) { LocationsRepository.renameSaf(hexId, newName) }
-                        safRefreshKey++
+                        locations.refreshSaf()
                     }
                 },
                 onSafDelete = { hexId ->
                     scope.launch {
                         withContext(Dispatchers.IO) { LocationsRepository.deleteSaf(hexId) }
-                        safRefreshKey++
+                        locations.refreshSaf()
                     }
                 },
-                safOrder = safLocations.map { it.hexId },
+                safOrder = locations.safLocations.map { it.hexId },
                 onSafReorder = { from, to ->
-                    val mutable = safLocations.toMutableList()
+                    val mutable = locations.safLocations.toMutableList()
                     if (from in mutable.indices && to in mutable.indices) {
                         val item = mutable.removeAt(from)
                         mutable.add(to, item)
@@ -833,12 +768,12 @@ fun FileManagerApp(
                             withContext(Dispatchers.IO) {
                                 LocationsRepository.reorderSaf(mutable.map { it.hexId })
                             }
-                            safRefreshKey++
+                            locations.refreshSaf()
                         }
                     }
                 },
-                ftpLocations = ftpLocations,
-                ftpRefreshKey = ftpRefreshKey,
+                ftpLocations = locations.ftpLocations,
+                ftpRefreshKey = locations.ftpRefreshKey,
                 onAddFtp = { host, name, port, username, password ->
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
@@ -850,7 +785,7 @@ fun FileManagerApp(
                             else result.exceptionOrNull()?.message ?: "Failed to add",
                             Toast.LENGTH_SHORT
                         ).show()
-                        ftpRefreshKey++
+                        locations.refreshFtp()
                     }
                 },
                 onFtpSave = { oldHost, newHost, name, port, username, password ->
@@ -864,7 +799,7 @@ fun FileManagerApp(
                             else result.exceptionOrNull()?.message ?: "Failed to update",
                             Toast.LENGTH_SHORT
                         ).show()
-                        ftpRefreshKey++
+                        locations.refreshFtp()
                     }
                 },
                 onFtpClick = { host ->
@@ -874,12 +809,12 @@ fun FileManagerApp(
                 onFtpDelete = { host ->
                     scope.launch {
                         withContext(Dispatchers.IO) { LocationsRepository.deleteFtp(host) }
-                        ftpRefreshKey++
+                        locations.refreshFtp()
                     }
                 },
-                ftpOrder = ftpLocations.map { it.host },
+                ftpOrder = locations.ftpLocations.map { it.host },
                 onFtpReorder = { from, to ->
-                    val mutable = ftpLocations.toMutableList()
+                    val mutable = locations.ftpLocations.toMutableList()
                     if (from in mutable.indices && to in mutable.indices) {
                         val item = mutable.removeAt(from)
                         mutable.add(to, item)
@@ -887,12 +822,12 @@ fun FileManagerApp(
                             withContext(Dispatchers.IO) {
                                 LocationsRepository.reorderFtp(mutable.map { it.host })
                             }
-                            ftpRefreshKey++
+                            locations.refreshFtp()
                         }
                     }
                 },
-                sftpLocations = sftpLocations,
-                sftpRefreshKey = sftpRefreshKey,
+                sftpLocations = locations.sftpLocations,
+                sftpRefreshKey = locations.sftpRefreshKey,
                 onAddSftp = { host, name, port, username, password ->
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
@@ -904,7 +839,7 @@ fun FileManagerApp(
                             else result.exceptionOrNull()?.message ?: "Failed to add",
                             Toast.LENGTH_SHORT
                         ).show()
-                        sftpRefreshKey++
+                        locations.refreshSftp()
                     }
                 },
                 onSftpSave = { oldHost, newHost, name, port, username, password ->
@@ -918,7 +853,7 @@ fun FileManagerApp(
                             else result.exceptionOrNull()?.message ?: "Failed to update",
                             Toast.LENGTH_SHORT
                         ).show()
-                        sftpRefreshKey++
+                        locations.refreshSftp()
                     }
                 },
                 onSftpClick = { host ->
@@ -928,12 +863,12 @@ fun FileManagerApp(
                 onSftpDelete = { host ->
                     scope.launch {
                         withContext(Dispatchers.IO) { LocationsRepository.deleteSftp(host) }
-                        sftpRefreshKey++
+                        locations.refreshSftp()
                     }
                 },
-                sftpOrder = sftpLocations.map { it.host },
+                sftpOrder = locations.sftpLocations.map { it.host },
                 onSftpReorder = { from, to ->
-                    val mutable = sftpLocations.toMutableList()
+                    val mutable = locations.sftpLocations.toMutableList()
                     if (from in mutable.indices && to in mutable.indices) {
                         val item = mutable.removeAt(from)
                         mutable.add(to, item)
@@ -941,11 +876,11 @@ fun FileManagerApp(
                             withContext(Dispatchers.IO) {
                                 LocationsRepository.reorderSftp(mutable.map { it.host })
                             }
-                            sftpRefreshKey++
+                            locations.refreshSftp()
                         }
                     }
                 },
-                remoteLocations = remoteLocations,
+                remoteLocations = locations.remoteLocations,
                 onAddRemote = { location ->
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
@@ -957,7 +892,7 @@ fun FileManagerApp(
                             else result.exceptionOrNull()?.message ?: "Failed to add",
                             Toast.LENGTH_SHORT,
                         ).show()
-                        remoteRefreshKey++
+                        locations.refreshRemote()
                     }
                 },
                 onRemoteSave = { location ->
@@ -971,7 +906,7 @@ fun FileManagerApp(
                             else result.exceptionOrNull()?.message ?: "Failed to update",
                             Toast.LENGTH_SHORT,
                         ).show()
-                        remoteRefreshKey++
+                        locations.refreshRemote()
                     }
                 },
                 onRemoteClick = { location ->
@@ -990,12 +925,12 @@ fun FileManagerApp(
                                 Toast.LENGTH_SHORT,
                             ).show()
                         }
-                        remoteRefreshKey++
+                        locations.refreshRemote()
                     }
                 },
-                remoteOrder = remoteLocations.map { it.id },
+                remoteOrder = locations.remoteLocations.map { it.id },
                 onRemoteReorder = { from, to ->
-                    val mutable = remoteLocations.toMutableList()
+                    val mutable = locations.remoteLocations.toMutableList()
                     if (from in mutable.indices && to in mutable.indices) {
                         val item = mutable.removeAt(from)
                         mutable.add(to, item)
@@ -1003,7 +938,7 @@ fun FileManagerApp(
                             withContext(Dispatchers.IO) {
                                 LocationsRepository.reorderRemote(mutable.map { it.id })
                             }
-                            remoteRefreshKey++
+                            locations.refreshRemote()
                         }
                     }
                 },
@@ -1121,7 +1056,7 @@ fun FileManagerApp(
                 BottomToolbar(
                     canGoBack = toolTab.backStack.isNotEmpty(),
                     canGoForward = toolTab.forwardStack.isNotEmpty(),
-                    canGoParent = FileRepository.navigate(pendingNavigation?.path ?: toolTab.path, "..") != null,
+                    canGoParent = Vfs.navigate(pendingNavigation?.path ?: toolTab.path, "..") != null,
                     onBack = ::goBack,
                     onForward = ::goForward,
                     onCreateFile = { if (directoryCapabilities.canCreate) showCreateDialog = true },
@@ -1168,7 +1103,16 @@ fun FileManagerApp(
                                 selectedTabIndex = selectedTabIndex,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                tabs.forEachIndexed { index, tab -> TabContent(index, tab) }
+                                tabs.forEachIndexed { index, tab ->
+                                    FileTabContent(
+                                        index = index,
+                                        tab = tab,
+                                        selected = index == selectedTabIndex,
+                                        showClose = tabs.size > 1,
+                                        onClick = { selectedTabIndex = index },
+                                        onClose = { closeTab(index) },
+                                    )
+                                }
                             }
                         } else {
                             ScrollableTabRow(
@@ -1176,7 +1120,16 @@ fun FileManagerApp(
                                 modifier = Modifier.fillMaxWidth(),
                                 edgePadding = 0.dp
                             ) {
-                                tabs.forEachIndexed { index, tab -> TabContent(index, tab) }
+                                tabs.forEachIndexed { index, tab ->
+                                    FileTabContent(
+                                        index = index,
+                                        tab = tab,
+                                        selected = index == selectedTabIndex,
+                                        showClose = tabs.size > 1,
+                                        onClick = { selectedTabIndex = index },
+                                        onClose = { closeTab(index) },
+                                    )
+                                }
                             }
                         }
                     }
@@ -1276,9 +1229,9 @@ fun FileManagerApp(
             onConfirm = { path ->
                 showJumpDialog = false
                 scope.launch {
-                    val stat = withContext(Dispatchers.IO) { FileRepository.stat(path).getOrNull() }
+                    val stat = withContext(Dispatchers.IO) { Vfs.stat(path).getOrNull() }
                     if (stat != null && stat.exists && !stat.isDirectory) {
-                            val parent = FileRepository.navigate(path, "..")
+                            val parent = Vfs.navigate(path, "..")
                         if (parent != null) {
                             if (parent == currentTab().path) {
                                 replaceCurrent(currentTab().copy(
@@ -1315,7 +1268,7 @@ fun FileManagerApp(
             initialPath = currentTab().path,
             onDismiss = { showCreateDialog = false },
             onCreateFile = { name ->
-                val result = FileRepository.createFile(currentTab().path, name)
+                val result = Vfs.createFile(currentTab().path, name)
                 Toast.makeText(
                     context,
                     result.exceptionOrNull()?.message ?: context.getString(R.string.toast_created, name),
@@ -1325,7 +1278,7 @@ fun FileManagerApp(
                 refreshFileList()
             },
             onCreateFolder = { name ->
-                val result = FileRepository.createDirectory(currentTab().path, name)
+                val result = Vfs.createDirectory(currentTab().path, name)
                 Toast.makeText(
                     context,
                     result.exceptionOrNull()?.message ?: context.getString(R.string.toast_created, name),
@@ -1357,7 +1310,7 @@ fun FileManagerApp(
             entry = entry,
             onDismiss = { showDeleteConfirm = null },
             onConfirm = {
-                val result = FileRepository.delete(entry.path)
+                val result = Vfs.delete(entry.path)
                 Toast.makeText(
                     context,
                     if (result.isSuccess) context.getString(R.string.toast_deleted, entry.name)
@@ -1375,7 +1328,7 @@ fun FileManagerApp(
             entry = entry,
             onDismiss = { showRenameDialog = null },
             onConfirm = { newName ->
-                val result = FileRepository.rename(entry.path, newName)
+                val result = Vfs.rename(entry.path, newName)
                 Toast.makeText(
                     context,
                     if (result.isSuccess) context.getString(R.string.toast_renamed, newName)
@@ -1401,7 +1354,7 @@ fun FileManagerApp(
                     entries.mapNotNull { entry ->
                         val newName = regex.replace(entry.name, replacement)
                         if (newName.isBlank() || newName == entry.name) null
-                        else FileRepository.rename(entry.path, newName).exceptionOrNull()
+                        else Vfs.rename(entry.path, newName).exceptionOrNull()
                     }
                 }
                 Toast.makeText(

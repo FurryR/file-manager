@@ -37,7 +37,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.furryr.file.DefaultPath
-import io.furryr.file.model.DirectoryInfo
+import io.furryr.file.core.DirectoryStats
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.model.OperationProgress
 import io.furryr.file.ui.util.formatSize
@@ -114,7 +114,7 @@ fun JumpDialog(initialPath: String, onDismiss: () -> Unit, onConfirm: (String) -
 }
 
 @Composable
-fun InfoDialog(path: String, info: DirectoryInfo, onDismiss: () -> Unit) {
+fun InfoDialog(path: String, info: DirectoryStats, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Info") },

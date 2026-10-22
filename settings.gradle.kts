@@ -24,5 +24,10 @@ dependencyResolutionManagement {
 
 rootProject.name = "FileManager"
 include(":app")
+include(":container")
 include(":core")
+include(":daemon")
+include(":hub")
+include(":provider")
 include(":uds")
+include(":virgl")

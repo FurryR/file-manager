@@ -26,7 +26,7 @@ native/
 - **UID check** for data path: `maybe_android_data_path()` — skips `/Android/data` UID trick when root
 - **Progress tracking**: `TaskState` in `HashMap`, tasks spawn via `tokio::spawn`
 - **Terminal utilities**: `run0/`, `here/`, `agent/`; common wire transport in `hub-client/`
-- **Agent UI/network**: ratatui + crossterm UI in `agent/src/{ui,terminal,app}.rs`, HTTP in `agent/src/api.rs`, system DNS via reqwest
+- **Agent UI/network**: ratatui + crossterm UI in `agent/src/{ui,terminal,app}.rs`; chat/models/history/online MCP go through the hub (`agent/src/hub.rs`), local stdio MCP in `agent/src/mcp.rs`
 
 ## CONVENTIONS
 
@@ -48,9 +48,8 @@ native/
 
 - `unsafe { libc::... }` is required for abstract socket setup — keep isolated in `create_abstract_server()` / `bind_abstract_socket()`
 - Do NOT add threads to the daemon — `current_thread` runtime is intentional.
-  The `agent` utility also uses a `current_thread` task runtime, but permits
-  Reqwest's system DNS resolver to use Tokio's blocking pool. This preserves
-  Android network/VPN DNS without `/etc/resolv.conf` or public DNS fallbacks.
+  The `agent` utility also uses a `current_thread` runtime; network access goes
+  through the hub, so it never needs its own DNS/TLS stack.
 
 ## BUILD
 

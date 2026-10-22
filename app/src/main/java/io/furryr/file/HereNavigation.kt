@@ -1,13 +1,13 @@
 package io.furryr.file
 
 import android.content.Context
-import io.furryr.file.agent.ContainerManager
-import io.furryr.file.agent.ContainerPaths
+import io.furryr.file.container.ContainerManager
+import io.furryr.file.container.ContainerPaths
 import io.furryr.file.agent.SessionManager
-import io.furryr.file.core.DaemonManager
-import io.furryr.file.core.DaemonTarget
-import io.furryr.file.core.HubActions
-import io.furryr.file.util.Path
+import io.furryr.file.daemon.DaemonManager
+import io.furryr.file.daemon.DaemonTarget
+import io.furryr.file.daemon.HubActions
+import io.furryr.file.core.Path
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
 

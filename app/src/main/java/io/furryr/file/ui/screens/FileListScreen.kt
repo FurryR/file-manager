@@ -1,13 +1,13 @@
 package io.furryr.file.ui.screens
-import io.furryr.file.FileRepository
-import io.furryr.file.provider.DirectoryCapabilities
+import io.furryr.file.core.DirectoryCapabilities
+import io.furryr.file.core.Vfs
 import io.furryr.file.ui.theme.*
 import io.furryr.file.ui.screens.*
 import io.furryr.file.ui.components.*
 import io.furryr.file.ui.util.*
 import io.furryr.file.model.*
 import io.furryr.file.R
-import io.furryr.file.util.Path
+import io.furryr.file.core.Path
 import io.furryr.file.model.ErrorState
 
 import androidx.compose.animation.AnimatedVisibility
@@ -60,7 +60,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import io.furryr.file.model.DirectoryInfo
+import io.furryr.file.core.DirectoryStats
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.PermissionDeniedException
 import io.furryr.file.ui.util.formatSize
@@ -70,7 +70,7 @@ import kotlinx.coroutines.withContext
 import android.util.Log
 import android.content.ClipData
 import android.view.View
-import io.furryr.file.provider.ForwardFileProvider
+import io.furryr.file.forward.ForwardFileProvider
 import androidx.compose.foundation.draganddrop.dragAndDropSource
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.ui.draganddrop.DragAndDropTransferData
@@ -109,7 +109,7 @@ fun FileListScreen(
     filterText: String = "",
     scrollToPath: String? = null,
     onScrollConsumed: () -> Unit = {},
-    onInfoChange: (DirectoryInfo) -> Unit,
+    onInfoChange: (DirectoryStats) -> Unit,
     onEntriesChange: (String, Int, List<FileEntry>) -> Unit = { _, _, _ -> },
     onCapabilitiesChange: (DirectoryCapabilities) -> Unit = {},
     onDirectoryClick: (String) -> Unit,
@@ -189,17 +189,16 @@ fun FileListScreen(
                         Log.d("FileListScreen", "loadEntries: spinner shown after 300ms delay")
                     }
                 }
-                val result = withContext(Dispatchers.IO) { FileRepository.list(requestedPath) }
-                if (generation != loadGeneration || requestedPath != currentPath) return@launch
-                val capabilities = withContext(Dispatchers.IO) {
-                    FileRepository.directoryCapabilities(requestedPath)
+                val folder = withContext(Dispatchers.IO) {
+                    Vfs.folder(requestedPath).getOrThrow()
                 }
+                val result = withContext(Dispatchers.IO) { folder.list() }
+                if (generation != loadGeneration || requestedPath != currentPath) return@launch
+                val capabilities = withContext(Dispatchers.IO) { folder.capabilities() }
                 if (generation != loadGeneration || requestedPath != currentPath) return@launch
                 val raw = result.getOrDefault(emptyList())
                 val newEntries = sort(raw)
-                val directoryInfo = withContext(Dispatchers.IO) {
-                    FileRepository.info(requestedPath, raw)
-                }
+                val directoryInfo = withContext(Dispatchers.IO) { folder.info(raw) }
                 if (generation != loadGeneration || requestedPath != currentPath) return@launch
                 val directoryChanged = loadedPath != requestedPath
                 val visibleEntries = if (filterText.isBlank()) newEntries
@@ -245,7 +244,7 @@ fun FileListScreen(
                     currentOnCapabilitiesChange(loadedCapabilities)
                     entries = emptyList()
                     currentOnEntriesChange(requestedPath, requestedRefreshToken, emptyList())
-                    onInfoChange(DirectoryInfo())
+                    onInfoChange(DirectoryStats())
                     error = e
                 }
             } finally {

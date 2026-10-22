@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 
-use crate::api::Api;
-use crate::hub::{Hub, Target};
+use crate::hub::{display_target, Hub, Target};
+use crate::mcp::McpManager;
 use crate::model::{AgentEvent, Message};
 use crate::tool;
 
@@ -28,28 +28,80 @@ impl Failure {
 }
 
 pub async fn run(
-    api: Api,
     model: String,
     effort: String,
     hub: Arc<Mutex<Hub>>,
     messages: Vec<Message>,
     events: UnboundedSender<AgentEvent>,
+    active_exec: tool::ActiveExec,
+    session_id: String,
 ) -> Result<Outcome, Failure> {
     let context = hub.lock().await.caller.clone();
     let targets = hub.lock().await.targets().await.unwrap_or_default();
     let system = system_prompt(&context, &targets);
-    let tools = tool::definitions();
+    let cwd = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "/".to_owned());
+    let session_hub =
+        Arc::new(Mutex::new(Hub::connect().await.map_err(|error| {
+            Failure::new(format!("hub: {error}"), &messages)
+        })?));
+    let capabilities = session_hub
+        .lock()
+        .await
+        .capabilities(&cwd)
+        .await
+        .unwrap_or_default();
+    let mcp = Arc::new(McpManager::connect(&capabilities, Arc::clone(&session_hub), &cwd).await);
+    let tools = tool::definitions_with_mcp(Some(&mcp));
     let mut history = messages;
+    let mut pending_start = history.len().saturating_sub(1);
+    let mut append = !history.is_empty();
+    let mut base_count = pending_start as u32;
 
     loop {
         let _ = events.send(AgentEvent::StepStart);
-        let mut wire = Vec::with_capacity(history.len() + 1);
-        wire.push(Message::system(system.clone()));
-        wire.extend(history.iter().cloned());
-        let assistant = api
-            .chat(&model, &effort, &wire, &tools, &events)
+        let (delta, use_append, count) = if append {
+            (&history[pending_start..], true, base_count)
+        } else {
+            (&history[..], false, 0)
+        };
+        let attempt = session_hub
+            .lock()
             .await
-            .map_err(|error| Failure::new(error, &history))?;
+            .chat(
+                &session_id,
+                &model,
+                &effort,
+                &system,
+                delta,
+                &tools,
+                &events,
+                use_append,
+                count,
+            )
+            .await;
+        let assistant = match attempt {
+            Ok(assistant) => assistant,
+            Err(error) if error.contains("history mismatch") => session_hub
+                .lock()
+                .await
+                .chat(
+                    &session_id,
+                    &model,
+                    &effort,
+                    &system,
+                    &history,
+                    &tools,
+                    &events,
+                    false,
+                    0,
+                )
+                .await
+                .map_err(|error| Failure::new(error, &history))?,
+            Err(error) => return Err(Failure::new(error, &history)),
+        };
+        append = true;
 
         if assistant.has_tools() {
             let calls = assistant.tool_calls.clone().unwrap_or_default();
@@ -57,16 +109,26 @@ pub async fn run(
                 assistant.content.clone(),
                 calls.clone(),
             ));
+            pending_start = history.len();
+            base_count = pending_start as u32;
             for call in calls {
-                let info = tool::info(&call.function.name, &call.function.arguments);
+                let info =
+                    tool::info_with_mcp(Some(&mcp), &call.function.name, &call.function.arguments);
                 let _ = events.send(AgentEvent::ToolCall {
                     name: call.function.name.clone(),
                     detail: info.detail,
                     description: info.description,
                     command: info.command,
                 });
-                let result =
-                    tool::execute(&call, Arc::clone(&hub), &context, Some(events.clone())).await;
+                let result = tool::execute(
+                    &call,
+                    Arc::clone(&hub),
+                    Some(Arc::clone(&mcp)),
+                    &context,
+                    Some(events.clone()),
+                    &active_exec,
+                )
+                .await;
                 let _ = events.send(AgentEvent::ToolResult { ok: result.ok });
                 history.push(Message::tool(call.id.clone(), result.content));
             }
@@ -91,10 +153,7 @@ pub async fn run(
 fn system_prompt(context: &str, targets: &[Target]) -> String {
     let names = targets
         .iter()
-        .map(|target| {
-            let state = if target.running { "running" } else { "stopped" };
-            format!("{} ({state})", target.name)
-        })
+        .map(format_target)
         .collect::<Vec<_>>()
         .join(", ");
     let path = std::env::current_dir()
@@ -102,22 +161,33 @@ fn system_prompt(context: &str, targets: &[Target]) -> String {
         .unwrap_or_else(|_| "unknown".to_owned());
     let distribution = distribution();
     format!(
-        "You are the file-manager agent. You can inspect and change files in the current container or in another container through tools.\n\n\
-         Current container: {context}\n\
+        "You are the file-manager agent.\n\n\
+         Current target: {}\n\
          Current path: {path}\n\
          Distribution: {distribution}\n\
          Known targets: {names}\n\n\
-         Tools:\n\
-         - read: read a file (path, optional offset and length)\n\
-         - write: create or overwrite a file (path, content)\n\
-         - glob: find paths matching a glob under an absolute directory\n\
-         - exec: run a shell command and return exit code, stdout and stderr\n\
-         - list_containers: list all targets and whether they are running\n\n\
-         Every tool takes an optional container_id (host, app, or container-<name>). \
-         When it is omitted the tool uses the current container. Paths are absolute \
-         inside the selected target. Use list_containers when you need another target. \
-         Prefer reading a file before rewriting it, and keep answers concise."
+         File paths are absolute inside the current target, or canonical VFS URIs \
+         (file:///..., container://name/..., ftp://..., sftp://..., saf://...) for \
+         another location. copy takes a from/to pair. Use list_targets to discover \
+         location roots. Read a file before rewriting it. Keep answers concise.",
+        display_target(context),
     )
+}
+
+fn format_target(target: &Target) -> String {
+    let root = if target.root.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", target.root)
+    };
+    if target.kind == "exec" {
+        let state = if target.running { "running" } else { "stopped" };
+        format!("{} ({state}, exec){root}", display_target(&target.label))
+    } else if target.root.is_empty() {
+        format!("{} ({}, files)", target.label, target.kind)
+    } else {
+        format!("{} ({}, files) {}", target.label, target.kind, target.root)
+    }
 }
 
 fn distribution() -> String {
@@ -135,23 +205,27 @@ fn distribution() -> String {
 }
 
 pub async fn compact(
-    api: Api,
     model: String,
     effort: String,
     messages: Vec<Message>,
 ) -> Result<Outcome, String> {
     let transcript = transcript_text(&messages);
-    let wire = vec![
-        Message::system(
+    let mut hub = Hub::connect().await.map_err(|error| error.to_string())?;
+    let (sink, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let assistant = hub
+        .chat(
+            "",
+            &model,
+            &effort,
             "Compress the conversation below into a concise handoff summary. Keep decisions, \
              constraints, file paths, code changes, tool results and open questions. Reply with \
              only the summary.",
-        ),
-        Message::user(transcript),
-    ];
-    let (sink, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let assistant = api
-        .chat(&model, &effort, &wire, &serde_json::json!([]), &sink)
+            &[Message::user(transcript)],
+            &serde_json::json!([]),
+            &sink,
+            false,
+            0,
+        )
         .await?;
     let summary = assistant.content_text().trim().to_owned();
     if summary.is_empty() {

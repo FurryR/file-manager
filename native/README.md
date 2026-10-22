@@ -76,11 +76,15 @@ and are rejected on drop.
 
 ## agent
 
-Set the API base URL (for example `https://api.openai.com/v1`), API key, and model
-in the app's AI settings, then run `agent` from an app terminal. The command reads
-configuration from `HUB_SOCKET`; it does not save credentials or conversations.
-An empty API key is supported for local providers. The base URL may also be a
-complete `/chat/completions` endpoint. HTTP redirects are disabled.
+Set providers, models, and MCP servers in the app's AI settings, then run `agent`
+from an app terminal. The agent uses the hub for Chat Completions, model catalogs,
+session history and online MCP transport; provider credentials never enter the
+agent process. Conversation history is stored by the app and resumed per terminal
+session.
+
+Online MCP servers are configured with a URL (and optional headers) and reached
+through the hub HTTP proxy. Local stdio MCP servers are configured with a command
+and are spawned by the agent, so their lifetime follows the agent session.
 
 The interface uses the terminal's alternative screen and restores its original
 mode on exit, cancellation, ordinary errors and handled termination signals.
@@ -89,15 +93,17 @@ handles input without a background input thread. DNS uses the system resolver
 through Tokio's blocking pool so Android's active network and VPN DNS work without
 `/etc/resolv.conf` or a hard-coded public DNS service. Chinese input,
 grapheme-aware backspace, pasted multiline messages, and Unicode display widths
-are supported. Responses appear when the request completes.
+are supported. Responses stream as they arrive.
 
 - Enter sends a message. While waiting, a new message can be prepared.
 - Ctrl+C cancels an outstanding request; otherwise it exits. Ctrl+Q/Ctrl+D exit.
 - Backspace deletes the last grapheme; Ctrl+U clears input.
 - PageUp/PageDown or Ctrl+P/Ctrl+N scroll conversation history.
-- `/clear` clears the conversation; `/help` shows controls; `/exit` exits.
+- `/clear` clears the conversation; `/undo` reverts the last change and puts the prompt back in the input; `/redo` restores it; `/sessions` switches conversations; `/help` shows controls; `/exit` exits.
+- Conversation history and titles are managed in the app settings; the agent resumes the active session for its terminal.
 
 Conversation context includes successful exchanges. Failed/cancelled prompts are
 restored for editing when the input field is empty. API errors show a status or
 generic explanation rather than provider response bodies, URLs or credentials.
-The UI performs no tool execution and writes no conversation files.
+Conversation files are written by the app; MCP stdio processes are owned by the
+agent and stop when it exits.

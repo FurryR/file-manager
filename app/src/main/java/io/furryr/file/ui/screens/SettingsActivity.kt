@@ -32,7 +32,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -40,7 +39,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -60,7 +58,7 @@ import androidx.compose.ui.unit.dp
 import io.furryr.file.R
 import io.furryr.file.AppLocale
 import io.furryr.file.agent.SessionManager
-import io.furryr.file.core.DaemonManager
+import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.ui.theme.FileManagerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -215,156 +213,53 @@ private fun SettingsMainPage(
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
         ) {
-            // Section: Startup
-            Text(
-                text = stringResource(R.string.startup),
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+            SettingsSection(stringResource(R.string.startup))
+            SettingsToggleRow(
+                title = stringResource(R.string.root_enabled),
+                description = stringResource(R.string.root_enabled_desc),
+                checked = rootEnabled,
+                enabled = !applyingPermissions,
+                onCheckedChange = ::updateRootEnabled,
             )
-
-            // Root permission toggle
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(enabled = !applyingPermissions) { updateRootEnabled(!rootEnabled) }
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.root_enabled),
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Text(
-                        text = stringResource(R.string.root_enabled_desc),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = rootEnabled,
-                    enabled = !applyingPermissions,
-                    onCheckedChange = ::updateRootEnabled
-                )
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-
-            // Shell permission toggle
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(enabled = !applyingPermissions) { updateShellEnabled(!shellEnabled) }
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.shell_enabled),
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Text(
-                        text = stringResource(R.string.shell_enabled_desc),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = shellEnabled,
-                    enabled = !applyingPermissions,
-                    onCheckedChange = ::updateShellEnabled
-                )
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-
-            // Custom su command
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(enabled = !applyingPermissions) { showCustomSuDialog = true }
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.custom_su),
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Text(
-                        text = if (suPath.isNotBlank()) suPath
-                            else stringResource(R.string.custom_su_desc),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-
-            // Section: Container
-            Text(
-                text = stringResource(R.string.settings_container),
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+            SettingsDivider()
+            SettingsToggleRow(
+                title = stringResource(R.string.shell_enabled),
+                description = stringResource(R.string.shell_enabled_desc),
+                checked = shellEnabled,
+                enabled = !applyingPermissions,
+                onCheckedChange = ::updateShellEnabled,
             )
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { showDockerHubUrlDialog = true }
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.settings_docker_hub_url),
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Text(
-                        text = dockerHubUrl.ifBlank { stringResource(R.string.settings_docker_hub_url_desc) },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { showDockerHubKeyDialog = true }
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.settings_docker_hub_key),
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Text(
-                        text = if (dockerHubKey.isNotBlank()) "••••••••" else stringResource(R.string.settings_docker_hub_key_desc),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-
-            // Section: Terminal
-            Text(
-                text = stringResource(R.string.settings_terminal),
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+            SettingsDivider()
+            SettingsValueRow(
+                title = stringResource(R.string.custom_su),
+                value = if (suPath.isNotBlank()) suPath
+                else stringResource(R.string.custom_su_desc),
+                enabled = !applyingPermissions,
+                onClick = { showCustomSuDialog = true },
             )
+            SettingsDivider()
 
+            SettingsSection(stringResource(R.string.settings_container))
+            SettingsValueRow(
+                title = stringResource(R.string.settings_docker_hub_url),
+                value = dockerHubUrl.ifBlank { stringResource(R.string.settings_docker_hub_url_desc) },
+                onClick = { showDockerHubUrlDialog = true },
+            )
+            SettingsDivider()
+            SettingsValueRow(
+                title = stringResource(R.string.settings_docker_hub_key),
+                value = if (dockerHubKey.isNotBlank()) "••••••••"
+                else stringResource(R.string.settings_docker_hub_key_desc),
+                onClick = { showDockerHubKeyDialog = true },
+            )
+            SettingsDivider()
+            SettingsSection(stringResource(R.string.settings_terminal))
             AgentSettingsItem()
-            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+            SettingsDivider()
+            McpSettingsItem()
+            SettingsDivider()
+            SessionSettingsItem()
+            SettingsDivider()
 
             val fontPickerLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.OpenDocument()
@@ -387,112 +282,52 @@ private fun SettingsMainPage(
                     }
                 }
             }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { fontPickerLauncher.launch(arrayOf("font/ttf", "font/otf", "font/x-ttf", "application/x-font-ttf", "application/x-font-opentype")) }
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.settings_terminal_font),
-                        style = MaterialTheme.typography.bodyLarge
+            SettingsValueRow(
+                title = stringResource(R.string.settings_terminal_font),
+                value = terminalFont.ifBlank { stringResource(R.string.settings_terminal_font_desc) },
+                onClick = {
+                    fontPickerLauncher.launch(
+                        arrayOf(
+                            "font/ttf",
+                            "font/otf",
+                            "font/x-ttf",
+                            "application/x-font-ttf",
+                            "application/x-font-opentype",
+                        ),
                     )
-                    Text(
-                        text = terminalFont.ifBlank { stringResource(R.string.settings_terminal_font_desc) },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { showTerminalFontSizeDialog = true }
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.settings_terminal_font_size),
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Text(
-                        text = terminalFontSize,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-
-            Text(
-                text = stringResource(R.string.settings_other),
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                },
             )
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { showAboutDialog = true }
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(stringResource(R.string.about), style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        stringResource(R.string.about_desc),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onLicenses)
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-            ) {
-                Text(stringResource(R.string.open_source_licenses), style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    stringResource(R.string.open_source_licenses_desc),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { showLanguageDialog = true }
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-            ) {
-                Column {
-                    Text(stringResource(R.string.language), style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        stringResource(when (AppLocale.current(context)) {
-                            AppLocale.ENGLISH -> R.string.language_english
-                            AppLocale.CHINESE -> R.string.language_chinese
-                            else -> R.string.language_system
-                        }),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
+            SettingsDivider()
+            SettingsValueRow(
+                title = stringResource(R.string.settings_terminal_font_size),
+                value = terminalFontSize,
+                onClick = { showTerminalFontSizeDialog = true },
+            )
+            SettingsDivider()
+            SettingsSection(stringResource(R.string.settings_other))
+            SettingsValueRow(
+                title = stringResource(R.string.about),
+                value = stringResource(R.string.about_desc),
+                onClick = { showAboutDialog = true },
+            )
+            SettingsDivider()
+            SettingsValueRow(
+                title = stringResource(R.string.open_source_licenses),
+                value = stringResource(R.string.open_source_licenses_desc),
+                onClick = onLicenses,
+            )
+            SettingsDivider()
+            SettingsValueRow(
+                title = stringResource(R.string.language),
+                value = stringResource(
+                    when (AppLocale.current(context)) {
+                        AppLocale.ENGLISH -> R.string.language_english
+                        AppLocale.CHINESE -> R.string.language_chinese
+                        else -> R.string.language_system
+                    },
+                ),
+                onClick = { showLanguageDialog = true },
+            )
         }
     }
 
@@ -559,145 +394,66 @@ private fun SettingsMainPage(
         )
     }
 
-    // Custom su dialog
     if (showCustomSuDialog) {
-        var dialogSuPath by remember { mutableStateOf(suPath) }
-        AlertDialog(
-            onDismissRequest = { showCustomSuDialog = false },
-            title = { Text(stringResource(R.string.custom_su_dialog_title)) },
-            text = {
-                OutlinedTextField(
-                    value = dialogSuPath,
-                    onValueChange = { dialogSuPath = it },
-                    label = { Text(stringResource(R.string.su_path)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            },
-            dismissButton = {
-                TextButton(onClick = { showCustomSuDialog = false }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showCustomSuDialog = false
-                        if (dialogSuPath != suPath) {
-                            requestPermissionChange {
-                                suPath = dialogSuPath
-                                prefs.edit().putString("su_path", dialogSuPath).apply()
-                                DaemonManager.setSuPath(dialogSuPath)
-                            }
-                        }
+        SettingsInputDialog(
+            title = stringResource(R.string.custom_su_dialog_title),
+            label = stringResource(R.string.su_path),
+            initialValue = suPath,
+            onDismiss = { showCustomSuDialog = false },
+            onConfirm = { path ->
+                showCustomSuDialog = false
+                if (path != suPath) {
+                    requestPermissionChange {
+                        suPath = path
+                        prefs.edit().putString("su_path", path).apply()
+                        DaemonManager.setSuPath(path)
                     }
-                ) {
-                    Text(stringResource(R.string.confirm))
                 }
-            }
+            },
         )
     }
 
-    // Docker Hub address dialog
     if (showDockerHubUrlDialog) {
-        var dialogUrl by remember { mutableStateOf(dockerHubUrl) }
-        AlertDialog(
-            onDismissRequest = { showDockerHubUrlDialog = false },
-            title = { Text(stringResource(R.string.settings_docker_hub_url)) },
-            text = {
-                OutlinedTextField(
-                    value = dialogUrl,
-                    onValueChange = { dialogUrl = it },
-                    label = { Text(stringResource(R.string.settings_docker_hub_url_desc)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+        SettingsInputDialog(
+            title = stringResource(R.string.settings_docker_hub_url),
+            label = stringResource(R.string.settings_docker_hub_url_desc),
+            initialValue = dockerHubUrl,
+            onDismiss = { showDockerHubUrlDialog = false },
+            onConfirm = { url ->
+                dockerHubUrl = url
+                prefs.edit().putString("docker_hub_url", url).apply()
+                showDockerHubUrlDialog = false
             },
-            dismissButton = {
-                TextButton(onClick = { showDockerHubUrlDialog = false }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        dockerHubUrl = dialogUrl
-                        prefs.edit().putString("docker_hub_url", dialogUrl).apply()
-                        showDockerHubUrlDialog = false
-                    }
-                ) {
-                    Text(stringResource(R.string.confirm))
-                }
-            }
         )
     }
 
-    // Docker Hub key dialog
     if (showDockerHubKeyDialog) {
-        var dialogKey by remember { mutableStateOf(dockerHubKey) }
-        AlertDialog(
-            onDismissRequest = { showDockerHubKeyDialog = false },
-            title = { Text(stringResource(R.string.settings_docker_hub_key)) },
-            text = {
-                OutlinedTextField(
-                    value = dialogKey,
-                    onValueChange = { dialogKey = it },
-                    label = { Text(stringResource(R.string.settings_docker_hub_key_desc)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+        SettingsInputDialog(
+            title = stringResource(R.string.settings_docker_hub_key),
+            label = stringResource(R.string.settings_docker_hub_key_desc),
+            initialValue = dockerHubKey,
+            onDismiss = { showDockerHubKeyDialog = false },
+            onConfirm = { key ->
+                dockerHubKey = key
+                prefs.edit().putString("docker_hub_key", key).apply()
+                showDockerHubKeyDialog = false
             },
-            dismissButton = {
-                TextButton(onClick = { showDockerHubKeyDialog = false }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        dockerHubKey = dialogKey
-                        prefs.edit().putString("docker_hub_key", dialogKey).apply()
-                        showDockerHubKeyDialog = false
-                    }
-                ) {
-                    Text(stringResource(R.string.confirm))
-                }
-            }
         )
     }
 
-    // Terminal font size dialog
     if (showTerminalFontSizeDialog) {
-        var dialogSize by remember { mutableStateOf(terminalFontSize) }
-        AlertDialog(
-            onDismissRequest = { showTerminalFontSizeDialog = false },
-            title = { Text(stringResource(R.string.settings_terminal_font_size)) },
-            text = {
-                OutlinedTextField(
-                    value = dialogSize,
-                    onValueChange = { dialogSize = it.filter { c -> c.isDigit() } },
-                    label = { Text(stringResource(R.string.settings_terminal_font_size_desc)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+        SettingsInputDialog(
+            title = stringResource(R.string.settings_terminal_font_size),
+            label = stringResource(R.string.settings_terminal_font_size_desc),
+            initialValue = terminalFontSize,
+            filter = { value -> value.filter { it.isDigit() } },
+            onDismiss = { showTerminalFontSizeDialog = false },
+            onConfirm = { value ->
+                val size = value.toIntOrNull()?.coerceIn(8, 128) ?: 9
+                terminalFontSize = size.toString()
+                prefs.edit().putInt("terminal_font_size", size).apply()
+                showTerminalFontSizeDialog = false
             },
-            dismissButton = {
-                TextButton(onClick = { showTerminalFontSizeDialog = false }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val size = dialogSize.toIntOrNull()?.coerceIn(8, 128) ?: 9
-                        terminalFontSize = size.toString()
-                        prefs.edit().putInt("terminal_font_size", size).apply()
-                        showTerminalFontSizeDialog = false
-                    }
-                ) {
-                    Text(stringResource(R.string.confirm))
-                }
-            }
         )
     }
 }

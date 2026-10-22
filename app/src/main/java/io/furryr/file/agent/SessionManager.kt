@@ -5,9 +5,11 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.util.Log
 import io.furryr.file.RuntimeForegroundService
+import io.furryr.file.container.ContainerManager
+import io.furryr.file.container.ContainerUriResolver
 import io.furryr.file.virgl.VirglManager
-import io.furryr.file.core.DaemonManager
-import io.furryr.file.core.hub.Hub
+import io.furryr.file.daemon.DaemonManager
+import io.furryr.file.hub.Hub
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import kotlinx.coroutines.Dispatchers

@@ -14,7 +14,7 @@ import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import io.furryr.file.agent.SessionManager
-import io.furryr.file.core.DaemonManager
+import io.furryr.file.daemon.DaemonManager
 
 /**
  * Foreground service shown while any long-running runtime exists: terminal

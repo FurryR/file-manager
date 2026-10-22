@@ -12,7 +12,7 @@ import android.net.Uri
 import androidx.core.content.FileProvider
 import io.furryr.file.ProviderAuthority
 import io.furryr.file.core.model.FileEntry
-import io.furryr.file.provider.ForwardFileProvider
+import io.furryr.file.forward.ForwardFileProvider
 import io.furryr.file.util.PrimaryStorage
 import java.io.File
 

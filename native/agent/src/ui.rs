@@ -81,7 +81,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, state: &mut UiState) {
 fn draw_header(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let line = Line::from(vec![
         Span::styled("◆ ", theme::brand()),
-        Span::styled("agent", theme::brand()),
+        Span::styled(one_line(app.title()), theme::brand()),
         Span::styled("  ·  ", theme::muted()),
         Span::styled(one_line(app.context()), theme::muted()),
     ]);

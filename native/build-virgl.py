@@ -231,7 +231,7 @@ def main():
         if f" {symbol}\n" not in symbols:
             raise RuntimeError(f"Missing exported symbol: {symbol}")
 
-    output = root / "app/src/main/jniLibs/arm64-v8a/libvirglhost.so"
+    output = root / "virgl/src/main/jniLibs/arm64-v8a/libvirglhost.so"
     output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(binary, output)
     notices = root / "app/src/main/assets/native-licenses"

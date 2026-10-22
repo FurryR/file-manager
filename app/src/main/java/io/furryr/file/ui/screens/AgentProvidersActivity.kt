@@ -9,7 +9,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -30,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -44,7 +48,12 @@ import androidx.compose.ui.unit.dp
 import io.furryr.file.AppLocale
 import io.furryr.file.R
 import io.furryr.file.agent.AgentSettings
+import io.furryr.file.hub.HubAi
 import io.furryr.file.ui.theme.FileManagerTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 
 class AgentProvidersActivity : ComponentActivity() {
     override fun attachBaseContext(newBase: Context) {
@@ -72,10 +81,37 @@ private fun ProvidersPage(onBack: () -> Unit) {
     var active by remember { mutableStateOf(AgentSettings.activeProvider(context)?.id) }
     var editing by remember { mutableStateOf<AgentSettings.Provider?>(null) }
     var adding by remember { mutableStateOf(false) }
+    var titleModel by remember { mutableStateOf(AgentSettings.titleModel(context)) }
+    var titleModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var titleLoading by remember { mutableStateOf(false) }
+    var titleError by remember { mutableStateOf<String?>(null) }
+    var choosingTitleModel by remember { mutableStateOf(false) }
 
     fun reload() {
         providers = AgentSettings.providers(context)
         active = AgentSettings.activeProvider(context)?.id
+    }
+
+    LaunchedEffect(active, providers) {
+        if (active == null) {
+            titleModels = emptyList()
+            titleError = null
+            titleLoading = false
+            return@LaunchedEffect
+        }
+        titleLoading = true
+        titleError = null
+        val result = withContext(Dispatchers.IO) {
+            runCatching {
+                val array = JSONObject(HubAi.catalogJson()).optJSONArray("models") ?: JSONArray()
+                (0 until array.length())
+                    .mapNotNull { array.optString(it).takeIf(String::isNotBlank) }
+            }
+        }
+        result
+            .onSuccess { titleModels = it }
+            .onFailure { titleError = it.message ?: it.javaClass.simpleName }
+        titleLoading = false
     }
 
     Scaffold(
@@ -149,6 +185,30 @@ private fun ProvidersPage(onBack: () -> Unit) {
                 }
                 HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
             }
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { choosingTitleModel = true }
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        stringResource(R.string.agent_title_model),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    Text(
+                        if (titleModel.isBlank()) {
+                            stringResource(R.string.agent_title_model_follow)
+                        } else {
+                            titleModel
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         }
     }
 
@@ -168,6 +228,98 @@ private fun ProvidersPage(onBack: () -> Unit) {
             },
         )
     }
+    if (choosingTitleModel) {
+        TitleModelDialog(
+            models = titleModels,
+            loading = titleLoading,
+            error = titleError,
+            selected = titleModel,
+            onSelect = { model ->
+                AgentSettings.setTitleModel(context, model)
+                titleModel = model
+                choosingTitleModel = false
+            },
+            onDismiss = { choosingTitleModel = false },
+        )
+    }
+}
+
+@Composable
+private fun TitleModelDialog(
+    models: List<String>,
+    loading: Boolean,
+    error: String?,
+    selected: String,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.agent_title_model)) },
+        text = {
+            Column {
+                Text(
+                    stringResource(R.string.agent_title_model_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect("") }
+                        .padding(top = 8.dp),
+                ) {
+                    RadioButton(selected = selected.isBlank(), onClick = { onSelect("") })
+                    Text(
+                        stringResource(R.string.agent_title_model_follow),
+                        modifier = Modifier.padding(start = 4.dp),
+                    )
+                }
+                when {
+                    loading -> Text(
+                        stringResource(R.string.agent_title_model_loading),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    error != null -> Text(
+                        stringResource(R.string.agent_title_model_empty),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    models.isEmpty() -> Text(
+                        stringResource(R.string.agent_title_model_empty),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    else -> LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
+                        items(models) { model ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onSelect(model) },
+                            ) {
+                                RadioButton(
+                                    selected = selected == model,
+                                    onClick = { onSelect(model) },
+                                )
+                                Text(
+                                    model,
+                                    modifier = Modifier.padding(start = 4.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+        },
+    )
 }
 
 @Composable

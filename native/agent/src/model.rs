@@ -33,10 +33,6 @@ fn function_type() -> String {
 }
 
 impl Message {
-    pub fn system(content: impl Into<String>) -> Self {
-        Self::new("system", content)
-    }
-
     pub fn user(content: impl Into<String>) -> Self {
         Self::new("user", content)
     }
@@ -103,6 +99,11 @@ pub enum AgentEvent {
         description: Option<String>,
         command: Option<String>,
     },
+    ToolWrite {
+        path: String,
+        content: String,
+        diff: Option<String>,
+    },
     ToolOutput(Vec<u8>),
     ToolResult {
         ok: bool,
@@ -130,6 +131,14 @@ pub struct ToolBlock {
 }
 
 #[derive(Clone)]
+pub struct WriteBlock {
+    pub path: String,
+    pub content: String,
+    pub diff: Option<String>,
+    pub failed: bool,
+}
+
+#[derive(Clone)]
 pub struct Entry {
     pub role: Role,
     pub content: String,
@@ -137,6 +146,7 @@ pub struct Entry {
     pub duration: Option<Duration>,
     pub started: Option<std::time::Instant>,
     pub tool: Option<ToolBlock>,
+    pub write: Option<WriteBlock>,
 }
 
 impl Entry {
@@ -148,6 +158,7 @@ impl Entry {
             duration: None,
             started: None,
             tool: None,
+            write: None,
         }
     }
 

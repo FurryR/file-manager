@@ -28,6 +28,22 @@ message HubRequest {
     GlobRequest glob = 14;
     SetAiSelectionRequest set_ai_selection = 15;
     WaitExecRequest wait_exec = 16;
+    CloseExecRequest close_exec = 17;
+    ListDirectoryRequest list_directory = 18;
+    CopyFileRequest copy_file = 19;
+    ChatRequest chat = 20;
+    CancelChatRequest cancel_chat = 21;
+    GetHistoryRequest get_history = 22;
+    SetHistoryRequest set_history = 23;
+    GetModelsRequest get_models = 24;
+    GetCapabilitiesRequest get_capabilities = 25;
+    McpHttpRequest mcp_http = 26;
+    CancelMcpHttpRequest cancel_mcp_http = 27;
+    ListSessionsRequest list_sessions = 28;
+    GetActiveSessionRequest get_active_session = 29;
+    SetActiveSessionRequest set_active_session = 30;
+    DeleteSessionRequest delete_session = 31;
+    SubscribeSessionEventsRequest subscribe_session_events = 32;
   }
 }
 
@@ -44,6 +60,16 @@ message HubResponse {
     ReadFileResponse read_file = 9;
     WriteFileResponse write_file = 10;
     GlobResponse glob = 11;
+    ListDirectoryResponse list_directory = 12;
+    CopyFileResponse copy_file = 13;
+    ChatEvent chat = 14;
+    HistoryResponse history = 15;
+    ModelsResponse models = 16;
+    CapabilitiesResponse capabilities = 17;
+    McpHttpEvent mcp_http = 18;
+    SessionsResponse sessions = 19;
+    ActiveSessionResponse active_session = 20;
+    SessionTitle session_title = 21;
   }
 }
 
@@ -69,13 +95,22 @@ message ListTargetsResponse {
 }
 
 message Target {
-  // `host`, `app`, or `container-<name>`.
+  // Execution target id (`host`, `app`, `container-<name>`) or the canonical
+  // root URI of a file location (`ftp://host`, `saf://id`, ...).
   string name = 1;
   bool elevated = 2;
-  // Whether a daemon for this target is currently alive. Every container known
-  // to the app is listed, so stopped containers appear here too and are started
-  // on first use.
+  // Whether an execution target has a live daemon. File locations are always
+  // available.
   bool running = 3;
+  // `exec`, `ftp`, `sftp`, `saf`, `alist`, `ssh`, ...
+  string kind = 4;
+  // User-facing label. For execution targets this is the target name without
+  // the internal `container-` prefix.
+  string label = 5;
+  // Canonical VFS root for file operations: `file:///` for host,
+  // `container://<name>` for a container, or a location root URI. Empty when
+  // the target has no VFS provider (app).
+  string root = 6;
 }
 
 // ── Command execution ─────────────────────────────────────────────
@@ -120,16 +155,23 @@ message WaitExecRequest {
   uint64 exec_id = 1;
 }
 
+// Cancel a pipe-mode exec and terminate its process group.
+message CloseExecRequest {
+  // The exec_id returned by a pipe-mode ExecResponse.
+  uint64 exec_id = 1;
+}
+
 // ── Agent file tools ──────────────────────────────────────────────
 
 message ReadFileRequest {
+  // Absolute path in the authenticated caller target, or a canonical VFS URI
+  // such as `container://name/path`, `saf://id/path` or `ftp://host/path`.
   string path = 1;
   // Byte offset; defaults to the start of the file.
   uint64 offset = 2;
   // Maximum bytes to return; the hub applies its own upper bound.
   uint32 length = 3;
-  // `host` (default when empty), `app`, or `container-<name>`.
-  string container_id = 4;
+  reserved 4;
 }
 
 message ReadFileResponse {
@@ -139,11 +181,30 @@ message ReadFileResponse {
   bool eof = 3;
 }
 
+message ListDirectoryRequest {
+  // Absolute path in the authenticated caller target, or a canonical VFS URI.
+  string path = 1;
+  reserved 2;
+}
+
+message ListDirectoryEntry {
+  string name = 1;
+  string path = 2;
+  bool directory = 3;
+  uint64 size = 4;
+  bool symlink = 5;
+}
+
+message ListDirectoryResponse {
+  repeated ListDirectoryEntry entries = 1;
+  bool truncated = 2;
+}
+
 message WriteFileRequest {
+  // Absolute path in the authenticated caller target, or a canonical VFS URI.
   string path = 1;
   bytes data = 2;
-  // `host` (default when empty), `app`, or `container-<name>`.
-  string container_id = 3;
+  reserved 3;
 }
 
 message WriteFileResponse {
@@ -157,13 +218,179 @@ message GlobRequest {
   string path = 2;
   // Best-effort result cap; the hub applies its own upper bound. 0 = default.
   uint32 max_results = 3;
-  // `host` (default when empty), `app`, or `container-<name>`.
-  string container_id = 4;
+  reserved 4;
 }
 
 message GlobResponse {
   repeated string paths = 1;
   bool truncated = 2;
+}
+
+message CopyFileRequest {
+  // Absolute path in the authenticated caller target, or a canonical VFS URI.
+  string from = 1;
+  // Exact destination path. Its parent directory must already exist. This may
+  // also be a canonical VFS URI, including a network location.
+  string to = 2;
+}
+
+message CopyFileResponse {
+  // Total bytes written by the copy; zero for an empty directory tree.
+  uint64 bytes_copied = 1;
+}
+
+// ── AI chat, sessions and capabilities ────────────────────────────
+
+message ChatRequest {
+  string session_id = 1;
+  string model = 2;
+  string effort = 3;
+  string system = 4;
+  // JSON array of {role, content, tool_calls, tool_call_id}.
+  string messages_json = 5;
+  // JSON array of OpenAI-style tool definitions; empty when tools are off.
+  string tools_json = 6;
+  // When append is true, messages_json is only the new tail and the hub loads
+  // the stored session history, verifying it currently has base_count entries.
+  bool append = 7;
+  uint32 base_count = 8;
+}
+
+// A Chat response is streamed as several HubResponse frames sharing the request
+// id. The last frame sets done, or carries an error and done.
+message ChatEvent {
+  oneof event {
+    string reasoning_delta = 1;
+    string content_delta = 2;
+    // JSON array of complete tool calls, emitted once the provider finishes.
+    string tool_calls_json = 3;
+    TokenUsage usage = 4;
+    bool done = 5;
+    string error = 6;
+    bool tool_calling = 7;
+  }
+}
+
+message TokenUsage {
+  uint64 prompt_tokens = 1;
+  uint64 completion_tokens = 2;
+}
+
+message CancelChatRequest {
+  // The request id of the Chat being cancelled.
+  uint32 chat_id = 1;
+}
+
+message GetHistoryRequest {
+  string session_id = 1;
+}
+
+message HistoryResponse {
+  // JSON array of messages, or empty when no history exists.
+  string messages_json = 1;
+  // Persisted display title, or empty when the session has none.
+  string title = 2;
+}
+
+message SetHistoryRequest {
+  string session_id = 1;
+  string messages_json = 2;
+}
+
+message GetModelsRequest {}
+
+message ModelsResponse {
+  // Normalized catalog JSON: {"models": [...], "info": {name: {...}}}.
+  string catalog_json = 1;
+}
+
+message GetCapabilitiesRequest {
+  // Caller cwd, used to discover workspace-local MCP configuration.
+  string cwd = 1;
+}
+
+message McpServerConfig {
+  string name = 1;
+  // Remote MCP endpoint (Streamable HTTP). Empty for a stdio server.
+  string url = 2;
+  map<string, string> headers = 3;
+  // Local stdio server; ignored when `url` is set.
+  string command = 4;
+  repeated string args = 5;
+  map<string, string> env = 6;
+  string cwd = 7;
+  bool enabled = 8;
+  // `global` or `workspace`.
+  string source = 9;
+  // `http` or `stdio`. Empty means infer from url/command.
+  string transport = 10;
+}
+
+message CapabilitiesResponse {
+  repeated McpServerConfig mcp_servers = 1;
+}
+
+// Proxy one HTTP request for a remote (online) MCP server. The hub resolves
+// `server` for the caller, uses its configured URL and injects configured
+// headers; it does not parse MCP. Responses stream as McpHttpEvent frames with
+// the request id.
+message McpHttpRequest {
+  string server = 1;
+  string cwd = 2;
+  string method = 3;
+  // Optional path appended to the configured server URL.
+  string path = 4;
+  map<string, string> headers = 5;
+  bytes body = 6;
+}
+
+message McpHttpEvent {
+  int32 status = 1;
+  map<string, string> headers = 2;
+  bytes data = 3;
+  bool done = 4;
+  string error = 5;
+}
+
+message CancelMcpHttpRequest {
+  uint32 request_id = 1;
+}
+
+message SessionInfo {
+  string id = 1;
+  string title = 2;
+  uint64 updated_at = 3;
+  uint32 message_count = 4;
+}
+
+message ListSessionsRequest {}
+
+message SessionsResponse {
+  repeated SessionInfo sessions = 1;
+}
+
+message GetActiveSessionRequest {}
+
+message ActiveSessionResponse {
+  string session_id = 1;
+}
+
+message SetActiveSessionRequest {
+  string session_id = 1;
+}
+
+message DeleteSessionRequest {
+  string session_id = 1;
+}
+
+// Server-pushed session changes. The response to the subscribe request is the
+// acknowledgement; subsequent HubResponse frames share that request id and
+// carry SessionTitle as they happen.
+message SubscribeSessionEventsRequest {}
+
+message SessionTitle {
+  string session_id = 1;
+  string title = 2;
 }
 
 // ── PTY control ───────────────────────────────────────────────────

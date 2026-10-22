@@ -39,3 +39,47 @@ internal fun AgentSettingsItem() {
         )
     }
 }
+
+@Composable
+internal fun SessionSettingsItem() {
+    val context = LocalContext.current
+    val count = runCatching { AgentSettings.sessions(context).size }.getOrDefault(0)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                context.startActivity(Intent(context, AgentSessionsActivity::class.java))
+            }
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+    ) {
+        Text(stringResource(R.string.agent_sessions), style = MaterialTheme.typography.bodyLarge)
+        Text(
+            if (count > 0) stringResource(R.string.agent_sessions_desc) + " ($count)"
+            else stringResource(R.string.agent_sessions_empty),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+internal fun McpSettingsItem() {
+    val context = LocalContext.current
+    val count = runCatching { AgentSettings.mcpServers(context).size }.getOrDefault(0)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                context.startActivity(Intent(context, AgentMcpActivity::class.java))
+            }
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+    ) {
+        Text(stringResource(R.string.agent_mcp), style = MaterialTheme.typography.bodyLarge)
+        Text(
+            if (count > 0) stringResource(R.string.agent_mcp_desc) + " ($count)"
+            else stringResource(R.string.agent_mcp_empty),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}

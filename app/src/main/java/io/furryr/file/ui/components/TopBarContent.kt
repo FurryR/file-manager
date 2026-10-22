@@ -22,13 +22,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import io.furryr.file.model.DirectoryInfo
+import io.furryr.file.core.DirectoryStats
 import io.furryr.file.ui.util.formatSize
 
 import androidx.compose.ui.text.style.TextOverflow
 
 @Composable
-fun TitleBlock(path: String, info: DirectoryInfo, onClick: () -> Unit) {
+fun TitleBlock(path: String, info: DirectoryStats, onClick: () -> Unit) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier.clickable(onClick = onClick)

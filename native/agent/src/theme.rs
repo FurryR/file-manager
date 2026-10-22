@@ -18,6 +18,7 @@ pub const POPUP_SELECTED_BG: Color = Color::Rgb(0x3a, 0x40, 0x47);
 pub const PROVIDER: Color = Color::Rgb(0xb4, 0xba, 0xc1);
 pub const EXEC_OUTPUT: Color = Color::Rgb(0x9a, 0xa0, 0xa6);
 pub const REASONING: Color = Color::Rgb(0xe0, 0xb0, 0x4f);
+pub const DIFF_ADD: Color = Color::Rgb(0x7e, 0xc8, 0x7e);
 
 pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -77,6 +78,10 @@ pub fn tool_active() -> Style {
     Style::new().fg(Color::White).add_modifier(Modifier::BOLD)
 }
 
+pub fn loading() -> Style {
+    Style::new().fg(Color::White)
+}
+
 pub fn reasoning() -> Style {
     Style::new().fg(REASONING).add_modifier(Modifier::BOLD)
 }
@@ -90,6 +95,14 @@ pub fn notice() -> Style {
 }
 
 pub fn error() -> Style {
+    Style::new().fg(ERROR)
+}
+
+pub fn diff_add() -> Style {
+    Style::new().fg(DIFF_ADD)
+}
+
+pub fn diff_del() -> Style {
     Style::new().fg(ERROR)
 }
 

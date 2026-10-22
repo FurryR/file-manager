@@ -24,10 +24,6 @@ impl Input {
         &self.text
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
-    }
-
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;

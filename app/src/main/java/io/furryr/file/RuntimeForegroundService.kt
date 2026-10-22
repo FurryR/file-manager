@@ -8,39 +8,45 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import io.furryr.file.agent.SessionManager
+import io.furryr.file.core.DaemonManager
 
 /**
- * Foreground service shown while at least one terminal session is active.
+ * Foreground service shown while any long-running runtime exists: terminal
+ * sessions or live container daemons.
  *
  * Keeps the process in the foreground while the app is backgrounded. Users can
  * opt into a [PowerManager.WakeLock] so commands keep running with the screen
  * off. The notification exposes two actions:
  *
  * - toggle the wake lock ("Hold WakeLock" / "Release WakeLock"; released by default),
- * - exit, which closes every terminal session and stops the service.
+ * - exit, which closes every terminal session and container daemon and stops
+ *   the service.
  *
  * Lifetime is owned by the service itself: [SessionManager] starts it when the
- * first session is created, and the service listens for session changes to
- * refresh the notification count and stop once the last session is gone.
+ * first session is created, a live container daemon starts it via the named
+ * daemon change listener, and the service listens for both kinds of changes to
+ * refresh the notification counts and stop once nothing is left running.
  */
-class TerminalForegroundService : Service() {
+class RuntimeForegroundService : Service() {
 
     companion object {
-        private const val CHANNEL_ID = "terminal_session"
+        private const val CHANNEL_ID = "runtime"
         private const val NOTIFICATION_ID = 1002
-        private const val WAKE_LOCK_TAG = "io.furryr.file:terminal"
+        private const val WAKE_LOCK_TAG = "io.furryr.file:runtime"
 
-        const val ACTION_START = "io.furryr.file.action.TERMINAL_START"
-        const val ACTION_EXIT = "io.furryr.file.action.TERMINAL_EXIT"
-        const val ACTION_TOGGLE_WAKE_LOCK = "io.furryr.file.action.TERMINAL_TOGGLE_WAKE_LOCK"
+        const val ACTION_START = "io.furryr.file.action.RUNTIME_START"
+        const val ACTION_EXIT = "io.furryr.file.action.RUNTIME_EXIT"
+        const val ACTION_TOGGLE_WAKE_LOCK = "io.furryr.file.action.RUNTIME_TOGGLE_WAKE_LOCK"
 
-        /** Show (or refresh) the terminal foreground notification. */
+        /** Show (or refresh) the runtime foreground notification. */
         fun start(context: Context) {
-            val intent = Intent(context, TerminalForegroundService::class.java)
+            val intent = Intent(context, RuntimeForegroundService::class.java)
                 .setAction(ACTION_START)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -51,28 +57,30 @@ class TerminalForegroundService : Service() {
 
         /** Hide the notification and stop the service. */
         fun stop(context: Context) {
-            context.stopService(Intent(context, TerminalForegroundService::class.java))
+            context.stopService(Intent(context, RuntimeForegroundService::class.java))
         }
     }
 
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var wakeLock: PowerManager.WakeLock? = null
     private var wakeLockHeld = false
     private var foregroundStarted = false
 
     /**
-     * Keeps the notification's terminal count in sync with [SessionManager] and
-     * tears the service down once the last session is gone. The service -- not
-     * the Compose UI -- owns session lifetime, so terminals survive the UI being
-     * destroyed while the process stays alive.
+     * Keeps the notification's counts in sync with [SessionManager] and the
+     * live named daemons, and tears the service down once nothing is running.
+     * The service -- not the Compose UI -- owns session lifetime, so terminals
+     * survive the UI being destroyed while the process stays alive.
      */
-    private val sessionChangeListener: () -> Unit = { refreshNotification() }
+    private val runtimeChangeListener: () -> Unit = { requestRefresh() }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        SessionManager.addSessionChangeListener(sessionChangeListener)
+        SessionManager.addSessionChangeListener(runtimeChangeListener)
+        DaemonManager.addNamedChangeListener(runtimeChangeListener)
         // Each new service starts without a wake lock. Notification refreshes
         // and additional sessions preserve the user's choice for this lifetime.
         setWakeLockHeld(false)
@@ -82,10 +90,11 @@ class TerminalForegroundService : Service() {
         when (intent?.action) {
             ACTION_EXIT -> {
                 SessionManager.destroyAll()
+                DaemonManager.closeNamedConnections()
                 stopSelf()
             }
             ACTION_TOGGLE_WAKE_LOCK -> {
-                if (SessionManager.getAllSessions().isEmpty()) {
+                if (!hasRunningWork()) {
                     stopSelf()
                 } else {
                     setWakeLockHeld(!wakeLockHeld)
@@ -97,23 +106,36 @@ class TerminalForegroundService : Service() {
                 // startForeground() within a few seconds of the service being
                 // started, even if the last session has already disappeared.
                 startForegroundCompat()
-                if (SessionManager.getAllSessions().isEmpty()) stopSelf()
+                if (!hasRunningWork()) stopSelf()
             }
         }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        SessionManager.removeSessionChangeListener(sessionChangeListener)
+        SessionManager.removeSessionChangeListener(runtimeChangeListener)
+        DaemonManager.removeNamedChangeListener(runtimeChangeListener)
         setWakeLockHeld(false)
         stopForegroundCompat()
         super.onDestroy()
     }
 
-    /** Republish the notification (or stop the service) after any session change. */
+    private fun hasRunningWork(): Boolean =
+        SessionManager.getAllSessions().isNotEmpty() || DaemonManager.connectedNamedCount() > 0
+
+    /** Republish the notification (or stop the service) after any runtime change. */
+    private fun requestRefresh() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            refreshNotification()
+        } else {
+            mainHandler.post { refreshNotification() }
+        }
+    }
+
     private fun refreshNotification() {
-        val count = SessionManager.getAllSessions().size
-        if (count == 0) {
+        val containerCount = DaemonManager.connectedNamedCount()
+        val terminalCount = SessionManager.getAllSessions().size
+        if (containerCount == 0 && terminalCount == 0) {
             // The system requires startForeground() shortly after the service is
             // started, so satisfy it before tearing ourselves down.
             if (!foregroundStarted) startForegroundCompat()
@@ -122,7 +144,7 @@ class TerminalForegroundService : Service() {
         }
         if (foregroundStarted) {
             getSystemService(NotificationManager::class.java)
-                .notify(NOTIFICATION_ID, buildNotification(count))
+                .notify(NOTIFICATION_ID, buildNotification(containerCount, terminalCount))
         } else {
             startForegroundCompat()
         }
@@ -130,7 +152,13 @@ class TerminalForegroundService : Service() {
 
     private fun startForegroundCompat() {
         foregroundStarted = true
-        startForeground(NOTIFICATION_ID, buildNotification(SessionManager.getAllSessions().size))
+        startForeground(
+            NOTIFICATION_ID,
+            buildNotification(
+                DaemonManager.connectedNamedCount(),
+                SessionManager.getAllSessions().size,
+            ),
+        )
     }
 
     private fun stopForegroundCompat() {
@@ -143,7 +171,7 @@ class TerminalForegroundService : Service() {
         }
     }
 
-    internal fun buildNotification(sessionCount: Int): Notification {
+    internal fun buildNotification(containerCount: Int, terminalCount: Int): Notification {
         val contentIntent = PendingIntent.getActivity(
             this,
             1002,
@@ -157,31 +185,33 @@ class TerminalForegroundService : Service() {
         val toggleIntent = PendingIntent.getService(
             this,
             1,
-            Intent(this, TerminalForegroundService::class.java).setAction(ACTION_TOGGLE_WAKE_LOCK),
+            Intent(this, RuntimeForegroundService::class.java).setAction(ACTION_TOGGLE_WAKE_LOCK),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val exitIntent = PendingIntent.getService(
             this,
             2,
-            Intent(this, TerminalForegroundService::class.java).setAction(ACTION_EXIT),
+            Intent(this, RuntimeForegroundService::class.java).setAction(ACTION_EXIT),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
         val wakeLockLabel = getString(
-            if (wakeLockHeld) R.string.terminal_wakelock_release
-            else R.string.terminal_wakelock_hold
+            if (wakeLockHeld) R.string.runtime_wakelock_release
+            else R.string.runtime_wakelock_hold
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.terminal_notification_title))
-            .setContentText(getString(R.string.terminal_notification_text, sessionCount))
+            .setContentTitle(getString(R.string.runtime_notification_title))
+            .setContentText(
+                getString(R.string.runtime_notification_text, containerCount, terminalCount)
+            )
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentIntent(contentIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .addAction(0, wakeLockLabel, toggleIntent)
-            .addAction(0, getString(R.string.terminal_notification_exit), exitIntent)
+            .addAction(0, getString(R.string.runtime_notification_exit), exitIntent)
             .build()
     }
 
@@ -210,7 +240,7 @@ class TerminalForegroundService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                getString(R.string.terminal_notification_channel_name),
+                getString(R.string.runtime_notification_channel_name),
                 NotificationManager.IMPORTANCE_LOW,
             )
             val nm = getSystemService(NotificationManager::class.java)

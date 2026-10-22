@@ -5,5 +5,5 @@ edition = "2021"
 description = "Reveal a terminal path in the file manager"
 
 [dependencies]
-libc = "0.2"
 hub-client = { path = "../hub-client" }
+tokio = { version = "1.41", features = ["macros", "net", "rt"] }

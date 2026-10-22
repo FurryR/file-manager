@@ -17,8 +17,6 @@ pub struct Input {
 pub struct InputView {
     pub lines: Vec<Line<'static>>,
     pub cursor: Option<Position>,
-    pub total_rows: usize,
-    pub first_row: usize,
 }
 
 impl Input {
@@ -105,10 +103,10 @@ impl Input {
             .unwrap_or(self.text.len());
     }
 
-    pub fn up(&mut self) {
+    pub fn up(&mut self) -> bool {
         let start = self.line_start();
         if start == 0 {
-            return;
+            return false;
         }
         let column = self.text[start..self.cursor].graphemes(true).count();
         let previous_end = start - 1;
@@ -128,12 +126,13 @@ impl Input {
             position += grapheme.len();
         }
         self.cursor = position;
+        true
     }
 
-    pub fn down(&mut self) {
+    pub fn down(&mut self) -> bool {
         let end = self.line_end();
         if end >= self.text.len() {
-            return;
+            return false;
         }
         let start = self.line_start();
         let column = self.text[start..self.cursor].graphemes(true).count();
@@ -154,6 +153,7 @@ impl Input {
             position += grapheme.len();
         }
         self.cursor = position;
+        true
     }
 
     pub fn delete_word(&mut self) {
@@ -173,9 +173,29 @@ impl Input {
         self.cursor = start;
     }
 
-    pub fn view(&self, width: usize, max_rows: usize) -> InputView {
+    pub fn row_count(&self, width: usize) -> usize {
+        let text_width = width.max(1).saturating_sub(3).max(1);
+        let mut rows = 1usize;
+        let mut column = 0usize;
+        for grapheme in self.text.graphemes(true) {
+            if grapheme == "\n" {
+                rows += 1;
+                column = 0;
+                continue;
+            }
+            let cell = UnicodeWidthStr::width(grapheme);
+            if column + cell > text_width && column > 0 {
+                rows += 1;
+                column = 0;
+            }
+            column += cell;
+        }
+        rows
+    }
+
+    pub fn view(&self, width: usize, max_rows: usize, active: bool) -> InputView {
         let width = width.max(1);
-        let text_width = width.saturating_sub(2).max(1);
+        let text_width = width.saturating_sub(3).max(1);
         let mut rows: Vec<String> = Vec::new();
         let mut row = String::new();
         let mut column = 0usize;
@@ -215,7 +235,7 @@ impl Input {
         rows.push(row);
 
         let total_rows = rows.len();
-        let visible_rows = max_rows.max(1).min(total_rows);
+        let visible_rows = max_rows.max(1);
         let first_row = if cursor_row >= visible_rows {
             cursor_row + 1 - visible_rows
         } else {
@@ -223,35 +243,27 @@ impl Input {
         };
         let first_row = first_row.min(total_rows.saturating_sub(visible_rows));
 
+        let gutter = if active {
+            theme::border_focus()
+        } else {
+            theme::border_idle()
+        };
         let mut lines = Vec::with_capacity(visible_rows);
-        for (offset, row) in rows[first_row..first_row + visible_rows].iter().enumerate() {
-            let index = first_row + offset;
-            let (prefix, style) = if index == 0 {
-                ("❯ ", theme::prompt())
-            } else {
-                ("  ", theme::muted())
-            };
+        for index in first_row..first_row + visible_rows {
+            let row = rows.get(index).cloned().unwrap_or_default();
             lines.push(Line::from(vec![
-                Span::styled(prefix, style),
-                Span::raw(row.clone()),
+                Span::styled("┃ ", gutter),
+                Span::raw(" "),
+                Span::raw(row),
             ]));
         }
 
-        let cursor = if cursor_row >= first_row && cursor_row < first_row + visible_rows {
-            Some(Position::new(
-                (2usize + cursor_column).min(width.saturating_sub(1)) as u16,
-                (cursor_row - first_row) as u16,
-            ))
-        } else {
-            None
-        };
+        let cursor = Some(Position::new(
+            (3usize + cursor_column).min(width.saturating_sub(1)) as u16,
+            (cursor_row - first_row) as u16,
+        ));
 
-        InputView {
-            lines,
-            cursor,
-            total_rows,
-            first_row,
-        }
+        InputView { lines, cursor }
     }
 
     fn line_start(&self) -> usize {

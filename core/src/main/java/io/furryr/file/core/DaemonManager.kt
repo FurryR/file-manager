@@ -93,6 +93,11 @@ object DaemonManager {
     @Volatile private var primary: DaemonConnection? = null
     @Volatile private var app: DaemonConnection? = null
     private val named = mutableMapOf<String, DaemonConnection>()
+    private val startingNamed = mutableSetOf<String>()
+    private val namedChangeListeners = mutableSetOf<() -> Unit>()
+
+    /** Lock-free snapshot for the UI/notification thread. */
+    @Volatile private var namedCountSnapshot = 0
 
     @Volatile private var hub: HubServer? = null
     @Volatile internal var hubSocketName: String? = null
@@ -243,27 +248,65 @@ object DaemonManager {
     fun warmNamed(name: String): Result<Unit> = runCatching { connection(DaemonTarget.Named(name)) }
 
     /** Kill every daemon (process tree included) and forget them. */
-    fun reset() = synchronized(lock) {
-        (listOfNotNull(primary, app) + named.values).distinct().forEach { it.shutdown() }
-        primary = null
-        app = null
-        named.clear()
-        rootActive = false
-        _status.value = DaemonStatus.Idle
+    fun reset() {
+        val hadNamed = synchronized(lock) {
+            val had = named.isNotEmpty()
+            (listOfNotNull(primary, app) + named.values).distinct().forEach { it.shutdown() }
+            primary = null
+            app = null
+            named.clear()
+            updateNamedSnapshot()
+            rootActive = false
+            _status.value = DaemonStatus.Idle
+            had
+        }
+        if (hadNamed) notifyNamedChanged()
     }
 
     /** Kill a single named daemon; the next access starts a fresh one. */
-    fun closeNamedConnection(name: String) = synchronized(lock) {
-        named.remove(name)?.shutdown()
+    fun closeNamedConnection(name: String) {
+        val removed = synchronized(lock) {
+            named.remove(name)?.also { it.shutdown() }.also { updateNamedSnapshot() }
+        }
+        if (removed != null) notifyNamedChanged()
     }
 
     /** Kill every named daemon. */
-    fun closeNamedConnections() = synchronized(lock) {
-        named.values.forEach { it.shutdown() }; named.clear()
+    fun closeNamedConnections() {
+        val hadNamed = synchronized(lock) {
+            val had = named.isNotEmpty()
+            named.values.forEach { it.shutdown() }
+            named.clear()
+            updateNamedSnapshot()
+            had
+        }
+        if (hadNamed) notifyNamedChanged()
     }
 
     fun isNamedConnected(name: String): Boolean = synchronized(lock) {
         named[name]?.isAlive() == true
+    }
+
+    /** Number of live named daemons (running or starting containers). */
+    fun connectedNamedCount(): Int = namedCountSnapshot
+
+    private fun updateNamedSnapshot() {
+        namedCountSnapshot =
+            (named.filterValues { it.isAlive() }.keys + startingNamed).size
+    }
+
+    /** Listeners notified whenever the live named daemon set changes. */
+    fun addNamedChangeListener(listener: () -> Unit) {
+        synchronized(lock) { namedChangeListeners.add(listener) }
+    }
+
+    fun removeNamedChangeListener(listener: () -> Unit) {
+        synchronized(lock) { namedChangeListeners.remove(listener) }
+    }
+
+    private fun notifyNamedChanged() {
+        val listeners = synchronized(lock) { namedChangeListeners.toList() }
+        listeners.forEach { runCatching { it() } }
     }
 
     /**
@@ -288,21 +331,36 @@ object DaemonManager {
 
     // ── Internal ──────────────────────────────────────────────────────
 
-    internal fun connection(target: DaemonTarget): DaemonConnection = synchronized(lock) {
-        when (target) {
-            DaemonTarget.Host -> primary?.takeIf { it.isAlive() } ?: startPrimaryLocked()
-            DaemonTarget.App -> {
-                if (!rootEnabled && !shellEnabled) {
-                    primary?.takeIf { it.isAlive() } ?: startPrimaryLocked()
-                } else {
-                    startAppDaemon()
+    internal fun connection(target: DaemonTarget): DaemonConnection {
+        var namedAdded = false
+        val result = synchronized(lock) {
+            when (target) {
+                DaemonTarget.Host -> primary?.takeIf { it.isAlive() } ?: startPrimaryLocked()
+                DaemonTarget.App -> {
+                    if (!rootEnabled && !shellEnabled) {
+                        primary?.takeIf { it.isAlive() } ?: startPrimaryLocked()
+                    } else {
+                        startAppDaemon()
+                    }
+                }
+                is DaemonTarget.Named -> named[target.name]?.takeIf { it.isAlive() } ?: run {
+                    startingNamed.add(target.name)
+                    updateNamedSnapshot()
+                    try {
+                        named.remove(target.name)?.close()
+                        startNamedDaemon(target.name).also {
+                            named[target.name] = it
+                            namedAdded = true
+                        }
+                    } finally {
+                        startingNamed.remove(target.name)
+                        updateNamedSnapshot()
+                    }
                 }
             }
-            is DaemonTarget.Named -> named[target.name]?.takeIf { it.isAlive() } ?: run {
-                named.remove(target.name)?.close()
-                startNamedDaemon(target.name).also { named[target.name] = it }
-            }
         }
+        if (namedAdded) notifyNamedChanged()
+        return result
     }
 
     private fun startPrimaryLocked(): DaemonConnection {
@@ -395,7 +453,10 @@ object DaemonManager {
             .directory(appContext.filesDir).redirectErrorStream(true)
             .apply { environment().putAll(command.env) }
             .start()
-        return connectStarted(identity, process)
+        return connectStarted(identity, process) {
+            synchronized(lock) { updateNamedSnapshot() }
+            notifyNamedChanged()
+        }
     }
 
     private fun daemonPath(): String =
@@ -404,9 +465,13 @@ object DaemonManager {
     private fun getExecutable(): File = executableFile
         ?: throw IllegalStateException("Daemon binary not installed. Call init() first.")
 
-    private fun connectStarted(identity: DaemonIdentity, process: Process): DaemonConnection {
+    private fun connectStarted(
+        identity: DaemonIdentity,
+        process: Process,
+        onClosed: (() -> Unit)? = null,
+    ): DaemonConnection {
         return try {
-            DaemonConnection(identity, connectWithRetry(identity), process)
+            DaemonConnection(identity, connectWithRetry(identity), process, onClosed)
         } catch (e: Exception) {
             runCatching { process.destroy() }
                 .onFailure { Log.w(TAG, "Failed to stop daemon after startup failure", it) }

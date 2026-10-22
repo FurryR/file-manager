@@ -4,7 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.util.Log
-import io.furryr.file.TerminalForegroundService
+import io.furryr.file.RuntimeForegroundService
 import io.furryr.file.virgl.VirglManager
 import io.furryr.file.core.DaemonManager
 import io.furryr.file.core.hub.Hub
@@ -45,6 +45,9 @@ object SessionManager {
 
     /** Listeners notified when a session's content changes (needs redraw). */
     private val textChangedListeners = mutableSetOf<(TerminalSession) -> Unit>()
+
+    /** Listeners notified when a session's terminal title changes. */
+    private val titleChangedListeners = mutableSetOf<(TerminalSession) -> Unit>()
 
     /** Listeners notified when a session finishes. */
     private val sessionFinishedListeners = mutableSetOf<(TerminalSession) -> Unit>()
@@ -100,6 +103,14 @@ object SessionManager {
 
     fun removeTextChangedListener(listener: (TerminalSession) -> Unit) {
         synchronized(mutex) { textChangedListeners.remove(listener) }
+    }
+
+    fun addTitleChangedListener(listener: (TerminalSession) -> Unit) {
+        synchronized(mutex) { titleChangedListeners.add(listener) }
+    }
+
+    fun removeTitleChangedListener(listener: (TerminalSession) -> Unit) {
+        synchronized(mutex) { titleChangedListeners.remove(listener) }
     }
 
     fun addSessionFinishedListener(listener: (TerminalSession) -> Unit) {
@@ -162,9 +173,9 @@ object SessionManager {
                     sessionChangeListeners.forEach { it() }
                 }
 
-                // Show the terminal foreground notification while any session
+                // Show the runtime foreground notification while any session
                 // is alive (also keeps the process alive in the background).
-                appContext?.let { TerminalForegroundService.start(it) }
+                appContext?.let { RuntimeForegroundService.start(it) }
 
                 Log.d(TAG, "createSession: success id=$sessionId")
                 Result.success(terminalSession)
@@ -437,7 +448,11 @@ object SessionManager {
                 textChangedListeners.forEach { it(session) }
             }
         }
-        override fun onTitleChanged(session: TerminalSession) {}
+        override fun onTitleChanged(session: TerminalSession) {
+            synchronized(mutex) {
+                titleChangedListeners.forEach { it(session) }
+            }
+        }
         override fun onSessionFinished(session: TerminalSession) {
             synchronized(mutex) {
                 sessionFinishedListeners.forEach { it(session) }

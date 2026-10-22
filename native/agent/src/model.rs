@@ -1,67 +1,196 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
-    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type", default = "function_type")]
+    pub kind: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    #[serde(default)]
+    pub arguments: String,
+}
+
+fn function_type() -> String {
+    "function".to_owned()
 }
 
 impl Message {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::new("system", content)
+    }
+
     pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: "user".to_owned(),
-            content: content.into(),
-        }
+        Self::new("user", content)
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
+        Self::new("assistant", content)
+    }
+
+    pub fn assistant_with_tools(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: "assistant".to_owned(),
-            content: content.into(),
+            content,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
         }
     }
+
+    pub fn tool(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_owned(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: Some(call_id.into()),
+        }
+    }
+
+    fn new(role: &str, content: impl Into<String>) -> Self {
+        Self {
+            role: role.to_owned(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn content_text(&self) -> &str {
+        self.content.as_deref().unwrap_or_default()
+    }
+
+    pub fn has_tools(&self) -> bool {
+        self.tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+    }
+}
+
+/// Token usage reported by the provider for one request.
+#[derive(Clone, Copy, Default)]
+pub struct Usage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+/// Progress emitted by the tool loop for the terminal UI.
+#[derive(Clone)]
+pub enum AgentEvent {
+    StepStart,
+    ReasoningDelta(String),
+    AnswerDelta(String),
+    ToolCalling,
+    ToolCall {
+        name: String,
+        detail: String,
+        description: Option<String>,
+        command: Option<String>,
+    },
+    ToolOutput(Vec<u8>),
+    ToolResult {
+        ok: bool,
+    },
+    Usage(Usage),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     User,
     Assistant,
+    Reasoning,
+    Tool,
     Notice,
     Error,
+}
+
+/// Live view of an exec tool call rendered as a shell-style block.
+#[derive(Clone)]
+pub struct ToolBlock {
+    pub description: Option<String>,
+    pub command: String,
+    pub output: Vec<u8>,
+    pub failed: bool,
 }
 
 #[derive(Clone)]
 pub struct Entry {
     pub role: Role,
     pub content: String,
+    pub expanded: bool,
+    pub duration: Option<Duration>,
+    pub started: Option<std::time::Instant>,
+    pub tool: Option<ToolBlock>,
 }
 
 impl Entry {
-    pub fn user(content: impl Into<String>) -> Self {
+    fn new(role: Role, content: impl Into<String>) -> Self {
         Self {
-            role: Role::User,
+            role,
             content: content.into(),
+            expanded: false,
+            duration: None,
+            started: None,
+            tool: None,
         }
     }
 
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::new(Role::User, content)
+    }
+
     pub fn assistant(content: impl Into<String>) -> Self {
+        Self::new(Role::Assistant, content)
+    }
+
+    pub fn reasoning() -> Self {
         Self {
-            role: Role::Assistant,
-            content: content.into(),
+            started: Some(std::time::Instant::now()),
+            ..Self::new(Role::Reasoning, "")
+        }
+    }
+
+    pub fn tool(content: impl Into<String>) -> Self {
+        Self {
+            started: Some(std::time::Instant::now()),
+            ..Self::new(Role::Tool, content)
+        }
+    }
+
+    pub fn exec(description: Option<String>, command: impl Into<String>) -> Self {
+        Self {
+            started: Some(std::time::Instant::now()),
+            tool: Some(ToolBlock {
+                description,
+                command: command.into(),
+                output: Vec::new(),
+                failed: false,
+            }),
+            ..Self::new(Role::Tool, "")
         }
     }
 
     pub fn notice(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::Notice,
-            content: content.into(),
-        }
+        Self::new(Role::Notice, content)
     }
 
     pub fn error(content: impl Into<String>) -> Self {
-        Self {
-            role: Role::Error,
-            content: content.into(),
-        }
+        Self::new(Role::Error, content)
     }
 }

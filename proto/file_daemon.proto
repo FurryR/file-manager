@@ -35,6 +35,8 @@ message Request {
     CancelRequest cancel = 30;
     AuthRequest auth = 31;
     SignalPtyRequest signal_pty = 32;
+    WaitExecRequest wait_exec = 33;
+    CloseExecRequest close_exec = 34;
   }
 }
 
@@ -141,16 +143,33 @@ message Response {
   optional ReadSourceRequest read_source_request = 15;
   optional ExecResponse exec = 16;
   optional ServerHello server_hello = 17;
+  optional ExecStreamResponse exec_stream = 18;
 }
 
-// Non-PTY command execution. Runs [command] with [args], captures stdout and
-// stderr, and reports the exit code. Used to run container commands under a
-// root daemon (chroot) without allocating a pseudo-terminal.
+// Non-PTY command execution. With [pipes] unset it runs to completion and
+// returns the buffered output; with [pipes] set it attaches stdout and stderr
+// pipe descriptors instead, and the caller reaps it through WaitExec.
 message ExecRequest {
   string command = 1;
   repeated string args = 2;
   string cwd = 3;
   map<string, string> env = 4;
+  bool pipes = 5;
+}
+
+// Pipe-mode exec: stdout and stderr ride the response as two SCM_RIGHTS fds.
+message ExecStreamResponse {
+  uint64 exec_id = 1;
+  uint32 child_pid = 2;
+}
+
+message WaitExecRequest {
+  uint64 exec_id = 1;
+}
+
+// Drop a pipe-mode child without waiting. The daemon kills its process group.
+message CloseExecRequest {
+  uint64 exec_id = 1;
 }
 
 message ExecResponse {

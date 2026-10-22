@@ -5,7 +5,10 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -33,6 +36,7 @@ impl Terminal {
             &mut stdout,
             EnterAlternateScreen,
             EnableBracketedPaste,
+            EnableMouseCapture,
             Hide
         ) {
             let _ = disable_raw_mode();
@@ -115,6 +119,7 @@ fn restore() {
     let _ = execute!(
         io::stdout(),
         Show,
+        DisableMouseCapture,
         DisableBracketedPaste,
         LeaveAlternateScreen
     );

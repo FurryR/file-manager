@@ -2,9 +2,11 @@ package io.furryr.file.agent
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.text.InputType
 import android.util.Log
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -73,12 +75,16 @@ fun TerminalViewComposable(
             val wrapper = TerminalInputView(context, inputState)
 
             terminalView.apply {
-                // Text selection mode requests focus on the TerminalView itself.
-                // Normal keyboard input still goes through the wrapper below.
-                isFocusable = true
-                isFocusableInTouchMode = true
+                // Text selection temporarily makes this view focusable (see
+                // TerminalViewClientImpl.onLongPress). Keeping it unfocusable in
+                // normal use stops TerminalView's own tap handler from stealing
+                // focus from the input wrapper, which would attach the IME to
+                // TerminalView's TYPE_NULL editor.
+                isFocusable = false
+                isFocusableInTouchMode = false
                 isClickable = true
-                setTerminalViewClient(TerminalViewClientImpl(this, wrapper, inputState, fontSizeDp))
+                val client = TerminalViewClientImpl(this, wrapper, inputState, fontSizeDp)
+                setTerminalViewClient(client)
                 setTextSize(fontSizePx)
                 setBackgroundColor(backgroundColor)
             }
@@ -156,6 +162,17 @@ internal class TerminalInputView(context: Context, private val inputState: Termi
     private var connection: TerminalInputConnection? = null
     private var restartPending = false
     private var released = false
+    private var imeRequested = false
+    private val showIme: Runnable = Runnable {
+        if (released || !imeRequested || !isAttachedToWindow) return@Runnable
+        // A tap can happen before the window regains input focus (for example after
+        // a freeform window was in front). Wait for onWindowFocusChanged() instead
+        // of guessing a delay.
+        if (!hasFocus() || !hasWindowFocus()) return@Runnable
+        imeRequested = false
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+    }
     private val modeChanged: () -> Unit = {
         // Retire the old editor before restartInput can flush stale candidates into it.
         connection?.closeConnection()
@@ -170,14 +187,51 @@ internal class TerminalInputView(context: Context, private val inputState: Termi
             }
         }
     }
+    private val requestImeCallback: () -> Unit = { requestIme() }
 
-    init { inputState.onInputModeChanged = modeChanged }
+    init {
+        inputState.onInputModeChanged = modeChanged
+        inputState.onImeRequested = requestImeCallback
+    }
 
     fun releaseInput() {
         released = true
+        imeRequested = false
+        removeCallbacks(showIme)
         if (inputState.onInputModeChanged === modeChanged) inputState.onInputModeChanged = null
+        if (inputState.onImeRequested === requestImeCallback) inputState.onImeRequested = null
         connection?.closeConnection()
         connection = null
+    }
+
+    fun requestIme() {
+        imeRequested = true
+        requestFocus()
+        // InputMethodManager applies focus changes in a posted focus check, not
+        // synchronously. Posting the show request puts it after that check instead
+        // of racing it (showSoftInput is dropped while the focus change is pending).
+        removeCallbacks(showIme)
+        post(showIme)
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        // super has just handed this view to the input method; our post runs after
+        // the focus check it schedules.
+        if (hasWindowFocus && imeRequested) {
+            removeCallbacks(showIme)
+            post(showIme)
+        }
+    }
+
+    override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: Rect?) {
+        super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
+        if (!gainFocus) imeRequested = false
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(showIme)
+        super.onDetachedFromWindow()
     }
 
     override fun onCheckIsTextEditor(): Boolean = true
@@ -308,12 +362,14 @@ internal class TerminalInputConnection(
 
 private class TerminalViewClientImpl(
     private val view: TerminalView,
-    private val wrapper: View,
+    private val wrapper: TerminalInputView,
     private val inputState: TerminalInputState,
     initialFontSizeDp: Int = DEFAULT_FONT_SIZE_DP,
 ) : TerminalViewClient {
 
     var fontSizeDp = initialFontSizeDp.coerceIn(MIN_FONT_SIZE_DP, MAX_FONT_SIZE_DP)
+
+    private fun mouseTracking(): Boolean = view.mEmulator?.isMouseTrackingActive == true
 
     override fun onScale(scale: Float): Float {
         if (scale < 0.9f || scale > 1.1f) {
@@ -325,23 +381,34 @@ private class TerminalViewClientImpl(
     }
 
     override fun onSingleTapUp(e: MotionEvent) {
-        val session = view.currentSession
-        val isMouseTracking = session?.emulator?.isMouseTrackingActive() ?: false
-        if (!isMouseTracking) {
-            wrapper.requestFocus()
-            val imm = view.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-            imm?.showSoftInput(wrapper, InputMethodManager.SHOW_IMPLICIT)
+        // Mouse tracking consumes a touch tap as a program click, so the keyboard
+        // is summoned by swiping up from the extra keys row instead (see
+        // TerminalExtraKeys). A physical mouse never pops the IME up.
+        if (!e.isFromSource(InputDevice.SOURCE_MOUSE) && !mouseTracking()) {
+            wrapper.requestIme()
         }
+    }
+
+    override fun onLongPress(event: MotionEvent): Boolean {
+        // Text selection is the only time TerminalView needs focus, and it asks
+        // for it right after this callback returns.
+        view.isFocusable = true
+        view.isFocusableInTouchMode = true
+        return false
     }
 
     override fun shouldBackButtonBeMappedToEscape(): Boolean = false
     override fun shouldEnforceCharBasedInput(): Boolean = false
     override fun shouldUseCtrlSpaceWorkaround(): Boolean = false
     override fun isTerminalViewSelected(): Boolean = true
-    override fun copyModeChanged(copyMode: Boolean) {}
+    override fun copyModeChanged(copyMode: Boolean) {
+        if (copyMode) return
+        view.isFocusable = false
+        view.isFocusableInTouchMode = false
+        wrapper.requestFocus()
+    }
     override fun onKeyDown(keyCode: Int, e: KeyEvent, session: TerminalSession): Boolean = false
     override fun onKeyUp(keyCode: Int, e: KeyEvent): Boolean = false
-    override fun onLongPress(event: MotionEvent): Boolean = false
     override fun readControlKey(): Boolean = inputState.ctrl
     override fun readAltKey(): Boolean = inputState.alt
     override fun readShiftKey(): Boolean = inputState.shift

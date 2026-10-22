@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Build the Android ARM64 per-instance VirGL host library.
+"""Build the Android ARM64 VirGL host library.
 
 The upstream virglrenderer sources are pinned.  This script applies the Android
-compatibility patches, refactors the renderer's file-scope state into an
-explicit virgl_instance, builds a no-fork vtest server, and links the small
-virgl_host C API into libvirglhost.so.
+compatibility patches, adds a no-fork multi-client vtest entry point, and links
+the small virgl_host C API into libvirglhost.so.  One process-global renderer
+serves every container connection from a single host thread.
 
 All downloaded sources and local build tooling live under --work.  Nothing is
 installed into the user's Python environment.
@@ -103,8 +103,6 @@ def install_host_sources(root, source):
     shutil.copy2(root / "native/virgl-host/src/virgl_host.c", host_out / "virgl_host.c")
     shutil.copy2(root / "native/virgl-host/src/virgl_jni.c", host_out / "virgl_jni.c")
     shutil.copy2(root / "native/virgl-host/meson.build", host_out / "meson.build")
-    shutil.copy2(root / "native/virgl-host/src/virgl_instance.h", source / "src/virgl_instance.h")
-    shutil.copy2(root / "native/virgl-host/src/virgl_instance.c", source / "src/virgl_instance.c")
 
 
 def fingerprint(paths):
@@ -222,10 +220,11 @@ def main():
     if set(needed) - allowed:
         raise RuntimeError(f"Unexpected non-system runtime dependencies: {needed}")
     symbols = subprocess.check_output([str(llvm / "llvm-nm"), "-D", str(binary)], text=True)
-    for symbol in ("virgl_host_create", "virgl_host_serve", "virgl_host_stop",
-                   "virgl_host_destroy", "virgl_host_error",
+    for symbol in ("virgl_host_create", "virgl_host_start", "virgl_host_run",
+                   "virgl_host_stop", "virgl_host_destroy", "virgl_host_error",
                    "Java_io_furryr_file_virgl_VirglNative_create",
-                   "Java_io_furryr_file_virgl_VirglNative_serve",
+                   "Java_io_furryr_file_virgl_VirglNative_start",
+                   "Java_io_furryr_file_virgl_VirglNative_run",
                    "Java_io_furryr_file_virgl_VirglNative_stop",
                    "Java_io_furryr_file_virgl_VirglNative_destroy",
                    "Java_io_furryr_file_virgl_VirglNative_error"):

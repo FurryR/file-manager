@@ -23,6 +23,11 @@ message HubRequest {
     HereRequest here = 9;
     GetAiConfigRequest get_ai_config = 10;
     HelloRequest hello = 11;
+    ReadFileRequest read_file = 12;
+    WriteFileRequest write_file = 13;
+    GlobRequest glob = 14;
+    SetAiSelectionRequest set_ai_selection = 15;
+    WaitExecRequest wait_exec = 16;
   }
 }
 
@@ -36,6 +41,9 @@ message HubResponse {
     WaitResponse wait = 6;
     AiConfigResponse ai_config = 7;
     CallerRoot caller_root = 8;
+    ReadFileResponse read_file = 9;
+    WriteFileResponse write_file = 10;
+    GlobResponse glob = 11;
   }
 }
 
@@ -64,6 +72,10 @@ message Target {
   // `host`, `app`, or `container-<name>`.
   string name = 1;
   bool elevated = 2;
+  // Whether a daemon for this target is currently alive. Every container known
+  // to the app is listed, so stopped containers appear here too and are started
+  // on first use.
+  bool running = 3;
 }
 
 // ── Command execution ─────────────────────────────────────────────
@@ -87,12 +99,71 @@ message ExecRequest {
   optional int32 nice = 9;
   // `host` (default when empty), `app`, or `container-<name>`.
   string container_id = 10;
+  // When true, run without a PTY and attach stdout/stderr pipe descriptors to
+  // the response instead of a PTY master fd. This is the agent's `exec` tool
+  // mode; the caller reads both pipes to EOF and then sends WaitExec.
+  bool pipes = 11;
 }
 
-// The PTY master fd rides this response as SCM_RIGHTS.
+// In pipe mode, the response carries two descriptors (stdout then stderr) via
+// SCM_RIGHTS and an exec handle for WaitExec. In PTY mode, the PTY master fd
+// rides the response instead.
 message ExecResponse {
   uint64 pty_id = 1;
   uint32 pid = 2;
+  // Pipe mode only: handle used with WaitExec.
+  uint64 exec_id = 3;
+}
+
+message WaitExecRequest {
+  // The exec_id returned by a pipe-mode ExecResponse.
+  uint64 exec_id = 1;
+}
+
+// ── Agent file tools ──────────────────────────────────────────────
+
+message ReadFileRequest {
+  string path = 1;
+  // Byte offset; defaults to the start of the file.
+  uint64 offset = 2;
+  // Maximum bytes to return; the hub applies its own upper bound.
+  uint32 length = 3;
+  // `host` (default when empty), `app`, or `container-<name>`.
+  string container_id = 4;
+}
+
+message ReadFileResponse {
+  bytes data = 1;
+  // Total file size in bytes.
+  uint64 size = 2;
+  bool eof = 3;
+}
+
+message WriteFileRequest {
+  string path = 1;
+  bytes data = 2;
+  // `host` (default when empty), `app`, or `container-<name>`.
+  string container_id = 3;
+}
+
+message WriteFileResponse {
+  uint64 bytes_written = 1;
+}
+
+message GlobRequest {
+  // Glob pattern matched against paths relative to [path], e.g. `**/*.kt`.
+  string pattern = 1;
+  // Absolute directory to start from; defaults to `/`.
+  string path = 2;
+  // Best-effort result cap; the hub applies its own upper bound. 0 = default.
+  uint32 max_results = 3;
+  // `host` (default when empty), `app`, or `container-<name>`.
+  string container_id = 4;
+}
+
+message GlobResponse {
+  repeated string paths = 1;
+  bool truncated = 2;
 }
 
 // ── PTY control ───────────────────────────────────────────────────
@@ -131,5 +202,15 @@ message GetAiConfigRequest {}
 message AiConfigResponse {
   string base_url = 1;
   string api_key = 2;
+  // The last model selected by the agent, persisted by the app.
   string model = 3;
+  // The last reasoning effort selected by the agent.
+  string effort = 4;
+  // Display name of the active provider.
+  string provider = 5;
+}
+
+message SetAiSelectionRequest {
+  string model = 1;
+  string effort = 2;
 }

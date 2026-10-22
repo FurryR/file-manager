@@ -2,7 +2,6 @@
 
 #include <errno.h>
 #include <stdint.h>
-#include <unistd.h>
 
 #include "virgl_host.h"
 
@@ -12,7 +11,10 @@ static virgl_host *host_from_handle(jlong handle)
 }
 
 JNIEXPORT jlong JNICALL Java_io_furryr_file_virgl_VirglNative_create(JNIEnv *, jobject);
-JNIEXPORT jint JNICALL Java_io_furryr_file_virgl_VirglNative_serve(JNIEnv *, jobject, jlong, jint);
+JNIEXPORT jint JNICALL Java_io_furryr_file_virgl_VirglNative_start(JNIEnv *, jobject, jlong, jstring);
+JNIEXPORT jint JNICALL Java_io_furryr_file_virgl_VirglNative_startClients(JNIEnv *, jobject, jlong);
+JNIEXPORT jint JNICALL Java_io_furryr_file_virgl_VirglNative_addClient(JNIEnv *, jobject, jlong, jint);
+JNIEXPORT jint JNICALL Java_io_furryr_file_virgl_VirglNative_run(JNIEnv *, jobject, jlong);
 JNIEXPORT void JNICALL Java_io_furryr_file_virgl_VirglNative_stop(JNIEnv *, jobject, jlong);
 JNIEXPORT void JNICALL Java_io_furryr_file_virgl_VirglNative_destroy(JNIEnv *, jobject, jlong);
 JNIEXPORT jstring JNICALL Java_io_furryr_file_virgl_VirglNative_error(JNIEnv *, jobject, jlong);
@@ -26,17 +28,54 @@ Java_io_furryr_file_virgl_VirglNative_create(JNIEnv *env, jobject thiz)
 }
 
 JNIEXPORT jint JNICALL
-Java_io_furryr_file_virgl_VirglNative_serve(JNIEnv *env, jobject thiz,
-                                            jlong handle, jint fd)
+Java_io_furryr_file_virgl_VirglNative_start(JNIEnv *env, jobject thiz,
+                                            jlong handle, jstring socket_path)
+{
+   const char *path;
+   int result;
+
+   (void)thiz;
+   if (handle == 0 || socket_path == NULL)
+      return -EINVAL;
+
+   path = (*env)->GetStringUTFChars(env, socket_path, NULL);
+   if (!path)
+      return -ENOMEM;
+
+   result = virgl_host_start(host_from_handle(handle), path);
+   (*env)->ReleaseStringUTFChars(env, socket_path, path);
+   return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_io_furryr_file_virgl_VirglNative_startClients(JNIEnv *env, jobject thiz, jlong handle)
 {
    (void)env;
    (void)thiz;
-   if (handle == 0) {
-      if (fd >= 0)
-         close((int)fd);
+   if (handle == 0)
       return -EINVAL;
-   }
-   return virgl_host_serve(host_from_handle(handle), (int)fd);
+   return virgl_host_start_clients(host_from_handle(handle));
+}
+
+JNIEXPORT jint JNICALL
+Java_io_furryr_file_virgl_VirglNative_addClient(JNIEnv *env, jobject thiz,
+                                                jlong handle, jint fd)
+{
+   (void)env;
+   (void)thiz;
+   if (handle == 0)
+      return -EINVAL;
+   return virgl_host_add_client(host_from_handle(handle), fd);
+}
+
+JNIEXPORT jint JNICALL
+Java_io_furryr_file_virgl_VirglNative_run(JNIEnv *env, jobject thiz, jlong handle)
+{
+   (void)env;
+   (void)thiz;
+   if (handle == 0)
+      return -EINVAL;
+   return virgl_host_run(host_from_handle(handle));
 }
 
 JNIEXPORT void JNICALL

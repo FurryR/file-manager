@@ -22,6 +22,11 @@ class TerminalInputState {
 
     internal val directInput: Boolean get() = ctrl || alt || shift
     internal var onInputModeChanged: (() -> Unit)? = null
+    internal var onImeRequested: (() -> Unit)? = null
+
+    fun requestIme() {
+        onImeRequested?.invoke()
+    }
 
     private fun notifyMode(old: Boolean) {
         if (old != directInput) onInputModeChanged?.invoke()

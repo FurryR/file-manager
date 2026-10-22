@@ -1,21 +1,21 @@
 //! Reveal a path in the app, preserving the caller's filesystem identity.
 use std::env;
 use std::io;
-use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 
 use hub_client::filehub::{hub_request::Op, HereRequest, HubRequest};
 
 const USAGE: &str = "Usage: here [--] FILE_OR_DIRECTORY\n\nReveal and select a path in the file manager's current tab.";
 
-fn main() {
-    if let Err(error) = run() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    if let Err(error) = run().await {
         eprintln!("here: {error}");
         std::process::exit(2);
     }
 }
 
-fn run() -> io::Result<()> {
+async fn run() -> io::Result<()> {
     let mut args = env::args_os().skip(1);
     let first = args.next().ok_or_else(|| io::Error::other(USAGE))?;
     if first == "--help" || first == "-h" {
@@ -38,14 +38,13 @@ fn run() -> io::Result<()> {
         env::current_dir()?.join(path)
     };
     let path = path.to_string_lossy().into_owned();
-    let (socket, _root) = hub_client::connect_from_env()?;
-    let response = hub_client::round_trip(
-        socket.as_raw_fd(),
-        HubRequest {
+    let (connection, _root) = hub_client::Connection::connect_from_env().await?;
+    let response = connection
+        .round_trip(HubRequest {
             id: 1,
             op: Some(Op::Here(HereRequest { path })),
-        },
-    )?;
+        })
+        .await?;
     if !response.ok {
         return Err(io::Error::other(response.error));
     }

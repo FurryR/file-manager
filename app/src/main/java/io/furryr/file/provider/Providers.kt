@@ -4,11 +4,13 @@ import android.content.Context
 import io.furryr.file.FileRepository
 import io.furryr.file.HereNavigation
 import io.furryr.file.LocalLocationStore
+import io.furryr.file.RuntimeForegroundService
 import io.furryr.file.provider.remote.RemoteProviders
 import io.furryr.file.agent.ContainerDaemonLauncher
 import io.furryr.file.agent.AgentSettings
 import io.furryr.file.core.DaemonManager
-import io.furryr.file.virgl.VirglManager
+
+private var runtimeListenerInstalled = false
 
 /**
  * Wire up the daemon configuration and register every [FileProvider].
@@ -30,6 +32,16 @@ fun installFileProviders(context: Context) {
     )
     // Let the app decide how named (container) daemons are launched.
     DaemonManager.setLauncher { request -> ContainerDaemonLauncher.command(appContext, request) }
+    // Keep the runtime service (and its notification) alive while any
+    // container daemon is running.
+    if (!runtimeListenerInstalled) {
+        runtimeListenerInstalled = true
+        DaemonManager.addNamedChangeListener {
+            if (DaemonManager.connectedNamedCount() > 0) {
+                RuntimeForegroundService.start(appContext)
+            }
+        }
+    }
 
     FileRepository.setDefault(DaemonFileProvider())
     ContainerDaemonProvider.init(appContext)
@@ -44,5 +56,4 @@ fun installFileProviders(context: Context) {
     FileRepository.register("sftp", SftpProvider)
     HereNavigation.install(appContext)
     RemoteProviders.install(appContext)
-    VirglManager.ensureHost(appContext)
 }

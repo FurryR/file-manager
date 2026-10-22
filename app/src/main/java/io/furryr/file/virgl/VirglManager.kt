@@ -1,36 +1,40 @@
 package io.furryr.file.virgl
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.net.LocalSocket
-import android.net.LocalSocketAddress
-import android.os.Build
-import android.os.Bundle
-import android.os.Handler
+import android.content.ServiceConnection
+import android.os.IBinder
 import android.os.Looper
-import android.os.ResultReceiver
+import android.os.Message
+import android.os.Messenger
 import android.util.Log
 import io.furryr.file.agent.BindMount
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withTimeout
 import java.io.File
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 
 /**
  * VirGL host control and container wiring.
  *
- * VirGL is always enabled.  The `:virgl` process owns the vtest listener and
- * serves each accepted connection with its own renderer instance.  Containers
- * bind that socket at [CONTAINER_SOCKET].  The socket is passed as an
+ * VirGL is always enabled. The `:virgl` process is a resident listener:
+ * [ensureResident] binds it early, it binds the filesystem vtest socket
+ * immediately, and it accepts every connection in Kotlin. Loading the renderer
+ * library is slow, so it only happens when a container actually runs, through
+ * an asynchronous [VirglService.MSG_START_CORE] request. Container startup
+ * therefore never waits for the service process or for virgl to initialize.
+ *
+ * Containers bind that socket at [CONTAINER_SOCKET]. The socket is passed as an
  * environment variable; containers never see file-manager paths.
  */
 object VirglManager {
     private const val TAG = "VirglManager"
     private const val SOCKET_NAME = "virgl.sock"
+    private const val LISTENER_WAIT_MS = 2_000L
     const val CONTAINER_SOCKET = "/dev/virgl"
-    private const val START_TIMEOUT_MS = 15_000L
-    private const val SOCKET_WAIT_MS = 10_000L
+
+    private val lock = Any()
+    private var binding: ServiceConnection? = null
+    private var messenger: Messenger? = null
+    private var coreWanted = false
 
     fun socketDir(context: Context): File =
         File(context.cacheDir, "virgl").apply {
@@ -52,88 +56,99 @@ object VirglManager {
     )
 
     /**
-     * Start the `:virgl` process if needed.  When called off the main thread,
-     * wait briefly for the socket so a container daemon can bind it immediately.
+     * Bind the resident listener early (for example when the UI starts) so a
+     * container launch only has to use the socket that is already there.
+     */
+    fun ensureResident(context: Context) {
+        bindHost(context)
+    }
+
+    /**
+     * Ask the resident service to start the renderer asynchronously. This never
+     * waits for virgl; connections that arrive before it is ready are queued by
+     * the service.
      */
     fun ensureHost(context: Context) {
-        val socket = socketPath(context)
-        if (socketIsLive(socket)) return
-        runCatching {
-            startServiceCompat(
-                context,
-                Intent(context, VirglService::class.java).apply {
-                    action = VirglService.ACTION_START
-                    putExtra(VirglService.EXTRA_SOCKET, socket.absolutePath)
-                },
-            )
-        }.onFailure {
-            Log.w(TAG, "cannot start VirGL host", it)
-            return
+        val target = synchronized(lock) {
+            coreWanted = true
+            messenger
         }
-
-        if (Looper.myLooper() == Looper.getMainLooper()) return
-        val deadline = System.currentTimeMillis() + SOCKET_WAIT_MS
-        while (System.currentTimeMillis() < deadline) {
-            if (socketIsLive(socket)) return
-            Thread.sleep(50)
-        }
-        Log.w(TAG, "VirGL socket did not become ready: ${socket.absolutePath}")
-    }
-
-    private fun socketIsLive(socket: File): Boolean {
-        if (!socket.exists()) return false
-        return runCatching {
-            LocalSocket().use {
-                it.connect(
-                    LocalSocketAddress(
-                        socket.absolutePath,
-                        LocalSocketAddress.Namespace.FILESYSTEM,
-                    )
-                )
-            }
-            true
-        }.getOrDefault(false)
-    }
-
-    /** Start the host and wait for the socket, returning an error on failure. */
-    suspend fun start(context: Context): Result<String> = runCatching {
-        val socket = socketPath(context).absolutePath
-        withTimeout(START_TIMEOUT_MS) {
-            suspendCancellableCoroutine { continuation ->
-                val receiver = object : ResultReceiver(Handler(Looper.getMainLooper())) {
-                    override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
-                        if (!continuation.isActive) return
-                        if (resultCode == VirglService.RESULT_OK) {
-                            continuation.resume(
-                                resultData?.getString(VirglService.EXTRA_SOCKET) ?: socket
-                            )
-                        } else {
-                            continuation.resumeWithException(
-                                IllegalStateException(
-                                    resultData?.getString(VirglService.EXTRA_ERROR)
-                                        ?: "VirGL renderer failed"
-                                )
-                            )
-                        }
-                    }
-                }
-                startServiceCompat(
-                    context,
-                    Intent(context, VirglService::class.java).apply {
-                        action = VirglService.ACTION_START
-                        putExtra(VirglService.EXTRA_SOCKET, socket)
-                        putExtra(VirglService.EXTRA_RECEIVER, receiver)
-                    },
-                )
-            }
-        }
-    }
-
-    private fun startServiceCompat(context: Context, intent: Intent) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent)
+        if (target != null) {
+            requestCore(target)
         } else {
-            context.startService(intent)
+            // Not connected yet: bind (or wait for the pending binding) and let
+            // onServiceConnected deliver the request.
+            bindHost(context)
+        }
+        awaitListener(context)
+    }
+
+    /**
+     * Only the listener is guarded here, never the renderer. In normal use the
+     * resident service bound at UI start already created the socket, so this
+     * returns immediately.
+     */
+    private fun awaitListener(context: Context) {
+        val socket = socketPath(context)
+        if (socket.exists()) return
+        if (Looper.myLooper() == Looper.getMainLooper()) return
+        val deadline = System.currentTimeMillis() + LISTENER_WAIT_MS
+        while (System.currentTimeMillis() < deadline) {
+            if (socket.exists()) return
+            Thread.sleep(10)
+        }
+        Log.w(TAG, "VirGL listener did not become ready: ${socket.absolutePath}")
+    }
+
+    private fun requestCore(target: Messenger) {
+        runCatching { target.send(Message.obtain(null, VirglService.MSG_START_CORE)) }
+            .onFailure { error -> Log.w(TAG, "cannot start VirGL core", error) }
+    }
+
+    private fun bindHost(context: Context) {
+        val appContext = context.applicationContext
+        synchronized(lock) {
+            if (binding != null) return
+            val connection = object : ServiceConnection {
+                override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+                    if (service == null) return
+                    val target = Messenger(service)
+                    val wanted = synchronized(lock) {
+                        messenger = target
+                        coreWanted
+                    }
+                    if (wanted) requestCore(target)
+                }
+
+                override fun onServiceDisconnected(name: ComponentName?) {
+                    // The binding is still registered; the system recreates the
+                    // service and calls onServiceConnected again.
+                    synchronized(lock) { messenger = null }
+                }
+
+                override fun onBindingDied(name: ComponentName?) {
+                    synchronized(lock) {
+                        if (binding === this) binding = null
+                        messenger = null
+                    }
+                    runCatching { appContext.unbindService(this) }
+                }
+
+                override fun onNullBinding(name: ComponentName?) {
+                    synchronized(lock) {
+                        if (binding === this) binding = null
+                        messenger = null
+                    }
+                    runCatching { appContext.unbindService(this) }
+                }
+            }
+            val intent = Intent(appContext, VirglService::class.java)
+                .putExtra(VirglService.EXTRA_SOCKET, socketPath(appContext).absolutePath)
+            if (appContext.bindService(intent, connection, Context.BIND_AUTO_CREATE)) {
+                binding = connection
+            } else {
+                Log.w(TAG, "cannot bind VirGL host")
+            }
         }
     }
 }

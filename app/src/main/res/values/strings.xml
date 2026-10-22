@@ -181,24 +181,26 @@
     <string name="settings_terminal_font_desc">Font file path (TTF/OTF)</string>
     <string name="settings_terminal_font_size_desc">Default terminal text size</string>
 
-    <!-- Terminal foreground notification -->
-    <string name="terminal_notification_channel_name">Terminal sessions</string>
-    <string name="terminal_notification_title">Terminal</string>
-    <string name="terminal_notification_text">%1$d terminal(s) running</string>
-    <string name="terminal_wakelock_hold">Hold WakeLock</string>
-    <string name="terminal_wakelock_release">Release WakeLock</string>
-    <string name="terminal_notification_exit">Exit</string>
+    <!-- Runtime foreground notification -->
+    <string name="runtime_notification_channel_name">Runtime</string>
+    <string name="runtime_notification_title">Running</string>
+    <string name="runtime_notification_text">%1$d container(s) · %2$d terminal(s)</string>
+    <string name="runtime_wakelock_hold">Hold WakeLock</string>
+    <string name="runtime_wakelock_release">Release WakeLock</string>
+    <string name="runtime_notification_exit">Exit</string>
     <string name="agent_settings">AI agent</string>
-    <string name="agent_settings_desc">Configure the terminal agent API and model</string>
+    <string name="agent_settings_desc">Manage API providers for the terminal agent</string>
     <string name="agent_base_url">API base URL</string>
-    <string name="agent_model">Model</string>
     <string name="agent_api_key">API key (optional)</string>
     <string name="agent_endpoint_hint">Use a Chat Completions compatible API base URL (including /v1 if required). Run agent in the terminal to chat.</string>
-    <string name="agent_config_required">Configure the AI API URL and model in Settings first.</string>
+    <string name="agent_config_required">Configure an AI provider in Settings first.</string>
     <string name="agent_invalid_endpoint">Enter an HTTP or HTTPS base URL without credentials, query or fragment.</string>
     <string name="agent_config_read_error">The saved key could not be read. Enter your configuration again.</string>
     <string name="agent_config_save_error">Could not save the configuration securely. Please try again.</string>
-    <string name="virgl_notification_channel">VirGL renderer</string>
-    <string name="virgl_notification_title">VirGL renderer running</string>
-    <string name="virgl_notification_text">VirGL host renderer is active</string>
+    <string name="agent_providers">AI providers</string>
+    <string name="agent_provider_add">Add provider</string>
+    <string name="agent_provider_edit">Edit</string>
+    <string name="agent_provider_delete">Delete</string>
+    <string name="agent_provider_name">Name</string>
+    <string name="agent_provider_empty">No providers configured. Add one to start using the agent.</string>
 </resources>

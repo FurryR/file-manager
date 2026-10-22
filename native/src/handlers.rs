@@ -1,21 +1,23 @@
 use std::collections::HashMap;
 use std::io;
 use std::os::fd::{IntoRawFd, OwnedFd};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::fs::File;
 use tokio::sync::{mpsc, watch, Mutex};
 
 use crate::copy;
+use crate::exec::ExecManager;
 use crate::handles::HandleTable;
 use crate::list;
 use crate::proto::request::Command;
 use crate::proto::{
-    CancelRequest, CloseHandleRequest, ClosePtyRequest, CopyFromSourceRequest, CopyRequest, CreateDirRequest, CreateFileRequest,
-    DeleteRequest, DupHandleRequest, ExecRequest, ExecResponse, GetHandleSizeRequest, KillPtyRequest, ListRequest,
-    OpenHandleRequest, RenameRequest, Request, ResizePtyRequest, Response,
-    SeekHandleRequest, SignalPtyRequest, StatRequest, TruncateHandleRequest, WaitPtyRequest,
-    PtyEvent,
+    CancelRequest, CloseExecRequest, CloseHandleRequest, ClosePtyRequest, CopyFromSourceRequest,
+    CopyRequest, CreateDirRequest, CreateFileRequest, DeleteRequest, DupHandleRequest, ExecRequest,
+    ExecResponse, ExecStreamResponse, GetHandleSizeRequest, KillPtyRequest, ListRequest,
+    OpenHandleRequest, PtyEvent, RenameRequest, Request, ResizePtyRequest, Response,
+    SeekHandleRequest, SignalPtyRequest, StatRequest, TruncateHandleRequest, WaitExecRequest,
+    WaitPtyRequest,
 };
 use crate::protocol::OutboundResponse;
 use crate::pty::PtyManager;
@@ -24,6 +26,7 @@ pub async fn handle_streaming(
     request: Request,
     attached_fd: Option<OwnedFd>,
     pty_manager: &Arc<Mutex<PtyManager>>,
+    execs: &Arc<Mutex<ExecManager>>,
     handles: &Arc<Mutex<HandleTable>>,
     cancel_flags: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
     source_read_broker: &copy::SourceReadBroker,
@@ -44,7 +47,12 @@ pub async fn handle_streaming(
         }
         Some(Command::List(ListRequest { path })) => {
             let resp = match list::list_files(&path).await {
-                Ok(entries) => Response { id: req_id, ok: true, entries, ..Response::default() },
+                Ok(entries) => Response {
+                    id: req_id,
+                    ok: true,
+                    entries,
+                    ..Response::default()
+                },
                 Err(error) => error_response(req_id, error),
             };
             let _ = tx.send(OutboundResponse::plain(resp));
@@ -58,18 +66,26 @@ pub async fn handle_streaming(
         }
         Some(Command::Stat(StatRequest { path })) => {
             let resp = match list::stat_path(&path) {
-                Ok(stat) => Response { id: req_id, ok: true, stat: Some(stat), ..Response::default() },
+                Ok(stat) => Response {
+                    id: req_id,
+                    ok: true,
+                    stat: Some(stat),
+                    ..Response::default()
+                },
                 Err(error) => error_response(req_id, error),
             };
             let _ = tx.send(OutboundResponse::plain(resp));
         }
         Some(Command::Rename(RenameRequest { path, new_name })) => {
             let target_path = std::path::Path::new(&list::maybe_android_data_path(&path))
-                .parent().unwrap_or(std::path::Path::new("/")).join(&new_name);
-            let resp = match tokio::fs::rename(list::maybe_android_data_path(&path), &target_path).await {
-                Ok(()) => ok_response(req_id),
-                Err(error) => error_response(req_id, error),
-            };
+                .parent()
+                .unwrap_or(std::path::Path::new("/"))
+                .join(&new_name);
+            let resp =
+                match tokio::fs::rename(list::maybe_android_data_path(&path), &target_path).await {
+                    Ok(()) => ok_response(req_id),
+                    Err(error) => error_response(req_id, error),
+                };
             let _ = tx.send(OutboundResponse::plain(resp));
         }
         Some(Command::Delete(DeleteRequest { path })) => {
@@ -104,19 +120,28 @@ pub async fn handle_streaming(
                 let mut flags = cancel_flags_clone.lock().await;
                 flags.remove(&req_id);
 
-                    let _ = tx_clone.send(OutboundResponse::plain(Response {
-                        id: req_id, ok: result.is_ok(),
+                let _ = tx_clone.send(OutboundResponse::plain(Response {
+                    id: req_id,
+                    ok: result.is_ok(),
                     stream_progress: Some(crate::proto::StreamProgress {
                         finished: true,
                         total_bytes: 0,
                         copied_bytes: 0,
-                        current_name: result.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
-                        }),
-                        ..Response::default()
-                    }));
+                        current_name: result
+                            .as_ref()
+                            .err()
+                            .map(|e| e.to_string())
+                            .unwrap_or_default(),
+                    }),
+                    ..Response::default()
+                }));
             });
         }
-        Some(Command::CopyFromSource(CopyFromSourceRequest { to, source_size, virtual_source })) => {
+        Some(Command::CopyFromSource(CopyFromSourceRequest {
+            to,
+            source_size,
+            virtual_source,
+        })) => {
             let source_fd = if virtual_source {
                 close_unexpected_fd(attached_fd);
                 None
@@ -133,11 +158,30 @@ pub async fn handle_streaming(
             let broker = source_read_broker.clone();
             tokio::spawn(async move {
                 let result = if virtual_source {
-                    copy::copy_from_virtual(&to, req_id, source_size, &tx_clone, &cancel_flag, &broker).await
+                    copy::copy_from_virtual(
+                        &to,
+                        req_id,
+                        source_size,
+                        &tx_clone,
+                        &cancel_flag,
+                        &broker,
+                    )
+                    .await
                 } else if let Some(fd) = source_fd {
-                    copy::copy_from_fd(fd.into_raw_fd(), &to, req_id, source_size, &tx_clone, &cancel_flag).await
+                    copy::copy_from_fd(
+                        fd.into_raw_fd(),
+                        &to,
+                        req_id,
+                        source_size,
+                        &tx_clone,
+                        &cancel_flag,
+                    )
+                    .await
                 } else {
-                    Err(io::Error::new(io::ErrorKind::InvalidInput, "missing source fd"))
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "missing source fd",
+                    ))
                 };
                 let copied_bytes = result.as_ref().copied().unwrap_or_default();
                 let mut flags = cancel_flags_clone.lock().await;
@@ -149,7 +193,11 @@ pub async fn handle_streaming(
                         finished: true,
                         total_bytes: source_size,
                         copied_bytes,
-                        current_name: result.as_ref().err().map(|e| e.to_string()).unwrap_or_default(),
+                        current_name: result
+                            .as_ref()
+                            .err()
+                            .map(|e| e.to_string())
+                            .unwrap_or_default(),
                     }),
                     ..Response::default()
                 }));
@@ -162,7 +210,10 @@ pub async fn handle_streaming(
                     let _ = sender.send(response);
                     ok_response(req_id)
                 }
-                None => error_response(req_id, io::Error::new(io::ErrorKind::NotFound, "source read request not found")),
+                None => error_response(
+                    req_id,
+                    io::Error::new(io::ErrorKind::NotFound, "source read request not found"),
+                ),
             };
             let _ = tx.send(OutboundResponse::plain(response));
         }
@@ -190,7 +241,10 @@ pub async fn handle_streaming(
             match mgr.spawn_pty_with_cwd_fd(req, attached_fd) {
                 Ok((pty_id, master_fd, child_pid)) => {
                     let resp = Response {
-                        id: req_id, ok: true, pty_id, child_pid,
+                        id: req_id,
+                        ok: true,
+                        pty_id,
+                        child_pid,
                         ..Response::default()
                     };
                     let client_fd = unsafe { libc::fcntl(master_fd, libc::F_DUPFD_CLOEXEC, 0) };
@@ -198,8 +252,8 @@ pub async fn handle_streaming(
                         let error = io::Error::last_os_error();
                         let _ = mgr.close_pty(pty_id);
                         let _ = tx.send(OutboundResponse::plain(error_response(req_id, error)));
-                    } else if tx.send(OutboundResponse::with_fd(resp, client_fd)).is_err() {
-                        unsafe { libc::close(client_fd); }
+                    } else {
+                        let _ = tx.send(OutboundResponse::with_fd(resp, client_fd));
                     }
                 }
                 Err(error) => {
@@ -213,7 +267,7 @@ pub async fn handle_streaming(
                 Ok(()) => ok_response(req_id),
                 Err(error) => error_response(req_id, error),
             };
-                    let _ = tx.send(OutboundResponse::plain(resp));
+            let _ = tx.send(OutboundResponse::plain(resp));
         }
         Some(Command::ClosePty(ClosePtyRequest { pty_id })) => {
             let mut mgr = pty_manager.lock().await;
@@ -245,7 +299,8 @@ pub async fn handle_streaming(
                                     return Err(error);
                                 }
                             }
-                        }).await;
+                        })
+                        .await;
 
                         let exit_code = match result {
                             Ok(Ok(status)) => {
@@ -258,12 +313,14 @@ pub async fn handle_streaming(
                                 }
                             }
                             Ok(Err(error)) => {
-                                let _ = tx.send(OutboundResponse::plain(error_response(req_id, error)));
+                                let _ =
+                                    tx.send(OutboundResponse::plain(error_response(req_id, error)));
                                 return;
                             }
                             Err(error) => {
                                 let _ = tx.send(OutboundResponse::plain(error_response(
-                                    req_id, io::Error::other(error.to_string()),
+                                    req_id,
+                                    io::Error::other(error.to_string()),
                                 )));
                                 return;
                             }
@@ -274,11 +331,14 @@ pub async fn handle_streaming(
                         let _ = mgr.remove_pty(pty_id);
 
                         let _ = tx.send(OutboundResponse::plain(Response {
-                            id: req_id, ok: true,
+                            id: req_id,
+                            ok: true,
                             exit_code,
                             pty_event: Some(PtyEvent {
                                 pty_id,
-                                event: Some(crate::proto::pty_event::Event::ExitCode(exit_code as u32)),
+                                event: Some(crate::proto::pty_event::Event::ExitCode(
+                                    exit_code as u32,
+                                )),
                             }),
                             ..Response::default()
                         }));
@@ -286,16 +346,62 @@ pub async fn handle_streaming(
                     Err(_) => {
                         // PTY already cleaned up by closePty — return 0
                         let _ = tx.send(OutboundResponse::plain(Response {
-                            id: req_id, ok: true, exit_code: 0,
+                            id: req_id,
+                            ok: true,
+                            exit_code: 0,
                             ..Response::default()
                         }));
                     }
                 }
             });
         }
-        Some(Command::Exec(ExecRequest { command, args, cwd, env })) => {
+        Some(Command::Exec(ExecRequest {
+            command,
+            args,
+            cwd,
+            env,
+            pipes,
+        })) => {
             close_unexpected_fd(attached_fd);
-            let resp = run_exec(req_id, command, args, cwd, env).await;
+            if pipes {
+                let outbound = run_exec_stream(req_id, command, args, cwd, env, execs).await;
+                let _ = tx.send(outbound);
+            } else {
+                let resp = run_exec(req_id, command, args, cwd, env).await;
+                let _ = tx.send(OutboundResponse::plain(resp));
+            }
+        }
+        Some(Command::WaitExec(WaitExecRequest { exec_id })) => {
+            close_unexpected_fd(attached_fd);
+            let process = execs.lock().await.remove(exec_id);
+            let resp = match process {
+                Some(mut process) => match process.child.wait().await {
+                    Ok(status) => Response {
+                        id: req_id,
+                        ok: true,
+                        exit_code: status.code().unwrap_or(-1),
+                        ..Response::default()
+                    },
+                    Err(error) => error_response(req_id, error),
+                },
+                None => error_response(
+                    req_id,
+                    io::Error::new(io::ErrorKind::NotFound, "exec not found"),
+                ),
+            };
+            let _ = tx.send(OutboundResponse::plain(resp));
+        }
+        Some(Command::CloseExec(CloseExecRequest { exec_id })) => {
+            close_unexpected_fd(attached_fd);
+            let removed = execs.lock().await.remove(exec_id).is_some();
+            let resp = if removed {
+                ok_response(req_id)
+            } else {
+                error_response(
+                    req_id,
+                    io::Error::new(io::ErrorKind::NotFound, "exec not found"),
+                )
+            };
             let _ = tx.send(OutboundResponse::plain(resp));
         }
 
@@ -316,13 +422,21 @@ pub async fn handle_streaming(
             };
             let _ = tx.send(OutboundResponse::plain(resp));
         }
-        Some(Command::OpenHandle(OpenHandleRequest { path, mode, want_fd })) => {
-            let mode = crate::proto::HandleMode::try_from(mode).unwrap_or(crate::proto::HandleMode::Read);
+        Some(Command::OpenHandle(OpenHandleRequest {
+            path,
+            mode,
+            want_fd,
+        })) => {
+            let mode =
+                crate::proto::HandleMode::try_from(mode).unwrap_or(crate::proto::HandleMode::Read);
             let mut table = handles.lock().await;
             let outbound = match table.open(&path, mode).await {
                 Ok(handle) => {
                     let response = Response {
-                        id: req_id, ok: true, open_handle: Some(handle.clone()), ..Response::default()
+                        id: req_id,
+                        ok: true,
+                        open_handle: Some(handle.clone()),
+                        ..Response::default()
                     };
                     if mode == crate::proto::HandleMode::Read && want_fd {
                         // Only local/same-domain callers ask for this. A kernel
@@ -348,7 +462,8 @@ pub async fn handle_streaming(
             let mut table = handles.lock().await;
             let resp = match table.read(req.handle_id, req.offset, req.length).await {
                 Ok((data, eof)) => Response {
-                    id: req_id, ok: true,
+                    id: req_id,
+                    ok: true,
                     read_handle: Some(crate::proto::ReadHandleResponse { data, eof }),
                     ..Response::default()
                 },
@@ -379,15 +494,24 @@ pub async fn handle_streaming(
             let table = handles.lock().await;
             let resp = match table.get_size(handle_id) {
                 Some(size) => Response {
-                    id: req_id, ok: true,
+                    id: req_id,
+                    ok: true,
                     get_handle_size: Some(crate::proto::GetHandleSizeResponse { size }),
                     ..Response::default()
                 },
-                None => Response { id: req_id, ok: false, error: format!("handle {} not found", handle_id), ..Response::default() },
+                None => Response {
+                    id: req_id,
+                    ok: false,
+                    error: format!("handle {} not found", handle_id),
+                    ..Response::default()
+                },
             };
             let _ = tx.send(OutboundResponse::plain(resp));
         }
-        Some(Command::SeekHandle(SeekHandleRequest { handle_id, position })) => {
+        Some(Command::SeekHandle(SeekHandleRequest {
+            handle_id,
+            position,
+        })) => {
             close_unexpected_fd(attached_fd);
             let mut table = handles.lock().await;
             let resp = match table.seek(handle_id, position).await {
@@ -400,12 +524,20 @@ pub async fn handle_streaming(
             close_unexpected_fd(attached_fd);
             let mut table = handles.lock().await;
             let resp = match table.dup(handle_id).await {
-                Ok(r) => Response { id: req_id, ok: true, dup_handle: Some(r), ..Response::default() },
+                Ok(r) => Response {
+                    id: req_id,
+                    ok: true,
+                    dup_handle: Some(r),
+                    ..Response::default()
+                },
                 Err(error) => error_response(req_id, error),
             };
             let _ = tx.send(OutboundResponse::plain(resp));
         }
-        Some(Command::TruncateHandle(TruncateHandleRequest { handle_id, new_size })) => {
+        Some(Command::TruncateHandle(TruncateHandleRequest {
+            handle_id,
+            new_size,
+        })) => {
             close_unexpected_fd(attached_fd);
             let mut table = handles.lock().await;
             let resp = match table.truncate(handle_id, new_size).await {
@@ -416,15 +548,94 @@ pub async fn handle_streaming(
         }
         None => {
             close_unexpected_fd(attached_fd);
-            let _ = tx.send(OutboundResponse::plain(Response { id: req_id, ok: false, error: "missing command".to_string(), ..Response::default() }));
+            let _ = tx.send(OutboundResponse::plain(Response {
+                id: req_id,
+                ok: false,
+                error: "missing command".to_string(),
+                ..Response::default()
+            }));
         }
         // Handled in the connection loop before any dispatch; reaching here
         // means an authenticated client sent it after the handshake.
         Some(Command::Auth(_)) => {
             close_unexpected_fd(attached_fd);
-            let _ = tx.send(OutboundResponse::plain(Response { id: req_id, ok: false, error: "already authenticated".to_string(), ..Response::default() }));
+            let _ = tx.send(OutboundResponse::plain(Response {
+                id: req_id,
+                ok: false,
+                error: "already authenticated".to_string(),
+                ..Response::default()
+            }));
         }
     }
+}
+
+async fn run_exec_stream(
+    req_id: u64,
+    command: String,
+    args: Vec<String>,
+    cwd: String,
+    env: HashMap<String, String>,
+    execs: &Arc<Mutex<ExecManager>>,
+) -> OutboundResponse {
+    let mut cmd = tokio::process::Command::new(&command);
+    cmd.args(&args)
+        .envs(&env)
+        .kill_on_drop(true)
+        .process_group(0)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if !cwd.is_empty() {
+        cmd.current_dir(&cwd);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => return OutboundResponse::plain(error_response(req_id, error)),
+    };
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill().await;
+            return OutboundResponse::plain(error_response(
+                req_id,
+                io::Error::other("child stdout was not piped"),
+            ));
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            let _ = child.kill().await;
+            return OutboundResponse::plain(error_response(
+                req_id,
+                io::Error::other("child stderr was not piped"),
+            ));
+        }
+    };
+    let stdout = match stdout.into_owned_fd() {
+        Ok(fd) => fd,
+        Err(error) => {
+            let _ = child.kill().await;
+            return OutboundResponse::plain(error_response(req_id, error));
+        }
+    };
+    let stderr = match stderr.into_owned_fd() {
+        Ok(fd) => fd,
+        Err(error) => {
+            let _ = child.kill().await;
+            return OutboundResponse::plain(error_response(req_id, error));
+        }
+    };
+    let (exec_id, child_pid) = execs.lock().await.insert(child);
+    OutboundResponse::with_fds(
+        Response {
+            id: req_id,
+            ok: true,
+            exec_stream: Some(ExecStreamResponse { exec_id, child_pid }),
+            ..Response::default()
+        },
+        vec![stdout, stderr],
+    )
 }
 
 async fn run_exec(
@@ -437,12 +648,17 @@ async fn run_exec(
     struct ProcessGroup(u32);
     impl Drop for ProcessGroup {
         fn drop(&mut self) {
-            unsafe { libc::kill(-(self.0 as i32), libc::SIGKILL); }
+            unsafe {
+                libc::kill(-(self.0 as i32), libc::SIGKILL);
+            }
         }
     }
 
     let mut cmd = tokio::process::Command::new(&command);
-    cmd.args(&args).envs(&env).kill_on_drop(true).process_group(0)
+    cmd.args(&args)
+        .envs(&env)
+        .kill_on_drop(true)
+        .process_group(0)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -477,9 +693,18 @@ fn close_unexpected_fd(fd: Option<OwnedFd>) {
 }
 
 fn ok_response(id: u64) -> Response {
-    Response { id, ok: true, ..Response::default() }
+    Response {
+        id,
+        ok: true,
+        ..Response::default()
+    }
 }
 
 fn error_response(id: u64, error: io::Error) -> Response {
-    Response { id, ok: false, error: error.to_string(), ..Response::default() }
+    Response {
+        id,
+        ok: false,
+        error: error.to_string(),
+        ..Response::default()
+    }
 }

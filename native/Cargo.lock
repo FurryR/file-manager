@@ -513,7 +513,7 @@ name = "here"
 version = "0.1.0"
 dependencies = [
  "hub-client",
- "libc",
+ "tokio",
 ]
 
 [[package]]
@@ -562,6 +562,7 @@ dependencies = [
  "libc",
  "prost",
  "prost-build",
+ "tokio",
 ]
 
 [[package]]
@@ -1275,6 +1276,7 @@ dependencies = [
  "hub-client",
  "libc",
  "prost",
+ "tokio",
 ]
 
 [[package]]

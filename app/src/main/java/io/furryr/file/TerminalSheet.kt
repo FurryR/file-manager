@@ -13,9 +13,13 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.border
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -64,6 +68,7 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -93,11 +98,13 @@ import io.furryr.file.core.DaemonManager
 import android.app.Activity
 import android.content.Context
 import android.util.Log
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -111,8 +118,15 @@ private const val DRAWER_DRAG_THRESHOLD = 50f
 private data class TerminalTab(
     val sessionId: String,
     val session: TerminalSession,
-    val label: String,
-)
+    val baseLabel: String,
+    val title: String? = null,
+) {
+    val label: String
+        get() = title?.takeIf { it.isNotBlank() } ?: baseLabel
+}
+
+private fun sanitizedTitle(raw: String?): String? =
+    raw?.filterNot { it.isISOControl() }?.trim()?.takeIf { it.isNotEmpty() }
 
 private fun sessionLabel(type: SessionManager.SessionType): String = when (type) {
     is SessionManager.SessionType.Container -> type.containerName
@@ -142,6 +156,7 @@ fun TerminalSheet(
     var dropHovered by remember { mutableStateOf(false) }
     var dragDropped by remember { mutableStateOf(false) }
     var dragBounds by remember { mutableStateOf(Rect.Zero) }
+    var currentToast by remember { mutableStateOf<Toast?>(null) }
     val screenHeightPx = with(density) { configuration.screenHeightDp.dp.toPx() }
     val smallTargetPx = screenHeightPx * SmallRatio
     val largeTargetPx = screenHeightPx * LargeRatio
@@ -217,6 +232,16 @@ fun TerminalSheet(
         }
     }
 
+    fun showTabToast(index: Int) {
+        val tab = tabs.getOrNull(index) ?: return
+        val yOffset = with(density) { 96.dp.roundToPx() }
+        currentToast?.cancel()
+        currentToast = Toast.makeText(context, "[${index + 1}] ${tab.label}", Toast.LENGTH_SHORT).apply {
+            setGravity(Gravity.TOP or Gravity.CENTER_HORIZONTAL, 0, yOffset)
+        }
+        currentToast?.show()
+    }
+
     val sheetHeightPx = remember { Animatable(0f) }
     var wasVisible by remember { mutableStateOf(false) }
 
@@ -246,6 +271,16 @@ fun TerminalSheet(
         Unit
     }
 
+    val titleChangedListener = { changedSession: TerminalSession ->
+        val index = tabs.indexOfFirst { it.session === changedSession }
+        if (index >= 0) {
+            val title = sanitizedTitle(changedSession.title)
+            val tab = tabs[index]
+            if (tab.title != title) tabs[index] = tab.copy(title = title)
+        }
+        Unit
+    }
+
     DisposableEffect(Unit) {
         val sessionChangeListener: () -> Unit = {
             val activeId = tabs.getOrNull(activeTabIndex)?.sessionId
@@ -254,16 +289,20 @@ fun TerminalSheet(
             if (removed) {
                 activeTabIndex = tabs.indexOfFirst { it.sessionId == activeId }
                     .takeIf { it >= 0 } ?: tabs.lastIndex
-                if (tabs.isEmpty()) onDismiss()
+                if (tabs.isEmpty()) onDismiss() else showTabToast(activeTabIndex)
             }
         }
         SessionManager.addSessionFinishedListener(sessionFinishedListener)
         SessionManager.addSessionChangeListener(sessionChangeListener)
+        SessionManager.addTitleChangedListener(titleChangedListener)
         onDispose {
             SessionManager.removeSessionFinishedListener(sessionFinishedListener)
             SessionManager.removeSessionChangeListener(sessionChangeListener)
+            SessionManager.removeTitleChangedListener(titleChangedListener)
+            currentToast?.cancel()
+            currentToast = null
             // Sessions are owned by SessionManager and kept alive by
-            // TerminalForegroundService; they must survive the UI being torn
+            // RuntimeForegroundService; they must survive the UI being torn
             // down so the user can reopen them from the notification.
             tabs.clear()
             activeTabIndex = -1
@@ -300,7 +339,8 @@ fun TerminalSheet(
                     TerminalTab(
                         sessionId = info.id,
                         session = info.session,
-                        label = sessionLabel(info.type),
+                        baseLabel = sessionLabel(info.type),
+                        title = sanitizedTitle(info.session.title),
                     )
                 )
             }
@@ -317,7 +357,14 @@ fun TerminalSheet(
                     val infos = SessionManager.getAllSessionInfos()
                     val info = infos.find { it.session === session }
                     val sessionId = info?.id ?: return@launch
-                    tabs.add(TerminalTab(sessionId = sessionId, session = session, label = label))
+                    tabs.add(
+                        TerminalTab(
+                            sessionId = sessionId,
+                            session = session,
+                            baseLabel = label,
+                            title = sanitizedTitle(session.title),
+                        )
+                    )
                     activeTabIndex = tabs.lastIndex
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to create terminal", e)
@@ -434,7 +481,11 @@ fun TerminalSheet(
                     tabs = tabs,
                     activeTabIndex = activeTabIndex,
                     enabled = visible,
-                    onSwitchTab = { idx -> activeTabIndex = idx; showDrawer = false },
+                    onSwitchTab = { idx ->
+                        activeTabIndex = idx
+                        showDrawer = false
+                        showTabToast(idx)
+                    },
                     onCloseTab = { tab ->
                         SessionManager.destroySession(tab.sessionId)
                     },
@@ -448,9 +499,17 @@ fun TerminalSheet(
                                 val infos = SessionManager.getAllSessionInfos()
                                 val info = infos.find { it.session === session }
                                 val sessionId = info?.id ?: return@launch
-                                tabs.add(TerminalTab(sessionId = sessionId, session = session, label = label))
+                                tabs.add(
+                                    TerminalTab(
+                                        sessionId = sessionId,
+                                        session = session,
+                                        baseLabel = label,
+                                        title = sanitizedTitle(session.title),
+                                    )
+                                )
                                 activeTabIndex = tabs.lastIndex
                                 showDrawer = false
+                                showTabToast(activeTabIndex)
                             } catch (e: Exception) {
                                 Log.e(TAG, "Failed to create tab", e)
                                 sessionError = e.message ?: "Failed to create tab"
@@ -555,6 +614,9 @@ private fun ContentWithDrawer(
     }
 }
 
+private const val KEY_REPEAT_DELAY_MS = 400L
+private const val KEY_REPEAT_INTERVAL_MS = 60L
+
 @Composable
 internal fun TerminalExtraKeys(
     inputState: TerminalInputState,
@@ -573,7 +635,34 @@ internal fun TerminalExtraKeys(
             "\u2193" to KeyEvent.KEYCODE_DPAD_DOWN, "\u2192" to KeyEvent.KEYCODE_DPAD_RIGHT,
         ),
     )
-    Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer)) {
+    val imeSwipeThreshold = with(LocalDensity.current) { 24.dp.toPx() }
+    Column(
+        Modifier.fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceContainer)
+            .pointerInput(enabled, imeSwipeThreshold) {
+                if (!enabled) return@pointerInput
+                awaitEachGesture {
+                    val down = awaitFirstDown(
+                        requireUnconsumed = false,
+                        pass = PointerEventPass.Initial,
+                    )
+                    val startX = down.position.x
+                    val startY = down.position.y
+                    while (true) {
+                        val change = awaitPointerEvent(PointerEventPass.Initial)
+                            .changes.firstOrNull { it.id == down.id } ?: break
+                        if (!change.pressed) break
+                        val dy = change.position.y - startY
+                        val dx = change.position.x - startX
+                        if (dy <= -imeSwipeThreshold && abs(dy) >= abs(dx)) {
+                            inputState.requestIme()
+                            change.consume()
+                            break
+                        }
+                    }
+                }
+            }
+    ) {
         rows.forEachIndexed { rowIndex, keys ->
             Row(Modifier.fillMaxWidth()) {
                 keys.forEach { (label, keyCode) ->
@@ -583,12 +672,31 @@ internal fun TerminalExtraKeys(
                         KeyEvent.KEYCODE_SHIFT_LEFT -> inputState.shift
                         else -> false
                     }
+                    val isModifier = KeyEvent.isModifierKey(keyCode)
+                    val interactionSource = remember { MutableInteractionSource() }
+                    val pressed by interactionSource.collectIsPressedAsState()
+                    var repeated by remember { mutableStateOf(false) }
+
+                    LaunchedEffect(pressed, enabled, isModifier) {
+                        if (!pressed || !enabled || isModifier) return@LaunchedEffect
+                        repeated = false
+                        delay(KEY_REPEAT_DELAY_MS)
+                        repeated = true
+                        while (true) {
+                            inputState.sendKey(keyCode)
+                            delay(KEY_REPEAT_INTERVAL_MS)
+                        }
+                    }
+
                     TextButton(
                         onClick = {
-                            when (keyCode) {
-                                KeyEvent.KEYCODE_CTRL_LEFT -> inputState.ctrl = !inputState.ctrl
-                                KeyEvent.KEYCODE_ALT_LEFT -> inputState.alt = !inputState.alt
-                                KeyEvent.KEYCODE_SHIFT_LEFT -> inputState.shift = !inputState.shift
+                            when {
+                                isModifier -> when (keyCode) {
+                                    KeyEvent.KEYCODE_CTRL_LEFT -> inputState.ctrl = !inputState.ctrl
+                                    KeyEvent.KEYCODE_ALT_LEFT -> inputState.alt = !inputState.alt
+                                    KeyEvent.KEYCODE_SHIFT_LEFT -> inputState.shift = !inputState.shift
+                                }
+                                repeated -> repeated = false
                                 else -> inputState.sendKey(keyCode)
                             }
                         },
@@ -599,25 +707,45 @@ internal fun TerminalExtraKeys(
                             containerColor = if (isSelected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
                             contentColor = if (isSelected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface,
                         ),
+                        interactionSource = interactionSource,
                         modifier = Modifier.weight(1f).height(36.dp)
                             .focusProperties { canFocus = false }
                             .semantics {
                                 contentDescription = label
-                                if (KeyEvent.isModifierKey(keyCode)) selected = isSelected
+                                if (isModifier) selected = isSelected
                             },
                     ) {
                         Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1)
                     }
                 }
+                val enterSource = remember { MutableInteractionSource() }
+                val enterPressed by enterSource.collectIsPressedAsState()
+                var enterRepeated by remember { mutableStateOf(false) }
+
+                LaunchedEffect(enterPressed, enabled, rowIndex) {
+                    if (!enterPressed || !enabled || rowIndex == 0) return@LaunchedEffect
+                    enterRepeated = false
+                    delay(KEY_REPEAT_DELAY_MS)
+                    enterRepeated = true
+                    while (true) {
+                        inputState.sendKey(KeyEvent.KEYCODE_ENTER)
+                        delay(KEY_REPEAT_INTERVAL_MS)
+                    }
+                }
+
                 TextButton(
                     onClick = {
-                        if (rowIndex == 0) onOpenDrawer()
-                        else inputState.sendKey(KeyEvent.KEYCODE_ENTER)
+                        when {
+                            rowIndex == 0 -> onOpenDrawer()
+                            enterRepeated -> enterRepeated = false
+                            else -> inputState.sendKey(KeyEvent.KEYCODE_ENTER)
+                        }
                     },
                     enabled = enabled,
                     contentPadding = PaddingValues(0.dp),
                     shape = MaterialTheme.shapes.small,
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+                    interactionSource = enterSource,
                     modifier = Modifier.weight(1f).height(36.dp)
                         .focusProperties { canFocus = false },
                 ) {

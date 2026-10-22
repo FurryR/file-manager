@@ -67,6 +67,13 @@ internal data class PtyFd(
     val childPid: Int
 )
 
+internal data class ExecStreamFd(
+    val execId: Long,
+    val childPid: Int,
+    val stdout: FileDescriptor,
+    val stderr: FileDescriptor,
+)
+
 internal data class OpenHandleResult(
     val handleId: Long,
     val size: Long,
@@ -86,6 +93,7 @@ internal class DaemonConnection internal constructor(
     private val identity: DaemonIdentity,
     private val transport: Transport,
     process: Process?,
+    private val onClosed: (() -> Unit)? = null,
 ) {
     internal val socketName: String get() = identity.socketName
     internal val key: String get() = identity.key
@@ -147,19 +155,15 @@ internal class DaemonConnection internal constructor(
             dead = true
             failAllPending(EOFException("daemon connection lost"))
             transport.close()
+            onClosed?.let { runCatching(it) }
         }
     }
 
     private fun dispatchResponse(frame: Frame) {
-        // The daemon protocol attaches at most one descriptor; drop the rest.
-        if (frame.fds.size > 1) {
-            frame.fds.drop(1).forEach { runCatching { Os.close(it) } }
-        }
-        val fd = frame.fds.firstOrNull()
         val decoded = try {
-            DaemonResponse(Response.parseFrom(frame.payload), fd)
+            DaemonResponse(Response.parseFrom(frame.payload), frame.fds)
         } catch (e: Exception) {
-            fd?.let { runCatching { Os.close(it) } }
+            frame.fds.forEach { runCatching { Os.close(it) } }
             throw e
         }
 
@@ -187,7 +191,7 @@ internal class DaemonConnection internal constructor(
         synchronized(pendingLock) {
             val pending = pendingRequests[id]
             if (pending == null) {
-                fd?.let { runCatching { Os.close(it) } }
+                decoded.fds.forEach { runCatching { Os.close(it) } }
                 return
             }
             when (pending) {
@@ -314,6 +318,7 @@ internal class DaemonConnection internal constructor(
         }
 
         if (!resp.response.ok) {
+            resp.fds.forEach { runCatching { Os.close(it) } }
             throw PermissionDeniedException(resp.response.error.ifBlank { "daemon returned error" })
         }
         return resp
@@ -585,6 +590,45 @@ internal class DaemonConnection internal constructor(
     }
 
     // ── Non-PTY exec ──────────────────────────────────────────────────
+
+    /** Spawn a pipe-mode command; stdout/stderr descriptors stay owned by the caller. */
+    fun spawnExec(
+        command: String,
+        args: List<String> = emptyList(),
+        cwd: String? = null,
+        env: Map<String, String> = emptyMap(),
+    ): Result<ExecStreamFd> = runCatching {
+        val execReq = io.furryr.file.proto.ExecRequest.newBuilder()
+            .setCommand(command).addAllArgs(args).putAllEnv(env).setPipes(true)
+        if (cwd != null) execReq.cwd = cwd
+        val resp = request(Request.newBuilder().setExec(execReq).build())
+        val fds = resp.fds
+        if (fds.size != 2) {
+            fds.forEach { runCatching { Os.close(it) } }
+            throw IllegalStateException(
+                "daemon returned ${fds.size} exec descriptors, expected stdout and stderr",
+            )
+        }
+        val stream = resp.response.execStream
+        ExecStreamFd(
+            execId = stream.execId,
+            childPid = stream.childPid.toInt(),
+            stdout = fds[0],
+            stderr = fds[1],
+        )
+    }
+
+    fun waitExec(execId: Long): Result<Int> = runCatching {
+        request(Request.newBuilder()
+            .setWaitExec(io.furryr.file.proto.WaitExecRequest.newBuilder().setExecId(execId))
+            .build()).response.exitCode
+    }
+
+    fun closeExec(execId: Long): Result<Unit> = runCatching {
+        request(Request.newBuilder()
+            .setCloseExec(io.furryr.file.proto.CloseExecRequest.newBuilder().setExecId(execId))
+            .build())
+    }
 
     fun exec(
         command: String,

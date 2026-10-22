@@ -9,6 +9,7 @@ name = "run0"
 path = "src/main.rs"
 
 [dependencies]
+hub-client = { path = "../hub-client" }
 libc = "0.2"
 prost = "0.13"
-hub-client = { path = "../hub-client" }
+tokio = { version = "1.41", features = ["io-util", "macros", "net", "rt", "signal", "time"] }

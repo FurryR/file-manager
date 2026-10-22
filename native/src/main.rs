@@ -3,8 +3,8 @@ use std::env;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, watch, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
@@ -15,6 +15,7 @@ mod proto {
 mod auth;
 mod container;
 mod copy;
+mod exec;
 mod handlers;
 mod handles;
 mod list;
@@ -22,9 +23,10 @@ mod protocol;
 mod pty;
 mod socket;
 
+use exec::ExecManager;
 use handles::HandleTable;
-use pty::PtyManager;
 use protocol::{FrameReader, OutboundResponse};
+use pty::PtyManager;
 
 static TERMINATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -48,7 +50,10 @@ impl AuthenticatedClient {
     fn new(clients: Arc<Clients>, shutdown: watch::Sender<bool>) -> io::Result<Self> {
         let mut active = clients.active.lock().unwrap();
         if *shutdown.borrow() {
-            return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "daemon is shutting down"));
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "daemon is shutting down",
+            ));
         }
         *active += 1;
         clients.has_authenticated.store(true, Ordering::Relaxed);
@@ -70,6 +75,7 @@ impl Drop for AuthenticatedClient {
 /// PTYs and handles are shared across clients, but not across daemon launches.
 struct Shared {
     pty_manager: Arc<Mutex<PtyManager>>,
+    execs: Arc<Mutex<ExecManager>>,
     handles: Arc<Mutex<HandleTable>>,
     source_read_broker: copy::SourceReadBroker,
     clients: Arc<Clients>,
@@ -96,7 +102,9 @@ async fn main() -> io::Result<()> {
     // the whole container can be signalled as a unit. Ignore failure (e.g. when
     // already a group leader).
     if chroot_rootfs.is_some() || proot_mode {
-        unsafe { libc::setsid(); }
+        unsafe {
+            libc::setsid();
+        }
         list::set_container_mode(true);
     }
 
@@ -119,6 +127,7 @@ async fn main() -> io::Result<()> {
 
     let shared = Arc::new(Shared {
         pty_manager: Arc::new(Mutex::new(PtyManager::new())),
+        execs: Arc::new(Mutex::new(ExecManager::default())),
         handles: Arc::new(Mutex::new(HandleTable::new())),
         source_read_broker: copy::SourceReadBroker::default(),
         clients: Arc::new(Clients::default()),
@@ -189,6 +198,7 @@ async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
     while connections.join_next().await.is_some() {}
 
     shared.pty_manager.lock().await.close_all();
+    shared.execs.lock().await.clear();
     *shared.handles.lock().await = HandleTable::new();
     shared.source_read_broker.lock().await.clear();
     Ok(())
@@ -234,10 +244,16 @@ async fn handle_connection(
     let hello = proto::Response {
         id: 0,
         ok: true,
-        server_hello: Some(proto::ServerHello { nonce: nonce.to_vec() }),
+        server_hello: Some(proto::ServerHello {
+            nonce: nonce.to_vec(),
+        }),
         ..Default::default()
     };
-    tokio::time::timeout_at(auth_deadline, protocol::write_frame(&mut write_stream, hello)).await??;
+    tokio::time::timeout_at(
+        auth_deadline,
+        protocol::write_frame(&mut write_stream, hello),
+    )
+    .await??;
     let mut authed = false;
 
     let result = loop {
@@ -245,9 +261,9 @@ async fn handle_connection(
         if shutting_down {
             // Flush anything already queued (e.g. the exit ack), then stop.
             while let Ok(r) = response_rx.try_recv() {
-                if let Some(fd) = r.attached_fd {
-                    let _ = protocol::write_response_with_fd(write_fd, &r.response, fd);
-                    unsafe { libc::close(fd); }
+                if !r.attached_fds.is_empty() {
+                    let fds: Vec<_> = r.attached_fds.iter().map(|fd| fd.as_raw_fd()).collect();
+                    let _ = protocol::write_response_with_fds(write_fd, &r.response, &fds);
                 } else {
                     let _ = protocol::write_frame(&mut write_stream, r.response).await;
                 }
@@ -318,7 +334,7 @@ async fn handle_connection(
                         let handler = async move {
                             handlers::handle_streaming(
                                 incoming.request, incoming.attached_fd,
-                                &shared.pty_manager, &shared.handles,
+                                &shared.pty_manager, &shared.execs, &shared.handles,
                                 cancel_flags, &shared.source_read_broker, tx,
                                 &shutdown,
                             ).await;
@@ -338,10 +354,12 @@ async fn handle_connection(
             response = response_rx.recv() => {
                 match response {
                     Some(r) => {
-                        if let Some(fd) = r.attached_fd {
-                            let result = protocol::write_response_with_fd(write_fd, &r.response, fd);
-                            unsafe { libc::close(fd); }
-                            if let Err(error) = result {
+                        if !r.attached_fds.is_empty() {
+                            let fds: Vec<_> =
+                                r.attached_fds.iter().map(|fd| fd.as_raw_fd()).collect();
+                            if let Err(error) =
+                                protocol::write_response_with_fds(write_fd, &r.response, &fds)
+                            {
                                 break Err(error);
                             }
                         } else if let Err(error) =
@@ -362,10 +380,8 @@ async fn handle_connection(
     requests.abort_all();
     while requests.join_next().await.is_some() {}
     response_rx.close();
-    while let Ok(response) = response_rx.try_recv() {
-        if let Some(fd) = response.attached_fd {
-            unsafe { libc::close(fd); }
-        }
+    while response_rx.try_recv().is_ok() {
+        // Dropping the response closes any descriptors it still owns.
     }
     // Connection gone: cancel whatever is still in flight on it.
     {
@@ -380,15 +396,12 @@ async fn handle_connection(
 }
 
 fn parse_identity_args() -> io::Result<(Vec<u8>, String)> {
-    let key = parse_value_arg("--key").ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "missing --key argument")
-    })?;
-    let public_key = auth::parse_hex(&key).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "--key must be a hex string")
-    })?;
-    let id = parse_value_arg("--id").ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "missing --id argument")
-    })?;
+    let key = parse_value_arg("--key")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing --key argument"))?;
+    let public_key = auth::parse_hex(&key)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "--key must be a hex string"))?;
+    let id = parse_value_arg("--id")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing --id argument"))?;
     Ok((public_key, id))
 }
 

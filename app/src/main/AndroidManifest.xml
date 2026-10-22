@@ -48,6 +48,12 @@
             android:theme="@style/Theme.FileManager" />
 
         <activity
+            android:name=".ui.screens.AgentProvidersActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:exported="false"
+            android:theme="@style/Theme.FileManager" />
+
+        <activity
             android:name=".ui.screens.SettingsActivity"
             android:enableOnBackInvokedCallback="true"
             android:exported="false"
@@ -72,14 +78,13 @@
         </activity>
 
         <service
-            android:name=".TerminalForegroundService"
+            android:name=".RuntimeForegroundService"
             android:exported="false"
             android:foregroundServiceType="specialUse" />
 
         <service
             android:name=".virgl.VirglService"
             android:exported="false"
-            android:process=":virgl"
-            android:foregroundServiceType="specialUse" />
+            android:process=":virgl" />
     </application>
 </manifest>

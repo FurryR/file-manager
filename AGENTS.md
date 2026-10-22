@@ -80,6 +80,7 @@ file-manager/
 | Unified exec/PTY | `core/.../process/ExecService.kt` | `CommandSpec` → `ProcessChannel` |
 | Daemon file I/O | `core/.../file/FileService.kt` | list/stat/open/copy per target |
 | Container launch | `app/.../agent/ContainerDaemonLauncher.kt` | proot/chroot argv (app-owned) |
+| Terminal IME | `app/.../agent/TerminalViewComposable.kt` | focus hand-off + `showSoftInput`; see NOTES |
 | Native daemon | `native/src/main.rs` | File ops under root/shell |
 | IPC protocol | `proto/file_daemon.proto` | Request/Response messages |
 
@@ -93,11 +94,15 @@ file-manager/
 - **Container-visible names stay generic** — never expose `file-manager` in
   container paths, sockets, services, or environment values. VirGL is always
   enabled, runs in the `:virgl` process, and is exposed at `/dev/virgl`. The
-  Kotlin service owns the socket and serves each accepted connection on a
-  bounded native thread pool (default 4; 1 is serial); every session owns its
-  own `virgl_instance` and EGL context, so renderer state must stay per-instance.
-  Pass `VTEST_SOCKET_NAME=/dev/virgl` directly in the process environment; do
-  not write VirGL settings into `/etc/profile.d`.
+  listener service is resident: the UI binds it early, it binds the vtest socket
+  immediately (cheap), and accepts clients in Kotlin. The renderer library is
+  started on demand when a container runs, on a background thread; queued client
+  descriptors are handed to the native host once it is ready. That single thread
+  serves every connection through one shared virglrenderer instance (vtest
+  multi-client mode) and only initializes the renderer when a client actually
+  sends commands. Connections do not consume a thread each. Renderer state is
+  process-global. Pass `VTEST_SOCKET_NAME=/dev/virgl` directly in the process
+  environment; do not write VirGL settings into `/etc/profile.d`.
 
 ## ANTI-PATTERNS (THIS PROJECT)
 
@@ -180,3 +185,24 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   or request replay. After connection loss, a later operation starts a fresh
   daemon on demand; old PTYs and handles are not restored.
 - Client entry points live in `:core` (`DaemonManager.fileService/execService`).
+- **Terminal IME tap race (upstream-worthy)** — Termux's
+  `TerminalView.onSingleTapUp()` calls `requestFocus()` on the terminal view, then
+  the client moves focus back to `TerminalInputView` and shows the IME.
+  `InputMethodManager.focusIn()` only posts an asynchronous focus check, while
+  `showSoftInput()` checks `mServedView` synchronously, so showing in the same
+  touch event races the focus hand-off and the request is dropped. It is most
+  visible after returning from a freeform/small-window app, where window focus is
+  handed back late. Termux works around this with 300–500ms `postDelayed` retries
+  (issues #2111/#2112/#5014) and still fails sometimes. `TerminalViewComposable.kt`
+  instead posts `showSoftInput` so it runs after the focus check, keeps the request
+  pending while `hasWindowFocus()` is false, and retries from
+  `onWindowFocusChanged(true)`; pending requests are cancelled on focus
+  loss/detach/release. Keep this ordering when touching terminal input — do not
+  replace it with fixed delays. In normal mode a touch tap summons the IME while
+  still being forwarded to the program (the extra-keys row has no keyboard
+  toggle). When the terminal has mouse tracking active, a tap is a program click
+  and the keyboard is summoned by swiping up starting from the extra-keys row;
+  the same swipe also works in normal mode, so dragging and long-press selection
+  stay untouched. `TerminalView` is kept unfocusable except during text selection
+  so its tap handler cannot steal focus from `TerminalInputView` and attach the
+  IME to its `TYPE_NULL` editor. `InputDevice.SOURCE_MOUSE` never summons the IME.

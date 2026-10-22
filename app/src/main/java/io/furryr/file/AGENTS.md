@@ -29,7 +29,7 @@
 - **Terminal sessions**: `agent/SessionManager.kt` — session lifecycle, container session cleanup
 - **Container management**: `agent/ContainerManager.kt` — process tracking, kill
 - **Container daemon launch**: `agent/ContainerDaemonLauncher.kt` — proot/chroot argv (app-owned SPI)
-- **Terminal panel**: `TerminalSheet.kt` — bottom sheet with terminals; `TerminalForegroundService.kt` keeps sessions alive
+- **Terminal panel**: `TerminalSheet.kt` — bottom sheet with terminals; `RuntimeForegroundService.kt` keeps sessions and container daemons alive
 - **Exec/PTY**: `:core/process/ExecService.kt` — `CommandSpec` → `ProcessChannel` (one path for terminal + command exec)
 - **Native daemon entry**: `:core/DaemonManager.kt` — starts `libfiledaemon.so` from `nativeLibraryDir`
 

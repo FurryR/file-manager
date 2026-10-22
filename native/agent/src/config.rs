@@ -1,57 +1,35 @@
 use std::io;
-use std::os::fd::AsRawFd;
 
-use hub_client::filehub::{
-    hub_request::Op, hub_response, AiConfigResponse, GetAiConfigRequest, HubRequest,
-};
+use crate::hub::Hub;
 
 pub struct Config {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
+    pub effort: String,
+    pub provider: String,
 }
 
-pub struct Context {
-    pub container_id: String,
+pub async fn load() -> io::Result<(Config, Hub)> {
+    let mut hub = Hub::connect().await?;
+    let config = hub.ai_config().await.map_err(|message| {
+        io::Error::other(if message.is_empty() {
+            "AI configuration is unavailable; check the app's AI settings".to_owned()
+        } else {
+            message
+        })
+    })?;
+    Ok((Config::from(config), hub))
 }
 
-pub fn load() -> io::Result<(Config, Context)> {
-    let (socket, context) = hub_client::connect_from_env()?;
-    match context.container_id.as_str() {
-        "host" | "app" => {}
-        id if id.starts_with("container-") && id.len() > "container-".len() => {}
-        _ => return Err(io::Error::other("hub returned an invalid caller context")),
-    }
-    let response = hub_client::round_trip(
-        socket.as_raw_fd(),
-        HubRequest {
-            id: 1,
-            op: Some(Op::GetAiConfig(GetAiConfigRequest {})),
-        },
-    )?;
-    if !response.ok {
-        return Err(io::Error::other(
-            "AI configuration is unavailable; check the app's AI settings",
-        ));
-    }
-    let config = match response.result {
-        Some(hub_response::Result::AiConfig(config)) => config,
-        _ => return Err(io::Error::other("hub returned no AI configuration")),
-    };
-    Ok((
-        Config::from(config),
-        Context {
-            container_id: context.container_id,
-        },
-    ))
-}
-
-impl From<AiConfigResponse> for Config {
-    fn from(config: AiConfigResponse) -> Self {
+impl From<hub_client::filehub::AiConfigResponse> for Config {
+    fn from(config: hub_client::filehub::AiConfigResponse) -> Self {
         Self {
             api_key: config.api_key,
             base_url: config.base_url,
             model: config.model,
+            effort: config.effort,
+            provider: config.provider,
         }
     }
 }

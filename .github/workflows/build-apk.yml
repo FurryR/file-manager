@@ -1,0 +1,63 @@
+name: Build debug APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-apk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Android debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Check flake
+        run: nix flake check --no-write-lock-file
+
+      - name: Build native artifacts and APK
+        run: |
+          nix develop --command bash -c '
+            set -euo pipefail
+            bash native/build-android-aarch64.sh
+            bash native/build-proot.sh
+            gradle clean :app:assembleDebug --no-daemon
+          '
+
+      - name: Verify packaged native artifacts
+        run: |
+          set -euo pipefail
+          apk=app/build/outputs/apk/debug/app-debug.apk
+          test -f "$apk"
+
+          for entry in \
+            lib/arm64-v8a/libfiledaemon.so \
+            lib/arm64-v8a/libproot.so \
+            lib/arm64-v8a/libvirglhost.so \
+            lib/arm64-v8a/run0 \
+            lib/arm64-v8a/here \
+            lib/arm64-v8a/agent; do
+            unzip -Z1 "$apk" | grep -Fx "$entry"
+          done
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-${{ github.sha }}
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

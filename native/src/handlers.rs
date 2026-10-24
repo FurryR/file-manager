@@ -95,7 +95,7 @@ pub async fn handle_streaming(
         }
         Some(Command::Cancel(req)) => {
             close_unexpected_fd(attached_fd);
-            let resp = copy_ops::cancel(req_id, req, &cancel_flags).await;
+            let resp = copy_ops::cancel(req_id, req, &cancel_flags, source_read_broker).await;
             let _ = tx.send(OutboundResponse::plain(resp));
         }
         Some(Command::SpawnPty(req)) => {

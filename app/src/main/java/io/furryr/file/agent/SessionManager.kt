@@ -6,7 +6,6 @@ import android.content.Context
 import android.util.Log
 import io.furryr.file.RuntimeForegroundService
 import io.furryr.file.container.ContainerManager
-import io.furryr.file.container.ContainerUriResolver
 import io.furryr.file.virgl.VirglManager
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.hub.Hub
@@ -186,51 +185,6 @@ object SessionManager {
                 Result.failure(e)
             }
         }
-
-    /**
-     * Create or reuse a terminal session for the agent sheet.
-     * If [currentPath] starts with `container://`, looks up that container's
-     * session, creating one if needed. Otherwise starts a local shell.
-     */
-    suspend fun getOrCreateTerminal(context: Context, currentPath: String): TerminalSession {
-        val containerName = if (currentPath.startsWith("container://")) {
-            ContainerUriResolver.resolveContainerUri(currentPath).getOrThrow().containerName
-        } else null
-
-        val existing = synchronized(mutex) {
-            if (containerName != null) {
-                sessions.values.find {
-                    it.type is SessionType.Container &&
-                    (it.type as SessionType.Container).containerName == containerName
-                }
-            } else {
-                sessions.values.find { it.type is SessionType.AppShell }
-            }
-        }
-        if (existing != null) return existing.session
-
-        val type: SessionType = if (containerName != null && containerName.isNotBlank()) {
-            val startPath = runCatching {
-                ContainerUriResolver.resolveContainerUri(currentPath).getOrThrow().containerPath
-            }.getOrNull()
-            SessionType.Container(containerName, startPath)
-        } else {
-            SessionType.AppShell("/system/bin/sh")
-        }
-
-        return createSession(type, context).getOrThrow()
-    }
-
-    /**
-     * Release a terminal session created by [getOrCreateTerminal].
-     */
-    fun releaseSession(session: TerminalSession) {
-        val sessionId = synchronized(mutex) {
-            val entry = sessions.entries.find { it.value.session === session }
-            entry?.key
-        }
-        if (sessionId != null) destroySession(sessionId)
-    }
 
     /**
      * Destroy an active terminal session.

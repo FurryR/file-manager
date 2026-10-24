@@ -123,7 +123,7 @@ pub(super) async fn read_source_response(
 ) -> Response {
     let response_id = response.request_id;
     match source_read_broker.lock().await.remove(&response_id) {
-        Some(sender) => {
+        Some((_, sender)) => {
             let _ = sender.send(response);
             ok_response(req_id)
         }
@@ -138,11 +138,16 @@ pub(super) async fn cancel(
     req_id: u64,
     req: CancelRequest,
     cancel_flags: &Arc<Mutex<std::collections::HashMap<u64, Arc<AtomicBool>>>>,
+    source_read_broker: &copy::SourceReadBroker,
 ) -> Response {
-    let flags = cancel_flags.lock().await;
-    match flags.get(&req.target_id) {
+    let flag = cancel_flags.lock().await.get(&req.target_id).cloned();
+    match flag {
         Some(flag) => {
             flag.store(true, Ordering::Relaxed);
+            source_read_broker
+                .lock()
+                .await
+                .retain(|_, (copy_id, _)| *copy_id != req.target_id);
             ok_response(req_id)
         }
         None => error_response(

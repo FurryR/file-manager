@@ -43,11 +43,6 @@
             android:multiprocess="false" />
 
         <activity
-            android:name=".agent.ContainerWizardActivity"
-            android:exported="false"
-            android:theme="@style/Theme.FileManager" />
-
-        <activity
             android:name=".ui.screens.AgentProvidersActivity"
             android:enableOnBackInvokedCallback="true"
             android:exported="false"

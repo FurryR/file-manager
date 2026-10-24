@@ -334,6 +334,16 @@ class DaemonConnection internal constructor(
             .build())
     }
 
+    private fun cancelStream(id: Long) {
+        // Cancellation must not wait for an acknowledgement from the copy worker.
+        runCatching {
+            rawSend(Request.newBuilder()
+                .setId(allocateRequestId())
+                .setCancel(CancelRequest.newBuilder().setTargetId(id))
+                .build())
+        }.onFailure { Log.w(TAG, "Failed to cancel stream $id", it) }
+    }
+
     /** Send a streaming request, returning a Flow of CopyProgress. */
     fun requestStream(request: Request, isCopy: Boolean = true): Flow<CopyProgress> =
         requestStream(request, allocateRequestId(), isCopy)
@@ -359,6 +369,9 @@ class DaemonConnection internal constructor(
                 ))
                 if (p.finished) break
             }
+        } catch (e: CancellationException) {
+            cancelStream(id)
+            throw e
         } finally {
             synchronized(pendingLock) { pendingRequests.remove(id) }
         }
@@ -403,6 +416,9 @@ class DaemonConnection internal constructor(
                 ))
                 if (progress.finished) break
             }
+        } catch (e: CancellationException) {
+            cancelStream(id)
+            throw e
         } finally {
             synchronized(pendingLock) {
                 pendingRequests.remove(id)

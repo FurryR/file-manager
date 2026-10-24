@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use crate::proto::{ReadSourceResponse, Response, StreamProgress};
 use crate::protocol::OutboundResponse;
 
-pub type SourceReadBroker = Arc<Mutex<HashMap<u64, oneshot::Sender<ReadSourceResponse>>>>;
+pub type SourceReadBroker = Arc<Mutex<HashMap<u64, (u64, oneshot::Sender<ReadSourceResponse>)>>>;
 
 static NEXT_SOURCE_READ_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -91,12 +91,17 @@ pub async fn copy_from_virtual(
     let mut copied = 0u64;
 
     loop {
-        if cancel_flag.load(Ordering::Relaxed) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-        }
         let read_id = NEXT_SOURCE_READ_ID.fetch_add(1, Ordering::Relaxed);
         let (response_tx, response_rx) = oneshot::channel();
-        broker.lock().await.insert(read_id, response_tx);
+        {
+            let mut pending = broker.lock().await;
+            if cancel_flag.load(Ordering::Relaxed) {
+                drop(pending);
+                dst.flush().await?;
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
+            pending.insert(read_id, (req_id, response_tx));
+        }
         let request = Response {
             id: req_id,
             ok: true,
@@ -111,7 +116,12 @@ pub async fn copy_from_virtual(
             broker.lock().await.remove(&read_id);
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "response channel closed"));
         }
-        let response = response_rx.await.map_err(|_| {
+        let response = response_rx.await;
+        if cancel_flag.load(Ordering::Relaxed) {
+            dst.flush().await?;
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let response = response.map_err(|_| {
             io::Error::new(io::ErrorKind::BrokenPipe, "source read response missing")
         })?;
         if !response.error.is_empty() {
@@ -150,6 +160,8 @@ async fn copy_reader<R: tokio::io::AsyncRead + Unpin>(
     let mut copied = 0u64;
     loop {
         if cancel_flag.load(Ordering::Relaxed) {
+            // Tokio may still be completing the preceding buffered file write.
+            dst.flush().await?;
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
         let n = source.read(&mut buf).await?;
@@ -197,6 +209,7 @@ async fn copy_file(
 
     loop {
         if cancel_flag.load(Ordering::Relaxed) {
+            dst_file.flush().await?;
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
 

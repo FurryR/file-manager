@@ -77,7 +77,6 @@ struct Shared {
     pty_manager: Arc<Mutex<PtyManager>>,
     execs: Arc<Mutex<ExecManager>>,
     handles: Arc<Mutex<HandleTable>>,
-    source_read_broker: copy::SourceReadBroker,
     clients: Arc<Clients>,
     /// This launch's Ed25519 public key, used to authenticate every connection.
     public_key: Vec<u8>,
@@ -129,7 +128,6 @@ async fn main() -> io::Result<()> {
         pty_manager: Arc::new(Mutex::new(PtyManager::new())),
         execs: Arc::new(Mutex::new(ExecManager::default())),
         handles: Arc::new(Mutex::new(HandleTable::new())),
-        source_read_broker: copy::SourceReadBroker::default(),
         clients: Arc::new(Clients::default()),
         public_key,
         socket_name,
@@ -200,7 +198,6 @@ async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
     shared.pty_manager.lock().await.close_all();
     shared.execs.lock().await.clear();
     *shared.handles.lock().await = HandleTable::new();
-    shared.source_read_broker.lock().await.clear();
     Ok(())
 }
 
@@ -236,6 +233,7 @@ async fn handle_connection(
     // Cancellable in-flight requests are scoped to this connection.
     let cancel_flags: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let source_read_broker = copy::SourceReadBroker::default();
 
     // Issue the challenge before serving anything: the client must prove it
     // holds this launch's private key by signing `auth_message`.
@@ -330,17 +328,25 @@ async fn handle_connection(
                         let shared = shared.clone();
                         let shutdown = shutdown_tx.clone();
                         let cancel_flags = cancel_flags.clone();
-                        let is_exit = matches!(&incoming.request.command, Some(proto::request::Command::Exit(_)));
+                        let source_read_broker = source_read_broker.clone();
+                        let ordered = matches!(
+                            &incoming.request.command,
+                            Some(proto::request::Command::Exit(_))
+                                | Some(proto::request::Command::Copy(_))
+                                | Some(proto::request::Command::CopyFromSource(_))
+                                | Some(proto::request::Command::Cancel(_))
+                        );
                         let handler = async move {
                             handlers::handle_streaming(
                                 incoming.request, incoming.attached_fd,
                                 &shared.pty_manager, &shared.execs, &shared.handles,
-                                cancel_flags, &shared.source_read_broker, tx,
+                                cancel_flags, &source_read_broker, tx,
                                 &shutdown,
                             ).await;
                         };
                         // Exit must survive a client closing immediately after sending it.
-                        if is_exit {
+                        // Register copies before a following cancellation can run.
+                        if ordered {
                             handler.await;
                         } else {
                             requests.spawn(handler);
@@ -391,6 +397,7 @@ async fn handle_connection(
         }
         flags.clear();
     }
+    source_read_broker.lock().await.clear();
     drop(authenticated_client);
     result
 }

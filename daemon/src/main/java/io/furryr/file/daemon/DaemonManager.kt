@@ -101,7 +101,6 @@ object DaemonManager {
         private set
 
     @Volatile private var launcher: DaemonLauncher? = null
-    @Volatile private var registry: DaemonRegistry = DaemonRegistry { emptyList() }
 
     @Volatile private var _generation = 0
 
@@ -157,12 +156,6 @@ object DaemonManager {
 
     /** Install the launch strategy used for [DaemonTarget.Named] daemons. */
     fun setLauncher(launcher: DaemonLauncher?) { this.launcher = launcher }
-
-    /** Install the endpoint registry for external clients. */
-    fun setRegistry(registry: DaemonRegistry) { this.registry = registry }
-
-    /** Live endpoints an external client could attach to. */
-    fun endpoints(): List<DaemonEndpoint> = registry.endpoints()
 
     /** Live daemon endpoints with their actual sockets, ready for hub attach. */
     fun liveEndpoints(): List<DaemonEndpoint> = synchronized(lock) {

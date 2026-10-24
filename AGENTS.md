@@ -27,12 +27,12 @@ file-manager/
 ├── daemon/              # :daemon — daemon IPC over :uds.Transport
 │   └── src/main/java/io/furryr/file/daemon/
 │       ├── DaemonManager.kt      # Lifecycle, targets, launcher SPI, services
-│       ├── DaemonRegistry.kt
+│       ├── DaemonEndpoint.kt
 │       ├── ipc/                  # DaemonConnection (proto codec + id correlation)
 │       ├── process/              # CommandSpec + ProcessChannel + ExecService
 │       ├── file/                 # FileService (daemon-backed file ops)
 │       ├── source/               # Handle/Fd file sources
-│       └── model/                # CopyHandle, ExecResult
+│       └── model/                # ExecResult
 ├── provider/            # :provider — protocol domains (no UI/app deps)
 │   └── src/main/java/io/furryr/file/provider/
 │       ├── LocalProvider.kt      # Local filesystem over :daemon

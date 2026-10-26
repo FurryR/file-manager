@@ -37,8 +37,8 @@ message HubRequest {
     SetHistoryRequest set_history = 23;
     GetModelsRequest get_models = 24;
     GetCapabilitiesRequest get_capabilities = 25;
-    McpHttpRequest mcp_http = 26;
-    CancelMcpHttpRequest cancel_mcp_http = 27;
+    RemoteMcpCall remote_mcp_call = 26;
+    CancelRemoteMcpCall cancel_remote_mcp_call = 27;
     ListSessionsRequest list_sessions = 28;
     GetActiveSessionRequest get_active_session = 29;
     SetActiveSessionRequest set_active_session = 30;
@@ -66,7 +66,7 @@ message HubResponse {
     HistoryResponse history = 15;
     ModelsResponse models = 16;
     CapabilitiesResponse capabilities = 17;
-    McpHttpEvent mcp_http = 18;
+    RemoteMcpCallEvent remote_mcp_call = 18;
     SessionsResponse sessions = 19;
     ActiveSessionResponse active_session = 20;
     SessionTitle session_title = 21;
@@ -309,32 +309,23 @@ message GetCapabilitiesRequest {
   string cwd = 1;
 }
 
-message McpServerConfig {
-  string name = 1;
-  // Remote MCP endpoint (Streamable HTTP). Empty for a stdio server.
-  string url = 2;
-  map<string, string> headers = 3;
-  // Local stdio server; ignored when `url` is set.
-  string command = 4;
-  repeated string args = 5;
-  map<string, string> env = 6;
-  string cwd = 7;
-  bool enabled = 8;
-  // `global` or `workspace`.
-  string source = 9;
-  // `http` or `stdio`. Empty means infer from url/command.
-  string transport = 10;
-}
-
 message CapabilitiesResponse {
-  repeated McpServerConfig mcp_servers = 1;
+  // Names of remote MCP servers the caller may use through RemoteMcpCall.
+  // Their URLs and credential headers stay in the app and are never sent to
+  // the caller.
+  repeated string remote_mcp_servers = 1;
+  // Whether workspace `.agent/mcp.json` files are trusted. When true the agent
+  // reads local stdio servers from that file itself; the hub reads remote
+  // entries from it by name only.
+  bool workspace_mcp = 2;
 }
 
-// Proxy one HTTP request for a remote (online) MCP server. The hub resolves
-// `server` for the caller, uses its configured URL and injects configured
-// headers; it does not parse MCP. Responses stream as McpHttpEvent frames with
-// the request id.
-message McpHttpRequest {
+// One HTTP request for a remote MCP server, referenced by configured name. The
+// hub resolves the server for the caller, uses its configured URL and injects
+// its credential headers; it does not parse MCP. `headers` carries only the
+// caller's protocol headers (content type, session id, ...). Responses stream
+// as RemoteMcpCallEvent frames with the request id.
+message RemoteMcpCall {
   string server = 1;
   string cwd = 2;
   string method = 3;
@@ -344,7 +335,7 @@ message McpHttpRequest {
   bytes body = 6;
 }
 
-message McpHttpEvent {
+message RemoteMcpCallEvent {
   int32 status = 1;
   map<string, string> headers = 2;
   bytes data = 3;
@@ -352,7 +343,7 @@ message McpHttpEvent {
   string error = 5;
 }
 
-message CancelMcpHttpRequest {
+message CancelRemoteMcpCall {
   uint32 request_id = 1;
 }
 

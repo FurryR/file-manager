@@ -3,16 +3,16 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hub_client::filehub::McpServerConfig;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
-use crate::hub::Hub;
+use crate::hub::{Capabilities, Hub};
 use crate::tool::ToolInfo;
 
 const MAX_PAGES: usize = 16;
+const MAX_LOCAL_CONFIG_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
 pub struct McpTool {
@@ -48,37 +48,132 @@ struct StdioMcp {
     next_id: u64,
 }
 
+/// A local stdio server declared in a workspace `.agent/mcp.json`.
+struct LocalServer {
+    name: String,
+    command: String,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    cwd: String,
+}
+
+/// Local stdio servers from `.agent/mcp.json` in [cwd] and its ancestors.
+/// Closer files override farther ones by name, and `{"enabled": false}`
+/// removes a server defined farther up. Remote entries are ignored here; the
+/// hub resolves those by name.
+fn read_local_servers(cwd: &str) -> Vec<LocalServer> {
+    let mut directory = std::path::PathBuf::from(cwd);
+    let mut chain = vec![directory.clone()];
+    while directory.pop() {
+        chain.push(directory.clone());
+    }
+    let mut merged: Vec<LocalServer> = Vec::new();
+    for directory in chain.iter().rev() {
+        let Ok(text) = std::fs::read_to_string(directory.join(".agent").join("mcp.json")) else {
+            continue;
+        };
+        if text.len() > MAX_LOCAL_CONFIG_BYTES {
+            continue;
+        }
+        let Ok(root) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let Some(servers) = root.get("mcpServers").and_then(Value::as_object) else {
+            continue;
+        };
+        for (name, entry) in servers {
+            let transport = entry
+                .get("type")
+                .and_then(Value::as_str)
+                .or_else(|| entry.get("transport").and_then(Value::as_str))
+                .unwrap_or_default();
+            let url = entry.get("url").and_then(Value::as_str).unwrap_or_default();
+            let command = entry
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if command.is_empty() || !url.is_empty() || transport == "http" {
+                // No command: an `{"enabled": false}` tombstone for a server
+                // from a farther file, or a remote entry the hub handles.
+                if merged.iter().any(|server| server.name == *name)
+                    && entry.get("enabled").and_then(Value::as_bool) == Some(false)
+                {
+                    merged.retain(|server| server.name != *name);
+                }
+                continue;
+            }
+            let server = LocalServer {
+                name: name.clone(),
+                command: command.to_owned(),
+                args: entry
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                env: entry
+                    .get("env")
+                    .and_then(Value::as_object)
+                    .map(|object| {
+                        object
+                            .iter()
+                            .filter_map(|(key, value)| {
+                                value.as_str().map(|value| (key.clone(), value.to_owned()))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                cwd: entry
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            };
+            match merged.iter_mut().find(|server| server.name == *name) {
+                Some(existing) => *existing = server,
+                None => merged.push(server),
+            }
+        }
+    }
+    merged
+}
+
 impl McpManager {
-    pub async fn connect(configs: &[McpServerConfig], hub: Arc<Mutex<Hub>>, cwd: &str) -> Self {
+    /// Local stdio servers are read from the workspace `.agent/mcp.json` when
+    /// the caller trusts it; remote servers are reached by name through the
+    /// hub, which holds their URLs and credentials.
+    pub async fn connect(capabilities: &Capabilities, hub: Arc<Mutex<Hub>>, cwd: &str) -> Self {
         let mut manager = Self {
             tools: Vec::new(),
             clients: HashMap::new(),
         };
-        for config in configs.iter().filter(|config| config.enabled) {
-            let transport = if config.transport.is_empty() {
-                if config.url.is_empty() {
-                    "stdio"
-                } else {
-                    "http"
-                }
-            } else {
-                config.transport.as_str()
-            };
-            let client = if transport == "stdio" {
-                match StdioMcp::spawn(config) {
-                    Ok(client) => Client::Stdio(client),
+        let mut clients: Vec<(String, Client)> = Vec::new();
+        if capabilities.workspace_mcp {
+            for server in read_local_servers(cwd) {
+                match StdioMcp::spawn(&server) {
+                    Ok(client) => clients.push((server.name, Client::Stdio(client))),
                     Err(_) => continue,
                 }
-            } else {
+            }
+        }
+        for name in &capabilities.remote_servers {
+            clients.push((
+                name.clone(),
                 Client::Http(HttpMcp {
-                    server: config.name.clone(),
+                    server: name.clone(),
                     cwd: cwd.to_owned(),
                     hub: Arc::clone(&hub),
                     session_id: None,
                     next_id: 1,
-                })
-            };
-            let mut client = client;
+                }),
+            ));
+        }
+        for (name, mut client) in clients {
             if !matches!(
                 tokio::time::timeout(Duration::from_secs(20), client.initialize()).await,
                 Ok(Ok(()))
@@ -91,20 +186,20 @@ impl McpManager {
                     _ => continue,
                 };
             let shared = Arc::new(Mutex::new(client));
-            for (name, description, schema) in tools {
-                let qualified = qualified_name(&config.name, &name);
+            for (tool, description, schema) in tools {
+                let qualified = qualified_name(&name, &tool);
                 if manager.tools.iter().any(|tool| tool.qualified == qualified) {
                     continue;
                 }
                 manager.tools.push(McpTool {
                     qualified,
-                    server: config.name.clone(),
-                    name,
+                    server: name.clone(),
+                    name: tool,
                     description,
                     schema,
                 });
             }
-            manager.clients.insert(config.name.clone(), shared);
+            manager.clients.insert(name, shared);
         }
         manager
     }
@@ -282,7 +377,7 @@ impl HttpMcp {
             .hub
             .lock()
             .await
-            .mcp_http(
+            .remote_mcp_call(
                 &self.server,
                 &self.cwd,
                 "POST",
@@ -329,7 +424,7 @@ impl HttpMcp {
         self.hub
             .lock()
             .await
-            .mcp_http(
+            .remote_mcp_call(
                 &self.server,
                 &self.cwd,
                 "POST",
@@ -343,7 +438,7 @@ impl HttpMcp {
 }
 
 impl StdioMcp {
-    fn spawn(config: &McpServerConfig) -> Result<Self, String> {
+    fn spawn(config: &LocalServer) -> Result<Self, String> {
         if config.command.is_empty() {
             return Err("MCP stdio server has no command".to_owned());
         }

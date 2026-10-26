@@ -109,6 +109,9 @@
     <string name="drawer_sort">Sort</string>
     <string name="drawer_network_placeholder">SSH / FTP / SFTP (TODO)</string>
     <string name="drawer_tools_placeholder">Toolbox (TODO)</string>
+    <string name="drawer_tool_wayland">Wayland viewer</string>
+    <string name="drawer_tool_wayland_desc">Embedded Wayland desktop for containers</string>
+    <string name="wayland_toggle_keyboard">Toggle keyboard</string>
     <string name="container_state_running">Running</string>
     <string name="container_state_stopped">Stopped</string>
     <string name="container_state_creating">Creating</string>
@@ -172,6 +175,12 @@
     <string name="settings_container_desc">Docker Hub and image settings</string>
     <string name="settings_docker_hub_url">Docker Hub address</string>
     <string name="settings_docker_hub_key">Docker Hub key</string>
+    <string name="settings_pulse">Container audio (PulseAudio)</string>
+    <string name="settings_pulse_desc">Resident PulseAudio host for containers. Takes effect for new container sessions.</string>
+    <string name="settings_pulse_mic">Container microphone</string>
+    <string name="settings_pulse_mic_desc">Let containers record from this device\'s microphone while it is enabled.</string>
+    <string name="settings_pulse_buffer">Audio buffer</string>
+    <string name="settings_pulse_buffer_desc">Sink latency in milliseconds (10–1000). Lower reacts faster; too low stutters.</string>
     <string name="settings_terminal">Terminal</string>
     <string name="settings_terminal_desc">Font and display settings</string>
     <string name="settings_terminal_font">Font</string>
@@ -214,19 +223,10 @@
     <string name="agent_mcp_edit">Edit</string>
     <string name="agent_mcp_delete">Delete</string>
     <string name="agent_mcp_name">Name</string>
-    <string name="agent_mcp_command">Command</string>
-    <string name="agent_mcp_args">Arguments</string>
-    <string name="agent_mcp_args_hint">Separate arguments with spaces</string>
-    <string name="agent_mcp_env">Environment</string>
-    <string name="agent_mcp_env_hint">One KEY=VALUE per line</string>
-    <string name="agent_mcp_cwd">Working directory (optional)</string>
     <string name="agent_mcp_empty">No MCP servers configured.</string>
     <string name="agent_mcp_workspace">Load workspace MCP config</string>
     <string name="agent_mcp_workspace_desc">Trust .agent/mcp.json in the current workspace</string>
     <string name="agent_mcp_enabled">Enabled</string>
-    <string name="agent_mcp_transport">Transport</string>
-    <string name="agent_mcp_transport_http">Online (HTTP)</string>
-    <string name="agent_mcp_transport_stdio">Local (stdio)</string>
     <string name="agent_mcp_url">Server URL</string>
     <string name="agent_mcp_headers">Headers</string>
     <string name="agent_mcp_headers_hint">One Name: Value per line</string>

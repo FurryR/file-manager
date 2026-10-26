@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::model::{AgentEvent, Entry, Message, WriteBlock};
 
-use super::{tool_line, App, GENERATING_CALL, MAX_LIVE_TOOL_BYTES, WAITING_NOTICE};
+use super::{tool_line, App, GENERATING_CALL, MAX_LIVE_TOOL_BYTES};
 
 impl App {
     pub fn complete_success(&mut self, messages: Vec<Message>, answer: String) {
@@ -17,7 +17,6 @@ impl App {
         if !self.answer_streamed {
             self.transcript.push(Entry::assistant(answer));
         }
-        self.notice = String::new();
         self.bump();
     }
 
@@ -39,7 +38,6 @@ impl App {
         self.transcript.clear();
         self.transcript
             .push(Entry::notice("Conversation compacted."));
-        self.notice = String::new();
         self.follow = true;
         self.bump();
     }
@@ -147,7 +145,6 @@ impl App {
             }
             AgentEvent::ToolResult { ok, .. } => {
                 self.finish_tool((!ok).then_some("failed"));
-                self.notice = WAITING_NOTICE.to_owned();
             }
             AgentEvent::Usage(usage) => {
                 self.context_tokens = usage.prompt_tokens;
@@ -172,8 +169,14 @@ impl App {
         if let Some(messages) = messages {
             self.history = messages;
         }
-        self.notice.clear();
         self.follow = true;
+        self.bump();
+    }
+
+    /// Adopt the cancelled run's settled history. The transcript keeps what the
+    /// user already saw; only the message history is synchronized.
+    pub fn complete_cancelled(&mut self, messages: Vec<Message>) {
+        self.history = messages;
         self.bump();
     }
 

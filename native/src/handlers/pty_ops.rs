@@ -78,71 +78,36 @@ pub(super) fn wait(
     let pm = pty_manager.clone();
     let tx = tx.clone();
     tokio::spawn(async move {
-        let child_pid = {
-            let mgr = pm.lock().await;
-            mgr.get_child_pid(pty_id)
-        };
-        let pid = match child_pid {
-            Ok(pid) => pid,
-            Err(_) => {
-                // PTY already cleaned up by closePty — return 0.
-                let _ = tx.send(OutboundResponse::plain(Response {
-                    id: req_id,
-                    ok: true,
-                    exit_code: 0,
-                    ..Response::default()
-                }));
-                return;
-            }
-        };
-        let result = tokio::task::spawn_blocking(move || {
-            let mut status: i32 = 0;
+        // The poll task owns reaping; subscribe to its published exit code.
+        // A missing handle means the PTY was closed already — exit 0, same
+        // contract as before.
+        let mut code = 0;
+        // Bind the receiver before the `if let`: a guard that stays a
+        // scrutinee temporary in edition 2021 lives through the whole body,
+        // holding the manager lock across the await below and wedging every
+        // later PTY request (resize!) behind a shell that never exits.
+        let receiver = pm.lock().await.exit_receiver(pty_id);
+        if let Some(mut receiver) = receiver {
             loop {
-                let waited = unsafe { libc::waitpid(pid as i32, &mut status, 0) };
-                if waited == pid as i32 {
-                    return Ok(status);
+                if let Some(value) = *receiver.borrow() {
+                    code = value;
+                    break;
                 }
-                let error = io::Error::last_os_error();
-                if error.kind() != io::ErrorKind::Interrupted {
-                    return Err(error);
-                }
-            }
-        })
-        .await;
-
-        let exit_code = match result {
-            Ok(Ok(status)) => {
-                if libc::WIFEXITED(status) {
-                    libc::WEXITSTATUS(status) as i32
-                } else if libc::WIFSIGNALED(status) {
-                    -(libc::WTERMSIG(status) as i32)
-                } else {
-                    -1
+                if receiver.changed().await.is_err() {
+                    code = -1;
+                    break;
                 }
             }
-            Ok(Err(error)) => {
-                let _ = tx.send(OutboundResponse::plain(error_response(req_id, error)));
-                return;
-            }
-            Err(error) => {
-                let _ = tx.send(OutboundResponse::plain(error_response(
-                    req_id,
-                    io::Error::other(error.to_string()),
-                )));
-                return;
-            }
-        };
-
-        let mut mgr = pm.lock().await;
-        let _ = mgr.remove_pty(pty_id);
+        }
+        pm.lock().await.remove_pty(pty_id);
 
         let _ = tx.send(OutboundResponse::plain(Response {
             id: req_id,
             ok: true,
-            exit_code,
+            exit_code: code,
             pty_event: Some(PtyEvent {
                 pty_id,
-                event: Some(crate::proto::pty_event::Event::ExitCode(exit_code as u32)),
+                event: Some(crate::proto::pty_event::Event::ExitCode(code as u32)),
             }),
             ..Response::default()
         }));

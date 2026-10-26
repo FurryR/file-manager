@@ -120,6 +120,41 @@ fun LicensesScreen(modifier: Modifier = Modifier) {
                 license = "GNU GPLv2"
             )
             LicenseEntry(
+                name = "PulseAudio",
+                url = "https://www.freedesktop.org/wiki/Software/PulseAudio/",
+                license = "GNU LGPLv2.1 or later (see native-licenses/LICENSE-PulseAudio)"
+            )
+            LicenseEntry(
+                name = "libsndfile",
+                url = "https://libsndfile.github.io/libsndfile/",
+                license = "GNU LGPLv2.1 or later"
+            )
+            LicenseEntry(
+                name = "libltdl",
+                url = "https://www.gnu.org/software/libtool/",
+                license = "GNU LGPLv2.1 or later"
+            )
+            LicenseEntry(
+                name = "WLDroid",
+                url = "https://github.com/Shelnutt2/wldroid",
+                license = "MIT License"
+            )
+            LicenseEntry(
+                name = "wlroots (wldroid fork)",
+                url = "https://github.com/Shelnutt2/wlroots",
+                license = "MIT License"
+            )
+            LicenseEntry(
+                name = "virglrenderer (wldroid fork)",
+                url = "https://github.com/Shelnutt2/virglrenderer",
+                license = "MIT License"
+            )
+            LicenseEntry(
+                name = "libepoxy",
+                url = "https://github.com/anholt/libepoxy",
+                license = "MIT License"
+            )
+            LicenseEntry(
                 name = "Apache Commons Net",
                 url = "https://commons.apache.org/proper/commons-net/",
                 license = "Apache License 2.0"

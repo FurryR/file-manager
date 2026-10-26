@@ -4,26 +4,36 @@ use tokio::process::Child;
 
 /// A pipe-mode child kept alive between its Exec response and WaitExec.
 /// Dropping it (explicit close, wait completion, or daemon shutdown) kills any
-/// remaining members of its process group.
+/// remaining members of its process group and hands the zombie to the reaper
+/// sweep — nobody will wait for it after this point.
 pub struct ExecProcess {
     pub child: Child,
     pid: u32,
+    group: crate::reaper::ProcessGroup,
 }
 
 impl ExecProcess {
     fn new(child: Child) -> Self {
         let pid = child.id().unwrap_or(0);
-        Self { child, pid }
+        Self {
+            child,
+            pid,
+            group: crate::reaper::ProcessGroup(pid),
+        }
+    }
+
+    /// The owner consumed the exit status; stop shielding the pid from the
+    /// reaper sweep and disarm the group kill (the child is gone already).
+    pub fn reaped(&mut self) {
+        crate::reaper::release(self.pid);
+        self.group.finish();
     }
 }
 
 impl Drop for ExecProcess {
     fn drop(&mut self) {
-        if self.pid != 0 {
-            unsafe {
-                libc::kill(-(self.pid as i32), libc::SIGKILL);
-            }
-        }
+        self.group.finish();
+        crate::reaper::release(self.pid);
     }
 }
 
@@ -36,6 +46,8 @@ pub struct ExecManager {
 }
 
 impl ExecManager {
+    /// The caller must have registered the pid with `reaper::track` right
+    /// after spawning it, before any other task could run.
     pub fn insert(&mut self, child: Child) -> (u64, u32) {
         let process = ExecProcess::new(child);
         let pid = process.pid;

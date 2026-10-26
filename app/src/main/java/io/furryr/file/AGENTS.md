@@ -19,8 +19,8 @@ platform services and calls the library.
 
 > The VFS abstraction lives in `:core`; protocol providers (Local/FTP/SFTP/
 > SAF/remote) live in `:provider`; containers and the single `ContainerProvider`
-> live in `:container`; daemon IPC lives in `:daemon`; the hub lives in `:hub`;
-> VirGL lives in `:virgl`. `Providers.kt` only wires platform services.
+> live in `:container`; daemon IPC lives in `:daemon`; the hub lives in `:hub`.
+> `Providers.kt` only wires platform services.
 
 ## WHERE TO LOOK
 
@@ -45,7 +45,7 @@ platform services and calls the library.
 - **Protobuf lite** — `com.google.protobuf:protobuf-javalite` (generated in `:core`).
 - **No `enum` for screens** — uses `private enum class` in Activity files.
 - **SessionManager singleton** — `object`, not DI. Manual wiring via `configure()`.
-- **Native binaries as jniLibs** — `libfiledaemon.so` and `libproot.so` in `jniLibs/arm64-v8a/` here; `libvirglhost.so` ships with `:virgl`.
+- **Native binaries as jniLibs** — `libfiledaemon.so`, `libproot.so` and `libpulsehost.so` in `jniLibs/arm64-v8a/` here.
 
 ## ANTI-PATTERNS
 

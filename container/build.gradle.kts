@@ -24,6 +24,7 @@ android {
 dependencies {
     api(project(":core"))
     implementation(project(":daemon"))
-    implementation(project(":virgl"))
+    implementation(project(":pulse"))
+    implementation(project(":wayland"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }

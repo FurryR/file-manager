@@ -58,16 +58,9 @@ async fn run() -> io::Result<()> {
     let initial_effort = config.effort;
     let terminal_id = env::var("HUB_TERMINAL").unwrap_or_default();
     let mut titles = Hub::subscribe_titles().await.ok();
-    let active_session = hub.active_session().await.ok().flatten();
-    let mut session_id = active_session.unwrap_or_else(|| {
-        if terminal_id.is_empty() {
-            "default".to_owned()
-        } else {
-            terminal_id.clone()
-        }
-    });
-    let (history_json, initial_title) = hub.load_history(&session_id).await.unwrap_or_default();
-    let history = serde_json::from_str::<Vec<Message>>(&history_json).unwrap_or_default();
+    // Every launch starts a new conversation. Nothing is registered on the
+    // hub up front: the session materializes there with the first message.
+    let mut session_id = new_session_id(&terminal_id);
     let context = hub.caller.clone();
     let hub = Arc::new(Mutex::new(hub));
 
@@ -93,12 +86,13 @@ async fn run() -> io::Result<()> {
         initial_provider,
         initial_model,
         initial_effort,
-        history,
-        initial_title,
+        Vec::new(),
+        String::new(),
     );
     let mut state = UiState::default();
     let mut pending: Option<tokio::task::JoinHandle<Result<Outcome, runner::Failure>>> = None;
     let mut pending_kind = TaskKind::Chat;
+    let mut journal: Option<runner::Journal> = None;
     let active_exec: tool::ActiveExec = Default::default();
     let mut events: Option<tokio::sync::mpsc::UnboundedReceiver<AgentEvent>> = None;
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
@@ -122,23 +116,37 @@ async fn run() -> io::Result<()> {
                         if let Some(handle) = pending.take() {
                             handle.abort();
                             let _ = handle.await;
+                            // A cancel must not drop settled messages: adopt the
+                            // run's history so far and persist it as the session.
+                            match pending_kind {
+                                TaskKind::Chat => {
+                                    if let Some(journal) = journal.take() {
+                                        let mut messages = journal
+                                            .lock()
+                                            .unwrap_or_else(|error| error.into_inner())
+                                            .clone();
+                                        runner::repair_dangling_tool_calls(&mut messages);
+                                        app.complete_cancelled(messages.clone());
+                                        let _ = hub
+                                            .lock()
+                                            .await
+                                            .save_history(&session_id, &messages)
+                                            .await;
+                                    }
+                                }
+                                TaskKind::Compact => {}
+                            }
                         }
                         events = None;
-                        let exec_id = active_exec
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .take();
-                        if let Some(exec_id) = exec_id {
-                            let hub = Arc::clone(&hub);
-                            tokio::spawn(async move {
-                                let _ = hub.lock().await.close_exec(exec_id).await;
-                            });
-                        }
+                        journal = None;
+                        close_active_exec(&hub, &active_exec);
                     }
                     Action::Submit(messages) => {
                         if let Some(handle) = pending.take() {
                             handle.abort();
                         }
+                        let run_journal = runner::new_journal(&messages);
+                        journal = Some(Arc::clone(&run_journal));
                         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
                         events = Some(receiver);
                         pending_kind = TaskKind::Chat;
@@ -148,7 +156,17 @@ async fn run() -> io::Result<()> {
                         let active = Arc::clone(&active_exec);
                         let session = session_id.clone();
                         pending = Some(tokio::spawn(async move {
-                            runner::run(model, effort, hub, messages, sender, active, session).await
+                            runner::run(
+                                model,
+                                effort,
+                                hub,
+                                messages,
+                                run_journal,
+                                sender,
+                                active,
+                                session,
+                            )
+                            .await
                         }));
                     }
                     Action::Compact(messages) => {
@@ -156,6 +174,7 @@ async fn run() -> io::Result<()> {
                             handle.abort();
                         }
                         events = None;
+                        journal = None;
                         pending_kind = TaskKind::Compact;
                         let model = app.model().to_owned();
                         let effort = app.effort().to_owned();
@@ -180,14 +199,24 @@ async fn run() -> io::Result<()> {
                         app.open_sessions(&sessions, &session_id);
                     }
                     Action::SelectSession { id, title } => {
+                        // The UI blocks switching while a request runs; abort any
+                        // stray run so its result cannot land on the new session.
+                        if let Some(handle) = pending.take() {
+                            handle.abort();
+                            let _ = handle.await;
+                        }
+                        events = None;
+                        journal = None;
+                        close_active_exec(&hub, &active_exec);
                         let (history_json, stored_title) = hub
                             .lock()
                             .await
                             .load_history(&id)
                             .await
                             .unwrap_or_default();
-                        let history =
+                        let mut history =
                             serde_json::from_str::<Vec<Message>>(&history_json).unwrap_or_default();
+                        runner::repair_dangling_tool_calls(&mut history);
                         let _ = hub.lock().await.set_active_session(&id).await;
                         session_id = id;
                         let title = if stored_title.is_empty() {
@@ -198,6 +227,13 @@ async fn run() -> io::Result<()> {
                         app.switch_session(history, &title);
                     }
                     Action::NewSession => {
+                        if let Some(handle) = pending.take() {
+                            handle.abort();
+                            let _ = handle.await;
+                        }
+                        events = None;
+                        journal = None;
+                        close_active_exec(&hub, &active_exec);
                         let id = new_session_id(&terminal_id);
                         let _ = hub.lock().await.set_active_session(&id).await;
                         session_id = id;
@@ -223,6 +259,7 @@ async fn run() -> io::Result<()> {
             result = async { pending.as_mut().unwrap().await }, if pending.is_some() => {
                 pending = None;
                 events = None;
+                journal = None;
                 match (pending_kind, result) {
                     (TaskKind::Chat, Ok(Ok(outcome))) => {
                         app.complete_success(outcome.messages, outcome.answer)
@@ -297,6 +334,20 @@ fn new_session_id(terminal: &str) -> String {
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
     format!("{base}-{}-{millis}", std::process::id())
+}
+
+/// Terminate the exec owned by a cancelled or aborted run, if any.
+fn close_active_exec(hub: &Arc<Mutex<Hub>>, active_exec: &tool::ActiveExec) {
+    let exec_id = active_exec
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
+    if let Some(exec_id) = exec_id {
+        let hub = Arc::clone(hub);
+        tokio::spawn(async move {
+            let _ = hub.lock().await.close_exec(exec_id).await;
+        });
+    }
 }
 
 fn persist_selection(hub: &Arc<Mutex<Hub>>, model: &str, effort: &str) {

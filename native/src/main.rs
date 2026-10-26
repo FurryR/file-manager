@@ -21,6 +21,7 @@ mod handles;
 mod list;
 mod protocol;
 mod pty;
+mod reaper;
 mod socket;
 
 use exec::ExecManager;
@@ -96,6 +97,10 @@ async fn main() -> io::Result<()> {
         env!("CARGO_PKG_VERSION"),
         std::process::id()
     );
+
+    // Adopt orphaned descendants instead of letting them escape to init: we
+    // reap their zombies while running and kill the whole tree on exit.
+    reaper::enable()?;
 
     // Container daemons own the process tree: become a session/group leader so
     // the whole container can be signalled as a unit. Ignore failure (e.g. when
@@ -178,6 +183,7 @@ async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
                 }
             }
             _ = signal_check.tick() => {
+                reaper::reap_orphans();
                 if TERMINATE_REQUESTED.load(Ordering::Relaxed) {
                     break;
                 }
@@ -197,6 +203,11 @@ async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
 
     shared.pty_manager.lock().await.close_all();
     shared.execs.lock().await.clear();
+    // All async owners are gone: nobody's exit status can be stolen any more.
+    // Then act as init for the tree we adopted — descendants must not outlive
+    // the daemon. Blocking is fine here; the runtime has nothing left to do.
+    reaper::release_all();
+    reaper::kill_tree(std::time::Duration::from_millis(400));
     *shared.handles.lock().await = HandleTable::new();
     Ok(())
 }

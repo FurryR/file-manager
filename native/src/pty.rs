@@ -207,6 +207,8 @@ pub struct PtyManager {
 struct PtyHandle {
     master_fd: RawFd,
     child_pid: u32,
+    /// Exit code published by the poll task that owns reaping this child.
+    exit: tokio::sync::watch::Receiver<Option<i32>>,
     #[allow(dead_code)]
     container_name: Option<String>,
 }
@@ -463,14 +465,44 @@ impl PtyManager {
         }
 
         // ── PARENT ────────────────────────────────────────────────────
-        // Allocate PTY id and store handle
+        // Shield the child from the reaper sweep before any other task can
+        // run. This poller is the sole owner of its exit status; WaitPty
+        // subscribes to the watch instead of racing a waitpid.
         let child_pid = pid as u32;
+        crate::reaper::track(child_pid);
+        let (exit_tx, exit) = tokio::sync::watch::channel(None);
+        tokio::spawn(async move {
+            loop {
+                let mut status = 0;
+                let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+                if result == pid {
+                    let code = if libc::WIFEXITED(status) {
+                        libc::WEXITSTATUS(status)
+                    } else if libc::WIFSIGNALED(status) {
+                        -libc::WTERMSIG(status)
+                    } else {
+                        -1
+                    };
+                    crate::reaper::release(child_pid);
+                    exit_tx.send_replace(Some(code));
+                    break;
+                }
+                if result < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                    crate::reaper::release(child_pid);
+                    exit_tx.send_replace(Some(-1));
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
+        // Allocate PTY id and store handle
         let pty_id = NEXT_PTY_ID.fetch_add(1, Ordering::SeqCst);
         self.ptys.insert(
             pty_id,
             PtyHandle {
                 master_fd: master.into_raw_fd(),
                 child_pid,
+                exit,
                 container_name: None,
             },
         );
@@ -518,13 +550,16 @@ impl PtyManager {
         })?;
 
         // Kill the entire process group (negative pid → process group)
-        // SIGHUP first to give processes a chance to clean up
+        // SIGHUP first to give processes a chance to clean up. Once the child
+        // is reaped its pid may be recycled, so never signal a dead group.
         unsafe {
-            libc::kill(-(handle.child_pid as i32), libc::SIGHUP);
-            // SIGKILL to ensure termination
-            libc::kill(-(handle.child_pid as i32), libc::SIGKILL);
-            // The parent can close a fresh PTY before the child has called setsid().
-            libc::kill(handle.child_pid as i32, libc::SIGKILL);
+            if handle.exit.borrow().is_none() {
+                libc::kill(-(handle.child_pid as i32), libc::SIGHUP);
+                // SIGKILL to ensure termination
+                libc::kill(-(handle.child_pid as i32), libc::SIGKILL);
+                // The parent can close a fresh PTY before the child has called setsid().
+                libc::kill(handle.child_pid as i32, libc::SIGKILL);
+            }
             libc::close(handle.master_fd);
         }
 
@@ -540,6 +575,10 @@ impl PtyManager {
                 format!("pty {} not found", pty_id),
             )
         })?;
+        // A reaped child's pid may have been recycled; never signal a dead group.
+        if handle.exit.borrow().is_some() {
+            return Ok(());
+        }
         // Negative pid targets the whole process group.
         unsafe {
             libc::kill(-(handle.child_pid as i32), signal);
@@ -553,14 +592,12 @@ impl PtyManager {
             let _ = self.close_pty(pty_id);
         }
     }
-    /// Get the child pid for a PTY without removing the handle.
-    pub fn get_child_pid(&self, pty_id: u64) -> io::Result<u32> {
-        self.ptys.get(&pty_id).map(|h| h.child_pid).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("pty {} not found", pty_id),
-            )
-        })
+    /// Subscribe to a PTY child's exit code; None while it is still running.
+    pub fn exit_receiver(
+        &self,
+        pty_id: u64,
+    ) -> Option<tokio::sync::watch::Receiver<Option<i32>>> {
+        self.ptys.get(&pty_id).map(|h| h.exit.clone())
     }
 
     /// Remove a PTY handle and close the master fd.

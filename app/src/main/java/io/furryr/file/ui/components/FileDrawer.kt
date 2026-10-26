@@ -14,6 +14,8 @@ import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.DefaultPath
 import io.furryr.file.ui.util.formatSize
 
+import android.content.Intent
+
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
@@ -40,6 +42,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
@@ -960,13 +963,34 @@ fun FileDrawer(
                 )
             }
             if (3 !in collapsedGroups) {
-                item {
-                    Text(
-                        text = stringResource(R.string.drawer_tools_placeholder),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                    )
+                item(key = "_tool_wayland") {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(context, WaylandActivity::class.java)
+                                    )
+                                }
+                            }
+                            .padding(horizontal = 20.dp, vertical = 12.dp),
+                    ) {
+                        Icon(Icons.Default.DesktopWindows, contentDescription = null)
+                        Spacer(Modifier.width(16.dp))
+                        Column {
+                            Text(
+                                stringResource(R.string.drawer_tool_wayland),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                            Text(
+                                stringResource(R.string.drawer_tool_wayland_desc),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 }
             }
 

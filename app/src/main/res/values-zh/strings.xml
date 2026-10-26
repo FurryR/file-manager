@@ -107,6 +107,9 @@
     <string name="drawer_sort">排序</string>
     <string name="drawer_network_placeholder">SSH / FTP / SFTP（TODO）</string>
     <string name="drawer_tools_placeholder">工具箱（TODO）</string>
+    <string name="drawer_tool_wayland">Wayland 查看器</string>
+    <string name="drawer_tool_wayland_desc">容器内嵌 Wayland 桌面</string>
+    <string name="wayland_toggle_keyboard">切换键盘</string>
     <string name="container_state_running">运行中</string>
     <string name="container_state_stopped">已停止</string>
     <string name="container_state_creating">创建中</string>
@@ -170,6 +173,12 @@
     <string name="settings_container_desc">Docker Hub 和镜像设置</string>
     <string name="settings_docker_hub_url">Docker Hub 地址</string>
     <string name="settings_docker_hub_key">Docker Hub 密钥</string>
+    <string name="settings_pulse">容器音频（PulseAudio）</string>
+    <string name="settings_pulse_desc">为容器提供常驻 PulseAudio 音频服务，对新开的容器会话生效。</string>
+    <string name="settings_pulse_mic">容器麦克风</string>
+    <string name="settings_pulse_mic_desc">允许容器在启用时使用本机麦克风录音。</string>
+    <string name="settings_pulse_buffer">音频缓冲</string>
+    <string name="settings_pulse_buffer_desc">输出延迟（毫秒，10–1000）。越小响应越快，过小易断音。</string>
     <string name="settings_terminal">终端</string>
     <string name="settings_terminal_desc">字体和显示设置</string>
     <string name="settings_terminal_font">字体</string>
@@ -212,19 +221,10 @@
     <string name="agent_mcp_edit">编辑</string>
     <string name="agent_mcp_delete">删除</string>
     <string name="agent_mcp_name">名称</string>
-    <string name="agent_mcp_command">命令</string>
-    <string name="agent_mcp_args">参数</string>
-    <string name="agent_mcp_args_hint">参数之间用空格分隔</string>
-    <string name="agent_mcp_env">环境变量</string>
-    <string name="agent_mcp_env_hint">每行一个 KEY=VALUE</string>
-    <string name="agent_mcp_cwd">工作目录（可选）</string>
     <string name="agent_mcp_empty">尚未配置 MCP 服务器。</string>
     <string name="agent_mcp_workspace">加载工作区 MCP 配置</string>
     <string name="agent_mcp_workspace_desc">信任当前工作区的 .agent/mcp.json</string>
     <string name="agent_mcp_enabled">启用</string>
-    <string name="agent_mcp_transport">传输方式</string>
-    <string name="agent_mcp_transport_http">在线（HTTP）</string>
-    <string name="agent_mcp_transport_stdio">本地（stdio）</string>
     <string name="agent_mcp_url">服务器 URL</string>
     <string name="agent_mcp_headers">请求头</string>
     <string name="agent_mcp_headers_hint">每行一个 Name: Value</string>

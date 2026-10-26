@@ -185,20 +185,16 @@ fn draw_meta(frame: &mut Frame, app: &App, area: ratatui::layout::Rect, active: 
         area,
     );
 
-    let right = if let Some(elapsed) = app.pending_elapsed() {
-        Some((
+    let right = app.pending_elapsed().map(|elapsed| {
+        (
             format!(
                 "{} {}s ",
                 theme::spinner((elapsed.as_millis() / 100) as usize),
                 elapsed.as_secs()
             ),
             theme::warn(),
-        ))
-    } else if !app.notice().is_empty() {
-        Some((app.notice().to_owned(), theme::muted()))
-    } else {
-        None
-    };
+        )
+    });
     if let Some((text, style)) = right {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(text, style)))

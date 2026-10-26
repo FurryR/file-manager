@@ -1,8 +1,8 @@
 package io.furryr.file.hub
 
 import io.furryr.file.daemon.DaemonTarget
-import io.furryr.file.proto.hub.McpHttpEvent
-import io.furryr.file.proto.hub.McpHttpRequest
+import io.furryr.file.proto.hub.RemoteMcpCall
+import io.furryr.file.proto.hub.RemoteMcpCallEvent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
@@ -21,9 +21,9 @@ internal object McpProxy {
     private const val MAX_RESPONSE = 16 * 1024 * 1024
 
     suspend fun request(
-        request: McpHttpRequest,
+        request: RemoteMcpCall,
         target: DaemonTarget,
-        emit: suspend (McpHttpEvent) -> Unit,
+        emit: suspend (RemoteMcpCallEvent) -> Unit,
     ) {
         val server = McpConfig.servers(target, request.cwd)
             .firstOrNull { it.name == request.server }
@@ -54,7 +54,7 @@ internal object McpProxy {
                 }
                 val status = connection.responseCode
                 emit(
-                    McpHttpEvent.newBuilder()
+                    RemoteMcpCallEvent.newBuilder()
                         .setStatus(status)
                         .putAllHeaders(responseHeaders(connection))
                         .build(),
@@ -71,18 +71,18 @@ internal object McpProxy {
                             total += read
                             if (total > MAX_RESPONSE) error("MCP response is too large")
                             emit(
-                                McpHttpEvent.newBuilder()
+                                RemoteMcpCallEvent.newBuilder()
                                     .setData(com.google.protobuf.ByteString.copyFrom(buffer, 0, read))
                                     .build(),
                             )
                         }
                     }
                 }
-                emit(McpHttpEvent.newBuilder().setDone(true).build())
+                emit(RemoteMcpCallEvent.newBuilder().setDone(true).build())
             } catch (e: Exception) {
                 currentCoroutineContext().ensureActive()
-                emit(McpHttpEvent.newBuilder().setError(e.message ?: "MCP request failed").build())
-                emit(McpHttpEvent.newBuilder().setDone(true).build())
+                emit(RemoteMcpCallEvent.newBuilder().setError(e.message ?: "MCP request failed").build())
+                emit(RemoteMcpCallEvent.newBuilder().setDone(true).build())
             } finally {
                 runCatching { connection.disconnect() }
             }

@@ -23,7 +23,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -146,9 +145,7 @@ private fun McpPage(onBack: () -> Unit) {
                     Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
                         Text(server.name, style = MaterialTheme.typography.bodyLarge)
                         Text(
-                            server.url.ifBlank {
-                                (listOf(server.command) + server.args).joinToString(" ")
-                            },
+                            server.url,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -202,26 +199,13 @@ private fun McpDialog(
     onSave: (AgentSettings.McpServer) -> Unit,
 ) {
     var name by remember { mutableStateOf(initial?.name.orEmpty()) }
-    var transport by remember {
-        mutableStateOf(initial?.transport?.ifBlank { "http" } ?: "http")
-    }
     var url by remember { mutableStateOf(initial?.url.orEmpty()) }
     var headers by remember {
         mutableStateOf(initial?.headers?.entries?.joinToString("\n") { "${it.key}: ${it.value}" }.orEmpty())
     }
-    var command by remember { mutableStateOf(initial?.command.orEmpty()) }
-    var args by remember { mutableStateOf(initial?.args?.joinToString(" ").orEmpty()) }
-    var env by remember {
-        mutableStateOf(initial?.env?.entries?.joinToString("\n") { "${it.key}=${it.value}" }.orEmpty())
-    }
-    var cwd by remember { mutableStateOf(initial?.cwd.orEmpty()) }
     var enabled by remember { mutableStateOf(initial?.enabled ?: true) }
-    val remote = transport != "stdio"
-    val valid = name.isNotBlank() && if (remote) {
-        url.startsWith("http://") || url.startsWith("https://")
-    } else {
-        command.isNotBlank()
-    }
+    val valid = name.isNotBlank() &&
+        (url.startsWith("http://") || url.startsWith("https://"))
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -241,74 +225,22 @@ private fun McpDialog(
                     label = { Text(stringResource(R.string.agent_mcp_name)) },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(
-                        selected = remote,
-                        onClick = { transport = "http" },
-                    )
-                    Text(
-                        stringResource(R.string.agent_mcp_transport_http),
-                        modifier = Modifier.clickable { transport = "http" },
-                    )
-                    RadioButton(
-                        selected = !remote,
-                        onClick = { transport = "stdio" },
-                    )
-                    Text(
-                        stringResource(R.string.agent_mcp_transport_stdio),
-                        modifier = Modifier.clickable { transport = "stdio" },
-                    )
-                }
-                if (remote) {
-                    OutlinedTextField(
-                        value = url,
-                        onValueChange = { url = it },
-                        singleLine = true,
-                        label = { Text(stringResource(R.string.agent_mcp_url)) },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = headers,
-                        onValueChange = { headers = it },
-                        label = { Text(stringResource(R.string.agent_mcp_headers)) },
-                        supportingText = { Text(stringResource(R.string.agent_mcp_headers_hint)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 2,
-                    )
-                } else {
-                    OutlinedTextField(
-                        value = command,
-                        onValueChange = { command = it },
-                        singleLine = true,
-                        label = { Text(stringResource(R.string.agent_mcp_command)) },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = args,
-                        onValueChange = { args = it },
-                        singleLine = true,
-                        label = { Text(stringResource(R.string.agent_mcp_args)) },
-                        supportingText = { Text(stringResource(R.string.agent_mcp_args_hint)) },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = env,
-                        onValueChange = { env = it },
-                        label = { Text(stringResource(R.string.agent_mcp_env)) },
-                        supportingText = { Text(stringResource(R.string.agent_mcp_env_hint)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 2,
-                    )
-                    OutlinedTextField(
-                        value = cwd,
-                        onValueChange = { cwd = it },
-                        singleLine = true,
-                        label = { Text(stringResource(R.string.agent_mcp_cwd)) },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.agent_mcp_url)) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = headers,
+                    onValueChange = { headers = it },
+                    label = { Text(stringResource(R.string.agent_mcp_headers)) },
+                    supportingText = { Text(stringResource(R.string.agent_mcp_headers_hint)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                )
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth(),
@@ -328,13 +260,6 @@ private fun McpDialog(
             TextButton(
                 enabled = valid,
                 onClick = {
-                    val envMap = env.lineSequence()
-                        .map { it.trim() }
-                        .filter { it.isNotEmpty() && it.contains('=') }
-                        .associate { line ->
-                            val index = line.indexOf('=')
-                            line.substring(0, index) to line.substring(index + 1)
-                        }
                     val headerMap = headers.lineSequence()
                         .map { it.trim() }
                         .filter { it.isNotEmpty() }
@@ -349,14 +274,9 @@ private fun McpDialog(
                         AgentSettings.McpServer(
                             id = initial?.id.orEmpty(),
                             name = name.trim(),
-                            url = if (remote) url.trim() else "",
-                            headers = if (remote) headerMap else emptyMap(),
-                            command = if (remote) "" else command.trim(),
-                            args = if (remote) emptyList() else args.split(' ').filter { it.isNotBlank() },
-                            env = if (remote) emptyMap() else envMap,
-                            cwd = if (remote) "" else cwd.trim(),
+                            url = url.trim(),
+                            headers = headerMap,
                             enabled = enabled,
-                            transport = transport,
                         ),
                     )
                 },

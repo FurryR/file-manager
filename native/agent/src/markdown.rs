@@ -445,7 +445,7 @@ fn render_reasoning(
         theme::reasoning()
     };
     headers.push((output.len(), index));
-    output.push(Line::from(Span::styled(format!("  {sign}{label}"), style)));
+    output.push(Line::from(Span::styled(format!("{sign}{label}"), style)));
     if entry.expanded {
         output.push(Line::default());
         let start = output.len();

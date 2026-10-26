@@ -4,11 +4,11 @@ use std::os::fd::OwnedFd;
 
 use hub_client::filehub::{
     self, chat_event, hub_request::Op, hub_response, ChatRequest, CloseExecRequest,
-    CopyFileRequest, ExecRequest, GetActiveSessionRequest, GetAiConfigRequest,
-    GetCapabilitiesRequest, GetHistoryRequest, GetModelsRequest, GlobRequest, HubRequest,
-    ListDirectoryRequest, ListSessionsRequest, ListTargetsRequest, McpHttpRequest, McpServerConfig,
-    ReadFileRequest, SetActiveSessionRequest, SetAiSelectionRequest, SetHistoryRequest,
-    SubscribeSessionEventsRequest, WaitExecRequest, WriteFileRequest,
+    CopyFileRequest, ExecRequest, GetAiConfigRequest, GetCapabilitiesRequest, GetHistoryRequest,
+    GetModelsRequest, GlobRequest, HubRequest, ListDirectoryRequest, ListSessionsRequest,
+    ListTargetsRequest, ReadFileRequest, RemoteMcpCall, SetActiveSessionRequest,
+    SetAiSelectionRequest, SetHistoryRequest, SubscribeSessionEventsRequest, WaitExecRequest,
+    WriteFileRequest,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -68,6 +68,15 @@ pub struct SessionEntry {
     pub id: String,
     pub title: String,
     pub message_count: u32,
+}
+
+/// Remote MCP servers the hub may proxy for this caller, plus whether
+/// workspace `.agent/mcp.json` files are trusted. Server URLs and credential
+/// headers stay in the app and never reach the agent.
+#[derive(Default)]
+pub struct Capabilities {
+    pub remote_servers: Vec<String>,
+    pub workspace_mcp: bool,
 }
 
 impl Hub {
@@ -140,18 +149,6 @@ impl Hub {
                 })
                 .collect()),
             _ => Err("hub returned no sessions".to_owned()),
-        }
-    }
-
-    pub async fn active_session(&mut self) -> Result<Option<String>, String> {
-        let response = self
-            .request(Op::GetActiveSession(GetActiveSessionRequest {}))
-            .await?;
-        match response.result {
-            Some(hub_response::Result::ActiveSession(session)) => {
-                Ok((!session.session_id.is_empty()).then_some(session.session_id))
-            }
-            _ => Err("hub returned no active session".to_owned()),
         }
     }
 
@@ -496,19 +493,25 @@ impl Hub {
         }
     }
 
-    pub async fn capabilities(&mut self, cwd: &str) -> Result<Vec<McpServerConfig>, String> {
+    pub async fn capabilities(&mut self, cwd: &str) -> Result<Capabilities, String> {
         let response = self
             .request(Op::GetCapabilities(GetCapabilitiesRequest {
                 cwd: cwd.to_owned(),
             }))
             .await?;
         match response.result {
-            Some(hub_response::Result::Capabilities(capabilities)) => Ok(capabilities.mcp_servers),
+            Some(hub_response::Result::Capabilities(capabilities)) => Ok(Capabilities {
+                remote_servers: capabilities.remote_mcp_servers,
+                workspace_mcp: capabilities.workspace_mcp,
+            }),
             _ => Err("hub returned no capabilities".to_owned()),
         }
     }
 
-    pub async fn mcp_http(
+    /// Proxy one HTTP request for a remote MCP server, referenced by its
+    /// configured name. The hub injects the server's credential headers; the
+    /// supplied headers carry protocol state only.
+    pub async fn remote_mcp_call(
         &mut self,
         server: &str,
         cwd: &str,
@@ -516,8 +519,8 @@ impl Hub {
         path: &str,
         headers: &HashMap<String, String>,
         body: Vec<u8>,
-    ) -> Result<McpHttpResult, String> {
-        let request = McpHttpRequest {
+    ) -> Result<RemoteMcpResult, String> {
+        let request = RemoteMcpCall {
             server: server.to_owned(),
             cwd: cwd.to_owned(),
             method: method.to_owned(),
@@ -529,11 +532,11 @@ impl Hub {
         self.connection
             .send_request(HubRequest {
                 id,
-                op: Some(Op::McpHttp(request)),
+                op: Some(Op::RemoteMcpCall(request)),
             })
             .await
             .map_err(|error| error.to_string())?;
-        let mut result = McpHttpResult::default();
+        let mut result = RemoteMcpResult::default();
         let mut error: Option<String> = None;
         loop {
             let (response, _) = self
@@ -549,7 +552,7 @@ impl Hub {
                 });
             }
             match response.result {
-                Some(hub_response::Result::McpHttp(event)) => {
+                Some(hub_response::Result::RemoteMcpCall(event)) => {
                     if event.status != 0 {
                         result.status = event.status;
                     }
@@ -584,7 +587,7 @@ impl Hub {
 }
 
 #[derive(Default)]
-pub struct McpHttpResult {
+pub struct RemoteMcpResult {
     pub status: i32,
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,

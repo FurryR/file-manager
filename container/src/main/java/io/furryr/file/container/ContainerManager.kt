@@ -1,6 +1,10 @@
 package io.furryr.file.container
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkRequest
 import android.util.Log
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
@@ -337,6 +341,44 @@ object ContainerManager {
 
     private fun getContainerDir(context: Context, name: String): File =
         File(getContainersDir(context), name)
+
+    /**
+     * Keep the shared container resolv.conf in sync with the device's DNS.
+     * Every container binds the same file, written **in place** (truncate +
+     * write, never delete + recreate) so both backends pick up changes: the
+     * proot bind is path translation and re-reads the file on every open,
+     * and a chroot `mount --bind` pins the inode but sees in-place writes.
+     * VPN switches surface as link-property changes on (new) networks.
+     */
+    private var resolverWatchRegistered = false
+
+    fun startResolverWatch(context: Context) {
+        val appContext = context.applicationContext
+        synchronized(this) {
+            if (resolverWatchRegistered) return
+            resolverWatchRegistered = true
+        }
+        val manager = appContext.getSystemService(ConnectivityManager::class.java) ?: return
+        val request = NetworkRequest.Builder().build()
+        runCatching {
+            manager.registerNetworkCallback(
+                request,
+                object : ConnectivityManager.NetworkCallback() {
+                    // Re-resolve through the *active* network rather than the
+                    // callback's own link properties: a VPN going up fires this
+                    // for both the VPN and the underlying network, and only
+                    // the active one's DNS is what containers should use.
+                    override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                        ProotRunner.refreshResolverFromActive(appContext)
+                    }
+
+                    override fun onAvailable(network: Network) {
+                        ProotRunner.refreshResolverFromActive(appContext)
+                    }
+                },
+            )
+        }.onFailure { error -> Log.w(TAG, "cannot watch network changes", error) }
+    }
 
     /**
      * TODO(workaround): give a freshly extracted chroot rootfs root ownership by

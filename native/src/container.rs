@@ -14,7 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Directory binds.  `/dev` gets a container-private tmpfs and is populated
-/// separately, so `/dev/virgl` never reaches the host device tree.
+/// separately, so it never reaches the host device tree.
 const DIRS: &[(&str, &str)] = &[
     ("/sys", "/sys"),
     ("/system", "/system"),
@@ -70,6 +70,17 @@ pub fn enter_chroot(rootfs: &str, binds: &[(String, String)]) -> io::Result<()> 
         }
         let is_dir = Path::new(source).is_dir();
         bind_mount(source, &rootfs_path, target, is_dir)?;
+        if target == "/dev/audio" {
+            let alias = rootfs_path.join("dev/pulse");
+            if let Ok(meta) = std::fs::symlink_metadata(&alias) {
+                if meta.is_dir() {
+                    std::fs::remove_dir(&alias)?;
+                } else {
+                    std::fs::remove_file(&alias)?;
+                }
+            }
+            std::os::unix::fs::symlink("/dev/audio/pulse", alias)?;
+        }
     }
 
     unsafe {
@@ -96,7 +107,7 @@ fn mount_dev(rootfs: &Path) -> io::Result<()> {
         .flatten()
         .filter(|entry| {
             let name = entry.file_name();
-            name != "virgl" && name != "ptmx"
+            name != "ptmx"
         })
         .collect();
 
@@ -151,6 +162,10 @@ fn mount_dev(rootfs: &Path) -> io::Result<()> {
 fn ensure_target(rootfs: &Path, guest: &str, is_dir: bool) -> io::Result<PathBuf> {
     let host = rootfs.join(guest.trim_start_matches('/'));
     if is_dir {
+        // Older launches may have left a regular file at a directory bind point.
+        if host.is_file() {
+            std::fs::remove_file(&host)?;
+        }
         std::fs::create_dir_all(&host)?;
     } else {
         if let Some(parent) = host.parent() {

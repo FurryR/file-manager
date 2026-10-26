@@ -33,6 +33,10 @@ pub(super) async fn run_exec_stream(
         Ok(child) => child,
         Err(error) => return OutboundResponse::plain(error_response(req_id, error)),
     };
+    // The pid must be shielded from the reaper sweep before anything else
+    // runs; error paths below leave it tracked until /proc confirms Tokio
+    // reaped the dropped child.
+    crate::reaper::track(child.id().expect("new child has a pid"));
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
@@ -86,15 +90,6 @@ pub(super) async fn run_exec(
     cwd: String,
     env: HashMap<String, String>,
 ) -> Response {
-    struct ProcessGroup(u32);
-    impl Drop for ProcessGroup {
-        fn drop(&mut self) {
-            unsafe {
-                libc::kill(-(self.0 as i32), libc::SIGKILL);
-            }
-        }
-    }
-
     let mut cmd = tokio::process::Command::new(&command);
     cmd.args(&args)
         .envs(&env)
@@ -111,8 +106,12 @@ pub(super) async fn run_exec(
         Err(error) => return error_response(req_id, error),
     };
     // Cancellation must kill the command's group, not leave blocking work holding the runtime open.
-    let _group = ProcessGroup(child.id().expect("new child has a pid"));
+    let pid = child.id().expect("new child has a pid");
+    crate::reaper::track(pid);
+    let mut group = crate::reaper::ProcessGroup(pid);
     let outcome = child.wait_with_output().await;
+    crate::reaper::release(pid);
+    group.finish();
 
     match outcome {
         Ok(output) => Response {
@@ -137,13 +136,20 @@ pub(super) async fn wait(
     let process = execs.lock().await.remove(req.exec_id);
     match process {
         Some(mut process) => match process.child.wait().await {
-            Ok(status) => Response {
-                id: req_id,
-                ok: true,
-                exit_code: status.code().unwrap_or(-1),
-                ..Response::default()
-            },
-            Err(error) => error_response(req_id, error),
+            Ok(status) => {
+                let exit_code = status.code().unwrap_or(-1);
+                process.reaped();
+                Response {
+                    id: req_id,
+                    ok: true,
+                    exit_code,
+                    ..Response::default()
+                }
+            }
+            Err(error) => {
+                process.reaped();
+                error_response(req_id, error)
+            }
         },
         None => error_response(
             req_id,

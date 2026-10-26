@@ -50,6 +50,16 @@ file-manager/
 │   └── src/main/java/io/furryr/file/hub/
 │       ├── Hub.kt               # lifecycle + environment contract
 │       └── HubServer.kt         # hub protocol, target/exec/file translation
+├── pulse/                # :pulse — embedded PulseAudio host
+│   └── src/main/java/io/furryr/file/pulse/
+│       ├── PulseManager.kt      # on/off prefs, socket paths, container env
+│       ├── PulseService.kt      # :pulse process: resident listener + core lifecycle
+│       ├── PulseNative.kt       # JNI bridge to libpulsehost
+│       ├── AudioOut.kt          # the single AudioTrack (48k stereo float)
+│       └── MicInput.kt          # AudioRecord loop + mic-FGS promotion
+├── wayland/              # :wayland — wldroid compositor wiring + container env
+│   └── src/main/java/io/furryr/file/wayland/
+│       └── WaylandManager.kt    # runtime dirs, GPU mode, virgl session, env/binds
 ├── native/              # Rust workspace: daemon + hub terminal utilities
 │   ├── src/main.rs      # Accept loop + per-connection state
 │   ├── src/handlers.rs  # Command dispatch (incl. CancelRequest)
@@ -81,9 +91,20 @@ file-manager/
   locations of its protocol (internal subinstances), so Router keys are strict
   scheme names with no duplicates.
 - `:container` owns container lifecycle and exposes **one** `ContainerProvider`
-  for all containers. It depends on `:core`, `:daemon` and `:virgl`.
+  for all containers. It depends on `:core`, `:daemon`, `:pulse` and `:wayland`.
+- `:wayland` wires the embedded wldroid/wlroots compositor into containers:
+  the socket-directory bind + `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` env, GPU-mode
+  detection (KGSL → turnip+zink passthrough; otherwise virgl vtest), the virgl
+  server session and xkb extraction. The compositor AARs come from the
+  prebuilt wldroid maven repo (`scripts/fetch-wldroid.sh` →
+  `third_party/wldroid-maven`, registered first in `settings.gradle.kts`
+  because public mirrors serve bogus metadata for unknown coordinates).
 - `:hub` owns `Hub`/`HubServer` and depends on `:daemon` + `:uds`.
-- `:virgl` is the resident renderer host over `:uds`.
+- `:pulse` is the resident embedded-PulseAudio host over `:uds`.
+  `native/pulse/pulse_host.c` embeds the native protocol, mixer, sink and source
+  in `libpulsehost.so`; D-Bus and dynamic modules are disabled. Audio policy
+  (AudioTrack, RECORD_AUDIO, microphone foreground service) stays in Kotlin.
+  Containers use only `PULSE_SERVER=unix:/dev/pulse`.
 - `:app` is the UI shell and platform wiring: Compose, terminal/session,
   `ForwardFileProvider`, provider registration. It must not implement routing.
 
@@ -98,10 +119,14 @@ file-manager/
 | Provider locations | `provider/.../LocationsRepository.kt` | Location entries + actions for SAF/FTP/SFTP/local/remote |
 | Provider implementations | `provider/.../` | Protocol domains with internal location subinstances |
 | Provider wiring | `app/.../Providers.kt` | Daemon config, container runtime seam, registrations |
-| VirGL host | `virgl/.../VirglService.kt` | Resident `:virgl` process; socket + renderer lifecycle |
 | Daemon facade | `daemon/.../DaemonManager.kt` | Lifecycle, targets, launcher SPI |
 | UDS transport | `uds/.../UdsTransport.kt` | Frames + fd passing; `UdsClient`/`UdsServer` |
 | run0 hub server | `hub/.../HubServer.kt` | Exec/PTY, file tools, streaming AI chat, session history, MCP HTTP proxy |
+| PulseAudio host | `pulse/.../PulseService.kt` | Resident `:pulse` process; one socket, AudioTrack sink, AudioRecord source |
+| PulseAudio build | `native/build-pulse.sh` | PA 17.0, libsndfile and libltdl statically linked into one libpulsehost.so |
+| Wayland viewer | `app/.../ui/screens/WaylandActivity.kt` | Full-screen wldroid/wlroots viewer; in-process, `CompositorSurface`, predictive back |
+| Wayland wiring | `wayland/.../WaylandManager.kt` | socket dir + env for containers, GPU mode, virgl session, xkb extract |
+| wldroid fetch | `scripts/fetch-wldroid.sh` | prebuilt wldroid maven repo (compositor+virgl+shims AARs) → `third_party/wldroid-maven` |
 | run0 CLI | `native/run0/src/main.rs` | Rust client: hub protocol + local tty bridge |
 | here CLI | `native/here/src/main.rs` | Open target descriptor + request file-manager navigation |
 | agent CLI | `native/agent/src/ui.rs` | Modular ratatui + crossterm terminal AI chat UI |
@@ -115,9 +140,10 @@ file-manager/
 | Agent sessions | `app/.../agent/AgentSettings.kt` | Session files, titles, active session per terminal |
 | MCP proxy | `hub/.../McpProxy.kt` | HTTP proxy for online MCP; hub never speaks MCP |
 | Daemon file I/O | `daemon/.../file/FileService.kt` | list/stat/open/copy per target |
-| Container launch | `container/.../ContainerDaemonLauncher.kt` | proot/chroot argv + VirGL environment |
+| Container launch | `container/.../ContainerDaemonLauncher.kt` | proot/chroot argv + PulseAudio/Wayland environment; KGSL GPU probe in `ProotRunner` |
 | Terminal IME | `app/.../agent/TerminalViewComposable.kt` | focus hand-off + `showSoftInput`; see NOTES |
 | Native daemon | `native/src/main.rs` | File ops under root/shell |
+| Process subreaper | `native/src/reaper.rs` | Adopt/reap orphans; kill the whole tree on daemon exit |
 | IPC protocol | `proto/file_daemon.proto` | Request/Response messages |
 
 ## CONVENTIONS
@@ -128,17 +154,20 @@ file-manager/
 - **All daemon I/O is blocking** — Kotlin wraps in `Dispatchers.IO`; Rust uses `current_thread` tokio.
 - **Proto lives in `:daemon`** — the `app`/`:core` modules must not enable the protobuf plugin.
 - **Container-visible names stay generic** — never expose `file-manager` in
-  container paths, sockets, services, or environment values. VirGL is always
-  enabled, runs in the `:virgl` process, and is exposed at `/dev/virgl`. The
-  listener service is resident: the UI binds it early, it binds the vtest socket
-  immediately (cheap), and accepts clients in Kotlin. The renderer library is
-  started on demand when a container runs, on a background thread; queued client
-  descriptors are handed to the native host once it is ready. That single thread
-  serves every connection through one shared virglrenderer instance (vtest
-  multi-client mode) and only initializes the renderer when a client actually
-  sends commands. Connections do not consume a thread each. Renderer state is
-  process-global. Pass `VTEST_SOCKET_NAME=/dev/virgl` directly in the process
-  environment; do not write VirGL settings into `/etc/profile.d`.
+  container paths, sockets, services, or environment values. The audio host
+  is on by default (`pulse_enabled` in `settings`). When off, `PulseManager`
+  provides no audio mount or environment variable. Bind `cacheDir/pulse` at
+  `/dev/audio`, and create `/dev/pulse -> /dev/audio/pulse` in both backends.
+  This exposes one socket, without a `.sock` suffix, while directory binds
+  survive listener recreation. File binds would pin a dead inode in chroot.
+  The UI binds the listener early; the engine starts on container launch.
+  Settings restart only the engine, keeping the listener alive. Pass
+  `PULSE_SERVER` in the process environment, not `/etc/profile.d`.
+- **proot GPU pass-through is a KGSL probe** — `ProotRunner.gpuMounts()` binds
+  `/dev/kgsl-3d0` (plus `/dev/dma_heap`/`/dev/ion` when present) only when the
+  KGSL command device exists, so proot containers can run turnip + zink
+  against the real Adreno GPU. The chroot backend needs no equivalent: its
+  private `/dev` tmpfs already replicates these nodes from the host.
 
 ## ANTI-PATTERNS (THIS PROJECT)
 
@@ -164,6 +193,8 @@ file-manager/
 ./gradlew :core:compileKotlin                    # Compile the pure VFS abstraction
 bash native/build-android-aarch64.sh             # Cross-compile Rust daemon
 bash native/build-proot.sh                       # Cross-compile proot binary
+bash scripts/fetch-wldroid.sh                     # Fetch prebuilt wldroid maven repo into third_party/ (required before gradle sync)
+bash native/build-pulse.sh                       # Cross-compile embedded PulseAudio host (libpulsehost.so)
 adb install -r app/build/outputs/apk/debug/*.apk # Install
 ```
 
@@ -177,8 +208,9 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   the selected daemon — it never exposes the daemon's file protocol. run0 (and,
   later, agents) attach to it; the hub holds the app identity, so it
   authenticates to the daemon on the client's behalf. The `run0` Rust CLI is a
-  workspace member (`native/run0/`), alongside `native/here/` and `native/agent/`.
-  All three are staged under `app/src/main/executables/` and packaged through
+  workspace member (`native/run0/`), alongside `native/here/` and
+  `native/agent/`. All three
+  are staged under `app/src/main/executables/` and packaged through
   Java resources as `lib/<abi>/{run0,here,agent}` before APK signing. This
   bypasses AGP's JNI filename filter. The current debuggable build types allow
   Android to extract this original name into `nativeLibraryDir`; non-debuggable
@@ -192,7 +224,9 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   environment before `login -p -f root`, preserving the normal login/MOTD
   experience; hub command execution launches the passwd shell directly.
 - Native executables are packaged as **`lib*.so` under `jniLibs/`**
-  (`libfiledaemon.so`, `libproot.so`) because the Android installer only
+  (`libfiledaemon.so`, `libproot.so` and
+  `libpulsehost.so`; the wldroid AARs contribute `libwldroid-compositor.so`,
+  `libvirgl-test-server.so` and the shim assets) because the Android installer only
   auto-extracts `lib/<abi>/lib*.so` to `nativeLibraryDir` (debuggable apps also
   allow other safe filenames). AGP's jniLibs
   pipeline also drops any non-`.so` entry, so the `lib*.so` names are what let
@@ -211,6 +245,35 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   with the reserved ids).
 - Daemon priority: `su` (root) > `Shizuku` (shell) > direct (app UID). The
   elevated daemon is a single `privileged` target regardless of mechanism.
+- **Container runtime files are shared, not per-container**: one
+  `cacheDir/container/resolv.conf` and `hub.sh` serve every container,
+  written **in place** (truncate + write, never delete + recreate) so live
+  binds see updates — proot's binds are path translation (every open
+  re-reads the host file) and a chroot `mount --bind` pins the inode but
+  shows in-place writes. `ContainerManager.startResolverWatch` (registered
+  from `MainActivity.onResume`) re-resolves the active network's DNS on link
+  changes — including VPN switches — and every container launch refreshes it
+  too; an empty DNS report keeps the last known servers. `/tmp` and `/run`
+  stay per-container under `cacheDir/container/<id>/tmp/`.
+- **The Wayland viewer is the wldroid wlroots compositor in-process**
+  (`:wayland` + the `wldroid-ui` `CompositorSurface` inside
+  `WaylandActivity`; toolbox entry in the drawer tools group). It only runs
+  while the viewer activity is alive — it needs the Surface — and wlroots
+  creates `wayland-0` inside `cacheDir/wayland/wayland-runtime/`, whose
+  directory is bound into containers at `/dev/wayland` (same
+  bind-the-directory trick as PulseAudio; guests get
+  `XDG_RUNTIME_DIR=/dev/wayland`, `WAYLAND_DISPLAY=wayland-0`). All
+  containers share the socket; "one desktop at a time" is a usage
+  constraint, extra clients just open more windows on the nested desktop.
+  GPU modes: KGSL devices keep the existing turnip+zink passthrough
+  (nothing added to the container env); otherwise `WaylandManager` starts
+  the vtest `virgl_test_server` and containers get `VTEST_SOCK` plus
+  MESA overrides, with the guest-side shims bound at `/dev/shims`
+  (virgl-mode guests still need their setup — mesa + shim install — inside
+  the container). The wldroid AARs declare minSdk 29 but use nothing newer
+  than API 26; the app manifest overrides them down to 26, and
+  `wldroid-ui`'s transitive `wldroid-proot` is excluded (own container
+  stack).
 - **The daemon is multi-client** — it serves many concurrent connections, but
   per-connection state (cancellable in-flight requests) is *not* shared, and
   long-lived resources (handles, PTYs) are daemon-global. The daemon exits after
@@ -221,6 +284,18 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   container shutdown explicitly stop the daemon. There is no transport reconnect
   or request replay. After connection loss, a later operation starts a fresh
   daemon on demand; old PTYs and handles are not restored.
+- **The daemon is a child subreaper** ([`native/src/reaper.rs`]) — orphaned
+  descendants reparent to it instead of escaping to host init. Every child it
+  spawns is registered (`reaper::track`) while Tokio or a PTY poll task owns
+  its exit status; adopted/unowned children are reaped by a 100ms sweep that
+  skips registered pids and never calls `waitpid(-1)`. PTY exit codes are
+  owned by a per-child 50ms `WNOHANG` poll task and published over a watch
+  channel; `WaitPty` subscribes instead of blocking in `waitpid` on a worker
+  thread. On daemon exit it acts as init for its tree: after `release_all`
+  (async owners are gone), every live descendant found through
+  `/proc/<pid>/task/<pid>/children` gets one SIGTERM, then SIGKILL after a
+  400ms grace, reaping until the tree is quiet — descendants never outlive
+  the daemon.
 - Client entry points live in `:daemon` (`DaemonManager.fileService/execService`).
 - **Terminal IME tap race (upstream-worthy)** — Termux's
   `TerminalView.onSingleTapUp()` calls `requestFocus()` on the terminal view, then
@@ -243,3 +318,18 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   stay untouched. `TerminalView` is kept unfocusable except during text selection
   so its tap handler cannot steal focus from `TerminalInputView` and attach the
   IME to its `TYPE_NULL` editor. `InputDevice.SOURCE_MOUSE` never summons the IME.
+- **Audio host: one feature, one .so.** `native/build-pulse.sh` builds PA 17.0,
+  libsndfile 1.2.2 and libltdl 2.4.7 as static archives for API 26, then links
+  `libpulsehost.so` with undefined-symbol rejection. No D-Bus, GLib, dynamic
+  modules, config files or standalone audio daemon are needed.
+  `pulse_host.c` runs a PA main loop plus one audio I/O thread. Kotlin owns
+  the filesystem listener; native code duplicates its fd and never unlinks it.
+  `android_output` is 48 kHz stereo float32; `android_input` is 48 kHz mono
+  s16le. Render complete 10 ms blocks and advance an accumulated sample clock;
+  resetting the deadline to each wake-up accumulates scheduler delay and
+  periodically starves AudioTrack. Prime AudioTrack before playback.
+  `pulse_mic_enabled` defaults off; capture requires a RUNNING source,
+  RECORD_AUDIO permission and microphone foreground-service promotion.
+  `pulse_buffer_ms` defaults to 200 and clamps to 10–1000. Settings travel over
+  Messenger because SharedPreferences caches are process-local. Restart the
+  engine in place for changes; preserve the listener and its socket inode.

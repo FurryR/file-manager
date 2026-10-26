@@ -21,7 +21,6 @@ import io.furryr.file.proto.hub.HistoryResponse
 import io.furryr.file.proto.hub.HubRequest
 import io.furryr.file.proto.hub.HubResponse
 import io.furryr.file.proto.hub.ListTargetsResponse
-import io.furryr.file.proto.hub.McpServerConfig
 import io.furryr.file.proto.hub.ModelsResponse
 import io.furryr.file.proto.hub.SessionInfo
 import io.furryr.file.proto.hub.SessionsResponse
@@ -147,16 +146,16 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                         HubEvents.unsubscribe(events)
                                     }
                                 }
-                            } else if (request!!.opCase == HubRequest.OpCase.MCP_HTTP) {
+                            } else if (request!!.opCase == HubRequest.OpCase.REMOTE_MCP_CALL) {
                                 val id = request.id
                                 val call = launch {
                                     try {
-                                        McpProxy.request(request.mcpHttp, state.target) { event ->
+                                        McpProxy.request(request.remoteMcpCall, state.target) { event ->
                                             send(
                                                 client,
                                                 Reply(
                                                     HubResponse.newBuilder().setId(id).setOk(true)
-                                                        .setMcpHttp(event).build(),
+                                                        .setRemoteMcpCall(event).build(),
                                                 ),
                                             )
                                         }
@@ -428,8 +427,8 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     Reply(ok(id))
                 }
 
-                HubRequest.OpCase.CANCEL_MCP_HTTP -> {
-                    state.httpCalls.remove(request.cancelMcpHttp.requestId)?.cancel()
+                HubRequest.OpCase.CANCEL_REMOTE_MCP_CALL -> {
+                    state.httpCalls.remove(request.cancelRemoteMcpCall.requestId)?.cancel()
                     Reply(ok(id))
                 }
 
@@ -462,28 +461,22 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                         .build(),
                 )
 
-                HubRequest.OpCase.GET_CAPABILITIES -> Reply(
-                    HubResponse.newBuilder().setId(id).setOk(true)
-                        .setCapabilities(
-                            CapabilitiesResponse.newBuilder()
-                                .addAllMcpServers(
-                                    McpConfig.servers(state.target, request.getCapabilities.cwd)
-                                        .map { server ->
-                                            McpServerConfig.newBuilder()
-                                                .setName(server.name)
-                                                .setCommand(server.command)
-                                                .addAllArgs(server.args)
-                                                .putAllEnv(server.env)
-                                                .setCwd(server.cwd)
-                                                .setEnabled(server.enabled)
-                                                .setSource(server.source)
-                                                .setTransport(server.transport)
-                                                .build()
-                                        },
-                                )
-                                .build(),
-                        ).build(),
-                )
+                HubRequest.OpCase.GET_CAPABILITIES -> {
+                    // Only server names travel to the caller; URLs and
+                    // credential headers stay in the app and are resolved by
+                    // RemoteMcpCall.
+                    val servers = McpConfig.servers(state.target, request.getCapabilities.cwd)
+                        .filter { it.enabled && it.url.isNotBlank() }
+                    Reply(
+                        HubResponse.newBuilder().setId(id).setOk(true)
+                            .setCapabilities(
+                                CapabilitiesResponse.newBuilder()
+                                    .addAllRemoteMcpServers(servers.map { it.name })
+                                    .setWorkspaceMcp(HubActions.workspaceMcpEnabled?.invoke() == true)
+                                    .build(),
+                            ).build(),
+                    )
+                }
 
                 HubRequest.OpCase.LIST_SESSIONS -> Reply(
                     HubResponse.newBuilder().setId(id).setOk(true)

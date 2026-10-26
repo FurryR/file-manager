@@ -59,6 +59,7 @@ import io.furryr.file.R
 import io.furryr.file.AppLocale
 import io.furryr.file.agent.SessionManager
 import io.furryr.file.daemon.DaemonManager
+import io.furryr.file.pulse.PulseManager
 import io.furryr.file.ui.theme.FileManagerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -127,6 +128,10 @@ private fun SettingsMainPage(
     var dockerHubUrl by remember { mutableStateOf(prefs.getString("docker_hub_url", "https://registry-1.docker.io") ?: "https://registry-1.docker.io") }
     var showDockerHubKeyDialog by remember { mutableStateOf(false) }
     var dockerHubKey by remember { mutableStateOf(prefs.getString("docker_hub_key", "") ?: "") }
+    var pulseEnabled by remember { mutableStateOf(PulseManager.isEnabled(context)) }
+    var pulseMicEnabled by remember { mutableStateOf(PulseManager.isMicEnabled(context)) }
+    var pulseBufferMs by remember { mutableStateOf(PulseManager.bufferMs(context)) }
+    var showPulseBufferDialog by remember { mutableStateOf(false) }
     var terminalFont by remember { mutableStateOf(prefs.getString("terminal_font", "") ?: "") }
     var showTerminalFontSizeDialog by remember { mutableStateOf(false) }
     var terminalFontSize by remember { mutableStateOf(prefs.getInt("terminal_font_size", 9).toString()) }
@@ -240,6 +245,42 @@ private fun SettingsMainPage(
             SettingsDivider()
 
             SettingsSection(stringResource(R.string.settings_container))
+            SettingsToggleRow(
+                title = stringResource(R.string.settings_pulse),
+                description = stringResource(R.string.settings_pulse_desc),
+                checked = pulseEnabled,
+                onCheckedChange = { enabled ->
+                    pulseEnabled = enabled
+                    PulseManager.setEnabled(context, enabled)
+                },
+            )
+            SettingsDivider()
+            SettingsToggleRow(
+                title = stringResource(R.string.settings_pulse_mic),
+                description = stringResource(R.string.settings_pulse_mic_desc),
+                checked = pulseMicEnabled,
+                enabled = pulseEnabled,
+                onCheckedChange = { enabled ->
+                    pulseMicEnabled = enabled
+                    if (enabled && androidx.core.content.ContextCompat.checkSelfPermission(
+                            context, android.Manifest.permission.RECORD_AUDIO
+                        ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                    ) {
+                        (context as? android.app.Activity)?.requestPermissions(
+                            arrayOf(android.Manifest.permission.RECORD_AUDIO), 200
+                        )
+                    }
+                    PulseManager.setMicEnabled(context, enabled)
+                },
+            )
+            SettingsDivider()
+            SettingsValueRow(
+                title = stringResource(R.string.settings_pulse_buffer),
+                value = "$pulseBufferMs ms",
+                enabled = pulseEnabled,
+                onClick = { showPulseBufferDialog = true },
+            )
+            SettingsDivider()
             SettingsValueRow(
                 title = stringResource(R.string.settings_docker_hub_url),
                 value = dockerHubUrl.ifBlank { stringResource(R.string.settings_docker_hub_url_desc) },
@@ -430,13 +471,29 @@ private fun SettingsMainPage(
     if (showDockerHubKeyDialog) {
         SettingsInputDialog(
             title = stringResource(R.string.settings_docker_hub_key),
-            label = stringResource(R.string.settings_docker_hub_key_desc),
+            label = stringResource(R.string.settings_docker_hub_url_desc),
             initialValue = dockerHubKey,
             onDismiss = { showDockerHubKeyDialog = false },
             onConfirm = { key ->
                 dockerHubKey = key
                 prefs.edit().putString("docker_hub_key", key).apply()
                 showDockerHubKeyDialog = false
+            },
+        )
+    }
+
+    if (showPulseBufferDialog) {
+        SettingsInputDialog(
+            title = stringResource(R.string.settings_pulse_buffer),
+            label = stringResource(R.string.settings_pulse_buffer_desc),
+            initialValue = pulseBufferMs.toString(),
+            onDismiss = { showPulseBufferDialog = false },
+            onConfirm = { text ->
+                pulseBufferMs = text.trim().toIntOrNull()
+                    ?.coerceIn(PulseManager.MIN_BUFFER_MS, PulseManager.MAX_BUFFER_MS)
+                    ?: pulseBufferMs
+                PulseManager.setBufferMs(context, pulseBufferMs)
+                showPulseBufferDialog = false
             },
         )
     }

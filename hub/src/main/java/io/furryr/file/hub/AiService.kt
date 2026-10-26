@@ -109,8 +109,7 @@ internal object AiService {
                         }
                     }
                 }
-                val toolCalls = JSONArray()
-                calls.filter { it.name.isNotBlank() }.forEach { toolCalls.put(it.build()) }
+                val toolCalls = buildToolCalls(calls)
                 if (toolCalls.length() > 0) {
                     emitEvent(ChatEvent.newBuilder().setToolCallsJson(toolCalls.toString()).build())
                 }
@@ -232,7 +231,7 @@ internal object AiService {
             error("history mismatch")
         }
         for (index in 0 until incoming.length()) {
-            history.optJSONObject(index)?.let { history.put(it) }
+            incoming.optJSONObject(index)?.let { history.put(it) }
         }
         return history
     }
@@ -268,6 +267,12 @@ internal object AiService {
         emit(ChatEvent.newBuilder().setDone(true).build())
     }
 
+    /**
+     * One SSE payload, in either wire format providers use: Chat Completions
+     * chunks (`choices[0].delta`) or the typed events of the OpenAI Responses
+     * API. Both normalize into the same reasoning/content/tool-call
+     * accumulators.
+     */
     private suspend fun applyLine(
         line: String,
         calls: MutableList<CallBuilder>,
@@ -280,15 +285,22 @@ internal object AiService {
         if (data.isEmpty()) return false
         if (data == "[DONE]") return true
         val chunk = runCatching { JSONObject(data) }.getOrNull() ?: return false
-        chunk.optJSONObject("usage")?.let { usage ->
-            emit(
-                ChatEvent.newBuilder().setUsage(
-                    TokenUsage.newBuilder()
-                        .setPromptTokens(usage.optLong("prompt_tokens"))
-                        .setCompletionTokens(usage.optLong("completion_tokens")),
-                ).build(),
-            )
+        val type = chunk.optString("type")
+        return if (type.startsWith("response.") || type == "error") {
+            applyResponsesEvent(chunk, type, calls, emit, toolCalling)
+        } else {
+            applyChatChunk(chunk, calls, emit, toolCalling)
         }
+    }
+
+    /** Chat Completions chunk: `choices[0].delta` carries the fragments. */
+    private suspend fun applyChatChunk(
+        chunk: JSONObject,
+        calls: MutableList<CallBuilder>,
+        emit: suspend (ChatEvent) -> Unit,
+        toolCalling: () -> Boolean,
+    ): Boolean {
+        chunk.optJSONObject("usage")?.let { usage -> emit(usageEvent(usage)) }
         val choice = chunk.optJSONArray("choices")?.optJSONObject(0) ?: return false
         val delta = choice.optJSONObject("delta") ?: return false
         val reasoning = delta.optString("reasoning_content")
@@ -307,19 +319,104 @@ internal object AiService {
             }
             for (index in 0 until toolCalls.length()) {
                 val call = toolCalls.optJSONObject(index) ?: continue
-                val position = call.optInt("index", calls.size)
-                while (calls.size <= position) calls.add(CallBuilder())
-                val builder = calls[position]
+                val builder = builderFor(calls, call)
                 call.optString("id").takeIf { it.isNotEmpty() }?.let { builder.id = it }
                 call.optString("type").takeIf { it.isNotEmpty() }?.let { builder.type = it }
                 call.optJSONObject("function")?.let { function ->
-                    function.optString("name").takeIf { it.isNotEmpty() }?.let {
-                        builder.name += it
-                    }
-                    function.optString("arguments").takeIf { it.isNotEmpty() }?.let {
-                        builder.arguments += it
+                    val name = function.optString("name").takeIf { it.isNotEmpty() }
+                    val arguments =
+                        function.optString("arguments").takeIf { it.isNotEmpty() }
+                    if (name != null && builder.name.endsWith(name)) {
+                        // A repeated name means this chunk carries the call as
+                        // built so far, not a fragment: keep the longer form
+                        // instead of appending a second copy.
+                        if (arguments != null && arguments.length > builder.arguments.length) {
+                            builder.arguments = arguments
+                        }
+                    } else {
+                        name?.let { builder.name += it }
+                        arguments?.let { builder.arguments += it }
                     }
                 }
+            }
+        }
+        return false
+    }
+
+    /** One typed event of the OpenAI Responses API. */
+    private suspend fun applyResponsesEvent(
+        event: JSONObject,
+        type: String,
+        calls: MutableList<CallBuilder>,
+        emit: suspend (ChatEvent) -> Unit,
+        toolCalling: () -> Boolean,
+    ): Boolean {
+        when (type) {
+            "response.output_item.added" -> functionItem(event.optJSONObject("item"))?.let { item ->
+                if (toolCalling()) {
+                    emit(ChatEvent.newBuilder().setToolCalling(true).build())
+                }
+                val builder = itemBuilder(calls, item.itemId)
+                if (builder.id.isEmpty()) builder.id = item.callId
+                if (builder.name.isEmpty()) builder.name = item.name
+            }
+
+            "response.function_call_arguments.delta" ->
+                itemBuilder(calls, event.optString("item_id"))
+                    .arguments += event.optString("delta")
+
+            "response.function_call_arguments.done" ->
+                itemBuilder(calls, event.optString("item_id"))
+                    .arguments = event.optString("arguments")
+
+            "response.output_item.done" ->
+                functionItem(event.optJSONObject("item"))?.let { finalizeItem(calls, it) }
+
+            "response.output_text.delta" -> {
+                val delta = event.optString("delta")
+                if (delta.isNotEmpty()) {
+                    emit(ChatEvent.newBuilder().setContentDelta(delta).build())
+                }
+            }
+
+            "response.reasoning_text.delta",
+            "response.reasoning_summary_text.delta" -> {
+                val delta = event.optString("delta")
+                if (delta.isNotEmpty()) {
+                    emit(ChatEvent.newBuilder().setReasoningDelta(delta).build())
+                }
+            }
+
+            "response.completed", "response.incomplete" -> {
+                val response = event.optJSONObject("response")
+                response?.optJSONObject("usage")?.let { emit(usageEvent(it)) }
+                response?.optJSONArray("output")?.let { output ->
+                    for (index in 0 until output.length()) {
+                        functionItem(output.optJSONObject(index))?.let { finalizeItem(calls, it) }
+                    }
+                }
+                return true
+            }
+
+            "response.failed" -> {
+                val message = event.optJSONObject("response")
+                    ?.optJSONObject("error")
+                    ?.optString("message")
+                    .orEmpty()
+                if (message.isNotEmpty()) {
+                    emit(ChatEvent.newBuilder().setError(message).build())
+                }
+                return true
+            }
+
+            "error" -> {
+                val message = event.optJSONObject("error")?.optString("message")
+                    ?.ifBlank { event.optString("message") }
+                    .orEmpty()
+                if (message.isNotEmpty()) {
+                    emit(ChatEvent.newBuilder().setError(message).build())
+                }
+                return true
             }
         }
         return false
@@ -376,6 +473,10 @@ internal object AiService {
 
     private class CallBuilder {
         var id: String = ""
+
+        // Responses API item id (`fc_...`) used to route argument deltas; the
+        // id above is the `call_id` the caller must answer.
+        var itemId: String = ""
         var type: String = ""
         var name: String = ""
         var arguments: String = ""
@@ -388,6 +489,103 @@ internal object AiService {
                 JSONObject().put("name", name).put("arguments", arguments),
             )
         }
+    }
+
+    private class FunctionItem(
+        val itemId: String,
+        val callId: String,
+        val name: String,
+        val arguments: String,
+    )
+
+    private fun functionItem(item: JSONObject?): FunctionItem? {
+        if (item == null || item.optString("type") != "function_call") return null
+        val itemId = item.optString("id")
+        return FunctionItem(
+            itemId = itemId,
+            callId = item.optString("call_id").ifBlank { itemId },
+            name = item.optString("name"),
+            arguments = item.optString("arguments"),
+        )
+    }
+
+    /**
+     * Chat Completions streams tag every fragment with the call's index;
+     * some compatible providers omit it, or resend the full call per chunk.
+     * Match by index, then id, then the newest call, so one logical call is
+     * never split into duplicates.
+     */
+    private fun builderFor(calls: MutableList<CallBuilder>, call: JSONObject): CallBuilder {
+        if (call.has("index")) {
+            val position = call.optInt("index").coerceAtLeast(0)
+            while (calls.size <= position) calls.add(CallBuilder())
+            return calls[position]
+        }
+        val id = call.optString("id")
+        if (id.isNotEmpty()) {
+            return calls.lastOrNull { it.id == id } ?: CallBuilder().also(calls::add)
+        }
+        return calls.lastOrNull() ?: CallBuilder().also(calls::add)
+    }
+
+    /** Find (or start) the builder of one Responses API function-call item. */
+    private fun itemBuilder(calls: MutableList<CallBuilder>, itemId: String): CallBuilder {
+        if (itemId.isNotEmpty()) {
+            calls.lastOrNull { it.itemId == itemId || (it.id.isNotEmpty() && it.id == itemId) }
+                ?.let { return it }
+            return CallBuilder().apply { this.itemId = itemId }.also(calls::add)
+        }
+        return calls.lastOrNull() ?: CallBuilder().also(calls::add)
+    }
+
+    /** Apply the authoritative complete form of a function-call item. */
+    private fun finalizeItem(calls: MutableList<CallBuilder>, item: FunctionItem) {
+        val builder = itemBuilder(calls, item.itemId)
+        builder.itemId = item.itemId
+        if (item.callId.isNotEmpty()) builder.id = item.callId
+        if (item.name.isNotEmpty()) builder.name = item.name
+        if (item.arguments.isNotEmpty()) builder.arguments = item.arguments
+    }
+
+    /**
+     * One logical call per id: providers that resend a complete call after
+     * its fragments must not produce duplicate ids, which the API rejects on
+     * the next request. The last (most complete) copy wins.
+     */
+    private fun buildToolCalls(calls: List<CallBuilder>): JSONArray {
+        val merged = ArrayList<CallBuilder>()
+        val positions = HashMap<String, Int>()
+        for (builder in calls) {
+            if (builder.name.isBlank()) continue
+            if (builder.id.isNotEmpty()) {
+                val existing = positions[builder.id]
+                if (existing != null) {
+                    merged[existing] = builder
+                    continue
+                }
+                positions[builder.id] = merged.size
+            }
+            merged.add(builder)
+        }
+        val array = JSONArray()
+        merged.forEach { array.put(it.build()) }
+        return array
+    }
+
+    // Chat Completions reports prompt/completion tokens; the Responses API
+    // reports input/output tokens.
+    private fun usageEvent(usage: JSONObject): ChatEvent {
+        val prompt = usage.optLong("prompt_tokens")
+            .takeIf { it > 0 } ?: usage.optLong("input_tokens")
+        val completion = usage.optLong("completion_tokens")
+            .takeIf { it > 0 } ?: usage.optLong("output_tokens")
+        return ChatEvent.newBuilder()
+            .setUsage(
+                TokenUsage.newBuilder()
+                    .setPromptTokens(prompt)
+                    .setCompletionTokens(completion),
+            )
+            .build()
     }
 
     private class Catalog {

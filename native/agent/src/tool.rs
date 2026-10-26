@@ -49,6 +49,7 @@ pub async fn execute(
     hub: Arc<Mutex<Hub>>,
     mcp: Option<Arc<McpManager>>,
     default_container: &str,
+    cwd: &str,
     events: Option<UnboundedSender<AgentEvent>>,
     active_exec: &ActiveExec,
 ) -> ToolResult {
@@ -59,6 +60,7 @@ pub async fn execute(
             &hub,
             mcp,
             default_container,
+            cwd,
             events,
             active_exec,
         )
@@ -85,6 +87,7 @@ type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<String, String>> + Send
 struct ToolContext {
     hub: Arc<Mutex<Hub>>,
     default_container: String,
+    cwd: String,
     events: Option<UnboundedSender<AgentEvent>>,
     active_exec: ActiveExec,
 }
@@ -285,8 +288,8 @@ fn glob_definition() -> Value {
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string", "description": "Glob such as **/*.kt, matched against paths relative to path." },
-                    "path": { "type": "string", "description": "Absolute directory in the current target, or a VFS URI. Defaults to /." },
+                    "pattern": { "type": "string", "description": "Glob such as **/*.kt, matched against paths relative to path. **/ also matches at the base level itself." },
+                    "path": { "type": "string", "description": "Absolute directory in the current target, or a VFS URI. Defaults to the current directory." },
                     "max_results": { "type": "integer", "description": "Maximum number of matches. Defaults to 200." }
                 },
                 "required": ["pattern"]
@@ -338,7 +341,7 @@ fn copy_run<'a>(args: &'a Value, ctx: ToolContext) -> ToolFuture<'a> {
 }
 
 fn glob_run<'a>(args: &'a Value, ctx: ToolContext) -> ToolFuture<'a> {
-    Box::pin(async move { glob(args, &ctx.hub).await })
+    Box::pin(async move { glob(args, &ctx.hub, &ctx.cwd).await })
 }
 
 fn exec_run<'a>(args: &'a Value, ctx: ToolContext) -> ToolFuture<'a> {
@@ -364,7 +367,7 @@ fn exec_run<'a>(args: &'a Value, ctx: ToolContext) -> ToolFuture<'a> {
 }
 
 fn list_targets_run<'a>(_args: &'a Value, ctx: ToolContext) -> ToolFuture<'a> {
-    Box::pin(async move { list_targets(&ctx.hub).await })
+    Box::pin(async move { list_targets(&ctx.hub, &ctx.default_container).await })
 }
 
 async fn run(
@@ -373,6 +376,7 @@ async fn run(
     hub: &Arc<Mutex<Hub>>,
     mcp: Option<Arc<McpManager>>,
     default_container: &str,
+    cwd: &str,
     events: Option<UnboundedSender<AgentEvent>>,
     active_exec: &ActiveExec,
 ) -> ToolResult {
@@ -392,6 +396,7 @@ async fn run(
     let context = ToolContext {
         hub: Arc::clone(hub),
         default_container: default_container.to_owned(),
+        cwd: cwd.to_owned(),
         events,
         active_exec: Arc::clone(active_exec),
     };
@@ -580,13 +585,13 @@ async fn copy(args: &Value, hub: &Arc<Mutex<Hub>>) -> Result<String, String> {
     Ok(format!("Copied {bytes} bytes from {from} to {to}"))
 }
 
-async fn glob(args: &Value, hub: &Arc<Mutex<Hub>>) -> Result<String, String> {
+async fn glob(args: &Value, hub: &Arc<Mutex<Hub>>, cwd: &str) -> Result<String, String> {
     let pattern = string_arg(args, "pattern")?;
     let path = args
         .get("path")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .unwrap_or("/");
+        .unwrap_or(cwd);
     let max_results = args
         .get("max_results")
         .and_then(Value::as_u64)
@@ -706,7 +711,7 @@ unsafe fn read_raw(fd: std::os::fd::RawFd, buf: &mut [u8]) -> io::Result<usize> 
     }
 }
 
-async fn list_targets(hub: &Arc<Mutex<Hub>>) -> Result<String, String> {
+async fn list_targets(hub: &Arc<Mutex<Hub>>, caller: &str) -> Result<String, String> {
     let targets = hub.lock().await.targets().await?;
     if targets.is_empty() {
         return Ok("(no targets)".to_owned());
@@ -717,6 +722,11 @@ async fn list_targets(hub: &Arc<Mutex<Hub>>) -> Result<String, String> {
             if target.kind == "exec" {
                 let state = if target.running { "running" } else { "stopped" };
                 let elevated = if target.elevated { ", elevated" } else { "" };
+                let current = if target.name == caller {
+                    "current, "
+                } else {
+                    ""
+                };
                 let label = if target.label.is_empty() {
                     display_target(&target.name)
                 } else {
@@ -727,7 +737,7 @@ async fn list_targets(hub: &Arc<Mutex<Hub>>) -> Result<String, String> {
                 } else {
                     format!(" {}", target.root)
                 };
-                format!("{label} ({state}{elevated}, exec){root}")
+                format!("{label} ({current}{state}{elevated}, exec){root}")
             } else if target.root.is_empty() {
                 format!("{} ({}, files)", target.label, target.kind)
             } else {

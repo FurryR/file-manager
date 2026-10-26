@@ -18,10 +18,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.hub.Hub
+import io.furryr.file.container.ContainerManager
+import io.furryr.file.pulse.PulseManager
 import io.furryr.file.ui.theme.FileManagerTheme
 import io.furryr.file.ui.util.OperationNotification
 import io.furryr.file.ui.util.ContainerNotification
-import io.furryr.file.virgl.VirglManager
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -44,8 +45,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        runCatching { VirglManager.ensureResident(applicationContext) }
-            .onFailure { Log.w("FileManager", "virgl listener pre-start failed", it) }
+        runCatching { PulseManager.ensureResident(applicationContext) }
+            .onFailure { Log.w("FileManager", "PulseAudio listener pre-start failed", it) }
+        runCatching { ContainerManager.startResolverWatch(applicationContext) }
+            .onFailure { Log.w("FileManager", "resolver watch registration failed", it) }
         if (AppLocale.current(this) != appliedLanguage) recreate()
     }
 
@@ -67,11 +70,11 @@ class MainActivity : ComponentActivity() {
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         installFileProviders(this)
 
-        // Bind the resident vtest listener as early as possible. It binds its
+        // Bind the resident PulseAudio listener as early as possible. It binds its
         // socket immediately, so a container launch only reuses an existing
-        // socket; the renderer itself is started later, on demand.
-        runCatching { VirglManager.ensureResident(applicationContext) }
-            .onFailure { Log.w("FileManager", "virgl listener pre-start failed", it) }
+        // socket; the audio core itself is started later, on demand.
+        runCatching { PulseManager.ensureResident(applicationContext) }
+            .onFailure { Log.w("FileManager", "PulseAudio listener pre-start failed", it) }
 
         // Pre-start the daemon off the main thread. Failure is logged and
         // observable via DaemonManager.status; the lazy-init in

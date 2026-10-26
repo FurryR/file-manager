@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
@@ -7,6 +8,48 @@ use crate::hub::{display_target, Hub, Target};
 use crate::mcp::McpManager;
 use crate::model::{AgentEvent, Message};
 use crate::tool;
+
+/// Snapshot of the runner's history, updated as each message settles. The UI
+/// adopts it when a run is cancelled, so finished messages survive the cancel
+/// instead of being dropped with the task.
+pub type Journal = Arc<StdMutex<Vec<Message>>>;
+
+pub fn new_journal(messages: &[Message]) -> Journal {
+    Arc::new(StdMutex::new(messages.to_vec()))
+}
+
+fn record(journal: &Journal, messages: &[Message]) {
+    *journal.lock().unwrap_or_else(|error| error.into_inner()) = messages.to_vec();
+}
+
+/// Answer tool calls whose result never arrived (a cancelled or crashed run).
+/// The API rejects an assistant tool_calls message that is not fully followed
+/// by tool results, so missing calls get a synthetic reply.
+pub fn repair_dangling_tool_calls(messages: &mut Vec<Message>) {
+    let Some(position) = messages.iter().rposition(Message::has_tools) else {
+        return;
+    };
+    if messages[position + 1..]
+        .iter()
+        .any(|message| message.role != "tool")
+    {
+        return;
+    }
+    let answered: HashSet<&str> = messages[position + 1..]
+        .iter()
+        .filter_map(|message| message.tool_call_id.as_deref())
+        .collect();
+    let missing: Vec<String> = messages[position]
+        .tool_calls
+        .iter()
+        .flatten()
+        .filter(|call| !answered.contains(&call.id.as_str()))
+        .map(|call| call.id.clone())
+        .collect();
+    for id in missing {
+        messages.push(Message::tool(id, "This call was cancelled before it ran."));
+    }
+}
 
 pub struct Outcome {
     pub messages: Vec<Message>,
@@ -32,6 +75,7 @@ pub async fn run(
     effort: String,
     hub: Arc<Mutex<Hub>>,
     messages: Vec<Message>,
+    journal: Journal,
     events: UnboundedSender<AgentEvent>,
     active_exec: tool::ActiveExec,
     session_id: String,
@@ -111,6 +155,7 @@ pub async fn run(
             ));
             pending_start = history.len();
             base_count = pending_start as u32;
+            record(&journal, &history);
             for call in calls {
                 let info =
                     tool::info_with_mcp(Some(&mcp), &call.function.name, &call.function.arguments);
@@ -125,12 +170,14 @@ pub async fn run(
                     Arc::clone(&hub),
                     Some(Arc::clone(&mcp)),
                     &context,
+                    &cwd,
                     Some(events.clone()),
                     &active_exec,
                 )
                 .await;
                 let _ = events.send(AgentEvent::ToolResult { ok: result.ok });
                 history.push(Message::tool(call.id.clone(), result.content));
+                record(&journal, &history);
             }
             continue;
         }
@@ -143,6 +190,7 @@ pub async fn run(
             ));
         }
         history.push(Message::assistant(answer.clone()));
+        record(&journal, &history);
         return Ok(Outcome {
             messages: history,
             answer,

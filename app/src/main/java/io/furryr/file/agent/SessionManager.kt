@@ -6,7 +6,8 @@ import android.content.Context
 import android.util.Log
 import io.furryr.file.RuntimeForegroundService
 import io.furryr.file.container.ContainerManager
-import io.furryr.file.virgl.VirglManager
+import io.furryr.file.pulse.PulseManager
+import io.furryr.file.wayland.WaylandManager
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.hub.Hub
 import com.termux.terminal.TerminalSession
@@ -368,11 +369,9 @@ object SessionManager {
         val cwd = customCwd ?: context.filesDir.absolutePath
         Hub.start(context)
         val env = DEFAULT_ENV.toMutableList().apply {
-            context.cacheDir.mkdirs()
-            val tmpDir = context.cacheDir.absolutePath
-            add("PROOT_TMP_DIR=$tmpDir")
             if (shell.startsWith("container://")) {
-                VirglManager.environment().forEach { (key, value) -> add("$key=$value") }
+                PulseManager.environment().forEach { (key, value) -> add("$key=$value") }
+                WaylandManager.environment(context).forEach { (key, value) -> add("$key=$value") }
             }
             // HUB_SOCKET is added by ProcessHelper once the target is known.
             add("HUB_TERMINAL=$terminalId")

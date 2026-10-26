@@ -8,7 +8,7 @@ import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.hub.Hub
 import io.furryr.file.daemon.process.CommandSpec
 import io.furryr.file.daemon.process.ProcessChannel
-import io.furryr.file.virgl.VirglManager
+import io.furryr.file.pulse.PulseManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import java.io.FileDescriptor
@@ -60,7 +60,7 @@ object ProcessHelper {
             } else (args?.toList() ?: emptyList()),
             env = if (containerName != null) {
                 env.filterKeys { it == "TERM" || it == "HUB_TERMINAL" || it == "CONTAINER_START_PATH" } +
-                    hubEnv + VirglManager.environment() + buildMap {
+                    hubEnv + PulseManager.environment() + buildMap {
                     put("PATH", ContainerDaemonLauncher.DEFAULT_PATH)
                     Hub.binDir?.let { put("HUB_PATH", it.absolutePath) }
                 }

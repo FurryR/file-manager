@@ -42,17 +42,14 @@ object AgentSettings {
         val apiKey: String,
     )
 
+    /** A remote (Streamable HTTP) MCP server. Local stdio servers are configured
+     * in the workspace `.agent/mcp.json` and started by the agent itself. */
     data class McpServer(
         val id: String,
         val name: String,
         val url: String,
         val headers: Map<String, String>,
-        val command: String,
-        val args: List<String>,
-        val env: Map<String, String>,
-        val cwd: String,
         val enabled: Boolean,
-        val transport: String,
     )
 
     data class SessionInfo(
@@ -94,13 +91,8 @@ object AgentSettings {
                     name = server.name,
                     url = server.url,
                     headers = server.headers,
-                    command = server.command,
-                    args = server.args,
-                    env = server.env,
-                    cwd = server.cwd,
                     enabled = server.enabled,
                     source = "global",
-                    transport = server.transport,
                 )
             }
         }
@@ -213,37 +205,29 @@ object AgentSettings {
         val array = runCatching { JSONArray(decrypted) }.getOrNull() ?: return emptyList()
         return (0 until array.length()).mapNotNull { index ->
             val item = array.optJSONObject(index) ?: return@mapNotNull null
+            val url = item.optString("url")
+            // Legacy stdio entries (command only) are dropped: local MCP is
+            // configured in the workspace .agent/mcp.json now.
+            if (url.isBlank()) return@mapNotNull null
             McpServer(
                 id = item.optString("id").ifBlank { UUID.randomUUID().toString() },
                 name = item.optString("name"),
-                url = item.optString("url"),
+                url = url,
                 headers = item.optJSONObject("headers")?.let { headers ->
                     headers.keys().asSequence().associateWith { headers.optString(it) }
                 }.orEmpty(),
-                command = item.optString("command"),
-                args = item.optJSONArray("args")?.let { args ->
-                    (0 until args.length()).mapNotNull { args.optString(it).takeIf(String::isNotEmpty) }
-                }.orEmpty(),
-                env = item.optJSONObject("env")?.let { env ->
-                    env.keys().asSequence().associateWith { env.optString(it) }
-                }.orEmpty(),
-                cwd = item.optString("cwd"),
                 enabled = item.optBoolean("enabled", true),
-                transport = item.optString("transport")
-                    .ifBlank { if (item.optString("url").isNotBlank()) "http" else "stdio" },
             )
         }
     }
 
     fun saveMcpServer(context: Context, server: McpServer) {
         require(server.name.isNotBlank()) { "MCP server name is required" }
-        require(server.url.isNotBlank() || server.command.isNotBlank()) {
-            "MCP URL or command is required"
-        }
+        require(validEndpoint(server.url)) { "MCP server URL is required" }
         val id = server.id.ifBlank { UUID.randomUUID().toString() }
         val servers = mcpServers(context).toMutableList()
         val index = servers.indexOfFirst { it.id == id }
-        val saved = server.copy(id = id, name = server.name.trim(), command = server.command.trim())
+        val saved = server.copy(id = id, name = server.name.trim(), url = server.url.trim())
         if (index >= 0) servers[index] = saved else servers.add(saved)
         writeMcpServers(context, servers)
     }
@@ -475,12 +459,7 @@ object AgentSettings {
                     .put("name", server.name)
                     .put("url", server.url)
                     .put("headers", JSONObject(server.headers))
-                    .put("command", server.command)
-                    .put("args", JSONArray(server.args))
-                    .put("env", JSONObject(server.env))
-                    .put("cwd", server.cwd)
-                    .put("enabled", server.enabled)
-                    .put("transport", server.transport),
+                    .put("enabled", server.enabled),
             )
         }
         prefs(context).edit()

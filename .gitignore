@@ -7,7 +7,6 @@ app/build/
 *.apk
 *.aar
 app/src/main/jniLibs/*
-virgl/src/main/jniLibs/*
 /app/src/main/executables/
 
 # IDE files
@@ -27,6 +26,9 @@ target/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Fetched third-party sources (scripts/fetch-wldroid.sh)
+/third_party/
 
 # Local environment
 .env

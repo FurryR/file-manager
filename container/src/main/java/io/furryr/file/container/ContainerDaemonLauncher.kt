@@ -6,7 +6,8 @@ import io.furryr.file.daemon.DaemonLaunchRequest
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.isSuAvailable
 import io.furryr.file.daemon.shellQuote
-import io.furryr.file.virgl.VirglManager
+import io.furryr.file.pulse.PulseManager
+import io.furryr.file.wayland.WaylandManager
 
 /**
  * App-owned daemon launcher: builds the daemon argv for a container,
@@ -23,7 +24,8 @@ object ContainerDaemonLauncher {
 
     fun command(context: Context, request: DaemonLaunchRequest): DaemonCommand? {
         val container = ContainerManager.getContainer(context, request.name) ?: return null
-        VirglManager.ensureHost(context)
+        PulseManager.ensureHost(context)
+        WaylandManager.ensureHost(context)
         return when (container.backend) {
             ContainerBackend.CHROOT -> chrootCommand(context, request, container)
             ContainerBackend.PROOT -> prootCommand(context, request, container)
@@ -49,10 +51,9 @@ object ContainerDaemonLauncher {
             tokens.add(shellQuote("$source:$target"))
         }
         val su = request.suPath.ifBlank { "su" }
-        val virgl = VirglManager.environment().entries.joinToString(" ") {
-            "${it.key}=${shellQuote(it.value)}"
-        }
-        val command = "export PATH=${shellQuote(daemonPath(context))}${if (virgl.isEmpty()) "" else " $virgl"}; " +
+        val hostEnv = (PulseManager.environment() + WaylandManager.environment(context)).entries
+            .joinToString(" ") { "${it.key}=${shellQuote(it.value)}" }
+        val command = "export PATH=${shellQuote(daemonPath(context))}${if (hostEnv.isEmpty()) "" else " $hostEnv"}; " +
             "exec ${tokens.joinToString(" ")}"
         return DaemonCommand(listOf(su, "-c", command))
     }
@@ -75,7 +76,7 @@ object ContainerDaemonLauncher {
         val env = mapOf(
             "PROOT_TMP_DIR" to ProotRunner.prootTmpDir(context, container).absolutePath,
             "PATH" to daemonPath(context),
-        ) + VirglManager.environment()
+        ) + PulseManager.environment() + WaylandManager.environment(context)
         return DaemonCommand(argv, env)
     }
 

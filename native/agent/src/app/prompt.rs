@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::model::{Entry, Message};
 
-use super::{Action, App, Pending, UndoState, HELP, INPUT_LIMIT, WAITING_NOTICE};
+use super::{Action, App, Pending, UndoState, HELP};
 
 impl App {
     pub(super) fn clear_conversation(&mut self) {
@@ -21,7 +21,6 @@ impl App {
         self.answer_streamed = false;
         self.follow = true;
         self.scroll = 0;
-        self.notice = "Conversation cleared.".to_owned();
         self.bump();
     }
 
@@ -29,15 +28,12 @@ impl App {
         self.transcript.push(Entry::notice(HELP));
         self.input.clear();
         self.follow = true;
-        self.notice = String::new();
         self.bump();
     }
 
     pub(super) fn insert_text(&mut self, value: &str) -> Action {
         self.detach_prompt_browse();
-        if !self.input.insert(value) {
-            self.notice = INPUT_LIMIT.to_owned();
-        }
+        self.input.insert(value);
         Action::None
     }
 
@@ -70,25 +66,19 @@ impl App {
 
     pub(super) fn undo(&mut self) -> Action {
         let Some(previous) = self.undo.pop() else {
-            self.notice = "Nothing to undo.".to_owned();
-            self.bump();
             return Action::None;
         };
         self.redo.push(self.snapshot());
         self.restore(previous);
-        self.notice = "Undid the last change.".to_owned();
         Action::PersistHistory(self.history.clone())
     }
 
     pub(super) fn redo(&mut self) -> Action {
         let Some(next) = self.redo.pop() else {
-            self.notice = "Nothing to redo.".to_owned();
-            self.bump();
             return Action::None;
         };
         self.push_undo(self.snapshot());
         self.restore(next);
-        self.notice = "Restored the change.".to_owned();
         Action::PersistHistory(self.history.clone())
     }
 
@@ -127,7 +117,6 @@ impl App {
 
     pub(super) fn submit(&mut self) -> Action {
         if self.pending.is_some() {
-            self.notice = WAITING_NOTICE.to_owned();
             return Action::None;
         }
         let text = self.input.text().trim().to_owned();
@@ -171,7 +160,6 @@ impl App {
             _ => {}
         }
         if self.model.is_empty() {
-            self.notice = "No model selected yet.".to_owned();
             return Action::None;
         }
         let submitted = self.input.take();
@@ -193,7 +181,6 @@ impl App {
         self.pending = Some(Pending {
             started: Instant::now(),
         });
-        self.notice = WAITING_NOTICE.to_owned();
         self.follow = true;
         self.bump();
         Action::Submit(messages)

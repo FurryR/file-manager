@@ -10,10 +10,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Resolve the MCP server catalog for one caller. Global servers come from app
- * settings; workspace servers are read from `.agent/mcp.json` in the caller cwd
- * and its ancestors when workspace loading is trusted. Closer workspace entries
- * override ancestors, which override global entries with the same name.
+ * Resolve the remote MCP server catalog for one caller. Global servers come
+ * from app settings; workspace servers are read from `.agent/mcp.json` in the
+ * caller cwd and its ancestors when workspace loading is trusted. Closer
+ * workspace entries override ancestors, which override global entries with the
+ * same name. Local stdio entries in workspace files are not resolved here: the
+ * agent reads and spawns them itself.
  */
 internal object McpConfig {
     private const val MAX_CONFIG_BYTES = 1024 * 1024
@@ -59,8 +61,9 @@ internal object McpConfig {
             val entry = servers.optJSONObject(name) ?: continue
             val base = known[name]
             val url = entry.optString("url")
-            val command = entry.optString("command")
-            if (url.isBlank() && command.isBlank()) {
+            if (url.isBlank()) {
+                // No URL: either a pure enable/disable override of a known
+                // server, or a local stdio entry the agent handles itself.
                 if (base != null) {
                     result.add(
                         base.copy(
@@ -71,30 +74,16 @@ internal object McpConfig {
                 }
                 continue
             }
-            val args = entry.optJSONArray("args")?.let { array ->
-                (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotEmpty) }
-            }.orEmpty()
-            val env = entry.optJSONObject("env")?.let { objectValue ->
-                objectValue.keys().asSequence().associateWith { objectValue.optString(it) }
-            }.orEmpty()
             val headers = entry.optJSONObject("headers")?.let { objectValue ->
                 objectValue.keys().asSequence().associateWith { objectValue.optString(it) }
             }.orEmpty()
-            val transport = entry.optString("type")
-                .ifBlank { entry.optString("transport") }
-                .ifBlank { if (url.isNotBlank()) "http" else "stdio" }
             result.add(
                 HubMcpServer(
                     name = name,
                     url = url,
                     headers = headers,
-                    command = command,
-                    args = args,
-                    env = env,
-                    cwd = entry.optString("cwd"),
                     enabled = entry.optBoolean("enabled", true),
                     source = "workspace",
-                    transport = transport,
                 ),
             )
         }

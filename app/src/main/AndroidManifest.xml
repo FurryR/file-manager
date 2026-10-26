@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- wldroid's AARs declare minSdk 29; the compositor stack itself only uses
+         APIs available since 26 (AHardwareBuffer et al.), so the requirement is
+         overridden down to the app floor. -->
+    <uses-sdk tools:overrideLibrary="nu.shel.wldroid.compositor,nu.shel.wldroid.virgl,nu.shel.wldroid.shims" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.INTERNET" />
@@ -8,6 +13,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 
@@ -73,6 +80,12 @@
             android:theme="@style/Theme.FileManager" />
 
         <activity
+            android:name=".ui.screens.WaylandActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:exported="false"
+            android:theme="@style/Theme.FileManager" />
+
+        <activity
             android:name=".MainActivity"
             android:exported="true"
             android:windowSoftInputMode="adjustResize"
@@ -90,8 +103,9 @@
             android:foregroundServiceType="specialUse" />
 
         <service
-            android:name=".virgl.VirglService"
+            android:name=".pulse.PulseService"
             android:exported="false"
-            android:process=":virgl" />
+            android:foregroundServiceType="microphone"
+            android:process=":pulse" />
     </application>
 </manifest>

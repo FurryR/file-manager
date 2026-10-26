@@ -29,8 +29,6 @@ Ctrl+P: commands   /models: switch model   /variants: reasoning effort
 Configure an AI provider in the app's settings first.";
 
 const SCROLL_LINES: usize = 3;
-const WAITING_NOTICE: &str = "Waiting for the reply · Ctrl+C cancels · Ctrl+Q exits";
-const INPUT_LIMIT: &str = "Message reached the 64 KiB input limit.";
 pub(super) const GENERATING_CALL: &str = "~ Generating call";
 const MAX_LIVE_TOOL_BYTES: usize = 1024 * 1024;
 
@@ -72,7 +70,6 @@ pub struct App {
     prompt_draft: String,
     input: Input,
     pending: Option<Pending>,
-    notice: String,
     revision: u64,
     follow: bool,
     scroll: usize,
@@ -179,7 +176,6 @@ impl App {
             prompt_draft: String::new(),
             input: Input::default(),
             pending: None,
-            notice: String::new(),
             revision: 0,
             follow: true,
             scroll: 0,
@@ -450,9 +446,7 @@ impl App {
                         }
                         Some(PopupAction::Sessions) => Action::ListSessions,
                         Some(PopupAction::Clear) => {
-                            if self.pending.is_some() {
-                                self.notice = "Cancel the request before clearing.".to_owned();
-                            } else {
+                            if self.pending.is_none() {
                                 self.clear_conversation();
                             }
                             Action::None
@@ -474,13 +468,20 @@ impl App {
                         self.bump();
                         Action::PersistSelection
                     }
-                    PopupKind::Sessions => match item.session.clone() {
-                        Some(id) => Action::SelectSession {
-                            id,
-                            title: item.label.clone(),
-                        },
-                        None => Action::NewSession,
-                    },
+                    PopupKind::Sessions => {
+                        // Switching while a request runs would land its result
+                        // and history writes on the wrong session.
+                        if self.pending.is_some() {
+                            return Action::None;
+                        }
+                        match item.session.clone() {
+                            Some(id) => Action::SelectSession {
+                                id,
+                                title: item.label.clone(),
+                            },
+                            None => Action::NewSession,
+                        }
+                    }
                 }
             }
             _ => Action::None,
@@ -515,13 +516,11 @@ impl App {
         self.answer_streamed = false;
         self.follow = true;
         self.scroll = 0;
-        self.notice = format!("Session: {}", self.title);
         self.bump();
     }
 
     fn open_models(&mut self) {
         if self.models.is_empty() {
-            self.notice = "No models available yet.".to_owned();
             return;
         }
         self.popup = Some(Popup::models(&self.models, &self.model, &self.provider));
@@ -533,15 +532,12 @@ impl App {
 
     fn begin_compact(&mut self) -> Option<Action> {
         if self.pending.is_some() {
-            self.notice = "Wait for the current request to finish.".to_owned();
             return None;
         }
         if self.model.is_empty() {
-            self.notice = "No model selected yet.".to_owned();
             return None;
         }
         if self.history.is_empty() {
-            self.notice = "Nothing to compact.".to_owned();
             return None;
         }
         self.compact_snapshot = Some(UndoState {
@@ -552,7 +548,6 @@ impl App {
         self.pending = Some(Pending {
             started: Instant::now(),
         });
-        self.notice = "Compacting conversation...".to_owned();
         self.follow = true;
         self.bump();
         Some(Action::Compact(self.history.clone()))
@@ -605,10 +600,6 @@ impl App {
 
     pub fn input(&self) -> &Input {
         &self.input
-    }
-
-    pub fn notice(&self) -> &str {
-        &self.notice
     }
 
     pub fn revision(&self) -> u64 {

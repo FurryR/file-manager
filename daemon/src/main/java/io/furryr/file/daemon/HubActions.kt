@@ -57,7 +57,7 @@ object HubActions {
     @Volatile
     var sessionTitle: ((String) -> String?)? = null
 
-    /** User-level MCP servers configured in the app. */
+    /** User-level remote MCP servers configured in the app. */
     @Volatile
     var globalMcpServers: (() -> List<HubMcpServer>)? = null
 
@@ -100,17 +100,18 @@ data class HubSessionInfo(
     val messageCount: Int,
 )
 
+/**
+ * One remote (Streamable HTTP) MCP server. Local stdio servers are not
+ * configured here: the agent reads them from the workspace `.agent/mcp.json`
+ * itself. Credential headers stay in the app process and are injected by the
+ * hub when proxying a call.
+ */
 data class HubMcpServer(
     val name: String,
     val url: String = "",
     val headers: Map<String, String> = emptyMap(),
-    val command: String = "",
-    val args: List<String> = emptyList(),
-    val env: Map<String, String> = emptyMap(),
-    val cwd: String = "",
     val enabled: Boolean = true,
     val source: String = "global",
-    val transport: String = "",
 )
 
 data class HubAiConfig(

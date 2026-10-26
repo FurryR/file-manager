@@ -1,6 +1,7 @@
 package io.furryr.file.uds
 
 import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import java.io.Closeable
 import java.io.File
@@ -39,6 +40,12 @@ class UdsFdServer internal constructor(
         UdsNative.closeRaw(fd)
     }
 
+    /** The raw listening descriptor, for hand-off to a native acceptor. */
+    fun listenFd(): Int {
+        if (closed) throw IOException("listener closed")
+        return UdsNative.fdOf(listenerFd)
+    }
+
     override fun close() {
         if (closed) return
         closed = true
@@ -53,6 +60,8 @@ class UdsFdServer internal constructor(
         runCatching {
             val fd = UdsNative.socket()
             try {
+                // A full backlog must not block shutdown while the acceptor waits on its owner's lock.
+                Os.fcntlInt(fd, OsConstants.F_SETFL, OsConstants.O_NONBLOCK)
                 UdsNative.connect(fd, endpoint)
             } finally {
                 runCatching { Os.close(fd) }

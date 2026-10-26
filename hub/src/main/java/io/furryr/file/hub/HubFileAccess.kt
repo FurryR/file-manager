@@ -26,7 +26,12 @@ private const val CHUNK_SIZE = 64 * 1024
 private const val DEFAULT_GLOB_RESULTS = 200
 private const val MAX_GLOB_RESULTS = 1000
 private const val MAX_GLOB_VISITS = 20_000
+private const val GLOB_BUDGET_MS = 10_000L
 private const val MAX_DIRECTORY_ENTRIES = 2_000
+
+// Kernel pseudo filesystems: crawling them is meaningless for file globs and
+// can keep a `**` walk running for minutes.
+private val GLOB_SKIP_DIRS = setOf("/proc", "/sys", "/dev")
 
 internal suspend fun readFile(request: ReadFileRequest, target: DaemonTarget): ReadFileResponse {
     require(request.path.isNotBlank()) { "read requires a path" }
@@ -171,81 +176,93 @@ internal fun callerPath(target: DaemonTarget, path: String, label: String): Stri
 
 internal suspend fun glob(request: GlobRequest, target: DaemonTarget): GlobResponse {
     val base = request.path.ifBlank { "/" }
+    // Inside the caller's own scope the scope prefix is omitted: rewrite the
+    // base to a plain path and walk the caller's daemon, so results are plain
+    // paths like /src/Main.kt instead of container://name/src/Main.kt.
+    ownScopePath(base, target)?.let { return globDaemon(request, it, target) }
     if (isVfsPath(base)) return globVfs(request, base)
+    return globDaemon(request, base, target)
+}
+
+private suspend fun globDaemon(
+    request: GlobRequest,
+    base: String,
+    target: DaemonTarget,
+): GlobResponse {
     val connection = DaemonManager.connection(target)
     require(base.startsWith('/')) { "glob path must be absolute" }
     val basePath = base.trimEnd('/').ifEmpty { "/" }
     val prefix = if (basePath == "/") "/" else "$basePath/"
-    val maxResults = if (request.maxResults <= 0) DEFAULT_GLOB_RESULTS
-    else request.maxResults.coerceAtMost(MAX_GLOB_RESULTS)
-    val matcher = GlobMatcher(request.pattern.ifBlank { "*" })
-    val pending = ArrayDeque<String>()
-    pending.addLast(basePath)
-    val paths = ArrayList<String>()
-    var visited = 0
-    var truncated = false
-    while (pending.isNotEmpty()) {
-        if (++visited > MAX_GLOB_VISITS) {
-            truncated = true
-            break
-        }
-        val directory = pending.removeLast()
-        val entries = try {
-            connection.listFiles(directory).getOrThrow()
-        } catch (e: Exception) {
-            if (directory == basePath) throw e else continue
-        }
-        for (entry in entries) {
-            val relative = if (entry.path.startsWith(prefix)) {
-                entry.path.removePrefix(prefix)
-            } else {
-                entry.path.trimStart('/')
+    return walkGlob(
+        request,
+        basePath,
+        list = { directory ->
+            try {
+                connection.listFiles(directory).getOrThrow()
+            } catch (e: Exception) {
+                if (directory == basePath) throw e
+                emptyList()
             }
-            if (relative.isNotEmpty() && matcher.matches(relative)) {
-                paths.add(entry.path)
-                if (paths.size >= maxResults) {
-                    truncated = true
-                    break
-                }
-            }
-            if (entry.isDirectory && !entry.isSymlink && relative.isNotEmpty()) {
-                pending.addLast(entry.path)
-            }
-        }
-        if (truncated) break
-    }
-    paths.sort()
-    return GlobResponse.newBuilder().addAllPaths(paths).setTruncated(truncated).build()
+        },
+        toRelative = { path ->
+            if (path.startsWith(prefix)) path.removePrefix(prefix) else path.trimStart('/')
+        },
+    )
 }
 
 internal suspend fun globVfs(request: GlobRequest, base: String): GlobResponse {
     val basePath = base.trimEnd('/').ifEmpty { base }
     val prefix = if (basePath.endsWith('/')) basePath else "$basePath/"
+    return walkGlob(
+        request,
+        basePath,
+        list = { directory ->
+            try {
+                Vfs.folder(directory).getOrThrow().list().getOrThrow()
+            } catch (e: Exception) {
+                if (directory == basePath) throw e
+                emptyList()
+            }
+        },
+        toRelative = { path ->
+            if (path.startsWith(prefix)) path.removePrefix(prefix) else path
+        },
+    )
+}
+
+/**
+ * Depth-first glob walk with hard bounds: directories that cannot lead to a
+ * match are pruned, kernel pseudo filesystems are skipped, and the walk stops
+ * early once the result cap, visit cap or time budget is reached — a `**`
+ * pattern over a huge tree must return (truncated) instead of stalling the
+ * connection.
+ */
+private suspend fun walkGlob(
+    request: GlobRequest,
+    basePath: String,
+    list: suspend (String) -> List<io.furryr.file.core.model.FileEntry>,
+    toRelative: (String) -> String,
+): GlobResponse {
     val maxResults = if (request.maxResults <= 0) DEFAULT_GLOB_RESULTS
     else request.maxResults.coerceAtMost(MAX_GLOB_RESULTS)
     val matcher = GlobMatcher(request.pattern.ifBlank { "*" })
-    val pending = ArrayDeque<String>()
-    pending.addLast(basePath)
+    // Pending directories as absolute path plus path segments relative to the
+    // base, so descent can be pruned without re-splitting.
+    val pending = ArrayDeque<Pair<String, List<String>>>()
+    pending.addLast(basePath to emptyList())
     val paths = ArrayList<String>()
     var visited = 0
     var truncated = false
+    val deadline = System.nanoTime() + GLOB_BUDGET_MS * 1_000_000
     while (pending.isNotEmpty()) {
-        if (++visited > MAX_GLOB_VISITS) {
+        if (++visited > MAX_GLOB_VISITS || System.nanoTime() > deadline) {
             truncated = true
             break
         }
-        val directory = pending.removeLast()
-        val entries = try {
-            Vfs.folder(directory).getOrThrow().list().getOrThrow()
-        } catch (e: Exception) {
-            if (directory == basePath) throw e else continue
-        }
+        val (directory, segments) = pending.removeLast()
+        val entries = list(directory)
         for (entry in entries) {
-            val relative = if (entry.path.startsWith(prefix)) {
-                entry.path.removePrefix(prefix)
-            } else {
-                entry.path
-            }
+            val relative = toRelative(entry.path)
             if (relative.isNotEmpty() && matcher.matches(relative)) {
                 paths.add(entry.path)
                 if (paths.size >= maxResults) {
@@ -253,8 +270,11 @@ internal suspend fun globVfs(request: GlobRequest, base: String): GlobResponse {
                     break
                 }
             }
-            if (entry.isDirectory && !entry.isSymlink && relative.isNotEmpty()) {
-                pending.addLast(entry.path)
+            val entrySegments = segments + entry.name
+            if (entry.isDirectory && !entry.isSymlink && relative.isNotEmpty() &&
+                entry.path !in GLOB_SKIP_DIRS && matcher.canDescend(entrySegments)
+            ) {
+                pending.addLast(entry.path to entrySegments)
             }
         }
         if (truncated) break
@@ -265,7 +285,50 @@ internal suspend fun globVfs(request: GlobRequest, base: String): GlobResponse {
 
 internal fun isVfsPath(path: String): Boolean = path.contains("://")
 
+// The VFS root of the caller's own scope, resolved from the Hello handshake.
+internal fun ownScopeRoot(target: DaemonTarget): String? = when (target) {
+    DaemonTarget.Host -> "file://"
+    is DaemonTarget.Named -> "container://${target.name}"
+    DaemonTarget.App -> null
+}
+
+/** `container://test/src` becomes `/src` for a caller inside container `test`. */
+internal fun ownScopePath(path: String, target: DaemonTarget): String? {
+    val root = ownScopeRoot(target) ?: return null
+    if (path == root) return "/"
+    val prefix = "$root/"
+    if (!path.startsWith(prefix)) return null
+    return path.removePrefix(root)
+}
+
 internal class GlobMatcher(pattern: String) {
+    // Leading pattern segments without wildcards, e.g. `src/main/**` ->
+    // ["src", "main"]. Directories off this track can never match.
+    private val literalPrefix: List<String>
+
+    // Number of path segments of a match when the pattern has no `**`;
+    // directories at or below this depth cannot contain matches.
+    private val fixedDepth: Int?
+
+    init {
+        val segments = pattern.split('/')
+        literalPrefix = segments.takeWhile { segment ->
+            segment.none { it == '*' || it == '?' || it == '[' || it == '\\' }
+        }
+        fixedDepth = if (pattern.contains("**")) null else segments.size
+    }
+
+    /** Whether a directory with these base-relative [segments] can still hold matches. */
+    fun canDescend(segments: List<String>): Boolean {
+        if (fixedDepth != null && segments.size >= fixedDepth) return false
+        if (segments.size <= literalPrefix.size) {
+            for (index in segments.indices) {
+                if (segments[index] != literalPrefix[index]) return false
+            }
+        }
+        return true
+    }
+
     private val regex = Regex(buildString {
         append('^')
         var index = 0

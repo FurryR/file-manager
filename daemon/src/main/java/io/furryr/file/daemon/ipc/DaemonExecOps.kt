@@ -96,12 +96,26 @@ fun DaemonConnection.spawnExec(
     )
 }
 
-fun DaemonConnection.waitExec(execId: Long): Result<Int> = runCatching {
-    request(Request.newBuilder()
-        .setWaitExec(io.furryr.file.proto.WaitExecRequest.newBuilder().setExecId(execId))
-        .build()).response.exitCode
+/**
+ * Wait for a pipe-mode exec to finish.
+ *
+ * [timeoutMillis] defaults to 0 (wait forever) because the daemon owns the
+ * child and always answers. Callers that must not hang the UI pass a bound and
+ * then [closeExec] to kill the process group.
+ */
+fun DaemonConnection.waitExec(
+    execId: Long,
+    timeoutMillis: Long = 0L,
+): Result<Int> = runCatching {
+    request(
+        Request.newBuilder()
+            .setWaitExec(io.furryr.file.proto.WaitExecRequest.newBuilder().setExecId(execId))
+            .build(),
+        timeoutMillis,
+    ).response.exitCode
 }
 
+/** Kill the pipe-mode exec's process group; the exec id is retired. */
 fun DaemonConnection.closeExec(execId: Long): Result<Unit> = runCatching {
     request(Request.newBuilder()
         .setCloseExec(io.furryr.file.proto.CloseExecRequest.newBuilder().setExecId(execId))

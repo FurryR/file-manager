@@ -7,6 +7,11 @@ pub struct Message {
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Provider-visible chain of thought. Kept in session history so resuming
+    /// a conversation preserves the model's reasoning context instead of
+    /// dropping whole intermediate turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -45,15 +50,23 @@ impl Message {
         Self {
             role: "assistant".to_owned(),
             content,
+            reasoning_content: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
         }
+    }
+
+    /// Attach the provider's reasoning to an assistant message.
+    pub fn with_reasoning(mut self, reasoning: Option<String>) -> Self {
+        self.reasoning_content = reasoning.filter(|text| !text.trim().is_empty());
+        self
     }
 
     pub fn tool(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: "tool".to_owned(),
             content: Some(content.into()),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(call_id.into()),
         }
@@ -63,6 +76,7 @@ impl Message {
         Self {
             role: role.to_owned(),
             content: Some(content.into()),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         }
@@ -174,6 +188,16 @@ impl Entry {
         Self {
             started: Some(std::time::Instant::now()),
             ..Self::new(Role::Reasoning, "")
+        }
+    }
+
+    /// A reasoning block restored from session history. It has no live timer,
+    /// so the header renders as a completed thought.
+    pub fn saved_reasoning(content: impl Into<String>) -> Self {
+        Self {
+            duration: None,
+            started: None,
+            ..Self::new(Role::Reasoning, content)
         }
     }
 

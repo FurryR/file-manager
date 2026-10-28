@@ -148,6 +148,7 @@ async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
     let pending_auth = Arc::new(Semaphore::new(MAX_PENDING_AUTH));
     let first_auth_deadline = tokio::time::Instant::now() + FIRST_AUTH_TIMEOUT;
     let mut signal_check = tokio::time::interval(std::time::Duration::from_millis(100));
+    let mut child_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
 
     loop {
         if *main_shutdown.borrow() {
@@ -183,10 +184,12 @@ async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
                 }
             }
             _ = signal_check.tick() => {
-                reaper::reap_orphans();
                 if TERMINATE_REQUESTED.load(Ordering::Relaxed) {
                     break;
                 }
+            }
+            _ = child_signal.recv() => {
+                reaper::reap_orphans();
             }
         }
     }
@@ -204,9 +207,8 @@ async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
     shared.pty_manager.lock().await.close_all();
     shared.execs.lock().await.clear();
     // All async owners are gone: nobody's exit status can be stolen any more.
-    // Then act as init for the tree we adopted — descendants must not outlive
-    // the daemon. Blocking is fine here; the runtime has nothing left to do.
-    reaper::release_all();
+    // Signal the tracked process groups, then reap until the tree is quiet.
+    // No /proc enumeration: rootless targets cannot traverse it.
     reaper::kill_tree(std::time::Duration::from_millis(400));
     *shared.handles.lock().await = HandleTable::new();
     Ok(())

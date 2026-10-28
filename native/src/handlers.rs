@@ -132,9 +132,7 @@ pub async fn handle_streaming(
         }
         Some(Command::WaitExec(req)) => {
             close_unexpected_fd(attached_fd);
-            let _ = tx.send(OutboundResponse::plain(
-                exec::wait(req_id, req, execs).await,
-            ));
+            exec::wait(req_id, req, execs, &tx);
         }
         Some(Command::CloseExec(req)) => {
             close_unexpected_fd(attached_fd);

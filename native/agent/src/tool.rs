@@ -10,7 +10,7 @@ use tokio::io::Interest;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 
-use crate::hub::{display_target, Hub};
+use crate::hub::{display_target, ExecStream, Hub};
 use crate::mcp::McpManager;
 use crate::model::{AgentEvent, ToolCall};
 
@@ -19,10 +19,41 @@ const MAX_EXEC_CAPTURE: usize = 1024 * 1024;
 const MAX_LIVE_OUTPUT: usize = 256 * 1024;
 const MAX_WRITE_PREVIEW: u32 = 256 * 1024;
 const MAX_DIFF_LINES: usize = 1_500;
+/// Bound on a single exec. Without it a wedged child hangs the whole agent run,
+/// and the tool reports nothing at all.
+const EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// How long the output pipes keep draining after the child exited. Descendants
+/// may still hold the write ends open forever, so this must be bounded.
+const OUTPUT_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Handle of the exec currently owned by the running request, if any. The UI
-/// uses it to terminate the process when the request is cancelled.
-pub type ActiveExec = Arc<StdMutex<Option<u64>>>;
+/// Execs currently owned by running tool calls. The UI uses it to terminate
+/// every process group when the request is cancelled or the agent exits.
+pub type ActiveExec = Arc<StdMutex<Vec<u64>>>;
+
+fn register_exec(active_exec: &ActiveExec, exec_id: u64) {
+    let mut execs = active_exec
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if !execs.contains(&exec_id) {
+        execs.push(exec_id);
+    }
+}
+
+fn unregister_exec(active_exec: &ActiveExec, exec_id: u64) {
+    active_exec
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .retain(|active| *active != exec_id);
+}
+
+/// Drop every registered exec id so the caller can terminate them all.
+pub fn take_active_exec(active_exec: &ActiveExec) -> Vec<u64> {
+    std::mem::take(
+        &mut *active_exec
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    )
+}
 
 pub struct ToolResult {
     pub ok: bool,
@@ -619,23 +650,10 @@ async fn exec(
     let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or_default();
     let stream = hub.lock().await.exec(container, &command, cwd).await?;
     let exec_id = stream.exec_id;
-    *active_exec
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = Some(exec_id);
-    let outcome = async {
-        let (stdout, stderr) = tokio::try_join!(
-            read_all(stream.stdout, events),
-            read_all(stream.stderr, events)
-        )
-        .map_err(|error| error.to_string())?;
-        let exit_code = hub.lock().await.wait_exec(exec_id).await?;
-        Ok::<_, String>((stdout, stderr, exit_code))
-    }
-    .await;
-    *active_exec
-        .lock()
-        .unwrap_or_else(|error| error.into_inner()) = None;
-    let (stdout, stderr, exit_code) = outcome?;
+    register_exec(active_exec, exec_id);
+    let outcome = collect(stream, hub, exec_id, events).await;
+    unregister_exec(active_exec, exec_id);
+    let (stdout, stderr, exit_code, truncated) = outcome?;
     let mut output = format!("exit_code: {exit_code}\n");
     let stdout = String::from_utf8_lossy(&stdout);
     let stderr = String::from_utf8_lossy(&stderr);
@@ -648,16 +666,118 @@ async fn exec(
         push_bounded(&mut output, &stderr);
     }
     if stdout.is_empty() && stderr.is_empty() {
-        output.push_str("(no output)");
+        output.push_str(if truncated {
+            "(output discarded: background processes still hold the exec pipes)\n"
+        } else {
+            "(no output)\n"
+        });
+    } else if truncated {
+        output.push_str("[output truncated: background processes still hold the exec pipes]\n");
     }
     Ok(output)
+}
+
+/// Wait for one exec and collect its output.
+///
+/// Completion is decided by the exit status, never by pipe EOF. The daemon
+/// attaches plain pipes, so any background process that inherited stdout or
+/// stderr keeps the write ends open; draining to EOF would block forever even
+/// though the command already exited — which is exactly how an exec used to
+/// hang with no output at all. The pipes are still drained concurrently for
+/// live output, then abandoned after a bounded grace period.
+async fn collect(
+    stream: ExecStream,
+    hub: &Arc<Mutex<Hub>>,
+    exec_id: u64,
+    events: Option<&UnboundedSender<AgentEvent>>,
+) -> Result<(Vec<u8>, Vec<u8>, i32, bool), String> {
+    let out_reader = ReaderGuard::new(tokio::spawn(read_all(stream.stdout, events.cloned())));
+    let err_reader = ReaderGuard::new(tokio::spawn(read_all(stream.stderr, events.cloned())));
+
+    let waited = tokio::time::timeout(
+        EXEC_TIMEOUT,
+        async { hub.lock().await.wait_exec(exec_id).await },
+    )
+    .await;
+
+    let exit_code = match waited {
+        Ok(Ok(exit_code)) => exit_code,
+        Ok(Err(error)) => return Err(error),
+        Err(_) => {
+            // The timeout dropped the wait future, so the hub lock is free again
+            // and the process group can be torn down before reporting failure.
+            drop(out_reader);
+            drop(err_reader);
+            let _ = hub.lock().await.close_exec(exec_id).await;
+            return Err(format!(
+                "exec timed out after {}s; the process group was terminated",
+                EXEC_TIMEOUT.as_secs(),
+            ));
+        }
+    };
+
+    // Reaching EOF first is the common case; the grace period only bites when
+    // descendants outlive the command and keep the pipes open.
+    let mut truncated = false;
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    match tokio::time::timeout(OUTPUT_DRAIN, out_reader.take()).await {
+        Ok(result) => match joined(result) {
+            Ok(bytes) => stdout_bytes = bytes,
+            Err(error) => return Err(error),
+        },
+        Err(_) => truncated = true,
+    }
+    match tokio::time::timeout(OUTPUT_DRAIN, err_reader.take()).await {
+        Ok(result) => match joined(result) {
+            Ok(bytes) => stderr_bytes = bytes,
+            Err(error) => return Err(error),
+        },
+        Err(_) => truncated = true,
+    }
+    Ok((stdout_bytes, stderr_bytes, exit_code, truncated))
+}
+
+/// Aborts a reader task when dropped. A cancelled run must not leave a read
+/// future behind that outlives the request and keeps consuming the pipe.
+struct ReaderGuard(Option<tokio::task::JoinHandle<io::Result<Vec<u8>>>>);
+
+impl ReaderGuard {
+    fn new(task: tokio::task::JoinHandle<io::Result<Vec<u8>>>) -> Self {
+        Self(Some(task))
+    }
+
+    /// Hand the task to the drain future, which owns it from here on.
+    fn take(mut self) -> tokio::task::JoinHandle<io::Result<Vec<u8>>> {
+        self.0.take().expect("reader taken exactly once")
+    }
+}
+
+impl Drop for ReaderGuard {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
+
+/// Flatten a joined read task into a message the model can act on.
+fn joined(
+    result: Result<io::Result<Vec<u8>>, tokio::task::JoinError>,
+) -> Result<Vec<u8>, String> {
+    match result {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// Drain one exec pipe to EOF. Output beyond the cap is discarded but still
 /// read so the child never blocks on a full pipe.
 async fn read_all(
     fd: OwnedFd,
-    events: Option<&UnboundedSender<AgentEvent>>,
+    events: Option<UnboundedSender<AgentEvent>>,
 ) -> io::Result<Vec<u8>> {
     let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
     if flags < 0
@@ -678,7 +798,7 @@ async fn read_all(
         if n == 0 {
             break;
         }
-        if let Some(events) = events {
+        if let Some(events) = events.as_ref() {
             if streamed < MAX_LIVE_OUTPUT {
                 let take = (MAX_LIVE_OUTPUT - streamed).min(n);
                 let _ = events.send(AgentEvent::ToolOutput(buf[..take].to_vec()));
@@ -689,9 +809,9 @@ async fn read_all(
             let take = (MAX_EXEC_CAPTURE - collected.len()).min(n);
             collected.extend_from_slice(&buf[..take]);
         }
-        // `try_join!` polls the stdout future first. Without yielding, a busy
-        // stdout can be drained to EOF before stderr is ever polled, which
-        // makes live output look buffered and hides stderr until exit.
+        // Yield between reads so a saturated stdout cannot starve the stderr
+        // task: without it, live output looks buffered and stderr only
+        // appears once the command exits.
         tokio::task::yield_now().await;
     }
     Ok(collected)

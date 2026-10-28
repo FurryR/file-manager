@@ -1,38 +1,35 @@
 use std::collections::HashMap;
 
-use tokio::process::Child;
+use tokio::sync::watch;
 
 /// A pipe-mode child kept alive between its Exec response and WaitExec.
-/// Dropping it (explicit close, wait completion, or daemon shutdown) kills any
-/// remaining members of its process group and hands the zombie to the reaper
-/// sweep — nobody will wait for it after this point.
+///
+/// The daemon-wide reaper owns `waitpid`; this entry only subscribes to the
+/// exit code. Dropping it while the child is still running kills the whole
+/// process group, so closing an exec takes effect immediately.
 pub struct ExecProcess {
-    pub child: Child,
     pid: u32,
-    group: crate::reaper::ProcessGroup,
+    /// Exit code published by the reaper; `None` while still running.
+    exit: watch::Receiver<Option<i32>>,
 }
 
 impl ExecProcess {
-    fn new(child: Child) -> Self {
-        let pid = child.id().unwrap_or(0);
-        Self {
-            child,
-            pid,
-            group: crate::reaper::ProcessGroup(pid),
-        }
-    }
-
-    /// The owner consumed the exit status; stop shielding the pid from the
-    /// reaper sweep and disarm the group kill (the child is gone already).
-    pub fn reaped(&mut self) {
-        crate::reaper::release(self.pid);
-        self.group.finish();
+    /// Subscribe to the exit code without taking ownership of the process.
+    pub fn subscribe(&self) -> watch::Receiver<Option<i32>> {
+        self.exit.clone()
     }
 }
 
 impl Drop for ExecProcess {
     fn drop(&mut self) {
-        self.group.finish();
+        // The reaper kills the group when the leader exits; do it here only
+        // while the child can still be running. Pid reuse after that point
+        // could otherwise signal an unrelated process.
+        if self.exit.borrow().is_none() {
+            unsafe {
+                libc::kill(-(self.pid as i32), libc::SIGKILL);
+            }
+        }
         crate::reaper::release(self.pid);
     }
 }
@@ -46,15 +43,19 @@ pub struct ExecManager {
 }
 
 impl ExecManager {
-    /// The caller must have registered the pid with `reaper::track` right
-    /// after spawning it, before any other task could run.
-    pub fn insert(&mut self, child: Child) -> (u64, u32) {
-        let process = ExecProcess::new(child);
-        let pid = process.pid;
+    /// Register a spawned child. The caller must have registered the pid with
+    /// `reaper::track` before any await and must have created a process group.
+    pub fn insert(&mut self, pid: u32, exit: watch::Receiver<Option<i32>>) -> u64 {
+        let process = ExecProcess { pid, exit };
         self.next_id = self.next_id.wrapping_add(1).max(1);
         let id = self.next_id;
         self.processes.insert(id, process);
-        (id, pid)
+        id
+    }
+
+    /// Look up an exec's exit subscription without removing it.
+    pub fn subscribe(&self, id: u64) -> Option<watch::Receiver<Option<i32>>> {
+        self.processes.get(&id).map(ExecProcess::subscribe)
     }
 
     pub fn remove(&mut self, id: u64) -> Option<ExecProcess> {

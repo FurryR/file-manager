@@ -213,27 +213,55 @@ fn render_tool(
     );
     output.push(exec_block_line(Vec::new(), width));
 
-    let mut text = display_bytes(&tool.output);
-    let (limit, byte_limit) = if entry.expanded {
-        (EXEC_EXPANDED_LINES, EXEC_EXPANDED_BYTES)
-    } else {
-        (EXEC_PREVIEW_LINES, EXEC_PREVIEW_BYTES)
-    };
-    let truncated = text.len() > byte_limit;
-    if truncated {
-        let mut end = byte_limit;
-        while !text.is_char_boundary(end) {
-            end -= 1;
+    let text = display_bytes(&tool.output);
+    // While the command runs, the last lines are the useful ones: a head
+    // preview would freeze as soon as the first screenful arrived, which looks
+    // exactly like stalled output. Completed blocks keep the head preview so
+    // the beginning of the result stays visible.
+    let tail_preview = running && !entry.expanded;
+    let (rendered, clipped) = if tail_preview {
+        let mut start = text.len().saturating_sub(EXEC_PREVIEW_BYTES);
+        while start < text.len() && !text.is_char_boundary(start) {
+            start += 1;
         }
-        text.truncate(end);
+        let head_clipped = start > 0;
+        let (rendered, more) = tail_lines(
+            &text[start..],
+            width,
+            theme::exec_output(),
+            EXEC_PREVIEW_LINES,
+        );
+        (rendered, head_clipped || more)
+    } else {
+        let (limit, byte_limit) = if entry.expanded {
+            (EXEC_EXPANDED_LINES, EXEC_EXPANDED_BYTES)
+        } else {
+            (EXEC_PREVIEW_LINES, EXEC_PREVIEW_BYTES)
+        };
+        let truncated = text.len() > byte_limit;
+        let text = if truncated {
+            let mut end = byte_limit;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            &text[..end]
+        } else {
+            &text[..]
+        };
+        let (rendered, line_truncated) = plain_lines(text, width, theme::exec_output(), limit);
+        (rendered, truncated || line_truncated)
+    };
+    if tail_preview && clipped {
+        output.push(exec_block_line(
+            vec![Span::styled("…", theme::muted())],
+            width,
+        ));
     }
-    let (rendered, line_truncated) = plain_lines(&text, width, theme::exec_output(), limit);
     for line in rendered {
         output.push(exec_block_line(line.spans, width));
     }
-    let clipped = truncated || line_truncated;
     let expandable = entry.expanded || clipped;
-    if clipped {
+    if clipped && !tail_preview {
         output.push(exec_block_line(
             vec![Span::styled("…", theme::muted())],
             width,
@@ -397,6 +425,36 @@ fn plain_lines(text: &str, width: usize, style: Style, limit: usize) -> (Vec<Lin
     (output, false)
 }
 
+/// Last `limit` wrapped lines of `text`, without wrapping the whole buffer.
+/// Walking backwards from the final logical line keeps live exec rendering
+/// cheap even when the command has produced a lot of output.
+fn tail_lines(text: &str, width: usize, style: Style, limit: usize) -> (Vec<Line<'static>>, bool) {
+    let inner = width.saturating_sub(EXEC_LEFT_PAD + EXEC_RIGHT_PAD).max(1);
+    let clean = sanitize(text);
+    let mut source: Vec<&str> = clean.split('\n').collect();
+    while source.last() == Some(&"") {
+        source.pop();
+    }
+    let mut output = Vec::new();
+    let mut truncated = false;
+    while let Some(line) = source.pop() {
+        let line = line.trim_end();
+        let mut wrapped = wrap_segments(&[(style, line.to_owned())], inner, false);
+        wrapped.append(&mut output);
+        output = wrapped;
+        if output.len() > limit {
+            output.drain(..output.len() - limit);
+            truncated = true;
+            break;
+        }
+        if output.len() == limit {
+            truncated = !source.is_empty();
+            break;
+        }
+    }
+    (output, truncated)
+}
+
 pub(crate) fn fit(text: &str, width: usize) -> String {
     let clean = sanitize(text).replace('\n', " ");
     let width = width.max(1);
@@ -432,7 +490,8 @@ fn render_reasoning(
         None if entry.started.is_some() => format!("{} Thinking", theme::spinner(spinner)),
         None => "Thought".to_owned(),
     };
-    let sign = if entry.duration.is_none() {
+    let sign = if entry.content.is_empty() || (entry.started.is_some() && entry.duration.is_none())
+    {
         ""
     } else if entry.expanded {
         "- "
@@ -474,21 +533,30 @@ fn render_entry(output: &mut Vec<Line<'static>>, content: &str, width: usize, st
         if line.trim_start().starts_with("```") {
             if in_code {
                 in_code = false;
+                output.push(exec_block_line(Vec::new(), width));
             } else {
                 let language = line.trim().trim_start_matches('`').trim();
                 in_code = true;
+                output.push(exec_block_line(Vec::new(), width));
                 if !language.is_empty() {
-                    output.push(Line::from(Span::styled(
-                        language.to_owned(),
+                    exec_marked(
+                        output,
+                        width,
+                        "",
+                        language,
                         theme::code_lang(),
-                    )));
+                        theme::code_lang(),
+                    );
+                    output.push(exec_block_line(Vec::new(), width));
                 }
             }
             index += 1;
             continue;
         }
         if in_code {
-            output.extend(code_lines(line, width));
+            for wrapped in code_lines(line, width) {
+                output.push(exec_block_line(wrapped.spans, width));
+            }
             index += 1;
             continue;
         }
@@ -505,31 +573,23 @@ fn render_entry(output: &mut Vec<Line<'static>>, content: &str, width: usize, st
         index += 1;
     }
 
+    if in_code {
+        output.push(exec_block_line(Vec::new(), width));
+    }
+
     if output.len() == start {
         output.push(Line::default());
     }
 }
 
+/// Wrap one code line to the same content width as every other block line.
+/// The caller adds the shared `┃` gutter and background with `exec_block_line`.
 fn code_lines(line: &str, width: usize) -> Vec<Line<'static>> {
-    let inner = width.saturating_sub(2).max(1);
-    wrap_segments(&[(theme::code(), line.to_owned())], inner, false)
-        .into_iter()
-        .map(|wrapped| {
-            let used: usize = wrapped
-                .spans
-                .iter()
-                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-                .sum();
-            let padding = width.saturating_sub(2 + used);
-            let mut spans = Vec::with_capacity(wrapped.spans.len() + 2);
-            spans.push(Span::styled("│ ", theme::code_bar()));
-            spans.extend(wrapped.spans);
-            if padding > 0 {
-                spans.push(Span::styled(" ".repeat(padding), theme::code()));
-            }
-            Line::from(spans)
-        })
-        .collect()
+    if line.is_empty() {
+        // `plain_lines` drops empty source lines; a blank code line is content.
+        return vec![Line::default()];
+    }
+    plain_lines(line, width, theme::code(), usize::MAX).0
 }
 
 fn prose_lines(line: &str, width: usize, base: Style) -> Vec<Line<'static>> {

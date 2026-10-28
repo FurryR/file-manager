@@ -179,7 +179,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                     launch {
                                         val reply = try {
                                             val code = runInterruptible {
-                                                exec.connection.waitExec(exec.execId).getOrThrow()
+                                                exec.connection.waitExec(exec.execId, EXEC_WAIT_TIMEOUT_MS).getOrThrow()
                                             }
                                             state.execs.remove(handle, exec)
                                             Reply(
@@ -673,6 +673,13 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
     companion object {
         private const val TAG = "HubServer"
         private const val CONTAINER_PREFIX = "container-"
+
+        /**
+         * Bound on one pipe-mode exec wait. Only a wedged daemon reaches it; the
+         * timeout path also closes the exec so its process group is terminated
+         * instead of leaking.
+         */
+        private const val EXEC_WAIT_TIMEOUT_MS = 15 * 60 * 1000L
 
         /** Bind [endpoint] and start serving. */
         fun listen(endpoint: UdsEndpoint): HubServer = HubServer(UdsServer.listen(endpoint))

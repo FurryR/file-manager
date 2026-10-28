@@ -14,10 +14,11 @@ impl App {
         self.input.clear();
         self.prompt_index = None;
         self.prompt_draft.clear();
+        self.clear_queued();
         self.reasoning_active = None;
         self.active_tool = None;
         self.calling_tool = None;
-        self.streaming_answer = false;
+        self.streaming_index = None;
         self.answer_streamed = false;
         self.follow = true;
         self.scroll = 0;
@@ -58,10 +59,68 @@ impl App {
         self.finish_reasoning();
         self.finish_tool(Some("cancelled"));
         self.finish_calling(Some("cancelled"));
-        self.streaming_answer = false;
+        self.discard_queued();
+        self.streaming_index = None;
         self.compact_snapshot = None;
         self.follow = true;
         self.bump();
+    }
+
+    pub(super) fn clear_queued(&mut self) {
+        self.queue
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.queued_entries.clear();
+    }
+
+    /// Drop prompts that never reached the runner. Their transcript entries
+    /// must go too, otherwise the UI would show a message the model never saw.
+    fn discard_queued(&mut self) {
+        let leftover = {
+            let mut queue = self.queue.lock().unwrap_or_else(|error| error.into_inner());
+            let leftover = queue.len();
+            queue.clear();
+            leftover
+        };
+        let start = self.queued_entries.len().saturating_sub(leftover);
+        let indices = self.queued_entries.split_off(start);
+        for index in indices.into_iter().rev() {
+            if index < self.transcript.len() {
+                self.transcript.remove(index);
+            }
+        }
+        // Drained prompts stay: the journal adopted them with the history.
+        self.queued_entries.clear();
+    }
+
+    /// Start a follow-up run for prompts that arrived after the runner's last
+    /// queue drain. The transcript already shows them; only the message
+    /// history and pending state change.
+    pub fn resume_queued(&mut self) -> Option<Vec<Message>> {
+        if self.pending.is_some() {
+            return None;
+        }
+        let queued =
+            std::mem::take(&mut *self.queue.lock().unwrap_or_else(|error| error.into_inner()));
+        self.queued_entries.clear();
+        if queued.is_empty() {
+            return None;
+        }
+        for prompt in queued {
+            self.history.push(Message::user(prompt));
+        }
+        self.reasoning_active = None;
+        self.active_tool = None;
+        self.calling_tool = None;
+        self.streaming_index = None;
+        self.answer_streamed = false;
+        self.follow = true;
+        self.pending = Some(Pending {
+            started: Instant::now(),
+        });
+        self.bump();
+        Some(self.history.clone())
     }
 
     pub(super) fn undo(&mut self) -> Action {
@@ -109,17 +168,39 @@ impl App {
         self.reasoning_active = None;
         self.active_tool = None;
         self.calling_tool = None;
-        self.streaming_answer = false;
+        self.streaming_index = None;
         self.answer_streamed = false;
         self.follow = true;
         self.bump();
     }
 
     pub(super) fn submit(&mut self) -> Action {
+        let text = self.input.text().trim().to_owned();
         if self.pending.is_some() {
+            match text.as_str() {
+                "" => return Action::None,
+                "/exit" | "/quit" => return Action::Quit,
+                "/help" => {
+                    self.show_help();
+                    return Action::None;
+                }
+                "/clear" | "/undo" | "/redo" | "/sessions" | "/models" | "/variants"
+                | "/compact" => return Action::None,
+                _ => {}
+            }
+            let submitted = self.input.take();
+            self.remember_prompt(&submitted);
+            let index = self.transcript.len();
+            self.transcript.push(Entry::user(submitted.clone()));
+            self.queued_entries.push(index);
+            self.queue
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(submitted);
+            self.follow = true;
+            self.bump();
             return Action::None;
         }
-        let text = self.input.text().trim().to_owned();
         match text.as_str() {
             "" => return Action::None,
             "/exit" | "/quit" => return Action::Quit,
@@ -174,7 +255,7 @@ impl App {
         self.reasoning_active = None;
         self.active_tool = None;
         self.calling_tool = None;
-        self.streaming_answer = false;
+        self.streaming_index = None;
         self.answer_streamed = false;
         let mut messages = self.history.clone();
         messages.push(Message::user(submitted.clone()));

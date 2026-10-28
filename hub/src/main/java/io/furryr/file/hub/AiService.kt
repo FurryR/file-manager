@@ -83,8 +83,10 @@ internal object AiService {
                 val reader = BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8))
                 val calls = ArrayList<CallBuilder>()
                 val content = StringBuilder()
+                val reasoning = StringBuilder()
                 val emitEvent: suspend (ChatEvent) -> Unit = { event ->
                     if (event.hasContentDelta()) content.append(event.contentDelta)
+                    if (event.hasReasoningDelta()) reasoning.append(event.reasoningDelta)
                     emit(event)
                 }
                 var toolCalling = false
@@ -114,7 +116,13 @@ internal object AiService {
                     emitEvent(ChatEvent.newBuilder().setToolCallsJson(toolCalls.toString()).build())
                 }
                 emitEvent(ChatEvent.newBuilder().setDone(true).build())
-                saveHistory(request.sessionId, history, content.toString(), toolCalls)
+                saveHistory(
+                    request.sessionId,
+                    history,
+                    content.toString(),
+                    reasoning.toString(),
+                    toolCalls,
+                )
             } catch (e: Exception) {
                 currentCoroutineContext().ensureActive()
                 emitError(emit, e.message ?: "Could not read the API response.")
@@ -251,11 +259,15 @@ internal object AiService {
         sessionId: String,
         history: JSONArray,
         content: String,
+        reasoning: String,
         toolCalls: JSONArray,
     ) {
         if (sessionId.isBlank()) return
-        if (content.isEmpty() && toolCalls.length() == 0) return
+        if (content.isEmpty() && reasoning.isBlank() && toolCalls.length() == 0) return
         val assistant = JSONObject().put("role", "assistant")
+        // Keep the chain of thought in session history: dropping it turns
+        // intermediate reason/tool turns into holes the next request cannot see.
+        if (reasoning.isNotBlank()) assistant.put("reasoning_content", reasoning)
         if (content.isNotEmpty()) assistant.put("content", content)
         if (toolCalls.length() > 0) assistant.put("tool_calls", toolCalls)
         history.put(assistant)
@@ -579,11 +591,24 @@ internal object AiService {
             .takeIf { it > 0 } ?: usage.optLong("input_tokens")
         val completion = usage.optLong("completion_tokens")
             .takeIf { it > 0 } ?: usage.optLong("output_tokens")
+        val total = usage.optLong("total_tokens")
+        // Reasoning tokens are sometimes reported as a subset of completion
+        // tokens and sometimes as a separate bucket. Prefer the billed total
+        // when available, then fall back to the larger explicit count, so CoT
+        // is not silently excluded (and not double-counted when included).
+        val reasoning = sequenceOf("completion_tokens_details", "output_tokens_details")
+            .mapNotNull { usage.optJSONObject(it)?.optLong("reasoning_tokens") }
+            .firstOrNull { it > 0 }
+            ?: usage.optLong("reasoning_tokens").takeIf { it > 0 }
+            ?: 0L
+        val fromTotal = if (total > prompt) total - prompt else 0L
+        val billed = maxOf(completion, fromTotal)
+        val completionWithReasoning = if (reasoning > billed) billed + reasoning else billed
         return ChatEvent.newBuilder()
             .setUsage(
                 TokenUsage.newBuilder()
                     .setPromptTokens(prompt)
-                    .setCompletionTokens(completion),
+                    .setCompletionTokens(completionWithReasoning),
             )
             .build()
     }

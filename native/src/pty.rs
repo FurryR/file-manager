@@ -207,7 +207,7 @@ pub struct PtyManager {
 struct PtyHandle {
     master_fd: RawFd,
     child_pid: u32,
-    /// Exit code published by the poll task that owns reaping this child.
+    /// Exit code published by the daemon-wide reaper.
     exit: tokio::sync::watch::Receiver<Option<i32>>,
     #[allow(dead_code)]
     container_name: Option<String>,
@@ -465,36 +465,10 @@ impl PtyManager {
         }
 
         // ── PARENT ────────────────────────────────────────────────────
-        // Shield the child from the reaper sweep before any other task can
-        // run. This poller is the sole owner of its exit status; WaitPty
-        // subscribes to the watch instead of racing a waitpid.
+        // Register with the daemon-wide reaper before any other task can run.
+        // WaitPty subscribes to the watch channel instead of racing a waitpid.
         let child_pid = pid as u32;
-        crate::reaper::track(child_pid);
-        let (exit_tx, exit) = tokio::sync::watch::channel(None);
-        tokio::spawn(async move {
-            loop {
-                let mut status = 0;
-                let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-                if result == pid {
-                    let code = if libc::WIFEXITED(status) {
-                        libc::WEXITSTATUS(status)
-                    } else if libc::WIFSIGNALED(status) {
-                        -libc::WTERMSIG(status)
-                    } else {
-                        -1
-                    };
-                    crate::reaper::release(child_pid);
-                    exit_tx.send_replace(Some(code));
-                    break;
-                }
-                if result < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-                    crate::reaper::release(child_pid);
-                    exit_tx.send_replace(Some(-1));
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-        });
+        let exit = crate::reaper::track(child_pid);
         // Allocate PTY id and store handle
         let pty_id = NEXT_PTY_ID.fetch_add(1, Ordering::SeqCst);
         self.ptys.insert(

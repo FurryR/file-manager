@@ -1,50 +1,55 @@
 //! Subreaper support: adopt orphaned descendants, reap the zombies nobody
-//! owns, and tear the whole tree down when the daemon exits.
-use std::collections::HashSet;
+//! owns, and tear down tracked process groups when the daemon exits.
+//!
+//! Rootless Android cannot rely on listing `/proc`, so the reaper never scans
+//! it. The kernel already reports every child state change through `SIGCHLD`;
+//! one central `waitpid(-1)` then reaps tracked children and adopted orphans
+//! alike. Owners receive their exit code over a watch channel instead of
+//! racing the reaper with their own `waitpid`.
+use std::collections::HashMap;
 use std::io;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
 
-fn managed() -> &'static Mutex<HashSet<i32>> {
-    static PIDS: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
-    PIDS.get_or_init(|| Mutex::new(HashSet::new()))
+/// One tracked child. The process group id is the child pid because every
+/// spawn path creates a fresh process group (`process_group(0)` or `setsid`).
+struct ChildEntry {
+    exit: watch::Sender<Option<i32>>,
+    group: i32,
 }
 
-/// Register a child whose exit status belongs to a Tokio waiter or a PTY
-/// poller; the sweep must never reap it out from under its owner.
-pub fn track(pid: u32) {
-    managed().lock().unwrap().insert(pid as i32);
+fn children() -> &'static Mutex<HashMap<i32, ChildEntry>> {
+    static CHILDREN: OnceLock<Mutex<HashMap<i32, ChildEntry>>> = OnceLock::new();
+    CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Forget a child whose owner consumed the exit status (or will never wait),
-/// so the sweep may reap the zombie.
+/// Register a freshly spawned child and return its exit subscription.
+///
+/// Must be called immediately after spawn, before any await: registration has
+/// to win the race against the `SIGCHLD` sweep that reaps the process.
+pub fn track(pid: u32) -> watch::Receiver<Option<i32>> {
+    let (exit, receiver) = watch::channel(None);
+    children().lock().unwrap().insert(
+        pid as i32,
+        ChildEntry {
+            exit,
+            group: pid as i32,
+        },
+    );
+    receiver
+}
+
+/// Forget a child without waiting for it. The caller must have signalled its
+/// process group; the next `SIGCHLD` sweep reaps the zombie as an orphan.
 pub fn release(pid: u32) {
-    managed().lock().unwrap().remove(&(pid as i32));
+    children().lock().unwrap().remove(&(pid as i32));
 }
 
-/// Drop every registration. Shutdown only: the async owners are gone or
-/// frozen for good, so no status can be stolen from them any more.
+/// Drop every registration. Shutdown only: no owner is left to receive an
+/// exit code, and `kill_tree` has already signalled every tracked group.
 pub fn release_all() {
-    managed().lock().unwrap().clear();
-}
-
-/// A cancellation guard for an owned process group. Construct before spawning
-/// its async waiter so even an unpolled task tears down descendants on drop.
-pub struct ProcessGroup(pub u32);
-impl ProcessGroup {
-    pub fn finish(&mut self) {
-        if self.0 != 0 {
-            unsafe {
-                libc::kill(-(self.0 as i32), libc::SIGKILL);
-            }
-            self.0 = 0;
-        }
-    }
-}
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        self.finish();
-    }
+    children().lock().unwrap().clear();
 }
 
 pub fn enable() -> io::Result<()> {
@@ -54,86 +59,93 @@ pub fn enable() -> io::Result<()> {
     Ok(())
 }
 
-/// Direct children of `pid`; zombies included — they are reaped, not killed.
-fn children_of(pid: i32) -> Vec<i32> {
-    let Ok(children) = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")) else {
-        return Vec::new();
-    };
-    children
-        .split_whitespace()
-        .filter_map(|p| p.parse().ok())
-        .collect()
+fn exit_code(status: i32) -> i32 {
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        -libc::WTERMSIG(status)
+    } else {
+        -1
+    }
 }
 
+/// Reap every child that has changed state. Tracked pids publish their exit
+/// code; adopted orphans are discarded.
+///
+/// This is the only `wait*` call on children in the daemon. Keeping it in one
+/// place prevents two owners from stealing the same exit status, and it works
+/// without enumerating `/proc`.
 pub fn reap_orphans() {
-    let pid = std::process::id() as i32;
-    let children = children_of(pid);
-    let mut tracked = managed().lock().unwrap();
-    // Cancelled Tokio commands are killed/reaped by Tokio itself. Keep their
-    // registration until /proc confirms they have gone; never waitpid(-1).
-    tracked.retain(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
-    for child in children {
-        if !tracked.contains(&child) {
-            let mut status = 0;
+    loop {
+        let mut status = 0;
+        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+        if pid <= 0 {
+            if pid < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+        let code = exit_code(status);
+        let entry = children().lock().unwrap().remove(&pid);
+        if let Some(entry) = entry {
+            // The leader is gone. Descendants that stayed in its process group
+            // must not outlive it; this replaces walking parent links in /proc.
             unsafe {
-                libc::waitpid(child, &mut status, libc::WNOHANG);
+                libc::kill(-entry.group, libc::SIGKILL);
             }
+            entry.exit.send_replace(Some(code));
         }
     }
 }
 
-/// Every descendant of `root`, walking /proc children lists transitively.
-/// Orphans reparent to us (subreaper), so this stays a complete inventory of
-/// the tree even for processes that escaped their process group.
-fn collect_descendants(root: i32) -> Vec<i32> {
-    let mut queue = children_of(root);
-    let mut found = Vec::new();
-    while let Some(pid) = queue.pop() {
-        if !found.contains(&pid) {
-            found.push(pid);
-            queue.extend(children_of(pid));
-        }
-    }
-    found
-}
-
-/// Init-like teardown: terminate every live descendant before the daemon
-/// exits. SIGTERM first for the grace period — children whose parents die
-/// reparent to us and join the sweep — then SIGKILL the remainder, reaping
-/// zombies until the tree is quiet. Blocks; call only from shutdown, after
-/// every async owner has stopped.
+/// Terminate every tracked process group before the daemon exits.
+///
+/// `kill_tree` intentionally relies on the recorded groups rather than walking
+/// `/proc`: a group id stays valid while any member is alive, so the graceful
+/// and forceful phases can signal the same group even after its leader was
+/// reaped. Descendants that called `setsid()` and left the group are outside
+/// this inventory; the daemon cannot discover them without a process-table
+/// scan.
 pub fn kill_tree(term_grace: Duration) {
-    let root = std::process::id() as i32;
-    // Polite phase: TERM each process once — repeats would interrupt the very
-    // cleanup the grace period is meant to allow. Orphans whose parents die
-    // reparent to us and are picked up by the next sweep.
-    let mut signaled = HashSet::new();
+    let groups = children()
+        .lock()
+        .unwrap()
+        .values()
+        .map(|entry| entry.group)
+        .collect::<Vec<_>>();
+
+    // Polite phase: TERM each group once. Repeats would interrupt the very
+    // cleanup the grace period is meant to allow.
+    for group in &groups {
+        unsafe {
+            libc::kill(-*group, libc::SIGTERM);
+        }
+    }
     let deadline = Instant::now() + term_grace;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !children().lock().unwrap().is_empty() {
         reap_orphans();
-        let alive = collect_descendants(root);
-        if alive.is_empty() {
-            return;
-        }
-        for child in alive {
-            if signaled.insert(child) {
-                unsafe { libc::kill(child, libc::SIGTERM); }
-            }
-        }
         std::thread::sleep(Duration::from_millis(50));
     }
-    // Forceful phase: SIGKILL cannot be blocked or caught, so re-sending to
-    // whatever is still alive each sweep is exactly what converges.
+
+    // Forceful phase: SIGKILL cannot be blocked or caught. Re-read the live
+    // groups every round so a reaped leader's id is never signalled after the
+    // kernel could have recycled it.
     let deadline = Instant::now() + Duration::from_millis(500);
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !children().lock().unwrap().is_empty() {
+        let live = children()
+            .lock()
+            .unwrap()
+            .values()
+            .map(|entry| entry.group)
+            .collect::<Vec<_>>();
+        for group in live {
+            unsafe {
+                libc::kill(-group, libc::SIGKILL);
+            }
+        }
         reap_orphans();
-        let alive = collect_descendants(root);
-        if alive.is_empty() {
-            return;
-        }
-        for child in alive {
-            unsafe { libc::kill(child, libc::SIGKILL); }
-        }
         std::thread::sleep(Duration::from_millis(20));
     }
+    reap_orphans();
+    release_all();
 }

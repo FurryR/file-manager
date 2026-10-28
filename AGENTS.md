@@ -143,7 +143,7 @@ file-manager/
 | Container launch | `container/.../ContainerDaemonLauncher.kt` | proot/chroot argv + PulseAudio/Wayland environment; KGSL GPU probe in `ProotRunner` |
 | Terminal IME | `app/.../agent/TerminalViewComposable.kt` | focus hand-off + `showSoftInput`; see NOTES |
 | Native daemon | `native/src/main.rs` | File ops under root/shell |
-| Process subreaper | `native/src/reaper.rs` | Adopt/reap orphans; kill the whole tree on daemon exit |
+| Process subreaper | `native/src/reaper.rs` | Central SIGCHLD reaper; kill tracked process groups on exit |
 | IPC protocol | `proto/file_daemon.proto` | Request/Response messages |
 
 ## CONVENTIONS
@@ -285,17 +285,16 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   or request replay. After connection loss, a later operation starts a fresh
   daemon on demand; old PTYs and handles are not restored.
 - **The daemon is a child subreaper** ([`native/src/reaper.rs`]) — orphaned
-  descendants reparent to it instead of escaping to host init. Every child it
-  spawns is registered (`reaper::track`) while Tokio or a PTY poll task owns
-  its exit status; adopted/unowned children are reaped by a 100ms sweep that
-  skips registered pids and never calls `waitpid(-1)`. PTY exit codes are
-  owned by a per-child 50ms `WNOHANG` poll task and published over a watch
-  channel; `WaitPty` subscribes instead of blocking in `waitpid` on a worker
-  thread. On daemon exit it acts as init for its tree: after `release_all`
-  (async owners are gone), every live descendant found through
-  `/proc/<pid>/task/<pid>/children` gets one SIGTERM, then SIGKILL after a
-  400ms grace, reaping until the tree is quiet — descendants never outlive
-  the daemon.
+  descendants reparent to it instead of escaping to host init. One central
+  SIGCHLD sweep calls `waitpid(-1)`, reaps adopted orphans, and publishes each
+  tracked child's exit code over a watch channel; no other code waits on a
+  child, so a status can never be stolen twice. `reaper::track` returns that
+  channel immediately after spawn, before any await. Rootless Android cannot
+  traverse `/proc`, so the reaper never scans the process table: every spawn
+  creates its own process group, and teardown signals the tracked groups
+  (SIGTERM, then SIGKILL after a 400ms grace) until the registrations drain.
+  Descendants that `setsid()` out of their group are the one case this
+  inventory cannot reach.
 - Client entry points live in `:daemon` (`DaemonManager.fileService/execService`).
 - **Terminal IME tap race (upstream-worthy)** — Termux's
   `TerminalView.onSingleTapUp()` calls `requestFocus()` on the terminal view, then

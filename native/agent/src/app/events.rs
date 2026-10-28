@@ -12,7 +12,7 @@ impl App {
         self.finish_reasoning();
         self.finish_tool(None);
         self.finish_calling(None);
-        self.streaming_answer = false;
+        self.streaming_index = None;
         self.history = messages;
         if !self.answer_streamed {
             self.transcript.push(Entry::assistant(answer));
@@ -27,7 +27,7 @@ impl App {
         self.finish_reasoning();
         self.finish_tool(None);
         self.finish_calling(None);
-        self.streaming_answer = false;
+        self.streaming_index = None;
         self.history = vec![Message::user(format!(
             "Summary of the earlier conversation (compacted):\n{summary}"
         ))];
@@ -48,7 +48,7 @@ impl App {
                 self.finish_reasoning();
                 self.finish_tool(None);
                 self.finish_calling(None);
-                self.streaming_answer = false;
+                self.streaming_index = None;
                 self.answer_streamed = false;
             }
             AgentEvent::ReasoningDelta(text) => {
@@ -68,17 +68,22 @@ impl App {
             AgentEvent::AnswerDelta(text) => {
                 self.finish_reasoning();
                 self.answer_streamed = true;
-                if !self.streaming_answer {
-                    self.transcript.push(Entry::assistant(""));
-                    self.streaming_answer = true;
-                }
-                if let Some(entry) = self.transcript.last_mut() {
+                let index = match self.streaming_index {
+                    Some(index) if index < self.transcript.len() => index,
+                    _ => {
+                        let index = self.transcript.len();
+                        self.transcript.push(Entry::assistant(""));
+                        self.streaming_index = Some(index);
+                        index
+                    }
+                };
+                if let Some(entry) = self.transcript.get_mut(index) {
                     entry.content.push_str(&text);
                 }
             }
             AgentEvent::ToolCalling => {
                 self.finish_reasoning();
-                self.streaming_answer = false;
+                self.streaming_index = None;
                 if self.calling_tool.is_none() {
                     let index = self.transcript.len();
                     self.transcript.push(Entry::tool(GENERATING_CALL));
@@ -93,7 +98,7 @@ impl App {
             } => {
                 self.finish_reasoning();
                 self.finish_tool(None);
-                self.streaming_answer = false;
+                self.streaming_index = None;
                 let index = match self.calling_tool.take() {
                     Some(index) => index,
                     None => {
@@ -164,7 +169,7 @@ impl App {
         self.finish_reasoning();
         self.finish_tool(Some("failed"));
         self.finish_calling(Some("failed"));
-        self.streaming_answer = false;
+        self.streaming_index = None;
         self.transcript.push(Entry::error(error));
         if let Some(messages) = messages {
             self.history = messages;

@@ -396,6 +396,7 @@ impl Hub {
             .map_err(|error| error.to_string())?;
 
         let mut content = String::new();
+        let mut reasoning = String::new();
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut error: Option<String> = None;
         loop {
@@ -414,6 +415,7 @@ impl Hub {
             match response.result {
                 Some(hub_response::Result::Chat(event)) => match event.event {
                     Some(chat_event::Event::ReasoningDelta(text)) => {
+                        reasoning.push_str(&text);
                         let _ = events.send(AgentEvent::ReasoningDelta(text));
                     }
                     Some(chat_event::Event::ContentDelta(text)) => {
@@ -446,6 +448,7 @@ impl Hub {
         let message = Message {
             role: "assistant".to_owned(),
             content: (!content.is_empty()).then_some(content),
+            reasoning_content: (!reasoning.trim().is_empty()).then_some(reasoning),
             tool_calls: (!calls.is_empty()).then_some(calls),
             tool_call_id: None,
         };

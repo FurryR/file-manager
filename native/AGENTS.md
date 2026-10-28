@@ -31,6 +31,11 @@ native/
 ## CONVENTIONS
 
 - **Single-threaded async** — `tokio::main(flavor = "current_thread")`; concurrency is tasks, not threads
+- **One reaper owns every child** — `reaper::track` returns a `watch::Receiver`
+  for the exit code; only the SIGCHLD sweep calls `waitpid(-1)`. Do not add a
+  second `waitpid` owner, and do not enumerate `/proc` (rootless Android cannot
+  traverse it). Every spawn must create its own process group so teardown can
+  signal the group.
 - **Multi-client** — the daemon serves many concurrent connections. Each has its own
   read loop, write half and response channel; PTYs/handles/broker are shared via `Shared`.
   Disconnecting one client does not affect other authenticated clients.

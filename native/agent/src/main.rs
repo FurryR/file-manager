@@ -139,35 +139,24 @@ async fn run() -> io::Result<()> {
                         }
                         events = None;
                         journal = None;
-                        close_active_exec(&hub, &active_exec);
+                        close_active_exec(&hub, &active_exec).await;
                     }
                     Action::Submit(messages) => {
                         if let Some(handle) = pending.take() {
                             handle.abort();
+                            let _ = handle.await;
                         }
-                        let run_journal = runner::new_journal(&messages);
-                        journal = Some(Arc::clone(&run_journal));
-                        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+                        let (handle, receiver, run_journal) = spawn_chat(
+                            &app,
+                            &hub,
+                            messages,
+                            &active_exec,
+                            session_id.clone(),
+                        );
+                        pending = Some(handle);
                         events = Some(receiver);
+                        journal = Some(run_journal);
                         pending_kind = TaskKind::Chat;
-                        let hub = Arc::clone(&hub);
-                        let model = app.model().to_owned();
-                        let effort = app.effort().to_owned();
-                        let active = Arc::clone(&active_exec);
-                        let session = session_id.clone();
-                        pending = Some(tokio::spawn(async move {
-                            runner::run(
-                                model,
-                                effort,
-                                hub,
-                                messages,
-                                run_journal,
-                                sender,
-                                active,
-                                session,
-                            )
-                            .await
-                        }));
                     }
                     Action::Compact(messages) => {
                         if let Some(handle) = pending.take() {
@@ -207,7 +196,7 @@ async fn run() -> io::Result<()> {
                         }
                         events = None;
                         journal = None;
-                        close_active_exec(&hub, &active_exec);
+                        close_active_exec(&hub, &active_exec).await;
                         let (history_json, stored_title) = hub
                             .lock()
                             .await
@@ -233,7 +222,7 @@ async fn run() -> io::Result<()> {
                         }
                         events = None;
                         journal = None;
-                        close_active_exec(&hub, &active_exec);
+                        close_active_exec(&hub, &active_exec).await;
                         let id = new_session_id(&terminal_id);
                         let _ = hub.lock().await.set_active_session(&id).await;
                         session_id = id;
@@ -288,6 +277,21 @@ async fn run() -> io::Result<()> {
                         app.complete_error("Request failed unexpectedly.".to_owned(), None)
                     }
                 }
+                // Prompts queued after the runner's final drain start a fresh
+                // run with the settled history.
+                if let Some(messages) = app.resume_queued() {
+                    let (handle, receiver, run_journal) = spawn_chat(
+                        &app,
+                        &hub,
+                        messages,
+                        &active_exec,
+                        session_id.clone(),
+                    );
+                    pending = Some(handle);
+                    events = Some(receiver);
+                    journal = Some(run_journal);
+                    pending_kind = TaskKind::Chat;
+                }
             }
             title = async {
                 match titles.as_mut() {
@@ -319,6 +323,18 @@ async fn run() -> io::Result<()> {
 
     if let Some(handle) = pending.take() {
         handle.abort();
+        let _ = handle.await;
+    }
+    close_active_exec(&hub, &active_exec).await;
+    // Exiting mid-run must not lose the turns that already settled. Adopt the
+    // journal, answer dangling tool calls, and persist them before teardown.
+    if let Some(journal) = journal.take() {
+        let mut messages = journal
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        runner::repair_dangling_tool_calls(&mut messages);
+        let _ = hub.lock().await.save_history(&session_id, &messages).await;
     }
     Ok(())
 }
@@ -336,18 +352,52 @@ fn new_session_id(terminal: &str) -> String {
     format!("{base}-{}-{millis}", std::process::id())
 }
 
-/// Terminate the exec owned by a cancelled or aborted run, if any.
-fn close_active_exec(hub: &Arc<Mutex<Hub>>, active_exec: &tool::ActiveExec) {
-    let exec_id = active_exec
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .take();
-    if let Some(exec_id) = exec_id {
-        let hub = Arc::clone(hub);
-        tokio::spawn(async move {
-            let _ = hub.lock().await.close_exec(exec_id).await;
-        });
+/// Terminate every exec owned by a cancelled, aborted or exiting run.
+async fn close_active_exec(hub: &Arc<Mutex<Hub>>, active_exec: &tool::ActiveExec) {
+    let exec_ids = tool::take_active_exec(active_exec);
+    if exec_ids.is_empty() {
+        return;
     }
+    let mut hub = hub.lock().await;
+    for exec_id in exec_ids {
+        let _ = hub.close_exec(exec_id).await;
+    }
+}
+
+fn spawn_chat(
+    app: &App,
+    hub: &Arc<Mutex<Hub>>,
+    messages: Vec<Message>,
+    active_exec: &tool::ActiveExec,
+    session_id: String,
+) -> (
+    tokio::task::JoinHandle<Result<Outcome, runner::Failure>>,
+    tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
+    runner::Journal,
+) {
+    let journal = runner::new_journal(&messages);
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let hub = Arc::clone(hub);
+    let active = Arc::clone(active_exec);
+    let queue = Arc::clone(app.queue());
+    let model = app.model().to_owned();
+    let effort = app.effort().to_owned();
+    let run_journal = Arc::clone(&journal);
+    let handle = tokio::spawn(async move {
+        runner::run(
+            model,
+            effort,
+            hub,
+            messages,
+            run_journal,
+            sender,
+            active,
+            queue,
+            session_id,
+        )
+        .await
+    });
+    (handle, receiver, journal)
 }
 
 fn persist_selection(hub: &Arc<Mutex<Hub>>, model: &str, effort: &str) {

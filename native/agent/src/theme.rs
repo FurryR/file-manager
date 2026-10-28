@@ -130,10 +130,6 @@ pub fn code() -> Style {
     Style::new().fg(CODE_FG).bg(CODE_BG)
 }
 
-pub fn code_bar() -> Style {
-    Style::new().fg(MUTED)
-}
-
 pub fn code_lang() -> Style {
     Style::new().fg(MUTED).add_modifier(Modifier::ITALIC)
 }

@@ -14,8 +14,24 @@ use crate::tool;
 /// instead of being dropped with the task.
 pub type Journal = Arc<StdMutex<Vec<Message>>>;
 
+/// Prompts typed while a run is already in flight. The runner drains them
+/// between model calls, so a queued prompt lands right after the current tool
+/// batch instead of waiting for the whole run to finish.
+pub type PromptQueue = Arc<StdMutex<Vec<String>>>;
+
 pub fn new_journal(messages: &[Message]) -> Journal {
     Arc::new(StdMutex::new(messages.to_vec()))
+}
+
+fn drain_queue(queue: &PromptQueue, history: &mut Vec<Message>) -> bool {
+    let queued = std::mem::take(&mut *queue.lock().unwrap_or_else(|error| error.into_inner()));
+    if queued.is_empty() {
+        return false;
+    }
+    for prompt in queued {
+        history.push(Message::user(prompt));
+    }
+    true
 }
 
 fn record(journal: &Journal, messages: &[Message]) {
@@ -78,6 +94,7 @@ pub async fn run(
     journal: Journal,
     events: UnboundedSender<AgentEvent>,
     active_exec: tool::ActiveExec,
+    queue: PromptQueue,
     session_id: String,
 ) -> Result<Outcome, Failure> {
     let context = hub.lock().await.caller.clone();
@@ -105,6 +122,11 @@ pub async fn run(
 
     loop {
         let _ = events.send(AgentEvent::StepStart);
+        // A prompt typed while the previous tool batch ran belongs after its
+        // results and before the next model call.
+        if drain_queue(&queue, &mut history) {
+            record(&journal, &history);
+        }
         let (delta, use_append, count) = if append {
             (&history[pending_start..], true, base_count)
         } else {
@@ -149,10 +171,10 @@ pub async fn run(
 
         if assistant.has_tools() {
             let calls = assistant.tool_calls.clone().unwrap_or_default();
-            history.push(Message::assistant_with_tools(
-                assistant.content.clone(),
-                calls.clone(),
-            ));
+            history.push(
+                Message::assistant_with_tools(assistant.content.clone(), calls.clone())
+                    .with_reasoning(assistant.reasoning_content.clone()),
+            );
             pending_start = history.len();
             base_count = pending_start as u32;
             record(&journal, &history);
@@ -189,8 +211,18 @@ pub async fn run(
                 &history,
             ));
         }
-        history.push(Message::assistant(answer.clone()));
+        history.push(
+            Message::assistant(answer.clone()).with_reasoning(assistant.reasoning_content.clone()),
+        );
+        pending_start = history.len();
+        base_count = pending_start as u32;
         record(&journal, &history);
+        // Prompts queued after the final tool batch but before this reply
+        // finished continue the same run instead of being dropped.
+        if drain_queue(&queue, &mut history) {
+            record(&journal, &history);
+            continue;
+        }
         return Ok(Outcome {
             messages: history,
             answer,
@@ -306,6 +338,15 @@ fn transcript_text(messages: &[Message]) -> String {
             .filter(|text| !text.trim().is_empty())
         {
             output.push_str(content.trim_end());
+            output.push('\n');
+        }
+        if let Some(reasoning) = message
+            .reasoning_content
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            output.push_str("[reasoning]\n");
+            output.push_str(reasoning.trim_end());
             output.push('\n');
         }
         if let Some(calls) = &message.tool_calls {

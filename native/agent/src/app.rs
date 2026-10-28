@@ -8,6 +8,7 @@ use crate::hub::SessionEntry;
 use crate::input::Input;
 use crate::model::{Entry, Message, Role};
 use crate::model_info::{ModelCatalog, ModelInfo};
+use crate::runner::PromptQueue;
 
 mod events;
 mod popup;
@@ -19,7 +20,8 @@ use popup::{PopupAction, PopupKind};
 
 pub const HELP: &str = "agent - terminal AI chat configured in the file manager
 
-Enter: send   Shift+Enter / Ctrl+J: newline   Ctrl+C: cancel request / exit   Ctrl+Q: exit
+Enter: send   Shift+Enter / Ctrl+J: newline   Esc: stop the run and its commands   Ctrl+C: cancel request / exit   Ctrl+Q: exit
+Enter while a request runs: queue the prompt for after the current tool call
 Left/Right/Home/End: move   Up/Down: previous/next line; at first/last line: prompt history   Ctrl+U: clear input   Ctrl+W: delete word
 PageUp/PageDown, Ctrl/Shift+Up/Down, mouse wheel: scroll   click a Thought header: toggle thinking
 Ctrl+P: commands   /models: switch model   /variants: reasoning effort
@@ -68,6 +70,7 @@ pub struct App {
     prompts: Vec<String>,
     prompt_index: Option<usize>,
     prompt_draft: String,
+    queued_entries: Vec<usize>,
     input: Input,
     pending: Option<Pending>,
     revision: u64,
@@ -76,7 +79,7 @@ pub struct App {
     content_height: usize,
     viewport_height: usize,
     reasoning_active: Option<usize>,
-    streaming_answer: bool,
+    streaming_index: Option<usize>,
     answer_streamed: bool,
     transcript_top: u16,
     transcript_height: u16,
@@ -94,6 +97,7 @@ pub struct App {
     completion_tokens: u64,
     requests: u64,
     popup: Option<Popup>,
+    queue: PromptQueue,
 }
 
 fn tool_line(name: &str, detail: &str) -> String {
@@ -127,17 +131,92 @@ fn tool_label(name: &str) -> String {
 }
 
 fn transcript_from_history(history: &[Message]) -> Vec<Entry> {
-    history
-        .iter()
-        .filter_map(|message| {
-            let content = message.content.as_deref()?.to_owned();
-            match message.role.as_str() {
-                "user" => Some(Entry::user(content)),
-                "assistant" => Some(Entry::assistant(content)),
-                _ => None,
+    let mut transcript = Vec::new();
+    let mut tool_entries = std::collections::HashMap::new();
+    for message in history {
+        match message.role.as_str() {
+            "user" => {
+                if let Some(content) = message
+                    .content
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    transcript.push(Entry::user(content.to_owned()));
+                }
             }
-        })
-        .collect()
+            "assistant" => {
+                if let Some(reasoning) = message
+                    .reasoning_content
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    transcript.push(Entry::saved_reasoning(reasoning.to_owned()));
+                }
+                if let Some(content) = message
+                    .content
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    transcript.push(Entry::assistant(content.to_owned()));
+                }
+                if let Some(calls) = &message.tool_calls {
+                    for call in calls {
+                        let info = crate::tool::info_with_mcp(
+                            None,
+                            &call.function.name,
+                            &call.function.arguments,
+                        );
+                        let mut entry = match info.command {
+                            Some(command) => Entry::exec(info.description, command),
+                            None => Entry::tool(tool_line(&call.function.name, &info.detail)),
+                        };
+                        // Restored entries are finished, not live.
+                        entry.started = None;
+                        tool_entries.insert(call.id.clone(), transcript.len());
+                        transcript.push(entry);
+                    }
+                }
+            }
+            "tool" => {
+                let Some(id) = message.tool_call_id.as_deref() else {
+                    continue;
+                };
+                let Some(&index) = tool_entries.get(id) else {
+                    continue;
+                };
+                let Some(entry) = transcript.get_mut(index) else {
+                    continue;
+                };
+                let Some(tool) = entry.tool.as_mut() else {
+                    continue;
+                };
+                let content = message.content.as_deref().unwrap_or_default();
+                let (output, failed) = saved_tool_output(content);
+                tool.output.extend_from_slice(output.as_bytes());
+                tool.failed = failed;
+            }
+            _ => {}
+        }
+    }
+    transcript
+}
+
+/// Split the tool's formatted result (`exit_code: N\n…`) into displayable
+/// output and a failure flag.
+fn saved_tool_output(result: &str) -> (String, bool) {
+    let Some(rest) = result.strip_prefix("exit_code: ") else {
+        // An exec result without an exit header is an error (timeout, hub
+        // failure, cancelled call), never a successful command.
+        return (result.to_owned(), true);
+    };
+    let (code, body) = rest.split_once('\n').unwrap_or((rest, ""));
+    let failed = code.trim().parse::<i32>().is_ok_and(|code| code != 0);
+    // Drop the wire-format section labels so a restored block looks like the
+    // live exec block, which only receives the raw stream bytes.
+    let body = body.strip_prefix("stdout:\n").unwrap_or(body);
+    let body = body.strip_prefix("stderr:\n").unwrap_or(body);
+    let output = body.replace("\nstderr:\n", "\n");
+    (output.trim_end().to_owned(), failed)
 }
 
 impl App {
@@ -174,6 +253,7 @@ impl App {
             prompts: Vec::new(),
             prompt_index: None,
             prompt_draft: String::new(),
+            queued_entries: Vec::new(),
             input: Input::default(),
             pending: None,
             revision: 0,
@@ -182,7 +262,7 @@ impl App {
             content_height: 0,
             viewport_height: 0,
             reasoning_active: None,
-            streaming_answer: false,
+            streaming_index: None,
             answer_streamed: false,
             transcript_top: 0,
             transcript_height: 0,
@@ -200,6 +280,7 @@ impl App {
             completion_tokens: 0,
             requests: 0,
             popup: None,
+            queue: Default::default(),
         }
     }
 
@@ -508,11 +589,12 @@ impl App {
         self.redo.clear();
         self.compact_snapshot = None;
         self.detach_prompt_browse();
+        self.clear_queued();
         self.input.clear();
         self.reasoning_active = None;
         self.active_tool = None;
         self.calling_tool = None;
-        self.streaming_answer = false;
+        self.streaming_index = None;
         self.answer_streamed = false;
         self.follow = true;
         self.scroll = 0;
@@ -554,7 +636,13 @@ impl App {
     }
 
     pub fn tick(&mut self) {
-        if self.reasoning_active.is_some() {
+        // Only running entries that draw a braille frame need a new animation
+        // step. Exec blocks do; plain tool/read lines do not.
+        let exec_running = self
+            .active_tool
+            .and_then(|index| self.transcript.get(index))
+            .is_some_and(|entry| entry.tool.is_some() && entry.started.is_some());
+        if self.reasoning_active.is_some() || exec_running {
             self.thinking_frame = self.thinking_frame.wrapping_add(1);
             self.bump();
         }
@@ -584,6 +672,10 @@ impl App {
 
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    pub fn queue(&self) -> &PromptQueue {
+        &self.queue
     }
 
     pub fn provider(&self) -> &str {

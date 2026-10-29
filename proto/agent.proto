@@ -1,0 +1,117 @@
+syntax = "proto3";
+
+package fileagent;
+
+option java_package = "io.furryr.file.proto.agent";
+option java_multiple_files = true;
+
+// Agent control protocol. The hub remains a transport: these requests carry
+// prompts and tool approval/MCP traffic between the terminal shell and the
+// Kotlin agent loop.
+
+message AgentAttachRequest {
+  string session_id = 1;
+  string terminal_id = 2;
+  // Caller cwd in the authenticated target namespace.
+  string cwd = 3;
+  // `host`, `app`, or `container-<name>`.
+  string target = 4;
+  string model = 5;
+  string effort = 6;
+  bool workspace_mcp = 7;
+}
+
+message AgentAttachResponse {
+  string session_id = 1;
+  string target = 2;
+  string cwd = 3;
+}
+
+message AgentPromptRequest {
+  string text = 1;
+  string model = 2;
+  string effort = 3;
+}
+
+message AgentCompactRequest {
+  string model = 1;
+  string effort = 2;
+}
+
+message AgentCancelRequest {}
+
+message AgentApprovalReply {
+  uint64 approval_id = 1;
+  bool allow = 2;
+}
+
+message AgentMcpTools {
+  // OpenAI-style tool definitions discovered by the MCP host.
+  string definitions_json = 1;
+}
+
+message AgentMcpResult {
+  uint64 request_id = 1;
+  bool ok = 2;
+  string content = 3;
+}
+
+message AgentEvent {
+  oneof event {
+    string reasoning_delta = 1;
+    string content_delta = 2;
+    bool tool_calling = 3;
+    AgentToolNotice tool_call = 4;
+    AgentToolWrite tool_write = 5;
+    bytes tool_output = 6;
+    bool tool_result_ok = 7;
+    AgentUsage usage = 8;
+    bool done = 9;
+    string error = 10;
+    AgentApprovalRequest approval = 11;
+    AgentMcpCall mcp_call = 12;
+    AgentFinished finished = 13;
+  }
+}
+
+message AgentUsage {
+  uint64 prompt_tokens = 1;
+  uint64 completion_tokens = 2;
+}
+
+message AgentToolNotice {
+  string call_id = 1;
+  string name = 2;
+  string detail = 3;
+  string description = 4;
+  string command = 5;
+  string arrow = 6;
+}
+
+message AgentToolWrite {
+  string path = 1;
+  string content = 2;
+  string diff = 3;
+}
+
+message AgentApprovalRequest {
+  uint64 approval_id = 1;
+  string call_id = 2;
+  string name = 3;
+  string detail = 4;
+  string reason = 5;
+}
+
+message AgentMcpCall {
+  uint64 request_id = 1;
+  string name = 2;
+  string arguments = 3;
+}
+
+message AgentFinished {
+  // Complete message JSON, including tool results. The terminal shell adopts
+  // this after a run so cancelled or interrupted turns stay consistent.
+  string messages_json = 1;
+  string answer = 2;
+  string title = 3;
+}

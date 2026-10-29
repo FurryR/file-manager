@@ -48,7 +48,7 @@ import androidx.compose.ui.unit.dp
 import io.furryr.file.AppLocale
 import io.furryr.file.R
 import io.furryr.file.agent.AgentSettings
-import io.furryr.file.hub.HubAi
+import io.furryr.file.agent.AgentAi
 import io.furryr.file.ui.theme.FileManagerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -103,7 +103,7 @@ private fun ProvidersPage(onBack: () -> Unit) {
         titleError = null
         val result = withContext(Dispatchers.IO) {
             runCatching {
-                val array = JSONObject(HubAi.catalogJson()).optJSONArray("models") ?: JSONArray()
+                val array = JSONObject(AgentAi.catalogJson()).optJSONArray("models") ?: JSONArray()
                 (0 until array.length())
                     .mapNotNull { array.optString(it).takeIf(String::isNotBlank) }
             }

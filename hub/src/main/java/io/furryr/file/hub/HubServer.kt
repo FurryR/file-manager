@@ -1,22 +1,27 @@
 package io.furryr.file.hub
 
 import android.util.Log
-import com.google.protobuf.ByteString
-import io.furryr.file.core.Vfs
-import io.furryr.file.core.source.OpenMode
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
+import io.furryr.file.agent.AgentEnvironment
+import io.furryr.file.agent.AgentEvents
+import io.furryr.file.agent.copyFile
+import io.furryr.file.agent.glob
+import io.furryr.file.agent.listDirectory
+import io.furryr.file.agent.readFile
+import io.furryr.file.agent.writeFile
+import io.furryr.file.agent.AgentMcp
+import io.furryr.file.agent.AgentService
+import io.furryr.file.agent.AgentSession
+import io.furryr.file.daemon.ipc.*
+import io.furryr.file.proto.agent.AgentAttachResponse
 import io.furryr.file.daemon.HubActions
 import io.furryr.file.daemon.HubCallerRoot
-import io.furryr.file.daemon.ipc.*
-import io.furryr.file.proto.HandleMode
 import io.furryr.file.proto.hub.ActiveSessionResponse
 import io.furryr.file.proto.hub.AiConfigResponse
 import io.furryr.file.proto.hub.CallerRoot
 import io.furryr.file.proto.hub.CapabilitiesResponse
 import io.furryr.file.proto.hub.ExecResponse
-import io.furryr.file.proto.hub.GlobRequest
-import io.furryr.file.proto.hub.GlobResponse
 import io.furryr.file.proto.hub.HistoryResponse
 import io.furryr.file.proto.hub.HubRequest
 import io.furryr.file.proto.hub.HubResponse
@@ -24,12 +29,8 @@ import io.furryr.file.proto.hub.ListTargetsResponse
 import io.furryr.file.proto.hub.ModelsResponse
 import io.furryr.file.proto.hub.SessionInfo
 import io.furryr.file.proto.hub.SessionsResponse
-import io.furryr.file.proto.hub.ReadFileRequest
-import io.furryr.file.proto.hub.ReadFileResponse
 import io.furryr.file.proto.hub.Target
 import io.furryr.file.proto.hub.WaitResponse
-import io.furryr.file.proto.hub.WriteFileRequest
-import io.furryr.file.proto.hub.WriteFileResponse
 import io.furryr.file.uds.Transport
 import io.furryr.file.uds.TransportEvent
 import io.furryr.file.uds.UdsEndpoint
@@ -46,7 +47,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
-import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.FileDescriptor
 import java.util.concurrent.ConcurrentHashMap
@@ -98,37 +98,13 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                             }
                             if (failure != null) {
                                 send(client, Reply(failure))
-                            } else if (request!!.opCase == HubRequest.OpCase.CHAT) {
-                                val id = request.id
-                                val chat = launch {
-                                    try {
-                                        AiService.chat(request.chat) { event ->
-                                            send(
-                                                client,
-                                                Reply(
-                                                    HubResponse.newBuilder().setId(id).setOk(true)
-                                                        .setChat(event).build(),
-                                                ),
-                                            )
-                                        }
-                                    } catch (e: CancellationException) {
-                                        throw e
-                                    } catch (e: Exception) {
-                                        runCatching {
-                                            send(client, Reply(failure(id, e.message ?: "chat failed")))
-                                        }
-                                    } finally {
-                                        state.chats.remove(id)
-                                    }
-                                }
-                                state.chats[id] = chat
                             } else if (request!!.opCase == HubRequest.OpCase.SUBSCRIBE_SESSION_EVENTS) {
                                 val id = request.id
-                                val events = HubEvents.subscribe()
+                                val events = AgentEvents.subscribe()
                                 try {
                                     send(client, Reply(ok(id)))
                                 } catch (e: Exception) {
-                                    HubEvents.unsubscribe(events)
+                                    AgentEvents.unsubscribe(events)
                                     throw e
                                 }
                                 launch(start = CoroutineStart.UNDISPATCHED) {
@@ -143,14 +119,83 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                             )
                                         }
                                     } finally {
-                                        HubEvents.unsubscribe(events)
+                                        AgentEvents.unsubscribe(events)
                                     }
+                                }
+                            } else if (request!!.opCase == HubRequest.OpCase.AGENT_COMPACT) {
+                                val id = request.id
+                                val session = state.agent
+                                if (session == null) {
+                                    send(client, Reply(failure(id, "agent is not attached")))
+                                } else {
+                                    session.setEmitter { event ->
+                                        send(
+                                            client,
+                                            Reply(
+                                                HubResponse.newBuilder().setId(id).setOk(true)
+                                                    .setAgentEvent(event).build(),
+                                            ),
+                                        )
+                                    }
+                                    val job = launch {
+                                        try {
+                                            session.compact(
+                                                request.agentCompact.model,
+                                                request.agentCompact.effort,
+                                            )
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: Exception) {
+                                            runCatching {
+                                                send(client, Reply(failure(id, e.message ?: "compact failed")))
+                                            }
+                                        } finally {
+                                            state.agentJobs.remove(id)
+                                        }
+                                    }
+                                    state.agentJobs[id] = job
+                                }
+                            } else if (request!!.opCase == HubRequest.OpCase.AGENT_PROMPT) {
+                                val id = request.id
+                                val session = state.agent
+                                if (session == null) {
+                                    send(client, Reply(failure(id, "agent is not attached")))
+                                } else {
+                                    if (request.agentPrompt.model.isNotBlank()) {
+                                        session.model = request.agentPrompt.model
+                                    }
+                                    if (request.agentPrompt.effort.isNotBlank()) {
+                                        session.effort = request.agentPrompt.effort
+                                    }
+                                    session.setEmitter { event ->
+                                        send(
+                                            client,
+                                            Reply(
+                                                HubResponse.newBuilder().setId(id).setOk(true)
+                                                    .setAgentEvent(event).build(),
+                                            ),
+                                        )
+                                    }
+                                    val job = launch {
+                                        try {
+                                            session.startPrompt(request.agentPrompt.text).join()
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: Exception) {
+                                            runCatching {
+                                                send(client, Reply(failure(id, e.message ?: "agent failed")))
+                                            }
+                                        } finally {
+                                            state.agentJobs.remove(id)
+                                        }
+                                    }
+                                    state.agentJobs[id] = job
                                 }
                             } else if (request!!.opCase == HubRequest.OpCase.REMOTE_MCP_CALL) {
                                 val id = request.id
                                 val call = launch {
                                     try {
-                                        McpProxy.request(request.remoteMcpCall, state.target) { event ->
+                                        AgentMcp.request(request.remoteMcpCall, state.target) { event ->
                                             send(
                                                 client,
                                                 Reply(
@@ -237,7 +282,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                     }
                                 }
                             } else {
-                                send(client, dispatch(request!!, state))
+                                send(client, dispatch(request!!, state, client))
                             }
                         } finally {
                             event.frame.close()
@@ -266,10 +311,12 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                 }
             }
             state.execs.clear()
-            state.chats.values.forEach { it.cancel() }
-            state.chats.clear()
             state.httpCalls.values.forEach { it.cancel() }
             state.httpCalls.clear()
+            state.agentJobs.values.forEach { it.cancel() }
+            state.agentJobs.clear()
+            state.agent?.dispose()
+            state.agent = null
         }
     }
 
@@ -282,10 +329,76 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
         }
     }
 
-    private suspend fun dispatch(request: HubRequest, state: ConnectionState): Reply {
+    private suspend fun dispatch(request: HubRequest, state: ConnectionState, client: Transport): Reply {
         val id = request.id
         return runCatching {
             when (request.opCase) {
+                HubRequest.OpCase.AGENT_ATTACH -> {
+                    val attach = request.agentAttach
+                    state.agentJobs.values.forEach { it.cancel() }
+                    state.agentJobs.clear()
+                    state.agent?.dispose()
+                    val session = AgentSession(
+                        sessionId = attach.sessionId.ifBlank { "agent" },
+                        terminalId = state.terminalId.ifBlank { attach.terminalId },
+                        target = state.target,
+                        targetName = DaemonManager.hubId(state.target),
+                        cwd = attach.cwd.ifBlank { "/" },
+                        model = attach.model,
+                        effort = attach.effort,
+                        emit = { event ->
+                            send(
+                                client,
+                                Reply(
+                                    HubResponse.newBuilder().setId(request.id).setOk(true)
+                                        .setAgentEvent(event).build(),
+                                ),
+                            )
+                        },
+                    )
+                    state.agent = session
+                    Reply(
+                        HubResponse.newBuilder().setId(id).setOk(true)
+                            .setAgentAttach(
+                                AgentAttachResponse.newBuilder()
+                                    .setSessionId(session.sessionId)
+                                    .setTarget(session.targetName)
+                                    .setCwd(session.cwd)
+                                    .build(),
+                            ).build(),
+                    )
+                }
+
+                HubRequest.OpCase.AGENT_CANCEL -> {
+                    state.agent?.cancel()
+                    state.agentJobs.values.forEach { it.cancel() }
+                    state.agentJobs.clear()
+                    state.agent?.cancelAndWait()
+                    Reply(ok(id))
+                }
+
+                HubRequest.OpCase.AGENT_APPROVAL -> {
+                    state.agent?.resolveApproval(
+                        request.agentApproval.approvalId,
+                        request.agentApproval.allow,
+                    )
+                    Reply(ok(id))
+                }
+
+                HubRequest.OpCase.AGENT_MCP_RESULT -> {
+                    state.agent?.completeMcp(
+                        request.agentMcpResult.requestId,
+                        request.agentMcpResult.ok,
+                        request.agentMcpResult.content,
+                    )
+                    Reply(ok(id))
+                }
+
+                HubRequest.OpCase.AGENT_MCP_TOOLS -> {
+                    state.agent?.setMcpTools(request.agentMcpTools.definitionsJson)
+                    Reply(ok(id))
+                }
+
                 HubRequest.OpCase.HELLO -> {
                     require(request.hello.key.isNotBlank()) { "missing daemon key" }
                     val target = requireNotNull(DaemonManager.targetForKey(request.hello.key)) {
@@ -313,7 +426,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     )
 
                 HubRequest.OpCase.GET_AI_CONFIG -> {
-                    val config = requireNotNull(HubActions.aiConfigProvider) {
+                    val config = requireNotNull(AgentEnvironment.aiConfigProvider) {
                         "AI configuration is unavailable"
                     }.invoke()
                     Reply(
@@ -328,7 +441,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
 
                 HubRequest.OpCase.SET_AI_SELECTION -> {
                     val selection = request.setAiSelection
-                    requireNotNull(HubActions.aiSelectionSaver) {
+                    requireNotNull(AgentEnvironment.aiSelectionSaver) {
                         "AI selection persistence is unavailable"
                     }.invoke(selection.model, selection.effort)
                     Reply(HubResponse.newBuilder().setId(id).setOk(true).build())
@@ -390,43 +503,6 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     )
                 }
 
-                HubRequest.OpCase.READ_FILE ->
-                    Reply(
-                        HubResponse.newBuilder().setId(id).setOk(true)
-                            .setReadFile(readFile(request.readFile, state.target)).build(),
-                    )
-
-                HubRequest.OpCase.WRITE_FILE ->
-                    Reply(
-                        HubResponse.newBuilder().setId(id).setOk(true)
-                            .setWriteFile(writeFile(request.writeFile, state.target)).build(),
-                    )
-
-                HubRequest.OpCase.GLOB ->
-                    Reply(
-                        HubResponse.newBuilder().setId(id).setOk(true)
-                            .setGlob(glob(request.glob, state.target)).build(),
-                    )
-
-                HubRequest.OpCase.LIST_DIRECTORY ->
-                    Reply(
-                        HubResponse.newBuilder().setId(id).setOk(true)
-                            .setListDirectory(
-                                listDirectory(request.listDirectory, state.target),
-                            ).build(),
-                    )
-
-                HubRequest.OpCase.COPY_FILE ->
-                    Reply(
-                        HubResponse.newBuilder().setId(id).setOk(true)
-                            .setCopyFile(copyFile(request.copyFile, state.target)).build(),
-                    )
-
-                HubRequest.OpCase.CANCEL_CHAT -> {
-                    state.chats.remove(request.cancelChat.chatId)?.cancel()
-                    Reply(ok(id))
-                }
-
                 HubRequest.OpCase.CANCEL_REMOTE_MCP_CALL -> {
                     state.httpCalls.remove(request.cancelRemoteMcpCall.requestId)?.cancel()
                     Reply(ok(id))
@@ -439,16 +515,16 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                             .setHistory(
                                 HistoryResponse.newBuilder()
                                     .setMessagesJson(
-                                        HubActions.sessionLoad?.invoke(sessionId).orEmpty(),
+                                        AgentEnvironment.sessionLoad?.invoke(sessionId).orEmpty(),
                                     )
-                                    .setTitle(HubActions.sessionTitle?.invoke(sessionId).orEmpty())
+                                    .setTitle(AgentEnvironment.sessionTitle?.invoke(sessionId).orEmpty())
                                     .build(),
                             ).build(),
                     )
                 }
 
                 HubRequest.OpCase.SET_HISTORY -> {
-                    HubActions.sessionSave?.invoke(
+                    AgentEnvironment.sessionSave?.invoke(
                         request.setHistory.sessionId,
                         request.setHistory.messagesJson,
                     )
@@ -457,7 +533,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
 
                 HubRequest.OpCase.GET_MODELS -> Reply(
                     HubResponse.newBuilder().setId(id).setOk(true)
-                        .setModels(ModelsResponse.newBuilder().setCatalogJson(AiService.catalog()).build())
+                        .setModels(ModelsResponse.newBuilder().setCatalogJson(AgentService.catalog()).build())
                         .build(),
                 )
 
@@ -465,14 +541,14 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     // Only server names travel to the caller; URLs and
                     // credential headers stay in the app and are resolved by
                     // RemoteMcpCall.
-                    val servers = McpConfig.servers(state.target, request.getCapabilities.cwd)
+                    val servers = AgentMcp.servers(state.target, request.getCapabilities.cwd)
                         .filter { it.enabled && it.url.isNotBlank() }
                     Reply(
                         HubResponse.newBuilder().setId(id).setOk(true)
                             .setCapabilities(
                                 CapabilitiesResponse.newBuilder()
                                     .addAllRemoteMcpServers(servers.map { it.name })
-                                    .setWorkspaceMcp(HubActions.workspaceMcpEnabled?.invoke() == true)
+                                    .setWorkspaceMcp(AgentEnvironment.workspaceMcpEnabled?.invoke() == true)
                                     .build(),
                             ).build(),
                     )
@@ -482,7 +558,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     HubResponse.newBuilder().setId(id).setOk(true)
                         .setSessions(
                             SessionsResponse.newBuilder().addAllSessions(
-                                HubActions.sessionList?.invoke().orEmpty().map { session ->
+                                AgentEnvironment.sessionList?.invoke().orEmpty().map { session ->
                                     SessionInfo.newBuilder()
                                         .setId(session.id)
                                         .setTitle(session.title)
@@ -498,13 +574,13 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     HubResponse.newBuilder().setId(id).setOk(true)
                         .setActiveSession(
                             ActiveSessionResponse.newBuilder()
-                                .setSessionId(HubActions.activeSession?.invoke(state.terminalId).orEmpty())
+                                .setSessionId(AgentEnvironment.activeSession?.invoke(state.terminalId).orEmpty())
                                 .build(),
                         ).build(),
                 )
 
                 HubRequest.OpCase.SET_ACTIVE_SESSION -> {
-                    HubActions.activeSessionSave?.invoke(
+                    AgentEnvironment.activeSessionSave?.invoke(
                         state.terminalId,
                         request.setActiveSession.sessionId,
                     )
@@ -512,7 +588,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                 }
 
                 HubRequest.OpCase.DELETE_SESSION -> {
-                    HubActions.sessionDelete?.invoke(request.deleteSession.sessionId)
+                    AgentEnvironment.sessionDelete?.invoke(request.deleteSession.sessionId)
                     Reply(ok(id))
                 }
 
@@ -647,8 +723,9 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
         var nextHandle: Long = 1
         val ptys = ConcurrentHashMap<Long, OwnedPty>()
         val execs = ConcurrentHashMap<Long, OwnedExec>()
-        val chats = ConcurrentHashMap<Int, Job>()
         val httpCalls = ConcurrentHashMap<Int, Job>()
+        val agentJobs = ConcurrentHashMap<Int, Job>()
+        var agent: AgentSession? = null
 
         fun pty(handle: Long): OwnedPty =
             ptys[handle] ?: error("PTY not owned by client")

@@ -82,6 +82,7 @@ androidComponents {
 }
 
 dependencies {
+    implementation(project(":agent"))
     implementation(project(":container"))
     implementation(project(":core"))
     implementation(project(":daemon"))

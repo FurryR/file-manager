@@ -1,4 +1,4 @@
-package io.furryr.file.hub
+package io.furryr.file.agent
 
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.proto.hub.RemoteMcpCall
@@ -17,7 +17,7 @@ import java.net.URL
  * speak MCP: it only resolves the server, injects configured headers, and
  * streams the raw response back to the agent.
  */
-internal object McpProxy {
+object McpProxy {
     private const val MAX_RESPONSE = 16 * 1024 * 1024
 
     suspend fun request(

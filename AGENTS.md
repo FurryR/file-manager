@@ -46,6 +46,14 @@ file-manager/
 │       ├── ProotRunner / ProotInstaller / DistroFetcher
 │       ├── ContainerDaemonLauncher.kt
 │       └── ContainerProvider.kt  # one FileProvider for every container
+├── agent/               # :agent — Kotlin agent loop, prompt, tools, provider
+│   └── src/main/java/io/furryr/file/agent/
+│       ├── AgentSession.kt     # prompt loop, tool dispatch, cancel, history
+│       ├── AgentTools.kt       # built-in read/write/copy/glob/exec/list_targets
+│       ├── SystemPrompt.kt     # prompt + approval policy
+│       ├── AiService.kt        # OpenAI-compatible transport + model catalog
+│       ├── AgentEnvironment.kt # app callbacks (provider, sessions, MCP config)
+│       └── AgentMcp.kt         # remote MCP catalog/proxy facade
 ├── hub/                 # :hub — UDS hub server over daemons
 │   └── src/main/java/io/furryr/file/hub/
 │       ├── Hub.kt               # lifecycle + environment contract
@@ -95,11 +103,19 @@ file-manager/
 - `:wayland` wires the embedded wldroid/wlroots compositor into containers:
   the socket-directory bind + `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` env, GPU-mode
   detection (KGSL → turnip+zink passthrough; otherwise virgl vtest), the virgl
-  server session and xkb extraction. The compositor AARs come from the
-  prebuilt wldroid maven repo (`scripts/fetch-wldroid.sh` →
+  server session, xkb extraction, and handing the app's SELinux context to the
+  daemon (`WAYLAND_SHM_CONTEXT`) so it can gate container shared memory. The
+  compositor AARs come from the prebuilt wldroid maven repo
+  (`scripts/fetch-wldroid.sh` →
   `third_party/wldroid-maven`, registered first in `settings.gradle.kts`
   because public mirrors serve bogus metadata for unknown coordinates).
-- `:hub` owns `Hub`/`HubServer` and depends on `:daemon` + `:uds`.
+- `:agent` is the **single agent brain**: system prompt, provider transport,
+  tool definitions, tool-call parsing, loop, approval policy and session
+  history. It executes built-in tools directly through `:daemon`; the terminal
+  shell only renders events and answers approval requests.
+- `:hub` owns `Hub`/`HubServer` and depends on `:agent` + `:daemon` + `:uds`.
+  It is transport-only: socket auth, exec/PTY, file primitives for legacy
+  clients, and agent event forwarding.
 - `:pulse` is the resident embedded-PulseAudio host over `:uds`.
   `native/pulse/pulse_host.c` embeds the native protocol, mixer, sink and source
   in `libpulsehost.so`; D-Bus and dynamic modules are disabled. Audio policy
@@ -127,18 +143,23 @@ file-manager/
 | Wayland viewer | `app/.../ui/screens/WaylandActivity.kt` | Full-screen wldroid/wlroots viewer; in-process, `CompositorSurface`, predictive back |
 | Wayland wiring | `wayland/.../WaylandManager.kt` | socket dir + env for containers, GPU mode, virgl session, xkb extract |
 | wldroid fetch | `scripts/fetch-wldroid.sh` | prebuilt wldroid maven repo (compositor+virgl+shims AARs) → `third_party/wldroid-maven` |
+| Container shm gate | `native/src/shmgate.rs` | seccomp user-notif on `memfd_create` + fd injected from the compositor's domain; no-op when domains match |
 | run0 CLI | `native/run0/src/main.rs` | Rust client: hub protocol + local tty bridge |
 | here CLI | `native/here/src/main.rs` | Open target descriptor + request file-manager navigation |
 | agent CLI | `native/agent/src/ui.rs` | Modular ratatui + crossterm terminal AI chat UI |
 | Hub client transport | `native/hub-client/src/lib.rs` | Shared framing, abstract sockets and SCM_RIGHTS |
-| Hub protocol | `proto/hub.proto` | run0/agent protocol; paths for file tools; chat/session/MCP streams |
+| Hub protocol | `proto/hub.proto` | run0 transport: PTY/exec, auth, history, catalog, MCP proxy |
+| Agent protocol | `proto/agent.proto` | Attach/prompt/compact, streamed events, approval and MCP bridge |
 | run0 bootstrap | `hub/.../Hub.kt` | Starts the hub, env contract |
 | Unified exec/PTY | `daemon/.../process/ExecService.kt` | `CommandSpec` → `ProcessChannel` |
-| AI gateway | `hub/.../AiService.kt` | OpenAI-compatible streaming, normalized Chat events, model catalog |
-| Agent hub client | `agent/.../hub.rs` | Chat stream, history/sessions, catalog, MCP HTTP proxy |
-| Agent MCP | `agent/.../mcp.rs` | Streamable HTTP through the hub; stdio locally |
+| AI gateway | `agent/.../AiService.kt` | OpenAI-compatible streaming, normalized Chat events, model catalog |
+| Agent loop | `agent/.../AgentSession.kt` | Prompt loop, tool dispatch, approval, history persistence |
+| Agent tools | `agent/.../AgentTools.kt` | Built-in tools executed directly through `:daemon` |
+| Agent prompt/policy | `agent/.../SystemPrompt.kt` | System prompt + dangerous-path approval rules |
+| Rust agent shell | `native/agent/src/main.rs` | TUI client: prompt input, rendering, approval, local MCP host |
+| Agent MCP | `native/agent/.../mcp.rs` | Local stdio host + hub HTTP proxy for remote servers |
 | Agent sessions | `app/.../agent/AgentSettings.kt` | Session files, titles, active session per terminal |
-| MCP proxy | `hub/.../McpProxy.kt` | HTTP proxy for online MCP; hub never speaks MCP |
+| MCP proxy | `agent/.../McpProxy.kt` | HTTP proxy for online MCP; hub never speaks MCP |
 | Daemon file I/O | `daemon/.../file/FileService.kt` | list/stat/open/copy per target |
 | Container launch | `container/.../ContainerDaemonLauncher.kt` | proot/chroot argv + PulseAudio/Wayland environment; KGSL GPU probe in `ProotRunner` |
 | Terminal IME | `app/.../agent/TerminalViewComposable.kt` | focus hand-off + `showSoftInput`; see NOTES |
@@ -163,6 +184,18 @@ file-manager/
   The UI binds the listener early; the engine starts on container launch.
   Settings restart only the engine, keeping the listener alive. Pass
   `PULSE_SERVER` in the process environment, not `/etc/profile.d`.
+- **A memfd's label follows its creator, not its path** — `wl_shm` pools are
+  fds the client creates, so a memfd inode carries the client's SELinux domain.
+  A proot container shares the app's domain and is fine; a root container (chroot
+  backend via `su`, `u:r:ksu:s0`) does not, and the compositor's
+  `file:{ read write }` check then drops the fd — the client only sees
+  `invalid arguments for wl_shm#4.create_pool`, never an mmap error. `shmgate`
+  answers `memfd_create` from the syscall boundary (seccomp user notification)
+  with a pool created in the compositor's domain by a forked factory, so nothing
+  is preloaded into the container and statically linked clients work too. The
+  gate stays off when the daemon already shares the compositor's domain, and it
+  replies `ENOSYS` whenever it cannot service a request. PulseAudio shared memory
+  has the same constraint and is not covered yet.
 - **proot GPU pass-through is a KGSL probe** — `ProotRunner.gpuMounts()` binds
   `/dev/kgsl-3d0` (plus `/dev/dma_heap`/`/dev/ion` when present) only when the
   KGSL command device exists, so proot containers can run turnip + zink

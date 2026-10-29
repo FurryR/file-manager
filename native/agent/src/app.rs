@@ -8,7 +8,7 @@ use crate::hub::SessionEntry;
 use crate::input::Input;
 use crate::model::{Entry, Message, Role};
 use crate::model_info::{ModelCatalog, ModelInfo};
-use crate::runner::PromptQueue;
+pub type PromptQueue = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
 mod events;
 mod popup;
@@ -45,6 +45,7 @@ pub enum Action {
     ListSessions,
     SelectSession { id: String, title: String },
     NewSession,
+    Approval { id: u64, allow: bool },
 }
 
 struct Pending {
@@ -111,7 +112,34 @@ fn tool_line(name: &str, detail: &str) -> String {
 }
 
 fn tool_arrow(name: &str) -> &'static str {
-    crate::tool::arrow(name)
+    match name {
+        "read" | "glob" | "list_targets" => "→",
+        _ => "←",
+    }
+}
+
+fn tool_info(name: &str, arguments: &str) -> (String, Option<String>, Option<String>) {
+    let args = serde_json::from_str::<serde_json::Value>(arguments).unwrap_or_default();
+    let command = args.get("command").and_then(|value| value.as_str()).map(str::to_owned);
+    let detail = match name {
+        "read" | "write" => args.get("path").and_then(|value| value.as_str()).unwrap_or("?").to_owned(),
+        "glob" => args.get("pattern").and_then(|value| value.as_str()).unwrap_or("?").to_owned(),
+        "copy" => format!(
+            "{} -> {}",
+            args.get("from").and_then(|value| value.as_str()).unwrap_or("?"),
+            args.get("to").and_then(|value| value.as_str()).unwrap_or("?"),
+        ),
+        "exec" => command.clone().unwrap_or_default(),
+        "list_targets" => String::new(),
+        _ => arguments.replace('\n', " ").chars().take(120).collect(),
+    };
+    let description = args
+        .get("description")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    (detail, description, command)
 }
 
 fn tool_label(name: &str) -> String {
@@ -161,14 +189,11 @@ fn transcript_from_history(history: &[Message]) -> Vec<Entry> {
                 }
                 if let Some(calls) = &message.tool_calls {
                     for call in calls {
-                        let info = crate::tool::info_with_mcp(
-                            None,
-                            &call.function.name,
-                            &call.function.arguments,
-                        );
-                        let mut entry = match info.command {
-                            Some(command) => Entry::exec(info.description, command),
-                            None => Entry::tool(tool_line(&call.function.name, &info.detail)),
+                        let (detail, description, command) =
+                            tool_info(&call.function.name, &call.function.arguments);
+                        let mut entry = match command {
+                            Some(command) => Entry::exec(description, command),
+                            None => Entry::tool(tool_line(&call.function.name, &detail)),
                         };
                         // Restored entries are finished, not live.
                         entry.started = None;
@@ -488,8 +513,15 @@ impl App {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc => {
+                let approval = match self.popup.as_ref().map(|popup| &popup.kind) {
+                    Some(PopupKind::Approval(id)) => Some(*id),
+                    _ => None,
+                };
                 self.popup = None;
-                Action::None
+                match approval {
+                    Some(id) => Action::Approval { id, allow: false },
+                    None => Action::None,
+                }
             }
             KeyCode::Char('p') if control => {
                 self.popup = None;
@@ -537,6 +569,7 @@ impl App {
                             Action::None
                         }
                         Some(PopupAction::Exit) => Action::Quit,
+                        Some(PopupAction::Allow) | Some(PopupAction::Deny) => Action::None,
                         None | Some(PopupAction::NewSession) => Action::None,
                     },
                     PopupKind::Models => {
@@ -549,6 +582,11 @@ impl App {
                         self.bump();
                         Action::PersistSelection
                     }
+                    PopupKind::Approval(id) => match item.action {
+                        Some(PopupAction::Allow) => Action::Approval { id, allow: true },
+                        Some(PopupAction::Deny) => Action::Approval { id, allow: false },
+                        _ => Action::None,
+                    },
                     PopupKind::Sessions => {
                         // Switching while a request runs would land its result
                         // and history writes on the wrong session.
@@ -598,6 +636,11 @@ impl App {
         self.answer_streamed = false;
         self.follow = true;
         self.scroll = 0;
+        self.bump();
+    }
+
+    pub fn open_approval(&mut self, id: u64, name: &str, reason: &str) {
+        self.popup = Some(Popup::approval(id, name, reason));
         self.bump();
     }
 
@@ -672,10 +715,6 @@ impl App {
 
     pub fn model(&self) -> &str {
         &self.model
-    }
-
-    pub fn queue(&self) -> &PromptQueue {
-        &self.queue
     }
 
     pub fn provider(&self) -> &str {

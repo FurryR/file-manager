@@ -1,4 +1,4 @@
-package io.furryr.file.hub
+package io.furryr.file.agent
 
 import com.google.protobuf.ByteString
 import io.furryr.file.core.Vfs
@@ -33,7 +33,7 @@ private const val MAX_DIRECTORY_ENTRIES = 2_000
 // can keep a `**` walk running for minutes.
 private val GLOB_SKIP_DIRS = setOf("/proc", "/sys", "/dev")
 
-internal suspend fun readFile(request: ReadFileRequest, target: DaemonTarget): ReadFileResponse {
+public suspend fun readFile(request: ReadFileRequest, target: DaemonTarget): ReadFileResponse {
     require(request.path.isNotBlank()) { "read requires a path" }
     if (isVfsPath(request.path)) return readVfsFile(request)
     val connection = DaemonManager.connection(target)
@@ -69,7 +69,7 @@ internal suspend fun readFile(request: ReadFileRequest, target: DaemonTarget): R
     }
 }
 
-internal suspend fun readVfsFile(request: ReadFileRequest): ReadFileResponse {
+public suspend fun readVfsFile(request: ReadFileRequest): ReadFileResponse {
     val source = Vfs.file(request.path).getOrThrow().open(OpenMode.READ).getOrThrow()
     return source.use {
         val size = source.size
@@ -98,7 +98,7 @@ internal suspend fun readVfsFile(request: ReadFileRequest): ReadFileResponse {
     }
 }
 
-internal suspend fun listDirectory(
+public suspend fun listDirectory(
     request: ListDirectoryRequest,
     target: DaemonTarget,
 ): ListDirectoryResponse {
@@ -129,7 +129,7 @@ internal suspend fun listDirectory(
         .build()
 }
 
-internal suspend fun writeFile(request: WriteFileRequest, target: DaemonTarget): WriteFileResponse {
+public suspend fun writeFile(request: WriteFileRequest, target: DaemonTarget): WriteFileResponse {
     require(request.path.isNotBlank()) { "write requires a path" }
     val data = request.data.toByteArray()
     if (isVfsPath(request.path)) {
@@ -152,7 +152,7 @@ internal suspend fun writeFile(request: WriteFileRequest, target: DaemonTarget):
     }
 }
 
-internal suspend fun copyFile(request: CopyFileRequest, target: DaemonTarget): CopyFileResponse {
+public suspend fun copyFile(request: CopyFileRequest, target: DaemonTarget): CopyFileResponse {
     val from = callerPath(target, request.from, "copy source")
     val to = callerPath(target, request.to, "copy destination")
     var copied = 0L
@@ -164,7 +164,7 @@ internal suspend fun copyFile(request: CopyFileRequest, target: DaemonTarget): C
 
 // Resolve a caller-relative bare path into its provider URI so copy can span
 // containers and network locations. VFS URIs are passed through untouched.
-internal fun callerPath(target: DaemonTarget, path: String, label: String): String {
+public fun callerPath(target: DaemonTarget, path: String, label: String): String {
     require(path.isNotBlank()) { "$label requires a path" }
     if (isVfsPath(path)) return path
     require(path.startsWith('/')) { "$label must be absolute or a VFS URI" }
@@ -174,7 +174,7 @@ internal fun callerPath(target: DaemonTarget, path: String, label: String): Stri
     }
 }
 
-internal suspend fun glob(request: GlobRequest, target: DaemonTarget): GlobResponse {
+public suspend fun glob(request: GlobRequest, target: DaemonTarget): GlobResponse {
     val base = request.path.ifBlank { "/" }
     // Inside the caller's own scope the scope prefix is omitted: rewrite the
     // base to a plain path and walk the caller's daemon, so results are plain
@@ -210,7 +210,7 @@ private suspend fun globDaemon(
     )
 }
 
-internal suspend fun globVfs(request: GlobRequest, base: String): GlobResponse {
+public suspend fun globVfs(request: GlobRequest, base: String): GlobResponse {
     val basePath = base.trimEnd('/').ifEmpty { base }
     val prefix = if (basePath.endsWith('/')) basePath else "$basePath/"
     return walkGlob(
@@ -283,17 +283,17 @@ private suspend fun walkGlob(
     return GlobResponse.newBuilder().addAllPaths(paths).setTruncated(truncated).build()
 }
 
-internal fun isVfsPath(path: String): Boolean = path.contains("://")
+public fun isVfsPath(path: String): Boolean = path.contains("://")
 
 // The VFS root of the caller's own scope, resolved from the Hello handshake.
-internal fun ownScopeRoot(target: DaemonTarget): String? = when (target) {
+public fun ownScopeRoot(target: DaemonTarget): String? = when (target) {
     DaemonTarget.Host -> "file://"
     is DaemonTarget.Named -> "container://${target.name}"
     DaemonTarget.App -> null
 }
 
 /** `container://test/src` becomes `/src` for a caller inside container `test`. */
-internal fun ownScopePath(path: String, target: DaemonTarget): String? {
+public fun ownScopePath(path: String, target: DaemonTarget): String? {
     val root = ownScopeRoot(target) ?: return null
     if (path == root) return "/"
     val prefix = "$root/"
@@ -301,7 +301,7 @@ internal fun ownScopePath(path: String, target: DaemonTarget): String? {
     return path.removePrefix(root)
 }
 
-internal class GlobMatcher(pattern: String) {
+public class GlobMatcher(pattern: String) {
     // Leading pattern segments without wildcards, e.g. `src/main/**` ->
     // ["src", "main"]. Directories off this track can never match.
     private val literalPrefix: List<String>

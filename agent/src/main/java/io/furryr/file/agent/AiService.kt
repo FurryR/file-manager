@@ -1,13 +1,9 @@
-package io.furryr.file.hub
+package io.furryr.file.agent
 
-import io.furryr.file.daemon.HubActions
 import io.furryr.file.proto.hub.ChatEvent
-import io.furryr.file.proto.hub.ChatRequest
 import io.furryr.file.proto.hub.TokenUsage
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -22,42 +18,50 @@ import java.net.URL
 /**
  * OpenAI-compatible chat gateway. Provider credentials stay in the app; the
  * agent only sees normalized Chat events. Future provider adapters implement
- * the same [ChatRequest] -> event contract behind this service.
+ * the same normalized provider-event contract behind this service.
  */
-internal object AiService {
+object AiService {
     private const val MAX_METADATA = 4 * 1024 * 1024
-    private val titleScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    suspend fun chat(request: ChatRequest, emit: suspend (ChatEvent) -> Unit) {
-        val config = requireNotNull(HubActions.aiConfigProvider) {
+    suspend fun complete(
+        model: String,
+        effort: String,
+        system: String,
+        history: JSONArray,
+        toolsJson: String,
+        emit: suspend (ChatEvent) -> Unit,
+    ): ChatResult? {
+        val config = requireNotNull(AgentEnvironment.aiConfigProvider) {
             "AI configuration is unavailable"
         }.invoke()
+        return perform(config, model, effort, system, history, toolsJson, emit)
+    }
+
+    private suspend fun perform(
+        config: AgentAiConfig,
+        model: String,
+        effort: String,
+        system: String,
+        history: JSONArray,
+        toolsJson: String,
+        emit: suspend (ChatEvent) -> Unit,
+    ): ChatResult? {
         val url = endpoint(config.baseUrl)
-        val history = effectiveHistory(request)
-        if (!request.append && request.sessionId.isNotBlank() &&
-            HubActions.sessionSave != null &&
-            HubActions.sessionLoad?.invoke(request.sessionId) == null
-        ) {
-            HubActions.sessionSave?.invoke(request.sessionId, history.toString())
-            firstUser(history)?.let { message ->
-                launchTitle(request.sessionId, request.model, message)
-            }
-        }
         val body = JSONObject().apply {
-            put("model", request.model)
+            put("model", model)
             put("stream", true)
             put("stream_options", JSONObject().put("include_usage", true))
-            put("messages", providerMessages(request.system, history))
-            if (request.effort.isNotBlank() && request.effort != "auto") {
-                put("reasoning_effort", request.effort)
+            put("messages", providerMessages(system, history))
+            if (effort.isNotBlank() && effort != "auto") {
+                put("reasoning_effort", effort)
             }
-            val tools = runCatching { JSONArray(request.toolsJson) }.getOrNull()
+            val tools = runCatching { JSONArray(toolsJson) }.getOrNull()
             if (tools != null && tools.length() > 0) {
                 put("tools", tools)
                 put("tool_choice", "auto")
             }
         }
-        withContext(Dispatchers.IO) {
+        return withContext(Dispatchers.IO) {
             val connection = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 doOutput = true
@@ -78,7 +82,7 @@ internal object AiService {
                 val status = connection.responseCode
                 if (status !in 200..299) {
                     emitError(emit, "API returned HTTP $status; check the model, API key and provider limits.")
-                    return@withContext
+                    return@withContext null
                 }
                 val reader = BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8))
                 val calls = ArrayList<CallBuilder>()
@@ -99,7 +103,7 @@ internal object AiService {
                         received += line.length
                         if (received > 8 * 1024 * 1024) {
                             emitError(emitEvent, "API response is too large.")
-                            return@withContext
+                            return@withContext null
                         }
                         done = applyLine(line, calls, emitEvent) {
                             if (!toolCalling) {
@@ -116,31 +120,19 @@ internal object AiService {
                     emitEvent(ChatEvent.newBuilder().setToolCallsJson(toolCalls.toString()).build())
                 }
                 emitEvent(ChatEvent.newBuilder().setDone(true).build())
-                saveHistory(
-                    request.sessionId,
-                    history,
-                    content.toString(),
-                    reasoning.toString(),
-                    toolCalls,
-                )
+                ChatResult(content.toString(), reasoning.toString(), toolCalls)
             } catch (e: Exception) {
                 currentCoroutineContext().ensureActive()
                 emitError(emit, e.message ?: "Could not read the API response.")
+                null
             } finally {
                 runCatching { connection.disconnect() }
             }
         }
     }
 
-    private fun launchTitle(sessionId: String, model: String, firstUser: String) {
-        titleScope.launch {
-            val title = generateTitle(model, firstUser) ?: return@launch
-            HubActions.sessionAutoTitle?.invoke(sessionId, title)
-        }
-    }
-
     private fun generateTitle(model: String, firstUser: String): String? {
-        val config = runCatching { HubActions.aiConfigProvider?.invoke() }.getOrNull()
+        val config = runCatching { AgentEnvironment.aiConfigProvider?.invoke() }.getOrNull()
             ?: return null
         val url = runCatching { endpoint(config.baseUrl) }.getOrNull() ?: return null
         val body = JSONObject().apply {
@@ -196,18 +188,10 @@ internal object AiService {
         }
     }
 
-    private fun firstUser(history: JSONArray): String? {
-        for (index in 0 until history.length()) {
-            val message = history.optJSONObject(index) ?: continue
-            if (message.optString("role") != "user") continue
-            val content = message.optString("content").trim()
-            if (content.isNotEmpty()) return content
-        }
-        return null
-    }
+    suspend fun titleFor(model: String, firstUser: String): String? = generateTitle(model, firstUser)
 
     suspend fun catalog(): String {
-        val config = requireNotNull(HubActions.aiConfigProvider) {
+        val config = requireNotNull(AgentEnvironment.aiConfigProvider) {
             "AI configuration is unavailable"
         }.invoke()
         val chatUrl = endpoint(config.baseUrl)
@@ -226,24 +210,6 @@ internal object AiService {
         return catalog.toJson()
     }
 
-    private fun effectiveHistory(request: ChatRequest): JSONArray {
-        val incoming = runCatching { JSONArray(request.messagesJson) }.getOrElse { JSONArray() }
-        if (!request.append) return incoming
-        require(request.sessionId.isNotBlank()) { "append chat requires a session" }
-        val stored = requireNotNull(HubActions.sessionLoad?.invoke(request.sessionId)) {
-            "history mismatch: no stored session"
-        }
-        val history = runCatching { JSONArray(stored) }
-            .getOrElse { error("history mismatch: invalid session") }
-        if (history.length() != request.baseCount.toInt()) {
-            error("history mismatch")
-        }
-        for (index in 0 until incoming.length()) {
-            incoming.optJSONObject(index)?.let { history.put(it) }
-        }
-        return history
-    }
-
     private fun providerMessages(system: String, history: JSONArray): JSONArray {
         val array = JSONArray()
         if (system.isNotBlank()) {
@@ -253,25 +219,6 @@ internal object AiService {
             history.optJSONObject(index)?.let { array.put(it) }
         }
         return array
-    }
-
-    private fun saveHistory(
-        sessionId: String,
-        history: JSONArray,
-        content: String,
-        reasoning: String,
-        toolCalls: JSONArray,
-    ) {
-        if (sessionId.isBlank()) return
-        if (content.isEmpty() && reasoning.isBlank() && toolCalls.length() == 0) return
-        val assistant = JSONObject().put("role", "assistant")
-        // Keep the chain of thought in session history: dropping it turns
-        // intermediate reason/tool turns into holes the next request cannot see.
-        if (reasoning.isNotBlank()) assistant.put("reasoning_content", reasoning)
-        if (content.isNotEmpty()) assistant.put("content", content)
-        if (toolCalls.length() > 0) assistant.put("tool_calls", toolCalls)
-        history.put(assistant)
-        runCatching { HubActions.sessionSave?.invoke(sessionId, history.toString()) }
     }
 
     private suspend fun emitError(emit: suspend (ChatEvent) -> Unit, message: String) {
@@ -697,4 +644,9 @@ internal object AiService {
             return number.toLong().takeIf { number > 0.0 }
         }
     }
+    data class ChatResult(
+        val content: String,
+        val reasoning: String,
+        val toolCalls: JSONArray,
+    )
 }

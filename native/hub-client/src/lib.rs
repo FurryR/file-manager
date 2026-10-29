@@ -1,6 +1,9 @@
 //! Shared hub wire protocol for the native terminal utilities.
 use prost::Message;
+use std::collections::{HashMap, VecDeque};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::{env, io, mem};
 
 use tokio::io::Interest;
@@ -9,13 +12,39 @@ use tokio::net::UnixStream;
 pub mod filehub {
     include!(concat!(env!("OUT_DIR"), "/filehub.rs"));
 }
+pub mod fileagent {
+    include!(concat!(env!("OUT_DIR"), "/fileagent.rs"));
+}
 use filehub::{HubRequest, HubResponse};
+
+/// Responses that arrived while another id was awaited. Keeping them is what
+/// makes correlation *by id* instead of *by arrival order*: a response for a
+/// request that was abandoned (timeout, cancelled tool call) can no longer shift
+/// the stream and make every later request fail with a stale id.
+const MAX_STRAY: usize = 512;
+
+#[derive(Default)]
+struct Stray {
+    /// Frames keyed by request id; a stream (chat, session titles) keeps its own
+    /// queue and therefore its own order.
+    frames: HashMap<u32, VecDeque<(HubResponse, Vec<OwnedFd>)>>,
+    /// Ids in arrival order, used to evict the oldest when nobody claims them.
+    order: VecDeque<u32>,
+    /// Total parked frames, so one abandoned stream cannot grow without bound.
+    total: usize,
+}
+
+const MAX_STRAY_FRAMES: usize = 8 * MAX_STRAY;
 
 /// A live hub connection. Requests are correlated by their `id`; the transport
 /// is a non-blocking tokio socket, so callers await instead of blocking a
 /// thread, and there is no socket-level receive/send deadline.
 pub struct Connection {
     stream: UnixStream,
+    stray: Mutex<Stray>,
+    /// Set once the stream can no longer be trusted; later calls fail fast
+    /// instead of silently reading somebody else's response.
+    poisoned: AtomicBool,
 }
 
 impl Connection {
@@ -34,6 +63,8 @@ impl Connection {
         }
         let connection = Self {
             stream: connect_abstract(name)?,
+            stray: Mutex::new(Stray::default()),
+            poisoned: AtomicBool::new(false),
         };
         let response = connection
             .round_trip(HubRequest {
@@ -90,14 +121,78 @@ impl Connection {
         self.receive_response(request.id).await
     }
 
+    /// Await the response for `id`, keeping responses for other ids aside.
+    ///
+    /// A caller that gives up on a request (deadline, cancellation) leaves one
+    /// unmatched response in flight; it is parked under its own id instead of
+    /// being mistaken for the next request's answer.
     pub async fn receive_response(&self, id: u32) -> io::Result<(HubResponse, Vec<OwnedFd>)> {
-        let (payload, attached) = self.recv_frame().await?;
-        let response =
-            HubResponse::decode(payload.as_slice()).map_err(|e| io::Error::other(e.to_string()))?;
-        if response.id != id {
-            return Err(io::Error::other("hub response id mismatch"));
+        if self.poisoned.load(Ordering::Relaxed) {
+            return Err(io::Error::other("hub connection is no longer usable"));
         }
-        Ok((response, attached))
+        loop {
+            if let Some(response) = self.take_stray(id) {
+                return Ok(response);
+            }
+            let (payload, attached) = self.recv_frame().await?;
+            let response = HubResponse::decode(payload.as_slice()).map_err(|error| {
+                self.poison("malformed hub response");
+                io::Error::other(error.to_string())
+            })?;
+            if response.id == id {
+                return Ok((response, attached));
+            }
+            // An abandoned chat keeps streaming for a while; reading through
+            // its parked events is expected, so only a stash that cannot keep
+            // up may end this loop early.
+            if !self.stash(response, attached) {
+                self.poison("too many unmatched hub responses");
+                return Err(io::Error::other(
+                    "hub response stream is out of sync and was dropped",
+                ));
+            }
+        }
+    }
+
+    fn take_stray(&self, id: u32) -> Option<(HubResponse, Vec<OwnedFd>)> {
+        let mut stray = self.stray.lock().unwrap();
+        let entry = stray.frames.get_mut(&id)?;
+        let response = entry.pop_front()?;
+        let drained = entry.is_empty();
+        stray.total -= 1;
+        if drained {
+            stray.frames.remove(&id);
+            stray.order.retain(|queued| *queued != id);
+        }
+        Some(response)
+    }
+
+    /// Park a response nobody is waiting for. Returns `false` only when the
+    /// parked set is so large that the correlation state cannot be trusted.
+    fn stash(&self, response: HubResponse, fds: Vec<OwnedFd>) -> bool {
+        let mut stray = self.stray.lock().unwrap();
+        if !stray.frames.contains_key(&response.id) {
+            stray.order.push_back(response.id);
+        }
+        stray
+            .frames
+            .entry(response.id)
+            .or_default()
+            .push_back((response, fds));
+        stray.total += 1;
+        while stray.order.len() > MAX_STRAY || stray.total > MAX_STRAY_FRAMES {
+            let Some(evicted) = stray.order.pop_front() else { break };
+            if let Some(queue) = stray.frames.remove(&evicted) {
+                stray.total -= queue.len();
+            }
+        }
+        stray.order.len() <= MAX_STRAY
+    }
+
+    fn poison(&self, why: &str) {
+        if !self.poisoned.swap(true, Ordering::Relaxed) {
+            eprintln!("hub connection dropped: {why}");
+        }
     }
 
     pub async fn send_frame(&self, payload: &[u8], attached_fds: &[RawFd]) -> io::Result<()> {

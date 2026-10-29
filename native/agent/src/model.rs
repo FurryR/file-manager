@@ -42,36 +42,6 @@ impl Message {
         Self::new("user", content)
     }
 
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self::new("assistant", content)
-    }
-
-    pub fn assistant_with_tools(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
-        Self {
-            role: "assistant".to_owned(),
-            content,
-            reasoning_content: None,
-            tool_calls: Some(tool_calls),
-            tool_call_id: None,
-        }
-    }
-
-    /// Attach the provider's reasoning to an assistant message.
-    pub fn with_reasoning(mut self, reasoning: Option<String>) -> Self {
-        self.reasoning_content = reasoning.filter(|text| !text.trim().is_empty());
-        self
-    }
-
-    pub fn tool(call_id: impl Into<String>, content: impl Into<String>) -> Self {
-        Self {
-            role: "tool".to_owned(),
-            content: Some(content.into()),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: Some(call_id.into()),
-        }
-    }
-
     fn new(role: &str, content: impl Into<String>) -> Self {
         Self {
             role: role.to_owned(),
@@ -86,11 +56,7 @@ impl Message {
         self.content.as_deref().unwrap_or_default()
     }
 
-    pub fn has_tools(&self) -> bool {
-        self.tool_calls
-            .as_ref()
-            .is_some_and(|calls| !calls.is_empty())
-    }
+
 }
 
 /// Token usage reported by the provider for one request.
@@ -103,7 +69,6 @@ pub struct Usage {
 /// Progress emitted by the tool loop for the terminal UI.
 #[derive(Clone)]
 pub enum AgentEvent {
-    StepStart,
     ReasoningDelta(String),
     AnswerDelta(String),
     ToolCalling,
@@ -123,6 +88,11 @@ pub enum AgentEvent {
         ok: bool,
     },
     Usage(Usage),
+    ApprovalRequest {
+        id: u64,
+        name: String,
+        reason: String,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

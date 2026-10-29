@@ -1,11 +1,9 @@
-package io.furryr.file.hub
+package io.furryr.file.agent
 
 import io.furryr.file.core.Path
 import io.furryr.file.core.Vfs
 import io.furryr.file.core.source.OpenMode
 import io.furryr.file.daemon.DaemonTarget
-import io.furryr.file.daemon.HubActions
-import io.furryr.file.daemon.HubMcpServer
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -17,16 +15,16 @@ import org.json.JSONObject
  * same name. Local stdio entries in workspace files are not resolved here: the
  * agent reads and spawns them itself.
  */
-internal object McpConfig {
+object McpConfig {
     private const val MAX_CONFIG_BYTES = 1024 * 1024
     private const val CHUNK = 64 * 1024
 
-    suspend fun servers(target: DaemonTarget, cwd: String): List<HubMcpServer> {
-        val merged = LinkedHashMap<String, HubMcpServer>()
-        runCatching { HubActions.globalMcpServers?.invoke().orEmpty() }
+    suspend fun servers(target: DaemonTarget, cwd: String): List<AgentMcpServer> {
+        val merged = LinkedHashMap<String, AgentMcpServer>()
+        runCatching { AgentEnvironment.globalMcpServers?.invoke().orEmpty() }
             .getOrDefault(emptyList())
             .forEach { merged[it.name] = it }
-        if (HubActions.workspaceMcpEnabled?.invoke() == true) {
+        if (AgentEnvironment.workspaceMcpEnabled?.invoke() == true) {
             val chain = ancestorChain(target, cwd)
             for (directory in chain.asReversed()) {
                 for (server in readWorkspace(directory, merged)) {
@@ -50,13 +48,13 @@ internal object McpConfig {
 
     private suspend fun readWorkspace(
         directory: Path,
-        known: Map<String, HubMcpServer>,
-    ): List<HubMcpServer> {
+        known: Map<String, AgentMcpServer>,
+    ): List<AgentMcpServer> {
         val path = directory.child(".agent").child("mcp.json").toString()
         val text = runCatching { readText(path) }.getOrNull() ?: return emptyList()
         val root = runCatching { JSONObject(text) }.getOrNull() ?: return emptyList()
         val servers = root.optJSONObject("mcpServers") ?: return emptyList()
-        val result = ArrayList<HubMcpServer>()
+        val result = ArrayList<AgentMcpServer>()
         for (name in servers.keys()) {
             val entry = servers.optJSONObject(name) ?: continue
             val base = known[name]
@@ -78,7 +76,7 @@ internal object McpConfig {
                 objectValue.keys().asSequence().associateWith { objectValue.optString(it) }
             }.orEmpty()
             result.add(
-                HubMcpServer(
+                AgentMcpServer(
                     name = name,
                     url = url,
                     headers = headers,

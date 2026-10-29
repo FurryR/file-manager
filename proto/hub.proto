@@ -5,6 +5,8 @@ package filehub;
 option java_package = "io.furryr.file.proto.hub";
 option java_multiple_files = true;
 
+import "agent.proto";
+
 // The hub's own request/response protocol.
 //
 // The hub is a stable, long-lived local server (run0 today, agents later). Its
@@ -23,16 +25,9 @@ message HubRequest {
     HereRequest here = 9;
     GetAiConfigRequest get_ai_config = 10;
     HelloRequest hello = 11;
-    ReadFileRequest read_file = 12;
-    WriteFileRequest write_file = 13;
-    GlobRequest glob = 14;
     SetAiSelectionRequest set_ai_selection = 15;
     WaitExecRequest wait_exec = 16;
     CloseExecRequest close_exec = 17;
-    ListDirectoryRequest list_directory = 18;
-    CopyFileRequest copy_file = 19;
-    ChatRequest chat = 20;
-    CancelChatRequest cancel_chat = 21;
     GetHistoryRequest get_history = 22;
     SetHistoryRequest set_history = 23;
     GetModelsRequest get_models = 24;
@@ -44,6 +39,13 @@ message HubRequest {
     SetActiveSessionRequest set_active_session = 30;
     DeleteSessionRequest delete_session = 31;
     SubscribeSessionEventsRequest subscribe_session_events = 32;
+    fileagent.AgentAttachRequest agent_attach = 33;
+    fileagent.AgentPromptRequest agent_prompt = 34;
+    fileagent.AgentCancelRequest agent_cancel = 35;
+    fileagent.AgentApprovalReply agent_approval = 36;
+    fileagent.AgentMcpResult agent_mcp_result = 37;
+    fileagent.AgentMcpTools agent_mcp_tools = 38;
+    fileagent.AgentCompactRequest agent_compact = 39;
   }
 }
 
@@ -57,12 +59,6 @@ message HubResponse {
     WaitResponse wait = 6;
     AiConfigResponse ai_config = 7;
     CallerRoot caller_root = 8;
-    ReadFileResponse read_file = 9;
-    WriteFileResponse write_file = 10;
-    GlobResponse glob = 11;
-    ListDirectoryResponse list_directory = 12;
-    CopyFileResponse copy_file = 13;
-    ChatEvent chat = 14;
     HistoryResponse history = 15;
     ModelsResponse models = 16;
     CapabilitiesResponse capabilities = 17;
@@ -70,6 +66,8 @@ message HubResponse {
     SessionsResponse sessions = 19;
     ActiveSessionResponse active_session = 20;
     SessionTitle session_title = 21;
+    fileagent.AgentAttachResponse agent_attach = 22;
+    fileagent.AgentEvent agent_event = 23;
   }
 }
 

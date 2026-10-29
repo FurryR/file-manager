@@ -5,6 +5,7 @@ pub enum PopupKind {
     Models,
     Variants,
     Sessions,
+    Approval(u64),
 }
 
 pub struct Popup {
@@ -31,9 +32,33 @@ pub(super) enum PopupAction {
     Help,
     Exit,
     NewSession,
+    Allow,
+    Deny,
 }
 
 impl Popup {
+    pub(super) fn approval(id: u64, name: &str, reason: &str) -> Self {
+        Self {
+            title: "Approve tool call",
+            kind: PopupKind::Approval(id),
+            items: vec![
+                PopupItem {
+                    label: "Allow".to_owned(),
+                    hint: reason.to_owned(),
+                    action: Some(PopupAction::Allow),
+                    session: None,
+                },
+                PopupItem {
+                    label: "Deny".to_owned(),
+                    hint: format!("Skip {name}"),
+                    action: Some(PopupAction::Deny),
+                    session: None,
+                },
+            ],
+            selected: 0,
+        }
+    }
+
     pub(super) fn commands() -> Self {
         Self {
             title: "Commands",

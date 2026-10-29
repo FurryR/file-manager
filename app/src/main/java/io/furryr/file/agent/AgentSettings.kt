@@ -5,11 +5,6 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import io.furryr.file.R
-import io.furryr.file.daemon.HubActions
-import io.furryr.file.daemon.HubAiConfig
-import io.furryr.file.daemon.HubMcpServer
-import io.furryr.file.daemon.HubSessionInfo
-import io.furryr.file.hub.HubEvents
 import java.net.URI
 import java.security.KeyStore
 import java.util.UUID
@@ -63,12 +58,12 @@ object AgentSettings {
 
     fun install(context: Context) {
         val appContext = context.applicationContext
-        HubActions.aiConfigProvider = {
+        AgentEnvironment.aiConfigProvider = {
             val provider = activeProvider(appContext)
             check(provider != null && validEndpoint(provider.baseUrl)) {
                 appContext.getString(R.string.agent_config_required)
             }
-            HubAiConfig(
+            AgentAiConfig(
                 baseUrl = provider.baseUrl,
                 apiKey = provider.apiKey,
                 model = lastModel(appContext),
@@ -77,17 +72,17 @@ object AgentSettings {
                 titleModel = titleModel(appContext),
             )
         }
-        HubActions.aiSelectionSaver = { model, effort ->
+        AgentEnvironment.aiSelectionSaver = { model, effort ->
             saveSelection(appContext, model, effort)
         }
-        HubActions.sessionLoad = { sessionId -> loadSession(appContext, sessionId) }
-        HubActions.sessionSave = { sessionId, messages ->
+        AgentEnvironment.sessionLoad = { sessionId -> loadSession(appContext, sessionId) }
+        AgentEnvironment.sessionSave = { sessionId, messages ->
             saveSession(appContext, sessionId, messages)
         }
-        HubActions.sessionTitle = { sessionId -> sessionTitle(appContext, sessionId) }
-        HubActions.globalMcpServers = {
+        AgentEnvironment.sessionTitle = { sessionId -> sessionTitle(appContext, sessionId) }
+        AgentEnvironment.globalMcpServers = {
             mcpServers(appContext).map { server ->
-                HubMcpServer(
+                AgentMcpServer(
                     name = server.name,
                     url = server.url,
                     headers = server.headers,
@@ -96,10 +91,10 @@ object AgentSettings {
                 )
             }
         }
-        HubActions.workspaceMcpEnabled = { workspaceMcpEnabled(appContext) }
-        HubActions.sessionList = {
+        AgentEnvironment.workspaceMcpEnabled = { workspaceMcpEnabled(appContext) }
+        AgentEnvironment.sessionList = {
             sessions(appContext).map { session ->
-                HubSessionInfo(
+                AgentSessionInfo(
                     id = session.id,
                     title = session.title,
                     updatedAt = session.updatedAt,
@@ -107,15 +102,15 @@ object AgentSettings {
                 )
             }
         }
-        HubActions.sessionDelete = { sessionId -> deleteSession(appContext, sessionId) }
-        HubActions.sessionRename = { sessionId, title ->
+        AgentEnvironment.sessionDelete = { sessionId -> deleteSession(appContext, sessionId) }
+        AgentEnvironment.sessionRename = { sessionId, title ->
             renameSession(appContext, sessionId, title)
         }
-        HubActions.sessionAutoTitle = { sessionId, title ->
+        AgentEnvironment.sessionAutoTitle = { sessionId, title ->
             autoTitleSession(appContext, sessionId, title)
         }
-        HubActions.activeSession = { terminal -> activeSession(appContext, terminal) }
-        HubActions.activeSessionSave = { terminal, sessionId ->
+        AgentEnvironment.activeSession = { terminal -> activeSession(appContext, terminal) }
+        AgentEnvironment.activeSessionSave = { terminal, sessionId ->
             setActiveSession(appContext, terminal, sessionId)
         }
     }
@@ -276,7 +271,7 @@ object AgentSettings {
             file.parentFile?.mkdirs()
             file.writeText(wrapper.toString())
             if (existing == null) {
-                HubEvents.publishTitle(id, title)
+                AgentEvents.publishTitle(id, title)
             }
             title
         }.getOrNull()
@@ -315,11 +310,11 @@ object AgentSettings {
             val file = sessionFile(context, sessionId)
             val session = readSessionFile(file) ?: return@runCatching null
             if (session.titleGenerated) {
-                HubEvents.publishTitle(sessionId, session.title)
+                AgentEvents.publishTitle(sessionId, session.title)
                 return@runCatching session.title
             }
             val trimmed = title.trim().take(60).ifBlank {
-                HubEvents.publishTitle(sessionId, session.title)
+                AgentEvents.publishTitle(sessionId, session.title)
                 return@runCatching session.title
             }
             file.writeText(
@@ -331,7 +326,7 @@ object AgentSettings {
                     .put("messages", session.messages)
                     .toString(),
             )
-            HubEvents.publishTitle(sessionId, trimmed)
+            AgentEvents.publishTitle(sessionId, trimmed)
             trimmed
         }.getOrNull()
 
@@ -350,7 +345,7 @@ object AgentSettings {
                     .put("messages", session.messages)
                     .toString(),
             )
-            HubEvents.publishTitle(sessionId, trimmed)
+            AgentEvents.publishTitle(sessionId, trimmed)
         }
     }
 

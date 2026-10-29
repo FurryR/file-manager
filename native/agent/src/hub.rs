@@ -2,37 +2,28 @@ use std::collections::HashMap;
 use std::io;
 use std::os::fd::OwnedFd;
 
+use hub_client::fileagent::{self, agent_event, AgentApprovalReply, AgentAttachRequest,
+    AgentMcpResult, AgentMcpTools, AgentPromptRequest};
 use hub_client::filehub::{
-    self, chat_event, hub_request::Op, hub_response, ChatRequest, CloseExecRequest,
-    CopyFileRequest, ExecRequest, GetAiConfigRequest, GetCapabilitiesRequest, GetHistoryRequest,
-    GetModelsRequest, GlobRequest, HubRequest, ListDirectoryRequest, ListSessionsRequest,
-    ListTargetsRequest, ReadFileRequest, RemoteMcpCall, SetActiveSessionRequest,
-    SetAiSelectionRequest, SetHistoryRequest, SubscribeSessionEventsRequest, WaitExecRequest,
-    WriteFileRequest,
+    self, hub_request::Op, hub_response, GetAiConfigRequest, GetCapabilitiesRequest,
+    GetHistoryRequest, GetModelsRequest, HubRequest, ListSessionsRequest, RemoteMcpCall,
+    SetActiveSessionRequest, SetAiSelectionRequest, SetHistoryRequest,
+    SubscribeSessionEventsRequest,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use std::sync::Arc;
 
-use crate::model::{AgentEvent, Message, ToolCall, Usage};
+use crate::mcp::McpManager;
+use crate::model::{AgentEvent, Message, Usage};
 use crate::model_info::ModelCatalog;
 
-/// User-facing target name. The `container-` prefix is an internal transport
-/// id and must not leak into the agent UI or model-visible tool output.
-pub fn display_target(name: &str) -> &str {
-    name.strip_prefix("container-").unwrap_or(name)
-}
 
 /// A control connection to the file-manager hub, with the caller's container.
 pub struct Hub {
     connection: hub_client::Connection,
     next_id: u32,
     pub caller: String,
-}
-
-pub struct ExecStream {
-    pub stdout: OwnedFd,
-    pub stderr: OwnedFd,
-    pub exec_id: u64,
 }
 
 /// Server-pushed session titles on a dedicated hub connection.
@@ -51,16 +42,6 @@ impl Drop for TitleStream {
     fn drop(&mut self) {
         self.task.abort();
     }
-}
-
-#[derive(Clone)]
-pub struct Target {
-    pub name: String,
-    pub running: bool,
-    pub elevated: bool,
-    pub kind: String,
-    pub label: String,
-    pub root: String,
 }
 
 #[derive(Clone)]
@@ -210,194 +191,66 @@ impl Hub {
         Ok(())
     }
 
-    pub async fn targets(&mut self) -> Result<Vec<Target>, String> {
-        let response = self.request(Op::ListTargets(ListTargetsRequest {})).await?;
-        match response.result {
-            Some(hub_response::Result::Targets(targets)) => Ok(targets
-                .targets
-                .into_iter()
-                .map(|target| Target {
-                    name: target.name,
-                    running: target.running,
-                    elevated: target.elevated,
-                    kind: target.kind,
-                    label: target.label,
-                    root: target.root,
-                })
-                .collect()),
-            _ => Err("hub returned no target list".to_owned()),
-        }
-    }
-
-    pub async fn read(
+    /// Attach this connection to a Kotlin agent session.
+    pub async fn agent_attach(
         &mut self,
-        path: &str,
-        offset: u64,
-        length: u32,
-    ) -> Result<filehub::ReadFileResponse, String> {
-        let response = self
-            .request(Op::ReadFile(ReadFileRequest {
-                path: path.to_owned(),
-                offset,
-                length,
-            }))
-            .await?;
-        match response.result {
-            Some(hub_response::Result::ReadFile(read)) => Ok(read),
-            _ => Err("hub returned no read result".to_owned()),
-        }
-    }
-
-    pub async fn list_directory(
-        &mut self,
-        path: &str,
-    ) -> Result<filehub::ListDirectoryResponse, String> {
-        let response = self
-            .request(Op::ListDirectory(ListDirectoryRequest {
-                path: path.to_owned(),
-            }))
-            .await?;
-        match response.result {
-            Some(hub_response::Result::ListDirectory(list)) => Ok(list),
-            _ => Err("hub returned no directory result".to_owned()),
-        }
-    }
-
-    pub async fn write(&mut self, path: &str, data: Vec<u8>) -> Result<u64, String> {
-        let response = self
-            .request(Op::WriteFile(WriteFileRequest {
-                path: path.to_owned(),
-                data,
-            }))
-            .await?;
-        match response.result {
-            Some(hub_response::Result::WriteFile(write)) => Ok(write.bytes_written),
-            _ => Err("hub returned no write result".to_owned()),
-        }
-    }
-
-    pub async fn copy(&mut self, from: &str, to: &str) -> Result<u64, String> {
-        let response = self
-            .request(Op::CopyFile(CopyFileRequest {
-                from: from.to_owned(),
-                to: to.to_owned(),
-            }))
-            .await?;
-        match response.result {
-            Some(hub_response::Result::CopyFile(copy)) => Ok(copy.bytes_copied),
-            _ => Err("hub returned no copy result".to_owned()),
-        }
-    }
-
-    pub async fn glob(
-        &mut self,
-        pattern: &str,
-        path: &str,
-        max_results: u32,
-    ) -> Result<filehub::GlobResponse, String> {
-        let response = self
-            .request(Op::Glob(GlobRequest {
-                pattern: pattern.to_owned(),
-                path: path.to_owned(),
-                max_results,
-            }))
-            .await?;
-        match response.result {
-            Some(hub_response::Result::Glob(glob)) => Ok(glob),
-            _ => Err("hub returned no glob result".to_owned()),
-        }
-    }
-
-    pub async fn exec(
-        &mut self,
-        container_id: &str,
-        command: &str,
+        session_id: &str,
+        terminal_id: &str,
         cwd: &str,
-    ) -> Result<ExecStream, String> {
-        let (response, fds) = self
-            .request_with_fds(Op::Exec(ExecRequest {
-                command: "sh".to_owned(),
-                args: vec!["-c".to_owned(), command.to_owned()],
-                env: Default::default(),
+        target: &str,
+        model: &str,
+        effort: &str,
+        workspace_mcp: bool,
+    ) -> Result<fileagent::AgentAttachResponse, String> {
+        let response = self
+            .request(Op::AgentAttach(AgentAttachRequest {
+                session_id: session_id.to_owned(),
+                terminal_id: terminal_id.to_owned(),
                 cwd: cwd.to_owned(),
-                user: None,
-                term: String::new(),
-                rows: 0,
-                cols: 0,
-                nice: None,
-                container_id: container_id.to_owned(),
-                pipes: true,
+                target: target.to_owned(),
+                model: model.to_owned(),
+                effort: effort.to_owned(),
+                workspace_mcp,
             }))
             .await?;
-        let exec_id = match response.result {
-            Some(hub_response::Result::Exec(exec)) => exec.exec_id,
-            _ => return Err("hub returned no exec result".to_owned()),
-        };
-        if fds.len() != 2 {
-            return Err(format!(
-                "hub returned {} exec descriptors, expected stdout and stderr",
-                fds.len()
-            ));
-        }
-        let mut fds = fds.into_iter();
-        Ok(ExecStream {
-            stdout: fds.next().expect("checked two descriptors"),
-            stderr: fds.next().expect("checked two descriptors"),
-            exec_id,
-        })
-    }
-
-    pub async fn wait_exec(&mut self, exec_id: u64) -> Result<i32, String> {
-        let response = self
-            .request(Op::WaitExec(WaitExecRequest { exec_id }))
-            .await?;
         match response.result {
-            Some(hub_response::Result::Wait(wait)) => Ok(wait.exit_code),
-            _ => Err("hub returned no wait result".to_owned()),
+            Some(hub_response::Result::AgentAttach(attach)) => Ok(attach),
+            _ => Err("hub returned no agent attachment".to_owned()),
         }
     }
 
-    pub async fn close_exec(&mut self, exec_id: u64) -> Result<(), String> {
-        self.request(Op::CloseExec(CloseExecRequest { exec_id }))
+    pub async fn agent_set_mcp_tools(&mut self, definitions: &[Value]) -> Result<(), String> {
+        let json = serde_json::to_string(definitions).map_err(|error| error.to_string())?;
+        self.request(Op::AgentMcpTools(AgentMcpTools {
+            definitions_json: json,
+        }))
+        .await?;
+        Ok(())
+    }
+
+    pub async fn agent_cancel(&mut self) -> Result<(), String> {
+        self.request(Op::AgentCancel(fileagent::AgentCancelRequest {}))
             .await?;
         Ok(())
     }
 
-    pub async fn chat(
+    pub async fn agent_compact(
         &mut self,
-        session_id: &str,
         model: &str,
         effort: &str,
-        system: &str,
-        messages: &[Message],
-        tools: &Value,
-        events: &UnboundedSender<AgentEvent>,
-        append: bool,
-        base_count: u32,
-    ) -> Result<Message, String> {
-        let messages_json = serde_json::to_string(messages).map_err(|error| error.to_string())?;
-        let request = ChatRequest {
-            session_id: session_id.to_owned(),
-            model: model.to_owned(),
-            effort: effort.to_owned(),
-            system: system.to_owned(),
-            messages_json,
-            tools_json: tools.to_string(),
-            append,
-            base_count,
-        };
+    ) -> Result<AgentOutcome, String> {
         let id = self.next_request_id();
         self.connection
             .send_request(HubRequest {
                 id,
-                op: Some(Op::Chat(request)),
+                op: Some(Op::AgentCompact(fileagent::AgentCompactRequest {
+                    model: model.to_owned(),
+                    effort: effort.to_owned(),
+                })),
             })
             .await
             .map_err(|error| error.to_string())?;
-
-        let mut content = String::new();
-        let mut reasoning = String::new();
-        let mut calls: Vec<ToolCall> = Vec::new();
+        let mut finished: Option<AgentOutcome> = None;
         let mut error: Option<String> = None;
         loop {
             let (response, _) = self
@@ -407,55 +260,162 @@ impl Hub {
                 .map_err(|error| error.to_string())?;
             if !response.ok {
                 return Err(if response.error.is_empty() {
-                    "hub chat failed".to_owned()
+                    "compact failed".to_owned()
                 } else {
                     response.error
                 });
             }
-            match response.result {
-                Some(hub_response::Result::Chat(event)) => match event.event {
-                    Some(chat_event::Event::ReasoningDelta(text)) => {
-                        reasoning.push_str(&text);
-                        let _ = events.send(AgentEvent::ReasoningDelta(text));
-                    }
-                    Some(chat_event::Event::ContentDelta(text)) => {
-                        content.push_str(&text);
-                        let _ = events.send(AgentEvent::AnswerDelta(text));
-                    }
-                    Some(chat_event::Event::ToolCalling(_)) => {
-                        let _ = events.send(AgentEvent::ToolCalling);
-                    }
-                    Some(chat_event::Event::Usage(usage)) => {
-                        let _ = events.send(AgentEvent::Usage(Usage {
-                            prompt_tokens: usage.prompt_tokens,
-                            completion_tokens: usage.completion_tokens,
-                        }));
-                    }
-                    Some(chat_event::Event::ToolCallsJson(json)) => {
-                        calls = serde_json::from_str(&json)
-                            .map_err(|_| "hub returned invalid tool calls".to_owned())?;
-                    }
-                    Some(chat_event::Event::Error(message)) => error = Some(message),
-                    Some(chat_event::Event::Done(_)) => break,
-                    None => {}
-                },
-                _ => return Err("hub returned no chat result".to_owned()),
+            let Some(hub_response::Result::AgentEvent(event)) = response.result else {
+                return Err("hub returned no compact event".to_owned());
+            };
+            match event.event {
+                Some(agent_event::Event::Finished(done)) => {
+                    let messages = serde_json::from_str::<Vec<Message>>(&done.messages_json)
+                        .unwrap_or_default();
+                    finished = Some(AgentOutcome {
+                        messages,
+                        answer: done.answer,
+                    });
+                }
+                Some(agent_event::Event::Error(message)) => error = Some(message),
+                Some(agent_event::Event::Done(_)) => break,
+                _ => {}
             }
         }
         if let Some(error) = error {
             return Err(error);
         }
-        let message = Message {
-            role: "assistant".to_owned(),
-            content: (!content.is_empty()).then_some(content),
-            reasoning_content: (!reasoning.trim().is_empty()).then_some(reasoning),
-            tool_calls: (!calls.is_empty()).then_some(calls),
-            tool_call_id: None,
-        };
-        if message.content_text().trim().is_empty() && !message.has_tools() {
-            return Err("API returned no assistant message.".to_owned());
+        finished.ok_or_else(|| "compact returned no final history".to_owned())
+    }
+
+    /// Run one prompt through the Kotlin agent loop, streaming UI events.
+    ///
+    /// Local MCP calls arrive as events on this stream; the terminal answers
+    /// them inline. Approval replies arrive on [approvals] and are forwarded to
+    /// the agent while the stream stays open.
+    pub async fn agent_run(
+        &mut self,
+        text: &str,
+        model: &str,
+        effort: &str,
+        mcp: Arc<McpManager>,
+        approvals: &mut UnboundedReceiver<(u64, bool)>,
+        events: &UnboundedSender<AgentEvent>,
+    ) -> Result<AgentOutcome, String> {
+        let id = self.next_request_id();
+        self.connection
+            .send_request(HubRequest {
+                id,
+                op: Some(Op::AgentPrompt(AgentPromptRequest {
+                    text: text.to_owned(),
+                    model: model.to_owned(),
+                    effort: effort.to_owned(),
+                })),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut finished: Option<AgentOutcome> = None;
+        let mut error: Option<String> = None;
+        loop {
+            tokio::select! {
+                incoming = self.connection.receive_response(id) => {
+                    let (response, _) = incoming.map_err(|error| error.to_string())?;
+                    if !response.ok {
+                        return Err(if response.error.is_empty() {
+                            "agent request failed".to_owned()
+                        } else {
+                            response.error
+                        });
+                    }
+                    let Some(hub_response::Result::AgentEvent(event)) = response.result else {
+                        return Err("hub returned no agent event".to_owned());
+                    };
+                    match event.event {
+                        Some(agent_event::Event::ReasoningDelta(text)) => {
+                            let _ = events.send(AgentEvent::ReasoningDelta(text));
+                        }
+                        Some(agent_event::Event::ContentDelta(text)) => {
+                            let _ = events.send(AgentEvent::AnswerDelta(text));
+                        }
+                        Some(agent_event::Event::ToolCalling(_)) => {
+                            let _ = events.send(AgentEvent::ToolCalling);
+                        }
+                        Some(agent_event::Event::ToolCall(call)) => {
+                            let _ = events.send(AgentEvent::ToolCall {
+                                name: call.name,
+                                detail: call.detail,
+                                description: (!call.description.is_empty()).then_some(call.description),
+                                command: (!call.command.is_empty()).then_some(call.command),
+                            });
+                        }
+                        Some(agent_event::Event::ToolWrite(write)) => {
+                            let _ = events.send(AgentEvent::ToolWrite {
+                                path: write.path,
+                                content: write.content,
+                                diff: (!write.diff.is_empty()).then_some(write.diff),
+                            });
+                        }
+                        Some(agent_event::Event::ToolOutput(bytes)) => {
+                            let _ = events.send(AgentEvent::ToolOutput(bytes));
+                        }
+                        Some(agent_event::Event::ToolResultOk(ok)) => {
+                            let _ = events.send(AgentEvent::ToolResult { ok });
+                        }
+                        Some(agent_event::Event::Usage(usage)) => {
+                            let _ = events.send(AgentEvent::Usage(Usage {
+                                prompt_tokens: usage.prompt_tokens,
+                                completion_tokens: usage.completion_tokens,
+                            }));
+                        }
+                        Some(agent_event::Event::Approval(request)) => {
+                            let _ = events.send(AgentEvent::ApprovalRequest {
+                                id: request.approval_id,
+                                name: request.name,
+                                reason: request.reason,
+                            });
+                        }
+                        Some(agent_event::Event::McpCall(call)) => {
+                            let args = serde_json::from_str(&call.arguments)
+                                .unwrap_or(Value::Null);
+                            let result = mcp.call(&call.name, &args).await;
+                            let (ok, content) = match result {
+                                Ok(content) => (true, content),
+                                Err(error) => (false, error),
+                            };
+                            self.request(Op::AgentMcpResult(AgentMcpResult {
+                                request_id: call.request_id,
+                                ok,
+                                content,
+                            }))
+                            .await?;
+                        }
+                        Some(agent_event::Event::Finished(done)) => {
+                            let messages = serde_json::from_str::<Vec<Message>>(&done.messages_json)
+                                .unwrap_or_default();
+                            finished = Some(AgentOutcome {
+                                messages,
+                                answer: done.answer,
+                            });
+                        }
+                        Some(agent_event::Event::Error(message)) => error = Some(message),
+                        Some(agent_event::Event::Done(_)) => break,
+                        None => {}
+                    }
+                }
+                approval = approvals.recv() => {
+                    let Some((approval_id, allow)) = approval else { continue };
+                    self.request(Op::AgentApproval(AgentApprovalReply {
+                        approval_id,
+                        allow,
+                    }))
+                    .await?;
+                }
+            }
         }
-        Ok(message)
+        if let Some(error) = error {
+            return Err(error);
+        }
+        finished.ok_or_else(|| "agent returned no final history".to_owned())
     }
 
     pub async fn load_history(&mut self, session_id: &str) -> Result<(String, String), String> {
@@ -587,6 +547,11 @@ impl Hub {
         }
         id
     }
+}
+
+pub struct AgentOutcome {
+    pub messages: Vec<Message>,
+    pub answer: String,
 }
 
 #[derive(Default)]

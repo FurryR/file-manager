@@ -36,6 +36,7 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "FileManager"
+include(":agent")
 include(":app")
 include(":container")
 include(":core")

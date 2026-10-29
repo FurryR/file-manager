@@ -22,6 +22,7 @@ mod list;
 mod protocol;
 mod pty;
 mod reaper;
+mod shmgate;
 mod socket;
 
 use exec::ExecManager;
@@ -118,6 +119,13 @@ async fn main() -> io::Result<()> {
     if let Some(rootfs) = chroot_rootfs {
         let binds = parse_bind_args();
         container::enter_chroot(&rootfs, &binds)?;
+    }
+
+    // Container shm gate: see `shmgate`. Armed before the first child is
+    // spawned, because every container process must inherit the filter, and it
+    // is a no-op when this daemon already shares the compositor's SELinux domain.
+    if shmgate::install() {
+        eprintln!("[file-daemon] shm gate armed");
     }
 
     let listener = socket::create_abstract_server(&socket_name)?;

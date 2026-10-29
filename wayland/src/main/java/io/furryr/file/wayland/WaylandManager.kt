@@ -44,6 +44,15 @@ import java.util.concurrent.TimeUnit
  * guests find it through `XDG_RUNTIME_DIR` + `WAYLAND_DISPLAY`. The socket
  * and client connections survive closing or recreating the viewer.
  *
+ * A wl_shm pool is an fd the *client* creates, and a memfd inode carries the
+ * creating process's SELinux label. For the usual proot container the client
+ * shares this process's domain, so nothing changes. For a root container (a
+ * chroot backend launched through `su`) the client lives in a different domain
+ * and the compositor's `file:{ read write }` check drops the fd, which surfaces
+ * as `invalid arguments for wl_shm#4.create_pool` and no mmap. The daemon fixes
+ * that from the syscall boundary — it needs to know this domain to decide
+ * whether to arm that gate ([SHM_CONTEXT_ENV]).
+ *
  * GPU modes follow wldroid's model: on Qualcomm devices with an accessible
  * KGSL command device the existing turnip + zink pass-through keeps working
  * (containers render natively and just hand their dma-bufs to the compositor);
@@ -68,6 +77,13 @@ object WaylandManager {
 
     /** Where the guest-side shim libraries appear inside containers. */
     const val CONTAINER_SHIMS_DIR = "/dev/shims"
+
+    /**
+     * Environment variable carrying this process's SELinux context to the
+     * container daemon, which compares it with its own to decide whether shared
+     * memory needs to be redirected into the compositor's domain.
+     */
+    const val SHM_CONTEXT_ENV = "WAYLAND_SHM_CONTEXT"
 
     private const val VTEST_SOCKET_NAME = "vtest.sock"
 
@@ -110,6 +126,11 @@ object WaylandManager {
 
     /** Guest-side shim libraries, bound at [CONTAINER_SHIMS_DIR]. */
     fun shimsDir(context: Context): File = File(context.filesDir, "wldroid-shims")
+
+    /** This process's SELinux context, handed to containers as [SHM_CONTEXT_ENV]. */
+    fun selinuxContext(): String? = runCatching {
+        File("/proc/self/attr/current").readText().trim().trimEnd('\u0000')
+    }.getOrNull()?.takeIf { it.isNotEmpty() }
 
     /**
      * The GPU mode for this device. TURNIP_DIRECT keeps the existing KGSL
@@ -286,6 +307,9 @@ object WaylandManager {
             "WAYLAND_DISPLAY" to SOCKET_NAME,
             "XDG_RUNTIME_DIR" to CONTAINER_RUNTIME_DIR,
         )
+        // Lets the daemon tell whether container clients share this domain; it
+        // arms its shm gate only when they do not. See the class documentation.
+        selinuxContext()?.let { vars[SHM_CONTEXT_ENV] = it }
         when (gpuMode(context)) {
             GpuMode.SOFTWARE -> vars["LIBGL_ALWAYS_SOFTWARE"] = "1"
             GpuMode.VIRGL_GLES -> {

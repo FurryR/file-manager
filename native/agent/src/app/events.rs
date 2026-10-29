@@ -44,13 +44,6 @@ impl App {
 
     pub fn agent_event(&mut self, event: AgentEvent) {
         match event {
-            AgentEvent::StepStart => {
-                self.finish_reasoning();
-                self.finish_tool(None);
-                self.finish_calling(None);
-                self.streaming_index = None;
-                self.answer_streamed = false;
-            }
             AgentEvent::ReasoningDelta(text) => {
                 let index = match self.reasoning_active {
                     Some(index) if index < self.transcript.len() => index,
@@ -149,7 +142,16 @@ impl App {
                 }
             }
             AgentEvent::ToolResult { ok, .. } => {
+                if matches!(
+                    self.popup.as_ref().map(|popup| &popup.kind),
+                    Some(crate::app::popup::PopupKind::Approval(_))
+                ) {
+                    self.popup = None;
+                }
                 self.finish_tool((!ok).then_some("failed"));
+            }
+            AgentEvent::ApprovalRequest { id, name, reason } => {
+                self.open_approval(id, &name, &reason);
             }
             AgentEvent::Usage(usage) => {
                 self.context_tokens = usage.prompt_tokens;

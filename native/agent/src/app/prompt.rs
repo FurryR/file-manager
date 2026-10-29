@@ -97,6 +97,13 @@ impl App {
     /// Start a follow-up run for prompts that arrived after the runner's last
     /// queue drain. The transcript already shows them; only the message
     /// history and pending state change.
+    pub fn queued_prompts(&self) -> Vec<String> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
     pub fn resume_queued(&mut self) -> Option<Vec<Message>> {
         if self.pending.is_some() {
             return None;

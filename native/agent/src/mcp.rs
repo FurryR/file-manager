@@ -9,7 +9,6 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
 use crate::hub::{Capabilities, Hub};
-use crate::tool::ToolInfo;
 
 const MAX_PAGES: usize = 16;
 const MAX_LOCAL_CONFIG_BYTES: usize = 1024 * 1024;
@@ -220,15 +219,7 @@ impl McpManager {
             .collect()
     }
 
-    pub fn info(&self, name: &str, arguments: &Value) -> Option<ToolInfo> {
-        let tool = self.tools.iter().find(|tool| tool.qualified == name)?;
-        let value = arguments.to_string().replace('\n', " ");
-        Some(ToolInfo {
-            detail: truncate(&value, 120),
-            description: Some(tool.description.clone()),
-            command: None,
-        })
-    }
+
 
     pub async fn call(&self, name: &str, arguments: &Value) -> Result<String, String> {
         let tool = self
@@ -576,11 +567,3 @@ fn sanitize(value: &str) -> String {
     output
 }
 
-fn truncate(value: &str, limit: usize) -> String {
-    if value.chars().count() <= limit {
-        return value.to_owned();
-    }
-    let mut result: String = value.chars().take(limit).collect();
-    result.push('…');
-    result
-}

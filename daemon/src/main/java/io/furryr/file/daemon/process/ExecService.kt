@@ -34,6 +34,17 @@ data class CommandSpec(
     val nice: Int? = null,
 )
 
+
+/** A live child with separate stdout/stderr pipes. */
+interface PipeChannel : Closeable {
+    val id: Long
+    val pid: Int
+    val stdout: InputStream
+    val stderr: InputStream
+    suspend fun waitFor(): Result<Int>
+    suspend fun closeProcess()
+}
+
 /**
  * A live child process wired back through a PTY master. The single abstraction
  * shared by the terminal (which owns [fileDescriptor]) and by command
@@ -82,6 +93,20 @@ class ExecService internal constructor(private val resolve: () -> DaemonConnecti
         }
     }
 
+    /** Start a pipe-mode command with separate stdout/stderr streams. */
+    suspend fun spawnPipes(spec: CommandSpec): Result<PipeChannel> = withContext(Dispatchers.IO) {
+        runCatching {
+            val connection = resolve()
+            val stream = connection.spawnExec(
+                command = spec.command,
+                args = spec.args,
+                cwd = spec.cwd,
+                env = spec.env,
+            ).getOrThrow()
+            PipeProcessChannel(connection, stream)
+        }
+    }
+
     /** Run [spec] to completion and buffer its output (non-interactive). */
     suspend fun run(spec: CommandSpec): Result<ExecResult> = withContext(Dispatchers.IO) {
         runCatching {
@@ -113,5 +138,26 @@ private class PtyProcessChannel(
         runCatching { input.close() }
         runCatching { output.close() }
         runCatching { connection.closePty(id) }
+    }
+}
+
+private class PipeProcessChannel(
+    private val connection: DaemonConnection,
+    private val stream: ExecStreamFd,
+) : PipeChannel {
+    override val id: Long = stream.execId
+    override val pid: Int = stream.childPid
+    override val stdout: InputStream = FileInputStream(stream.stdout)
+    override val stderr: InputStream = FileInputStream(stream.stderr)
+
+    override suspend fun waitFor(): Result<Int> = connection.waitExec(id)
+
+    override suspend fun closeProcess() {
+        runCatching { connection.closeExec(id) }
+    }
+
+    override fun close() {
+        runCatching { stdout.close() }
+        runCatching { stderr.close() }
     }
 }

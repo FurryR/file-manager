@@ -47,6 +47,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.Closeable
 import java.io.FileDescriptor
 import java.util.concurrent.ConcurrentHashMap
@@ -373,7 +374,10 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     state.agent?.cancel()
                     state.agentJobs.values.forEach { it.cancel() }
                     state.agentJobs.clear()
-                    state.agent?.cancelAndWait()
+                    // Cancellation normally unwinds at the next suspension. Keep
+                    // the reply bounded even if a request is stuck in a blocking
+                    // read, instead of freezing the agent terminal on Esc.
+                    withTimeoutOrNull(CANCEL_WAIT_MS) { state.agent?.cancelAndWait() }
                     Reply(ok(id))
                 }
 
@@ -757,6 +761,9 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
          * instead of leaking.
          */
         private const val EXEC_WAIT_TIMEOUT_MS = 15 * 60 * 1000L
+
+        /** Upper bound on waiting for an agent run to unwind after cancel. */
+        private const val CANCEL_WAIT_MS = 5_000L
 
         /** Bind [endpoint] and start serving. */
         fun listen(endpoint: UdsEndpoint): HubServer = HubServer(UdsServer.listen(endpoint))

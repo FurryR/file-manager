@@ -3,7 +3,8 @@ package io.furryr.file.agent
 import io.furryr.file.proto.hub.ChatEvent
 import io.furryr.file.proto.hub.TokenUsage
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -74,8 +75,15 @@ object AiService {
                     setRequestProperty("Authorization", "Bearer ${config.apiKey}")
                 }
             }
-            currentCoroutineContext()[Job]?.invokeOnCompletion {
-                runCatching { connection.disconnect() }
+            val cancelWatcher = launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    awaitCancellation()
+                } finally {
+                    // Cancellation must close the socket immediately: readLine()
+                    // on a silent stream would otherwise ignore the cancel until
+                    // the read timeout, hanging Esc/cancel in the agent terminal.
+                    runCatching { connection.disconnect() }
+                }
             }
             try {
                 connection.outputStream.use { it.write(body.toString().toByteArray()) }
@@ -126,6 +134,7 @@ object AiService {
                 emitError(emit, e.message ?: "Could not read the API response.")
                 null
             } finally {
+                cancelWatcher.cancel()
                 runCatching { connection.disconnect() }
             }
         }

@@ -95,6 +95,7 @@ import io.furryr.file.daemon.shellQuote
 import io.furryr.file.agent.TerminalInputState
 import io.furryr.file.agent.TerminalViewComposable
 import io.furryr.file.daemon.DaemonManager
+import io.furryr.file.provider.remote.SshTerminals
 import android.app.Activity
 import android.content.Context
 import android.util.Log
@@ -133,6 +134,18 @@ private fun sanitizedTitle(raw: String?): String? =
 private fun sessionLabel(type: SessionManager.SessionType): String = when (type) {
     is SessionManager.SessionType.Container -> type.containerName
     is SessionManager.SessionType.AppShell -> "Local"
+    is SessionManager.SessionType.Ssh -> type.locationName
+}
+
+private fun terminalPathForTarget(context: Context, path: String, target: String, isDirectory: Boolean): String {
+    if (target.startsWith("ssh://")) {
+        val root = target.trimEnd('/')
+        require(path == root || path.startsWith("$root/")) {
+            "only entries from this SSH connection can be inserted"
+        }
+        return path.removePrefix(root).ifEmpty { "/" }
+    }
+    return ContainerPaths.terminalPath(context, path, target, isDirectory)
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -213,7 +226,7 @@ fun TerminalSheet(
                 scope.launch {
                     try {
                         val path = withContext(Dispatchers.IO) {
-                            ContainerPaths.terminalPath(context, entry.path, target, entry.isDirectory)
+                            terminalPathForTarget(context, entry.path, target, entry.isDirectory)
                         }
                         check(path.none { it.code < 32 || it.code == 127 }) { "path contains terminal control characters" }
                         check(currentDropTab?.session === tab.session && tab.session.isRunning &&
@@ -313,7 +326,12 @@ fun TerminalSheet(
     }
 
     fun resolveSessionType(path: String): Pair<SessionManager.SessionType, String> {
-        return if (path.startsWith("container://")) {
+        return if (path.startsWith("ssh://")) {
+            val inner = path.removePrefix("ssh://")
+            val location = SshTerminals.find(inner.substringBefore('/'))
+            val remotePath = if ('/' in inner) "/" + inner.substringAfter('/').trimStart('/') else "/"
+            SessionManager.SessionType.Ssh(location.id, location.name, remotePath) to location.name
+        } else if (path.startsWith("container://")) {
             val resolved = ContainerUriResolver.resolveContainerUri(path).getOrThrow()
             val name = resolved.containerName
             if (name != null) {

@@ -10,6 +10,8 @@ import io.furryr.file.pulse.PulseManager
 import io.furryr.file.wayland.WaylandManager
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.hub.Hub
+import io.furryr.file.provider.remote.SshTerminals
+import io.furryr.file.util.ProcessHelper
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import kotlinx.coroutines.Dispatchers
@@ -20,10 +22,11 @@ import java.io.Closeable
 /**
  * Singleton managing all active terminal sessions.
  *
- * Supports two session types:
+ * Supports three session types:
  * - [SessionType.AppShell] -- local shell inside Termux's own PTY
  * - [SessionType.Container] -- proot container process run directly as
  *   the PTY shell; no external bridge needed
+ * - [SessionType.Ssh] -- remote shell bridged to the shared SSH connection
  *
  * Thread safety is provided via [synchronized] on [mutex] for all map access.
  *
@@ -76,6 +79,14 @@ object SessionManager {
         data class Container(
             val containerName: String,
             /** Directory to enter once the container login profile runs. */
+            val startPath: String? = null,
+        ) : SessionType()
+
+        /** Interactive shell on a saved SSH remote connection. */
+        data class Ssh(
+            val locationId: String,
+            val locationName: String,
+            /** Remote directory to enter after the shell starts. */
             val startPath: String? = null,
         ) : SessionType()
     }
@@ -140,9 +151,10 @@ object SessionManager {
     /**
      * Create a new terminal session of the given [type].
      *
-     * Both kinds spawn their shell on a daemon -- the app daemon for a local
-     * shell, the container's own daemon for `container://` -- and Termux's
-     * terminal then owns the returned PTY fd directly.
+     * Local and container shells spawn on a daemon -- the app daemon for a
+     * local shell, the container's own daemon for `container://` -- and
+     * Termux's terminal owns the returned PTY fd directly. An SSH session
+     * instead bridges that fd to a shell channel on the shared remote session.
      *
      * @param type    The kind of session to create.
      * @param context Android [Context] (needed for container operations).
@@ -161,6 +173,9 @@ object SessionManager {
 
                     is SessionType.Container ->
                         createContainerTerminal(type.containerName, type.startPath, context, sessionId)
+
+                    is SessionType.Ssh ->
+                        createSshTerminal(type, context, sessionId)
                 }
 
                 val info = SessionInfo(
@@ -207,8 +222,11 @@ object SessionManager {
             removed
         } ?: return@runCatching
 
-        // Terminate the shell process inside the session.
-        if (info.session.getPid() > 0) {
+        // Terminate the shell process inside the session. SSH shells are
+        // bridged in-process, so close that bridge instead of signalling a pid.
+        if (info.type is SessionType.Ssh) {
+            ProcessHelper.closeSshTerminal(info.id)
+        } else if (info.session.getPid() > 0) {
             runCatching { info.session.finishIfRunning() }
         }
 
@@ -286,6 +304,7 @@ object SessionManager {
     fun terminalTarget(sessionId: String): String = synchronized(mutex) {
         terminalTargets[sessionId]?.lastOrNull()?.second ?: when (val type = sessions[sessionId]?.type) {
             is SessionType.Container -> "container-${type.containerName}"
+            is SessionType.Ssh -> "ssh://${type.locationId}"
             else -> "app"
         }
     }
@@ -352,6 +371,40 @@ object SessionManager {
     }
 
     /**
+     * Create the terminal for a saved SSH remote connection.
+     *
+     * [ProcessHelper] owns the in-process bridge between the terminal fd and
+     * the SSH shell channel; the SSH session itself stays shared with file
+     * operations on that connection.
+     */
+    private suspend fun createSshTerminal(
+        type: SessionType.Ssh,
+        context: Context,
+        terminalId: String,
+    ): TerminalSession {
+        // Open the shell before the terminal attaches, so authentication and
+        // channel errors reach createSession instead of the UI thread. The rows
+        // and columns are corrected once Termux reports its real size.
+        val shell = withContext(Dispatchers.IO) {
+            val location = SshTerminals.find(type.locationId)
+            SshTerminals.open(location, type.startPath, 24, 80)
+        }
+        ProcessHelper.prepareSshTerminal(terminalId, shell)
+        return try {
+            createTerminalSession(
+                "ssh://${type.locationId}",
+                context,
+                customCwd = "/",
+                startPath = type.startPath,
+                terminalId = terminalId,
+            )
+        } catch (failure: Exception) {
+            ProcessHelper.discardSshTerminal(terminalId)
+            throw failure
+        }
+    }
+
+    /**
      * Construct a [TerminalSession] with sensible defaults.
      *
      * The shell is spawned on the daemon by [io.furryr.file.util.ProcessHelper]
@@ -372,10 +425,14 @@ object SessionManager {
             if (shell.startsWith("container://")) {
                 PulseManager.environment().forEach { (key, value) -> add("$key=$value") }
                 WaylandManager.environment(context).forEach { (key, value) -> add("$key=$value") }
+                startPath?.let { add("CONTAINER_START_PATH=$it") }
+            }
+            if (shell.startsWith("ssh://")) {
+                add("SSH_TERMINAL_ID=$terminalId")
+                startPath?.let { add("SSH_START_PATH=$it") }
             }
             // HUB_SOCKET is added by ProcessHelper once the target is known.
             add("HUB_TERMINAL=$terminalId")
-            startPath?.let { add("CONTAINER_START_PATH=$it") }
             Hub.binDir?.let { dir ->
                 val pathIndex = indexOfFirst { it.startsWith("PATH=") }
                 if (pathIndex >= 0) {

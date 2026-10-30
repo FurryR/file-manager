@@ -228,12 +228,6 @@ impl Hub {
         Ok(())
     }
 
-    pub async fn agent_cancel(&mut self) -> Result<(), String> {
-        self.request(Op::AgentCancel(fileagent::AgentCancelRequest {}))
-            .await?;
-        Ok(())
-    }
-
     pub async fn agent_compact(
         &mut self,
         model: &str,
@@ -301,6 +295,7 @@ impl Hub {
         mcp: Arc<McpManager>,
         approvals: &mut UnboundedReceiver<(u64, bool)>,
         events: &UnboundedSender<AgentEvent>,
+        cancel: &mut UnboundedReceiver<()>,
     ) -> Result<AgentOutcome, String> {
         let id = self.next_request_id();
         self.connection
@@ -316,8 +311,20 @@ impl Hub {
             .map_err(|error| error.to_string())?;
         let mut finished: Option<AgentOutcome> = None;
         let mut error: Option<String> = None;
+        let mut cancel_open = true;
         loop {
             tokio::select! {
+                biased;
+                signal = cancel.recv(), if cancel_open => {
+                    cancel_open = false;
+                    if signal.is_some() {
+                        // Cancel from inside the run, so the task never aborts
+                        // in the middle of a hub frame and desync the stream.
+                        self.request(Op::AgentCancel(fileagent::AgentCancelRequest {}))
+                            .await?;
+                        return Err("cancelled".to_owned());
+                    }
+                }
                 incoming = self.connection.receive_response(id) => {
                     let (response, _) = incoming.map_err(|error| error.to_string())?;
                     if !response.ok {

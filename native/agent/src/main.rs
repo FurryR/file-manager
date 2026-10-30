@@ -114,6 +114,7 @@ async fn run() -> io::Result<()> {
     );
     let mut state = UiState::default();
     let mut pending: Option<tokio::task::JoinHandle<Result<AgentOutcome, String>>> = None;
+    let mut pending_cancel: Option<tokio::sync::mpsc::UnboundedSender<()>> = None;
     let mut pending_kind = TaskKind::Chat;
     let mut approvals: Option<tokio::sync::mpsc::UnboundedSender<(u64, bool)>> = None;
     let mut events: Option<tokio::sync::mpsc::UnboundedReceiver<AgentEvent>> = None;
@@ -135,12 +136,23 @@ async fn run() -> io::Result<()> {
                     Action::None => {}
                     Action::Quit => break,
                     Action::Cancel => {
+                        // Ask the running task to cancel from inside its own
+                        // stream, then let it finish the cancel round-trip.
+                        // Aborting here can drop a partially read hub frame and
+                        // freeze every later request on that connection.
+                        let has_cancel = pending_cancel.is_some();
+                        if let Some(sender) = pending_cancel.take() {
+                            let _ = sender.send(());
+                        }
                         if let Some(handle) = pending.take() {
-                            handle.abort();
-                            let _ = handle.await;
+                            if has_cancel {
+                                let _ = handle.await;
+                            } else {
+                                handle.abort();
+                                let _ = handle.await;
+                            }
                         }
                         if matches!(pending_kind, TaskKind::Chat) {
-                            let _ = agent_hub.lock().await.agent_cancel().await;
                             tokio::time::sleep(Duration::from_millis(10)).await;
                             if let Ok((history_json, _)) = hub
                                 .lock()
@@ -161,14 +173,16 @@ async fn run() -> io::Result<()> {
                             handle.abort();
                             let _ = handle.await;
                         }
+                        pending_cancel = None;
                         if let Some(text) = last_user(&messages) {
-                            let (handle, receiver, approval) = spawn_agent(
+                            let (handle, receiver, approval, cancel) = spawn_agent(
                                 &app,
                                 &agent_hub,
                                 Arc::clone(&mcp),
                                 text,
                             );
                             pending = Some(handle);
+                            pending_cancel = Some(cancel);
                             events = Some(receiver);
                             approvals = Some(approval);
                             pending_kind = TaskKind::Chat;
@@ -178,6 +192,7 @@ async fn run() -> io::Result<()> {
                         if let Some(handle) = pending.take() {
                             handle.abort();
                         }
+                        pending_cancel = None;
                         events = None;
                         approvals = None;
                         pending_kind = TaskKind::Compact;
@@ -232,6 +247,7 @@ async fn run() -> io::Result<()> {
                             handle.abort();
                             let _ = handle.await;
                         }
+                        pending_cancel = None;
                         events = None;
                         approvals = None;
                         let (history_json, stored_title) = hub
@@ -275,6 +291,7 @@ async fn run() -> io::Result<()> {
                             handle.abort();
                             let _ = handle.await;
                         }
+                        pending_cancel = None;
                         events = None;
                         approvals = None;
                         let id = new_session_id(&terminal_id);
@@ -319,6 +336,7 @@ async fn run() -> io::Result<()> {
             }
             result = async { pending.as_mut().unwrap().await }, if pending.is_some() => {
                 pending = None;
+                pending_cancel = None;
                 events = None;
                 approvals = None;
                 match (pending_kind, result) {
@@ -359,9 +377,10 @@ async fn run() -> io::Result<()> {
                         Some(queued.join("\n\n"))
                     };
                     if let Some(text) = text {
-                        let (handle, receiver, approval) =
+                        let (handle, receiver, approval, cancel) =
                             spawn_agent(&app, &agent_hub, Arc::clone(&mcp), text);
                         pending = Some(handle);
+                        pending_cancel = Some(cancel);
                         events = Some(receiver);
                         approvals = Some(approval);
                         pending_kind = TaskKind::Chat;
@@ -396,11 +415,16 @@ async fn run() -> io::Result<()> {
         }
     }
 
+    let has_cancel = pending_cancel.is_some();
+    if let Some(sender) = pending_cancel.take() {
+        let _ = sender.send(());
+    }
     if let Some(handle) = pending.take() {
-        handle.abort();
-        let _ = handle.await;
-        if matches!(pending_kind, TaskKind::Chat) {
-            let _ = agent_hub.lock().await.agent_cancel().await;
+        if has_cancel {
+            let _ = handle.await;
+        } else {
+            handle.abort();
+            let _ = handle.await;
         }
     }
     Ok(())
@@ -439,18 +463,28 @@ fn spawn_agent(
     tokio::task::JoinHandle<Result<AgentOutcome, String>>,
     tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
     tokio::sync::mpsc::UnboundedSender<(u64, bool)>,
+    tokio::sync::mpsc::UnboundedSender<()>,
 ) {
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     let (approval_sender, mut approval_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (cancel_sender, mut cancel_receiver) = tokio::sync::mpsc::unbounded_channel();
     let hub = Arc::clone(agent_hub);
     let model = app.model().to_owned();
     let effort = app.effort().to_owned();
     let handle = tokio::spawn(async move {
         let mut hub = hub.lock().await;
-        hub.agent_run(&text, &model, &effort, mcp, &mut approval_receiver, &sender)
-            .await
+        hub.agent_run(
+            &text,
+            &model,
+            &effort,
+            mcp,
+            &mut approval_receiver,
+            &sender,
+            &mut cancel_receiver,
+        )
+        .await
     });
-    (handle, receiver, approval_sender)
+    (handle, receiver, approval_sender, cancel_sender)
 }
 
 fn persist_selection(hub: &Arc<Mutex<Hub>>, model: &str, effort: &str) {

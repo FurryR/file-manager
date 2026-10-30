@@ -1,18 +1,11 @@
 package io.furryr.file.provider.remote
 
-import android.util.Base64
 import com.jcraft.jsch.ChannelExec
-import com.jcraft.jsch.HostKey
-import com.jcraft.jsch.HostKeyRepository
-import com.jcraft.jsch.JSch
-import com.jcraft.jsch.Session
-import com.jcraft.jsch.UserInfo
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
-import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
@@ -21,7 +14,7 @@ class SshHostKeyApprovalRequired(val fingerprint: String, val algorithm: String,
 class SshHostKeyChangedException(val fingerprint: String) :
     IOException("SSH host key changed. Connection blocked; verify the server with its administrator. New fingerprint: $fingerprint")
 
-/** Uses SSH exec channels only. No SFTP subsystem, PTY, or shell output evaluation. */
+/** File operations use SSH exec channels on the shared connection; the interactive shell lives in [SshTerminals]. */
 internal class SshExecBackend(private val location: RemoteLocation) : RemoteBackend {
     override fun list(path: String): List<RemoteEntry> {
         val script = "[ -d ${quote(path)} ] || exit 45\n" +
@@ -122,25 +115,24 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         return output.bytes()
     }
     private fun execute(script: String, input: InputStream? = null, output: OutputStream = Discard) {
-        val session = session()
-        var channel: ChannelExec? = null
         val stderr = BoundedOutput(16 * 1024)
         val activity = AtomicLong(System.nanoTime())
-        try {
-            channel = session.openChannel("exec") as ChannelExec
-            channel.setPty(false)
-            channel.setCommand("sh -c " + quote(script))
-            channel.setInputStream(input?.let { stream -> object : java.io.FilterInputStream(stream) {
+        val channel = SshConnections.get(location).open("exec") { exec: ChannelExec ->
+            exec.setPty(false)
+            exec.setCommand("sh -c " + quote(script))
+            exec.setInputStream(input?.let { stream -> object : java.io.FilterInputStream(stream) {
                 override fun read(bytes: ByteArray, offset: Int, length: Int): Int = super.read(bytes, offset, length).also { activity.set(System.nanoTime()) }
                 override fun read(): Int = super.read().also { activity.set(System.nanoTime()) }
             } }, true)
-            channel.setOutputStream(object : OutputStream() {
+            exec.setOutputStream(object : OutputStream() {
                 override fun write(value: Int) { output.write(value); activity.set(System.nanoTime()) }
                 override fun write(bytes: ByteArray, offset: Int, length: Int) { output.write(bytes, offset, length); activity.set(System.nanoTime()) }
                 override fun flush() { output.flush() }
             }, true)
-            channel.setErrStream(stderr, true)
-            channel.connect(30_000)
+            exec.setErrStream(stderr, true)
+            exec.connect(30_000)
+        }
+        try {
             while (!channel.isClosed) {
                 interrupted()
                 if (System.nanoTime() - activity.get() > 120_000_000_000L) throw IOException("SSH operation timed out")
@@ -155,49 +147,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
                 throw IOException("SSH command failed ($exit)${if (safe.isBlank()) "" else ": $safe"}")
             }
             output.flush()
-        } finally { channel?.disconnect(); session.disconnect() }
-    }
-    private fun session(): Session {
-        val jsch = JSch()
-        val repository = PinnedHostKey(location.hostKey)
-        jsch.setHostKeyRepository(repository)
-        if (location.privateKey.isNotBlank()) {
-            try {
-                jsch.addIdentity("remote-${location.id}", location.privateKey.toByteArray(Charsets.UTF_8), null,
-                    location.passphrase.takeIf { it.isNotEmpty() }?.toByteArray(Charsets.UTF_8))
-            } catch (failure: Exception) { throw IOException("Could not unlock the SSH private key; check its format and passphrase") }
-        }
-        val session = jsch.getSession(location.username, location.host, location.port)
-        session.setConfig("StrictHostKeyChecking", "yes")
-        session.setConfig("PreferredAuthentications", if (location.privateKey.isNotBlank()) "publickey,password" else "password")
-        session.setPassword(location.password)
-        session.timeout = 30_000
-        session.serverAliveInterval = 15_000
-        try { session.connect(30_000); return session }
-        catch (failure: Exception) {
-            session.disconnect()
-            repository.observed?.let { key ->
-                val fingerprint = fingerprint(key)
-                if (location.hostKey.isEmpty()) throw SshHostKeyApprovalRequired(fingerprint, HostKey(location.host, key).type,
-                    Base64.encodeToString(key, Base64.NO_WRAP))
-                if (!MessageDigest.isEqual(key, Base64.decode(location.hostKey, Base64.NO_WRAP))) throw SshHostKeyChangedException(fingerprint)
-            }
-            throw IOException("SSH connection or authentication failed; check the host, port and credentials", failure)
-        }
-    }
-    private class PinnedHostKey(private val saved: String) : HostKeyRepository {
-        var observed: ByteArray? = null
-        override fun check(host: String?, key: ByteArray): Int {
-            observed = key.clone()
-            return if (saved.isEmpty()) HostKeyRepository.NOT_INCLUDED else if (
-                MessageDigest.isEqual(Base64.decode(saved, Base64.NO_WRAP), key)) HostKeyRepository.OK else HostKeyRepository.CHANGED
-        }
-        override fun add(hostkey: HostKey?, ui: UserInfo?) = Unit
-        override fun remove(host: String?, type: String?) = Unit
-        override fun remove(host: String?, type: String?, key: ByteArray?) = Unit
-        override fun getKnownHostsRepositoryID(): String = "file-manager pinned host keys"
-        override fun getHostKey(): Array<HostKey> = emptyArray()
-        override fun getHostKey(host: String?, type: String?): Array<HostKey> = emptyArray()
+        } finally { channel.disconnect() }
     }
     private class BoundedOutput(private val maximum: Int) : OutputStream() {
         private val output = ByteArrayOutputStream()
@@ -261,7 +211,6 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
     }
     companion object {
         private fun quote(value: String): String { require('\u0000' !in value); return "'" + value.replace("'", "'\\''") + "'" }
-        private fun fingerprint(key: ByteArray) = "SHA256:" + Base64.encodeToString(MessageDigest.getInstance("SHA-256").digest(key), Base64.NO_WRAP or Base64.NO_PADDING)
         private val METADATA = """
             for p do
                 v=${'$'}(stat -c '%s %Y' -- "${'$'}p" 2>/dev/null) || v=${'$'}(stat -f '%z %m' "${'$'}p") || exit 70

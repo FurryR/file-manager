@@ -43,7 +43,9 @@ private class RemoteProvider(private val context: Context, private val kind: Rem
         ProviderFeature.CREATE_FILE, ProviderFeature.CREATE_DIR, ProviderFeature.DELETE, ProviderFeature.RENAME, ProviderFeature.STREAM_COPY)
     override fun isAvailable() = true
     override suspend fun connect() = Result.success(Unit)
-    override suspend fun disconnect() = Unit // each operation owns its connection
+    override suspend fun disconnect() {
+        if (kind == RemoteKind.SSH) SshConnections.disconnectAll()
+    }
 
     override suspend fun list(path: String): Result<List<FileEntry>> = io {
         if (path == "/") RemoteLocationStore.all().filter { it.kind == kind }.map {
@@ -67,8 +69,13 @@ private class RemoteProvider(private val context: Context, private val kind: Rem
     }
     override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
         if (path == "/") return DirectoryCapabilities()
-        return io { val (location, remote) = resolve(path); DirectoryCapabilities(canCreate = backend(location).canWrite(remote)) }
-            .getOrDefault(DirectoryCapabilities())
+        return io {
+            val (location, remote) = resolve(path)
+            DirectoryCapabilities(
+                canCreate = backend(location).canWrite(remote),
+                canOpenTerminal = kind == RemoteKind.SSH,
+            )
+        }.getOrDefault(DirectoryCapabilities(canOpenTerminal = kind == RemoteKind.SSH))
     }
     override suspend fun createFile(path: String): Result<Unit> = io {
         val (location, remote) = resolve(path); backend(location).createFile(mutablePath(remote))

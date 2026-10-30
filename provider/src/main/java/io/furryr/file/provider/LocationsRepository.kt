@@ -12,9 +12,11 @@ import io.furryr.file.provider.SAFProvider
 import io.furryr.file.provider.model.SafLocation
 import io.furryr.file.provider.SftpProvider
 import io.furryr.file.provider.model.SftpServer
+import io.furryr.file.provider.remote.RemoteKind
 import io.furryr.file.provider.remote.RemoteLocation
 import io.furryr.file.provider.remote.RemoteLocationStore
 import io.furryr.file.provider.remote.RemoteProviders
+import io.furryr.file.provider.remote.SshConnections
 import io.furryr.file.provider.model.LocalLocation
 
 /**
@@ -189,9 +191,15 @@ object LocationsRepository {
 
     fun insertRemote(location: RemoteLocation) = RemoteLocationStore.put(location)
 
-    fun updateRemote(location: RemoteLocation) = RemoteLocationStore.put(location)
+    fun updateRemote(location: RemoteLocation) {
+        if (location.kind == RemoteKind.SSH) SshConnections.disconnect(location.id)
+        RemoteLocationStore.put(location)
+    }
 
-    fun deleteRemote(id: String) = RemoteLocationStore.remove(id)
+    fun deleteRemote(id: String) {
+        SshConnections.disconnect(id)
+        RemoteLocationStore.remove(id)
+    }
 
     fun reorderRemote(ids: List<String>) = RemoteLocationStore.reorder(ids)
 

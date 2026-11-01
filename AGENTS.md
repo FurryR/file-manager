@@ -65,9 +65,13 @@ file-manager/
 │       ├── PulseNative.kt       # JNI bridge to libpulsehost
 │       ├── AudioOut.kt          # the single AudioTrack (48k stereo float)
 │       └── MicInput.kt          # AudioRecord loop + mic-FGS promotion
-├── wayland/              # :wayland — wldroid compositor wiring + container env
+├── wayland/              # :wayland — compositor lifecycle, input/viewer, container env
 │   └── src/main/java/io/furryr/file/wayland/
-│       └── WaylandManager.kt    # runtime dirs, GPU mode, virgl session, env/binds
+│       ├── WaylandManager.kt    # runtime dirs, density scale, env/binds
+│       ├── WaylandService.kt    # resident host: native start/stop/attach
+│       ├── WaylandView.kt       # SurfaceView + input forwarding
+│       ├── NativeCompositor.kt  # JNI bridge to libwayland_compositor.so
+│       └── XkbData.kt           # installs assets/xkb for libxkbcommon
 ├── native/              # Rust workspace: daemon + hub terminal utilities
 │   ├── src/main.rs      # Accept loop + per-connection state
 │   ├── src/handlers.rs  # Command dispatch (incl. CancelRequest)
@@ -100,15 +104,16 @@ file-manager/
   scheme names with no duplicates.
 - `:container` owns container lifecycle and exposes **one** `ContainerProvider`
   for all containers. It depends on `:core`, `:daemon`, `:pulse` and `:wayland`.
-- `:wayland` wires the embedded wldroid/wlroots compositor into containers:
-  the socket-directory bind + `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` env, GPU-mode
-  detection (KGSL → turnip+zink passthrough; otherwise virgl vtest), the virgl
-  server session, xkb extraction, and handing the app's SELinux context to the
-  daemon (`WAYLAND_SHM_CONTEXT`) so it can gate container shared memory. The
-  compositor AARs come from the prebuilt wldroid maven repo
-  (`scripts/fetch-wldroid.sh` →
-  `third_party/wldroid-maven`, registered first in `settings.gradle.kts`
-  because public mirrors serve bogus metadata for unknown coordinates).
+- `:wayland` hosts the nested compositor and wires it into containers: the
+  Smithay implementation lives in the Rust crate `native/wayland`
+  (`libwayland_compositor.so`), while this module owns its lifecycle, the
+  viewer surface, input forwarding and the socket-directory bind +
+  `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` env. The output scale comes from
+  `densityDpi / 160` (`WaylandManager.displayScale`) and is advertised as
+  `wl_output` scale plus `wp_fractional_scale_v1`. It also hands the app's
+  SELinux context to the daemon (`WAYLAND_SHM_CONTEXT`) so the daemon can gate
+  container shared memory. Keymap data (xkeyboard-config) is installed to
+  `assets/xkb` by `scripts/fetch-xkbdata.sh` and extracted by `XkbData`.
 - `:agent` is the **single agent brain**: system prompt, provider transport,
   tool definitions, tool-call parsing, loop, approval policy and session
   history. It executes built-in tools directly through `:daemon`; the terminal
@@ -140,9 +145,10 @@ file-manager/
 | run0 hub server | `hub/.../HubServer.kt` | Exec/PTY, file tools, streaming AI chat, session history, MCP HTTP proxy |
 | PulseAudio host | `pulse/.../PulseService.kt` | Resident `:pulse` process; one socket, AudioTrack sink, AudioRecord source |
 | PulseAudio build | `native/build-pulse.sh` | PA 17.0, libsndfile and libltdl statically linked into one libpulsehost.so |
-| Wayland viewer | `app/.../ui/screens/WaylandActivity.kt` | Full-screen wldroid/wlroots viewer; in-process, `CompositorSurface`, predictive back |
-| Wayland wiring | `wayland/.../WaylandManager.kt` | socket dir + env for containers, GPU mode, virgl session, xkb extract |
-| wldroid fetch | `scripts/fetch-wldroid.sh` | prebuilt wldroid maven repo (compositor+virgl+shims AARs) → `third_party/wldroid-maven` |
+| Wayland viewer | `app/.../ui/screens/WaylandActivity.kt` | Full-screen viewer; `WaylandView` surface + input, predictive back |
+| Wayland wiring | `wayland/.../WaylandManager.kt` | socket dir + env for containers, density scale, xkb data |
+| Smithay compositor | `native/wayland/src/lib.rs` | run loop, socket, JNI; `state.rs` protocol state, `egl.rs` Android output |
+| xkb data fetch | `scripts/fetch-xkbdata.sh` | xkeyboard-config → `app/src/main/assets/xkb` (gitignored) |
 | Container shm gate | `native/src/shmgate.rs` | seccomp user-notif on `memfd_create` + fd injected from the compositor's domain; no-op when domains match |
 | run0 CLI | `native/run0/src/main.rs` | Rust client: hub protocol + local tty bridge |
 | here CLI | `native/here/src/main.rs` | Open target descriptor + request file-manager navigation |
@@ -226,8 +232,9 @@ file-manager/
 ./gradlew :core:compileKotlin                    # Compile the pure VFS abstraction
 bash native/build-android-aarch64.sh             # Cross-compile Rust daemon
 bash native/build-proot.sh                       # Cross-compile proot binary
-bash scripts/fetch-wldroid.sh                     # Fetch prebuilt wldroid maven repo into third_party/ (required before gradle sync)
 bash native/build-pulse.sh                       # Cross-compile embedded PulseAudio host (libpulsehost.so)
+bash native/build-xkbcommon.sh aarch64           # Cross-compile libxkbcommon (required by the Wayland compositor)
+bash scripts/fetch-xkbdata.sh                    # xkeyboard-config → app/src/main/assets/xkb (required before packaging)
 adb install -r app/build/outputs/apk/debug/*.apk # Install
 ```
 
@@ -257,9 +264,8 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   environment before `login -p -f root`, preserving the normal login/MOTD
   experience; hub command execution launches the passwd shell directly.
 - Native executables are packaged as **`lib*.so` under `jniLibs/`**
-  (`libfiledaemon.so`, `libproot.so` and
-  `libpulsehost.so`; the wldroid AARs contribute `libwldroid-compositor.so`,
-  `libvirgl-test-server.so` and the shim assets) because the Android installer only
+  (`libfiledaemon.so`, `libproot.so`, `libpulsehost.so`,
+  `libwayland_compositor.so` and its `libeglshim.so` soname bridge) because the Android installer only
   auto-extracts `lib/<abi>/lib*.so` to `nativeLibraryDir` (debuggable apps also
   allow other safe filenames). AGP's jniLibs
   pipeline also drops any non-`.so` entry, so the `lib*.so` names are what let
@@ -288,25 +294,63 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   changes — including VPN switches — and every container launch refreshes it
   too; an empty DNS report keeps the last known servers. `/tmp` and `/run`
   stay per-container under `cacheDir/container/<id>/tmp/`.
-- **The Wayland viewer is the wldroid wlroots compositor in-process**
-  (`:wayland` + the `wldroid-ui` `CompositorSurface` inside
-  `WaylandActivity`; toolbox entry in the drawer tools group). It only runs
-  while the viewer activity is alive — it needs the Surface — and wlroots
-  creates `wayland-0` inside `cacheDir/wayland/wayland-runtime/`, whose
-  directory is bound into containers at `/dev/wayland` (same
-  bind-the-directory trick as PulseAudio; guests get
-  `XDG_RUNTIME_DIR=/dev/wayland`, `WAYLAND_DISPLAY=wayland-0`). All
-  containers share the socket; "one desktop at a time" is a usage
-  constraint, extra clients just open more windows on the nested desktop.
-  GPU modes: KGSL devices keep the existing turnip+zink passthrough
-  (nothing added to the container env); otherwise `WaylandManager` starts
-  the vtest `virgl_test_server` and containers get `VTEST_SOCK` plus
-  MESA overrides, with the guest-side shims bound at `/dev/shims`
-  (virgl-mode guests still need their setup — mesa + shim install — inside
-  the container). The wldroid AARs declare minSdk 29 but use nothing newer
-  than API 26; the app manifest overrides them down to 26, and
-  `wldroid-ui`'s transitive `wldroid-proot` is excluded (own container
-  stack).
+- **The Wayland viewer runs the Smithay compositor from `native/wayland`**
+  (`libwayland_compositor.so`, started by the resident `WaylandService`;
+  toolbox entry in the drawer tools group). The compositor creates
+  `wayland-0` inside `cacheDir/wayland/wayland-runtime/`, whose directory is
+  bound into containers at `/dev/wayland` (same bind-the-directory trick as
+  PulseAudio; guests get `XDG_RUNTIME_DIR=/dev/wayland`,
+  `WAYLAND_DISPLAY=wayland-0`). All containers share the socket; "one
+  desktop at a time" is a usage constraint, extra clients just open more
+  windows on the nested desktop. GPU access is the guest's own stack:
+  containers run turnip+zink against the KGSL device nodes and hand dma-bufs
+  to the compositor, so no virgl/vtest/shim variables or binds exist.
+  The output scale is `densityDpi / 160` (`WaylandManager.displayScale`):
+  it sets the `wl_output`/`preferred_buffer_scale` integer fallback and the
+  `wp_fractional_scale_v1` value, and refreshes as one unit, so clients
+  never disagree with the panel. Input arrives from `WaylandView` as raw
+  Android `MotionEvent`/`KeyEvent` payloads; the native keymap turns Android
+  key codes into evdev before they reach the seat. Keymap data
+  (`assets/xkb`, installed by `scripts/fetch-xkbdata.sh`) is extracted once
+  by `XkbData` into `filesDir/xkb` and passed as `XKB_CONFIG_ROOT`.
+  The Android IME drives `zwp_text_input_v3` directly
+  (`native/wayland/src/text_input.rs` — Smithay's own module expects a Wayland
+  input-method client, which does not exist here): `enter`/`leave` follow the
+  keyboard focus, `commit`/`preedit`/`delete` are JNI commands from
+  `NativeCompositor`, and the compositor calls back `onTextInputEnabled` so the
+  viewer summons the keyboard when a client enables a text field. That callback
+  must use a class reference and method ID cached during `nativeStart`: a native
+  thread later attached to the VM has no application class loader, so
+  `FindClass` there fails with `ClassNotFoundException` and kills the process.
+  The Kotlin side posts the callback to the main thread (views may only be
+  touched there). Clients without `zwp_text_input_v3` (foot and most terminals)
+  still get CJK: the IME composes normally, and a commit the terminal cannot
+  express as keycodes is typed through a regenerated keymap that maps
+  `F13`..`F22` to Unicode keysyms (`native/wayland/src/text_input.rs`,
+  `State::send_text_as_keys`). The keymap string comes from the keyboard's own
+  `xkb_keymap_get_as_string`, one `replace key <FKnn> { [ Uxxxx ] };` per
+  character is spliced into its symbols section, and the keycodes are then
+  pressed. Write Unicode keysyms as `U4F60`, never `U+4F60` — XKB's lexer reads
+  `U+` as an operator and rejects the whole keymap, which strands the client on
+  the previous keymap with no error on its side.
+  Smithay's EGL loader `dlopen`s the desktop soname `libEGL.so.1`, which does
+  not exist on Android and panics the compositor thread. `native/wayland`'s
+  build script links `native/egl_shim.c` into `libeglshim.so` with
+  `SONAME libEGL.so.1` and a `DT_NEEDED` on `libEGL.so`; `NativeCompositor`
+  preloads it before the compositor library, so the lookup resolves to the
+  already-loaded shim and `dlsym` reaches the real EGL symbols. Do not remove
+  either the soname flag or the preload order. The compositor also unlinks a
+  stale `wayland-0` before binding — a crashed previous process leaves the
+  socket file behind, and clients then get `ECONNREFUSED`
+  (`failed to connect to wayland`) instead of a clear bind error.
+  Three Smithay integration points are easy to get wrong and each shows up as
+  "connected but nothing draws": `Display::dispatch_clients` must run every
+  loop iteration (the socket is polled by calloop, but client requests are only
+  read there), `Window::on_commit` must be called *after*
+  `on_commit_buffer_handler` in the compositor's `commit` (otherwise the cached
+  window geometry stays 0×0), and the Android EGL window surface needs
+  `Transform::Flipped180` at render time, not on the output's own transform —
+  flipping the output would also mirror pointer coordinates.
 - **The daemon is multi-client** — it serves many concurrent connections, but
   per-connection state (cancellable in-flight requests) is *not* shared, and
   long-lived resources (handles, PTYs) are daemon-global. The daemon exits after

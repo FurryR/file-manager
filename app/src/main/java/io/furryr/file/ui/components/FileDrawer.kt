@@ -15,6 +15,7 @@ import io.furryr.file.DefaultPath
 import io.furryr.file.ui.util.formatSize
 
 import android.content.Intent
+import android.widget.Toast
 
 
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -62,7 +63,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.OutlinedTextField
@@ -91,7 +91,6 @@ import io.furryr.file.provider.LocationsRepository
 import io.furryr.file.provider.remote.RemoteKind
 import io.furryr.file.provider.remote.RemoteLocation
 import io.furryr.file.provider.remote.SshHostKeyApprovalRequired
-import io.furryr.file.provider.remote.SshHostKeyChangedException
 import kotlin.math.abs
 import io.furryr.file.provider.model.SafLocation
 import io.furryr.file.provider.model.LocalLocation
@@ -216,8 +215,6 @@ fun FileDrawer(
     var remoteDeleteTarget by remember { mutableStateOf<String?>(null) }
     var remoteContextMenuTarget by remember { mutableStateOf<String?>(null) }
     var remoteApproval by remember { mutableStateOf<RemoteHostApproval?>(null) }
-    var remoteBusyId by remember { mutableStateOf<String?>(null) }
-    var remoteError by remember { mutableStateOf<String?>(null) }
     var draggedRemoteId by remember { mutableStateOf<String?>(null) }
     var remoteDragOffsetDp by remember { mutableStateOf(0f) }
 
@@ -301,19 +298,15 @@ fun FileDrawer(
     }
 
     fun openRemote(location: RemoteLocation) {
-        if (remoteBusyId != null) return
-        remoteBusyId = location.id
+        // Close the drawer and navigate first; the file list already shows its
+        // delayed spinner when the load is slow, so no drawer-level indicator.
+        onRemoteClick(location)
         scope.launch {
-            val result = LocationsRepository.verifyRemote(location)
-            remoteBusyId = null
-            result.onSuccess {
-                onRemoteClick(location)
-            }.onFailure { failure ->
-                when (failure) {
-                    is SshHostKeyApprovalRequired -> remoteApproval = RemoteHostApproval(location, failure)
-                    is SshHostKeyChangedException -> remoteError =
-                        context.getString(R.string.remote_host_changed, failure.fingerprint)
-                    else -> remoteError = failure.message ?: context.getString(R.string.remote_connect_error)
+            // Connection failures are already rendered by the file list at the
+            // target path; only the host-key prompt still needs a dialog.
+            LocationsRepository.verifyRemote(location).onFailure { failure ->
+                if (failure is SshHostKeyApprovalRequired) {
+                    remoteApproval = RemoteHostApproval(location, failure)
                 }
             }
         }
@@ -610,13 +603,6 @@ fun FileDrawer(
                 )
             }
             if (1 !in collapsedGroups) {
-                if (remoteBusyId != null) {
-                    item {
-                        LinearProgressIndicator(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
-                        )
-                    }
-                }
                 if (displayFtpLocations.isEmpty() && displaySftpLocations.isEmpty() &&
                     displayRemoteLocations.isEmpty()
                 ) {
@@ -1354,7 +1340,11 @@ fun FileDrawer(
                                 runCatching { LocationsRepository.updateRemote(trusted) }
                             }
                             saved.onSuccess { openRemote(trusted) }.onFailure {
-                                remoteError = it.message ?: context.getString(R.string.remote_store_error)
+                                Toast.makeText(
+                                    context,
+                                    it.message ?: context.getString(R.string.remote_store_error),
+                                    Toast.LENGTH_LONG,
+                                ).show()
                             }
                         }
                     },
@@ -1363,19 +1353,6 @@ fun FileDrawer(
             dismissButton = {
                 TextButton(onClick = { remoteApproval = null }) {
                     Text(stringResource(R.string.cancel))
-                }
-            },
-        )
-    }
-
-    remoteError?.let { message ->
-        AlertDialog(
-            onDismissRequest = { remoteError = null },
-            title = { Text(stringResource(R.string.remote_locations)) },
-            text = { Text(message) },
-            confirmButton = {
-                TextButton(onClick = { remoteError = null }) {
-                    Text(stringResource(R.string.confirm))
                 }
             },
         )

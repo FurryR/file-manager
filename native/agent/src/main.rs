@@ -112,6 +112,7 @@ async fn run() -> io::Result<()> {
         Vec::new(),
         String::new(),
     );
+    app.set_yolo(attached.yolo);
     let mut state = UiState::default();
     let mut pending: Option<tokio::task::JoinHandle<Result<AgentOutcome, String>>> = None;
     let mut pending_cancel: Option<tokio::sync::mpsc::UnboundedSender<()>> = None;
@@ -208,6 +209,11 @@ async fn run() -> io::Result<()> {
                             let _ = sender.send((id, allow));
                         }
                     }
+                    Action::Yolo(enabled) => {
+                        if let Err(error) = agent_hub.lock().await.agent_yolo(enabled).await {
+                            app.yolo_failed(enabled, &error);
+                        }
+                    }
                     Action::PersistSelection => {
                         persist_selection(&hub, app.model(), app.effort());
                     }
@@ -229,7 +235,8 @@ async fn run() -> io::Result<()> {
                                 app.effort(),
                                 capabilities.workspace_mcp,
                             )
-                            .await;
+                            .await
+                            .map(|attached| app.set_yolo(attached.yolo));
                         let _ = agent_hub
                             .lock()
                             .await
@@ -260,7 +267,7 @@ async fn run() -> io::Result<()> {
                             serde_json::from_str::<Vec<Message>>(&history_json).unwrap_or_default();
                         // Kotlin agent repairs dangling tool calls when it loads the session.
                         let _ = hub.lock().await.set_active_session(&id).await;
-                        let _ = agent_hub
+                        let attached = agent_hub
                             .lock()
                             .await
                             .agent_attach(
@@ -285,6 +292,7 @@ async fn run() -> io::Result<()> {
                             stored_title
                         };
                         app.switch_session(history, &title);
+                        app.set_yolo(attached.map(|attached| attached.yolo).unwrap_or(false));
                     }
                     Action::NewSession => {
                         if let Some(handle) = pending.take() {
@@ -296,7 +304,7 @@ async fn run() -> io::Result<()> {
                         approvals = None;
                         let id = new_session_id(&terminal_id);
                         let _ = hub.lock().await.set_active_session(&id).await;
-                        let _ = agent_hub
+                        let attached = agent_hub
                             .lock()
                             .await
                             .agent_attach(
@@ -316,6 +324,7 @@ async fn run() -> io::Result<()> {
                             .await;
                         session_id = id;
                         app.switch_session(Vec::new(), "New conversation");
+                        app.set_yolo(attached.map(|attached| attached.yolo).unwrap_or(false));
                     }
                 }
             }

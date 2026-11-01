@@ -12,17 +12,14 @@ import java.io.IOException
 import java.security.MessageDigest
 
 /**
- * One reusable SSH session for a remote location.
+ * One SSH session of a remote location's pooled connection set.
  *
- * File operations open a short-lived channel on the shared [Session]; the
- * terminal keeps its own shell channel on the same session. A dead session is
- * replaced once per open before the caller observes the failure.
+ * Sessions are never used directly: [SshConnections] hands them out as
+ * [SshLease]s, so callers always release them again. A dead session is replaced
+ * once per open before the caller observes the failure.
  */
 internal class SshConnection(private val location: RemoteLocation) {
     private var session: Session? = null
-    private val signature = connectionSignature(location)
-
-    fun matches(other: RemoteLocation): Boolean = connectionSignature(other) == signature
 
     fun acquire(): Session = synchronized(this) {
         session?.takeIf { it.isConnected }?.let { return it }
@@ -134,33 +131,128 @@ internal class SshConnection(private val location: RemoteLocation) {
     }
 
     private companion object {
-        fun connectionSignature(location: RemoteLocation): String = listOf(
-            location.host, location.port.toString(), location.username,
-            location.password, location.privateKey, location.passphrase, location.hostKey,
-        ).joinToString("\u0000")
-
         fun fingerprint(key: ByteArray) = "SHA256:" + Base64.encodeToString(
             MessageDigest.getInstance("SHA-256").digest(key), Base64.NO_WRAP or Base64.NO_PADDING,
         )
     }
 }
 
-/** Shared per-remote-location connections, so files and terminals reuse one SSH session. */
-internal object SshConnections {
-    private val connections = HashMap<String, SshConnection>()
+/** Identity of a connection: editing host, user or credentials retires the pool. */
+private fun connectionSignature(location: RemoteLocation): String = listOf(
+    location.host, location.port.toString(), location.username,
+    location.password, location.privateKey, location.passphrase, location.hostKey,
+).joinToString("\u0000")
 
-    @Synchronized fun get(location: RemoteLocation): SshConnection {
-        connections[location.id]?.takeIf { it.matches(location) }?.let { return it }
-        connections.remove(location.id)?.close()
-        return SshConnection(location).also { connections[location.id] = it }
+/**
+ * A pooled session reserved for one operation.
+ *
+ * Closing recycles the session, or disconnects it when the lease was transient
+ * (terminals). Leases always close through `use` or `try/finally`.
+ */
+internal class SshLease internal constructor(
+    val connection: SshConnection,
+    private val recycle: () -> Unit,
+) : java.io.Closeable {
+    private var closed = false
+
+    override fun close() {
+        if (closed) return
+        closed = true
+        recycle()
+    }
+}
+
+/**
+ * One connection pool per remote location, shared by metadata, transfers and
+ * terminals.
+ *
+ * A JSch [Session] funnels every channel through one socket reader: while a
+ * channel hands data to a consumer that is not draining (a paused preview, a
+ * stalled copy) that reader blocks and the whole session stalls with it. So a
+ * lease marks its session busy, and a new session is dialed whenever every
+ * pooled session is busy. Sessions stay pooled for reuse after release;
+ * terminal sessions are destroyed when the terminal closes.
+ */
+internal object SshConnections {
+    /** Upper bound for recycled sessions; past it leases share the least busy. */
+    private const val MAX_REUSED = 6
+
+    private class Slot(val connection: SshConnection, var transient: Boolean) {
+        var busy = 0
+    }
+
+    private class Entry(val signature: String) {
+        val slots = ArrayList<Slot>()
+    }
+
+    private val entries = HashMap<String, Entry>()
+
+    /** Lease for a file operation; the session stays pooled after [SshLease.close]. */
+    fun open(location: RemoteLocation): SshLease {
+        val entry = entry(location)
+        val slot = synchronized(entry) {
+            val reusable = entry.slots.filter { !it.transient }
+            val chosen = reusable.firstOrNull { it.busy == 0 } ?: run {
+                if (reusable.size < MAX_REUSED) {
+                    Slot(SshConnection(location), transient = false).also { entry.slots.add(it) }
+                } else {
+                    // Every pooled session is busy: share the least loaded one
+                    // instead of blocking; only isolation degrades.
+                    reusable.minByOrNull { it.busy }
+                        ?: Slot(SshConnection(location), transient = false).also { entry.slots.add(it) }
+                }
+            }
+            chosen.busy++
+            chosen
+        }
+        return SshLease(slot.connection) { release(entry, slot) }
+    }
+
+    /**
+     * Lease whose session is destroyed on close; terminals own it until they
+     * exit. An already-warm idle session is reused so a terminal opens without
+     * a fresh handshake, and it is dropped instead of recycled afterwards.
+     */
+    fun terminal(location: RemoteLocation): SshLease {
+        val entry = entry(location)
+        val slot = synchronized(entry) {
+            (entry.slots.firstOrNull { it.busy == 0 }
+                ?: Slot(SshConnection(location), transient = true).also { entry.slots.add(it) })
+                .also {
+                    it.transient = true
+                    it.busy++
+                }
+        }
+        return SshLease(slot.connection) { release(entry, slot) }
     }
 
     @Synchronized fun disconnect(id: String) {
-        connections.remove(id)?.close()
+        entries.remove(id)?.let { closeEntry(it) }
     }
 
     @Synchronized fun disconnectAll() {
-        connections.values.forEach { it.close() }
-        connections.clear()
+        entries.values.forEach { closeEntry(it) }
+        entries.clear()
+    }
+
+    @Synchronized private fun entry(location: RemoteLocation): Entry {
+        val signature = connectionSignature(location)
+        entries[location.id]?.takeIf { it.signature == signature }?.let { return it }
+        entries.remove(location.id)?.let { closeEntry(it) }
+        return Entry(signature).also { entries[location.id] = it }
+    }
+
+    private fun release(entry: Entry, slot: Slot) {
+        if (slot.transient) {
+            synchronized(entry) { entry.slots.remove(slot) }
+            slot.connection.close()
+            return
+        }
+        synchronized(entry) { if (slot.busy > 0) slot.busy-- }
+    }
+
+    private fun closeEntry(entry: Entry) {
+        entry.slots.forEach { it.connection.close() }
+        entry.slots.clear()
     }
 }

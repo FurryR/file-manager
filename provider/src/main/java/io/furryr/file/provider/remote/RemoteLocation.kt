@@ -1,7 +1,9 @@
 package io.furryr.file.provider.remote
 
+import io.furryr.file.core.source.FileSource
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.net.URI
 import java.util.UUID
 
@@ -56,6 +58,17 @@ internal interface RemoteBackend {
     fun rename(path: String, newName: String)
     fun prepareReplacement(original: String, replacement: String) = Unit
     fun canWrite(path: String): Boolean = true
+
+    /** True when reads/writes can stream through live channels instead of staged cache files. */
+    val streams: Boolean get() = false
+
+    /** Sequential reader for [path]; only valid when [streams] is true. */
+    fun openRead(path: String, size: Long): FileSource =
+        throw UnsupportedOperationException("Backend cannot stream reads")
+
+    /** Stream exactly [length] bytes from [source] into [path]; only valid when [streams] is true. */
+    fun uploadStream(path: String, source: InputStream, length: Long): Unit =
+        throw UnsupportedOperationException("Backend cannot stream writes")
 }
 
 internal fun backend(location: RemoteLocation): RemoteBackend = when (location.kind) {

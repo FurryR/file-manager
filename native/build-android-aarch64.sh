@@ -68,6 +68,10 @@ JNI_DIR="$ROOT_DIR/app/src/main/jniLibs/arm64-v8a"
 mkdir -p "$JNI_DIR"
 cp "$NATIVE_DIR/target/aarch64-linux-android/release/file_daemon" \
   "$JNI_DIR/libfiledaemon.so"
+# Smithay-based Wayland compositor. Requires libxkbcommon first:
+#   bash native/build-xkbcommon.sh aarch64
+cp "$NATIVE_DIR/target/aarch64-linux-android/release/libwayland_compositor.so" \
+  "$JNI_DIR/libwayland_compositor.so"
 
 # Java resources bypass JNI filename filtering while preserving original names.
 UTILITY_DIR="$ROOT_DIR/app/src/main/executables/lib/arm64-v8a"

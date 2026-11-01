@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * A `cmd` of the form `container://<name>` spawns the shell on that container's
  * dedicated daemon instead of the app daemon, so the terminal *is* the
  * container's shell (no bridging). An `ssh://<id>` command instead bridges the
- * terminal fd to an SSH shell channel on the reused remote connection.
+ * terminal fd to an SSH shell channel on a session dedicated to that terminal.
  */
 object ProcessHelper {
     private const val TAG = "ProcessHelper"
@@ -247,7 +247,7 @@ object ProcessHelper {
 
         fun start() {
             Thread({
-                copy(socketInput, shell.output)
+                relayInput()
             }, "SshTerminalInput").apply { isDaemon = true }.start()
             Thread({
                 copy(shell.input, socketOutput)
@@ -263,6 +263,21 @@ object ProcessHelper {
             }
             Log.d(TAG, "SSH terminal exited: pid=$pid status=${shell.exitStatus}")
             return shell.exitStatus
+        }
+
+        private fun relayInput() {
+            try {
+                val buffer = ByteArray(32 * 1024)
+                while (true) {
+                    val count = socketInput.read(buffer)
+                    if (count < 0) break
+                    shell.write(buffer, 0, count)
+                }
+            } catch (failure: Exception) {
+                Log.d(TAG, "SSH terminal relay stopped: pid=$pid", failure)
+            } finally {
+                close()
+            }
         }
 
         private fun copy(from: InputStream, to: OutputStream) {

@@ -1,6 +1,7 @@
 package io.furryr.file.agent
 
 import io.furryr.file.daemon.DaemonTarget
+import io.furryr.file.daemon.process.PipeChannel
 import io.furryr.file.proto.agent.AgentApprovalRequest
 import io.furryr.file.proto.agent.AgentEvent
 import io.furryr.file.proto.agent.AgentFinished
@@ -12,12 +13,14 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -34,11 +37,17 @@ class AgentSession(
     var model: String,
     var effort: String,
     private var emit: suspend (AgentEvent) -> Unit,
+    yolo: Boolean = false,
 ) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    /** Independent of [scope] so a detaching session still kills its execs. */
+    private val execKiller = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    @Volatile
+    private var yolo: Boolean = yolo
     private val runLock = Mutex()
     private val pendingMcp = ConcurrentHashMap<Long, CompletableDeferred<ToolResult>>()
     private val pendingApproval = ConcurrentHashMap<Long, CompletableDeferred<Boolean>>()
+    private val liveExecs = ConcurrentHashMap.newKeySet<PipeChannel>()
     private val nextMcp = AtomicLong(1)
     private val nextApproval = AtomicLong(1)
     private var messages = JSONArray()
@@ -142,11 +151,27 @@ class AgentSession(
     }.trimEnd()
 
     fun cancel() {
+        killLiveExecs()
         job?.cancel()
         pendingApproval.values.forEach { it.complete(false) }
         pendingApproval.clear()
         pendingMcp.values.forEach { it.complete(ToolResult(false, "agent cancelled")) }
         pendingMcp.clear()
+    }
+
+    /**
+     * Kill every running exec immediately. The close request runs outside the
+     * cancelled job so it still reaches the daemon; waiting for the run loop to
+     * unwind would leave the process group alive during that wait.
+     */
+    private fun killLiveExecs() {
+        for (channel in liveExecs) {
+            runCatching { channel.close() }
+            execKiller.launch {
+                withContext(NonCancellable) { runCatching { channel.closeProcess() } }
+            }
+        }
+        liveExecs.clear()
     }
 
     suspend fun cancelAndWait() {
@@ -161,6 +186,17 @@ class AgentSession(
 
     fun resolveApproval(approvalId: Long, allow: Boolean) {
         pendingApproval.remove(approvalId)?.complete(allow)
+    }
+
+    /**
+     * Full auto-approval for this session. Enabling it also releases prompts
+     * that are already waiting, so the model never stalls on an old dialog.
+     */
+    fun setYolo(enabled: Boolean) {
+        yolo = enabled
+        if (!enabled) return
+        pendingApproval.values.forEach { it.complete(true) }
+        pendingApproval.clear()
     }
 
     private suspend fun run(prompt: String) {
@@ -261,7 +297,7 @@ class AgentSession(
         val isBuiltin = name in BUILTINS
         val args = runCatching { JSONObject(arguments.ifBlank { "{}" }) }.getOrNull() ?: JSONObject()
         if (isBuiltin) {
-            val reason = AgentPolicy.approvalReason(name, args, cwd)
+            val reason = if (yolo) null else AgentPolicy.approvalReason(name, args, cwd)
             if (reason != null) {
                 val allowed = requestApproval(callId, name, reason)
                 if (!allowed) {
@@ -271,7 +307,15 @@ class AgentSession(
             return AgentTools.execute(
                 name,
                 arguments,
-                ToolContext(target, targetName, cwd, terminalId, emit),
+                ToolContext(
+                    target = target,
+                    targetName = targetName,
+                    cwd = cwd,
+                    terminalId = terminalId,
+                    emit = emit,
+                    onExecStart = liveExecs::add,
+                    onExecEnd = liveExecs::remove,
+                ),
             )
         }
         val result = callMcp(name, arguments)
@@ -404,6 +448,7 @@ class AgentSession(
     }
 
     fun dispose() {
+        killLiveExecs()
         job?.cancel()
         scope.cancel()
         pendingMcp.values.forEach { it.complete(ToolResult(false, "agent detached")) }

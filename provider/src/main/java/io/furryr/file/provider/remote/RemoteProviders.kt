@@ -11,6 +11,9 @@ import io.furryr.file.core.DirectoryCapabilities
 import io.furryr.file.core.FileProvider
 import io.furryr.file.core.ProviderFeature
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -18,6 +21,8 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.runInterruptible
 import java.io.File
 import java.io.FileNotFoundException
+import java.io.InputStream
+import java.util.concurrent.atomic.AtomicLong
 
 object RemoteProviders {
     fun install(context: Context) {
@@ -75,7 +80,7 @@ private class RemoteProvider(private val context: Context, private val kind: Rem
                 canCreate = backend(location).canWrite(remote),
                 canOpenTerminal = kind == RemoteKind.SSH,
             )
-        }.getOrDefault(DirectoryCapabilities(canOpenTerminal = kind == RemoteKind.SSH))
+        }.getOrElse { DirectoryCapabilities() }
     }
     override suspend fun createFile(path: String): Result<Unit> = io {
         val (location, remote) = resolve(path); backend(location).createFile(mutablePath(remote))
@@ -98,16 +103,30 @@ private class RemoteProvider(private val context: Context, private val kind: Rem
     override suspend fun open(path: String, mode: OpenMode): Result<FileSource> = io {
         val (location, remote) = resolve(path)
         val client = backend(location)
+        val display = "${kind.scheme}://${location.id}$remote"
+        if (mode == OpenMode.WRITE) {
+            val file = newCache()
+            return@io try {
+                mutablePath(remote)
+                SeekableCacheFileSource(file, mode, display,
+                    commit = { staged -> client.upload(remote, staged) })
+            } catch (failure: Throwable) {
+                file.delete()
+                throw failure
+            }
+        }
+        val info = client.stat(remote) ?: throw FileNotFoundException("Remote file does not exist")
+        require(!info.isDirectory) { "Cannot open a directory as a file" }
+        // Remote reads stream straight off the wire; nothing is staged first.
+        if (client.streams) return@io client.openRead(remote, info.size)
         val file = newCache()
         try {
-            if (mode != OpenMode.WRITE) {
-                val info = client.stat(remote) ?: throw FileNotFoundException("Remote file does not exist")
-                require(!info.isDirectory) { "Cannot open a directory as a file" }
-                client.download(remote, file)
-            } else mutablePath(remote)
-            SeekableCacheFileSource(file, mode, "${kind.scheme}://${location.id}$remote",
-                commit = if (mode == OpenMode.READ) null else ({ staged -> client.upload(remote, staged) }))
-        } catch (failure: Throwable) { file.delete(); throw failure }
+            client.download(remote, file)
+            SeekableCacheFileSource(file, mode, display, commit = null)
+        } catch (failure: Throwable) {
+            file.delete()
+            throw failure
+        }
     }
     override fun copy(from: String, to: String, isCopy: Boolean): Flow<CopyProgress> = flow {
         require(from != to) { "Source and destination are the same file" }
@@ -118,6 +137,31 @@ private class RemoteProvider(private val context: Context, private val kind: Rem
     override fun copy(src: FileSource, destPath: String, isCopy: Boolean): Flow<CopyProgress> = flow {
         val (location, remote) = resolve(destPath)
         mutablePath(remote)
+        val client = backend(location)
+        val total = src.size
+        if (client.streams && src.readable && total > 0) {
+            // Read and write at the same time: progress tracks the live wire,
+            // not a local staging copy that finishes before the upload starts.
+            val counter = AtomicLong(0)
+            val input = CountingInputStream(SourceInputStream(src), counter)
+            coroutineScope {
+                val upload = async(Dispatchers.IO) {
+                    runInterruptible { client.uploadStream(remote, input, total) }
+                }
+                try {
+                    while (!upload.isCompleted) {
+                        emit(CopyProgress(total, minOf(counter.get(), total), remote, false, isCopy))
+                        delay(200)
+                    }
+                    upload.await()
+                } catch (failure: Throwable) {
+                    upload.cancel()
+                    throw failure
+                }
+            }
+            emit(CopyProgress(total, total, remote, true, isCopy))
+            return@flow
+        }
         val staged = newCache()
         try {
             var offset = 0L
@@ -132,7 +176,7 @@ private class RemoteProvider(private val context: Context, private val kind: Rem
                 }
             }
             interrupted()
-            backend(location).upload(remote, staged)
+            client.upload(remote, staged)
             emit(CopyProgress(offset, offset, remote, true, isCopy))
         } finally { staged.delete() }
     }.flowOn(Dispatchers.IO)
@@ -147,4 +191,50 @@ private class RemoteProvider(private val context: Context, private val kind: Rem
         return location to normalizeRemotePath(if ('/' in inner) "/" + inner.substringAfter('/') else "/")
     }
     private suspend fun <T> io(block: () -> T): Result<T> = runInterruptible(Dispatchers.IO) { runCatching(block) }
+}
+
+/** Sequential [InputStream] adapter over a positional [FileSource]. */
+private class SourceInputStream(private val source: FileSource) : InputStream() {
+    private var offset = 0L
+    private var buffer = ByteArray(0)
+    private var position = 0
+    private var eof = false
+
+    override fun read(): Int {
+        val single = ByteArray(1)
+        return if (read(single, 0, 1) < 0) -1 else single[0].toInt() and 0xFF
+    }
+
+    override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
+        if (length == 0) return 0
+        if (position >= buffer.size) {
+            if (eof) return -1
+            buffer = source.readChunk(this.offset, CHUNK)
+            position = 0
+            if (buffer.isEmpty()) {
+                eof = true
+                return -1
+            }
+        }
+        val count = minOf(length, buffer.size - position)
+        System.arraycopy(buffer, position, bytes, offset, count)
+        position += count
+        this.offset += count
+        return count
+    }
+
+    private companion object {
+        const val CHUNK = 256 * 1024
+    }
+}
+
+/** Reports how many bytes the remote side has pulled while an upload runs. */
+private class CountingInputStream(
+    private val input: InputStream,
+    private val counter: AtomicLong,
+) : InputStream() {
+    override fun read(): Int = input.read().also { if (it >= 0) counter.incrementAndGet() }
+    override fun read(bytes: ByteArray, offset: Int, length: Int): Int =
+        input.read(bytes, offset, length).also { if (it > 0) counter.addAndGet(it.toLong()) }
+    override fun close() = input.close()
 }

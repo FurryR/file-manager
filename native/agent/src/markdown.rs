@@ -303,7 +303,7 @@ fn render_write(
     exec_marked(
         output,
         width,
-        "✎ ",
+        "← Edit ",
         &write.path,
         path_style,
         if write.failed {

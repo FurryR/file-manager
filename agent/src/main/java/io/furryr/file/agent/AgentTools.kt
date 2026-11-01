@@ -4,6 +4,7 @@ import io.furryr.file.core.model.FileEntry
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.daemon.process.CommandSpec
+import io.furryr.file.daemon.process.PipeChannel
 import io.furryr.file.proto.agent.AgentEvent
 import io.furryr.file.proto.agent.AgentToolNotice
 import io.furryr.file.proto.agent.AgentToolWrite
@@ -15,7 +16,10 @@ import io.furryr.file.proto.hub.WriteFileRequest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -47,6 +51,9 @@ internal data class ToolContext(
     val cwd: String,
     val terminalId: String,
     val emit: suspend (AgentEvent) -> Unit,
+    /** Track a live exec so cancellation can kill it before waiting for the run. */
+    val onExecStart: (PipeChannel) -> Unit = {},
+    val onExecEnd: (PipeChannel) -> Unit = {},
 )
 
 internal object AgentTools {
@@ -216,14 +223,22 @@ internal object AgentTools {
         val cwd = args.optString("cwd").takeIf { it.isNotBlank() }
         val requested = args.optString("container_id").takeIf { it.isNotBlank() }
         val target = requested?.let(::daemonTarget) ?: context.target
-        val channel = DaemonManager.execService(target).spawnPipes(
-            CommandSpec(
-                command = "sh",
-                args = listOf("-c", command),
-                cwd = cwd,
-                env = executionEnvironment(target, context.terminalId),
-            ),
-        ).getOrThrow()
+        currentCoroutineContext().ensureActive()
+        // A cancellation that lands after the daemon spawned the child must not
+        // discard the handle: spawn to completion, register it, then unwind so
+        // the finally block can kill the process group.
+        val channel = withContext(NonCancellable) {
+            DaemonManager.execService(target).spawnPipes(
+                CommandSpec(
+                    command = "sh",
+                    args = listOf("-c", command),
+                    cwd = cwd,
+                    env = executionEnvironment(target, context.terminalId),
+                ),
+            ).getOrThrow()
+        }
+        context.onExecStart(channel)
+        currentCoroutineContext().ensureActive()
         val scope = CoroutineScope(Dispatchers.IO + Job())
         var stdout = ByteArrayOutputStream()
         var stderr = ByteArrayOutputStream()
@@ -284,8 +299,13 @@ internal object AgentTools {
             }
             }
         } finally {
+            context.onExecEnd(channel)
+            // The run coroutine is already cancelled here, so the close request
+            // must not inherit that cancellation or the process group survives.
             runCatching { channel.close() }
-            runCatching { channel.closeProcess() }
+            withContext(NonCancellable) {
+                runCatching { channel.closeProcess() }
+            }
             scope.coroutineContext[Job]?.cancel()
         }
     }

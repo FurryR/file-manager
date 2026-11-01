@@ -32,6 +32,7 @@ pub(super) enum PopupAction {
     Help,
     Exit,
     NewSession,
+    Yolo,
     Allow,
     Deny,
 }
@@ -68,6 +69,12 @@ impl Popup {
                     label: "/compact".to_owned(),
                     hint: "Summarize the conversation".to_owned(),
                     action: Some(PopupAction::Compact),
+                    session: None,
+                },
+                PopupItem {
+                    label: "/yolo".to_owned(),
+                    hint: "Auto-approve every tool in this session".to_owned(),
+                    action: Some(PopupAction::Yolo),
                     session: None,
                 },
                 PopupItem {

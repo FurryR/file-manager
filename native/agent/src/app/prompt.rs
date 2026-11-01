@@ -32,6 +32,20 @@ impl App {
         self.bump();
     }
 
+    pub(super) fn toggle_yolo(&mut self) -> Action {
+        self.detach_prompt_browse();
+        self.input.clear();
+        self.yolo = !self.yolo;
+        self.transcript.push(Entry::notice(if self.yolo {
+            "YOLO mode enabled: every tool call in this session is auto-approved."
+        } else {
+            "YOLO mode disabled: approvals are required again."
+        }));
+        self.follow = true;
+        self.bump();
+        Action::Yolo(self.yolo)
+    }
+
     pub(super) fn insert_text(&mut self, value: &str) -> Action {
         self.detach_prompt_browse();
         self.input.insert(value);
@@ -191,6 +205,7 @@ impl App {
                     self.show_help();
                     return Action::None;
                 }
+                "/yolo" => return self.toggle_yolo(),
                 "/clear" | "/undo" | "/redo" | "/sessions" | "/models" | "/variants"
                 | "/compact" => return Action::None,
                 _ => {}
@@ -245,6 +260,7 @@ impl App {
                 self.input.clear();
                 return self.begin_compact().unwrap_or(Action::None);
             }
+            "/yolo" => return self.toggle_yolo(),
             _ => {}
         }
         if self.model.is_empty() {

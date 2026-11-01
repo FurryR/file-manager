@@ -158,7 +158,7 @@ object ProotRunner {
             hubProfileMount(context),
         ) + waylandMounts(context)
 
-    /** Wayland viewer mounts: the socket dir, plus vtest/shims for virgl modes. */
+    /** Wayland viewer mount: the socket directory bound at /dev/wayland. */
     private fun waylandMounts(context: Context): List<BindMount> =
         WaylandManager.bindMounts(context).map { (src, dst) -> BindMount(src, dst) }
 
@@ -219,10 +219,16 @@ object ProotRunner {
     /** Refresh the shared resolv.conf from the active network (launch + link changes). */
     fun refreshResolverFromActive(context: Context) {
         val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
-        val dnsServers = connectivityManager?.activeNetwork
-            ?.let { network -> connectivityManager.getLinkProperties(network)?.dnsServers }
-            .orEmpty()
-        writeResolver(context, dnsServers)
+        val linkProperties = connectivityManager?.activeNetwork
+            ?.let { network -> connectivityManager.getLinkProperties(network) }
+        writeResolver(
+            context,
+            linkProperties?.dnsServers.orEmpty(),
+            linkProperties?.domains
+                ?.split(Regex("\\s+"))
+                ?.filter { it.isNotEmpty() }
+                .orEmpty(),
+        )
     }
 
     private fun resolverMount(context: Context): BindMount {
@@ -230,15 +236,27 @@ object ProotRunner {
         return BindMount(sharedResolverFile(context).absolutePath, "/etc/resolv.conf")
     }
 
-    private fun writeResolver(context: Context, dnsServers: List<InetAddress>) {
+    private fun writeResolver(
+        context: Context,
+        dnsServers: List<InetAddress>,
+        domains: List<String>,
+    ) {
         // A network flap can momentarily report no DNS; keep the last known
         // servers instead of publishing an empty resolver.
         if (dnsServers.isEmpty()) return
-        val content = dnsServers
-            .mapNotNull { address -> address.hostAddress }
-            .map { address -> "nameserver $address" }
-            .distinct()
-            .joinToString(separator = "\n", postfix = "\n")
+        val lines = buildList {
+            dnsServers
+                .mapNotNull { address -> address.hostAddress }
+                .distinct()
+                .forEach { address -> add("nameserver $address") }
+            // MagicDNS and split-DNS VPNs resolve short names through a search
+            // domain. Without it "host" fails while "host.tailnet.ts.net" works.
+            val search = domains
+                .mapNotNull { domain -> domain.trim().takeIf { it.isNotEmpty() } }
+                .distinct()
+            if (search.isNotEmpty()) add("search ${search.joinToString(" ")}")
+        }
+        val content = lines.joinToString(separator = "\n", postfix = "\n")
         val file = sharedResolverFile(context)
         if (file.exists() && runCatching { file.readText() }.getOrNull() == content) return
         file.writeText(content)

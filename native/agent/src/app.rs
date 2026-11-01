@@ -26,7 +26,8 @@ Left/Right/Home/End: move   Up/Down: previous/next line; at first/last line: pro
 PageUp/PageDown, Ctrl/Shift+Up/Down, mouse wheel: scroll   click a Thought header: toggle thinking
 Ctrl+P: commands   /models: switch model   /variants: reasoning effort
 /compact: summarize   /clear: clear   /undo: revert last message   /redo: restore it
-/sessions: switch conversation   /help: shortcuts   /exit: exit
+/yolo: auto-approve every tool in this session   /sessions: switch conversation
+/help: shortcuts   /exit: exit
 
 Configure an AI provider in the app's settings first.";
 
@@ -46,6 +47,7 @@ pub enum Action {
     SelectSession { id: String, title: String },
     NewSession,
     Approval { id: u64, allow: bool },
+    Yolo(bool),
 }
 
 struct Pending {
@@ -99,6 +101,7 @@ pub struct App {
     requests: u64,
     popup: Option<Popup>,
     queue: PromptQueue,
+    yolo: bool,
 }
 
 fn tool_line(name: &str, detail: &str) -> String {
@@ -306,6 +309,7 @@ impl App {
             requests: 0,
             popup: None,
             queue: Default::default(),
+            yolo: false,
         }
     }
 
@@ -332,6 +336,27 @@ impl App {
 
     pub fn effort(&self) -> &str {
         &self.effort
+    }
+
+    pub fn yolo(&self) -> bool {
+        self.yolo
+    }
+
+    /// Adopt the hub's per-session auto-approval state after attach/switch.
+    pub fn set_yolo(&mut self, enabled: bool) {
+        if self.yolo == enabled {
+            return;
+        }
+        self.yolo = enabled;
+        self.bump();
+    }
+
+    pub fn yolo_failed(&mut self, enabled: bool, error: &str) {
+        self.yolo = !enabled;
+        self.transcript
+            .push(Entry::notice(format!("YOLO mode change failed: {error}")));
+        self.follow = true;
+        self.bump();
     }
 
     fn info(&self) -> Option<&ModelInfo> {
@@ -549,6 +574,7 @@ impl App {
                 match popup.kind {
                     PopupKind::Commands => match item.action {
                         Some(PopupAction::Compact) => self.begin_compact().unwrap_or(Action::None),
+                        Some(PopupAction::Yolo) => self.toggle_yolo(),
                         Some(PopupAction::Models) => {
                             self.open_models();
                             Action::None

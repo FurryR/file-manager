@@ -4,7 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
-import android.net.NetworkRequest
+import android.net.NetworkCapabilities
 import android.util.Log
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
@@ -354,25 +354,36 @@ object ContainerManager {
 
     fun startResolverWatch(context: Context) {
         val appContext = context.applicationContext
+        // Also runs on every resume: the process may have missed callbacks, or
+        // a previous instance may have left a stale resolver behind.
+        ProotRunner.refreshResolverFromActive(appContext)
         synchronized(this) {
             if (resolverWatchRegistered) return
             resolverWatchRegistered = true
         }
         val manager = appContext.getSystemService(ConnectivityManager::class.java) ?: return
-        val request = NetworkRequest.Builder().build()
         runCatching {
-            manager.registerNetworkCallback(
-                request,
+            // Default-network callbacks (not a per-network request): a VPN
+            // going up or down replaces the active network, and the physical
+            // network that takes over does not fire a new onAvailable.
+            manager.registerDefaultNetworkCallback(
                 object : ConnectivityManager.NetworkCallback() {
-                    // Re-resolve through the *active* network rather than the
-                    // callback's own link properties: a VPN going up fires this
-                    // for both the VPN and the underlying network, and only
-                    // the active one's DNS is what containers should use.
+                    override fun onAvailable(network: Network) {
+                        ProotRunner.refreshResolverFromActive(appContext)
+                    }
+
+                    override fun onLost(network: Network) {
+                        ProotRunner.refreshResolverFromActive(appContext)
+                    }
+
                     override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
                         ProotRunner.refreshResolverFromActive(appContext)
                     }
 
-                    override fun onAvailable(network: Network) {
+                    override fun onCapabilitiesChanged(
+                        network: Network,
+                        networkCapabilities: NetworkCapabilities,
+                    ) {
                         ProotRunner.refreshResolverFromActive(appContext)
                     }
                 },

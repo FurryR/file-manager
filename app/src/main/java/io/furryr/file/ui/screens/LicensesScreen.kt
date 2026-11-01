@@ -135,18 +135,18 @@ fun LicensesScreen(modifier: Modifier = Modifier) {
                 license = "GNU LGPLv2.1 or later"
             )
             LicenseEntry(
-                name = "WLDroid",
-                url = "https://github.com/Shelnutt2/wldroid",
+                name = "Smithay",
+                url = "https://github.com/Smithay/smithay",
                 license = "MIT License"
             )
             LicenseEntry(
-                name = "wlroots (wldroid fork)",
-                url = "https://github.com/Shelnutt2/wlroots",
+                name = "libxkbcommon",
+                url = "https://github.com/xkbcommon/libxkbcommon",
                 license = "MIT License"
             )
             LicenseEntry(
-                name = "virglrenderer (wldroid fork)",
-                url = "https://github.com/Shelnutt2/virglrenderer",
+                name = "xkeyboard-config",
+                url = "https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config",
                 license = "MIT License"
             )
             LicenseEntry(

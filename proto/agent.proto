@@ -25,12 +25,19 @@ message AgentAttachResponse {
   string session_id = 1;
   string target = 2;
   string cwd = 3;
+  // Whether this session currently auto-approves every tool call.
+  bool yolo = 4;
 }
 
 message AgentPromptRequest {
   string text = 1;
   string model = 2;
   string effort = 3;
+}
+
+message AgentYoloRequest {
+  // Toggle full auto-approval for the attached session.
+  bool enabled = 1;
 }
 
 message AgentCompactRequest {

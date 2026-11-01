@@ -2,40 +2,30 @@ package io.furryr.file.wayland
 
 import android.app.Service
 import android.content.Intent
-import android.graphics.PixelFormat
-import android.media.ImageReader
 import android.os.Binder
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
-import android.system.Os
 import android.util.Log
 import android.view.Surface
-import kotlinx.coroutines.runBlocking
-import nu.shel.wldroid.compositor.CompositorSession
 import java.io.File
 import java.util.concurrent.Executors
-import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 
 /**
- * Resident, in-process compositor host. A temporary offscreen output lets
- * wlroots initialize before any viewer exists. Pausing only detaches that
- * output: the event loop, Wayland socket, globals and clients remain alive.
- * The application-context binding outlives every viewer activity.
+ * Resident compositor host. The Smithay compositor runs its own thread inside
+ * this process; this service only owns its lifecycle and the viewer surface, so
+ * the Wayland socket and every connected client survive closing or recreating
+ * the viewer activity.
  */
 class WaylandService : Service() {
     private val executor = Executors.newSingleThreadExecutor { task ->
         Thread(task, "wayland-control")
     }
-    private lateinit var startup: Future<*>
-    private var bootstrapOutput: ImageReader? = null
-    private var attachedSurface: Surface? = null
-
     @Volatile
-    private var session: CompositorSession? = null
-
-    internal val input get() = session?.input
+    private var failure: String? = null
+    @Volatile
+    private var started = false
+    private var attachedSurface: Surface? = null
+    private var attachedSize = 0 to 0
 
     inner class LocalBinder : Binder() {
         val service get() = this@WaylandService
@@ -43,28 +33,36 @@ class WaylandService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        startup = executor.submit {
+        executor.execute {
             try {
-                runBlocking { WaylandManager.ensurePrepared(applicationContext) }
-                val output = ImageReader.newInstance(1280, 720, PixelFormat.RGBA_8888, 3)
-                bootstrapOutput = output
-                output.setOnImageAvailableListener({ reader ->
-                    reader.acquireLatestImage()?.close()
-                }, Handler(Looper.getMainLooper()))
-                val compositor = CompositorSession(WaylandManager.compositorConfig(this))
-                // Retain even on partial startup failure so onDestroy can stop JNI.
-                session = compositor
-                compositor.start(output.surface)
-                val socket = File(WaylandManager.socketDir(this), WaylandManager.SOCKET_NAME)
-                check(socket.exists()) { "Wayland compositor did not create $socket" }
-                // Chroot clients may use a non-root UID, unlike proot clients.
-                Os.chmod(socket.parent!!, 0x1ed) // 0755; clients cannot replace the socket.
-                Os.chmod(socket.absolutePath, 0x1b6) // 0666
-                compositor.pause()
+                WaylandManager.ensurePrepared(applicationContext)
+                val metrics = resources.displayMetrics
+                // Output geometry must exist before any client connects; the
+                // viewer's real surface size replaces it on attach.
+                val error = NativeCompositor.nativeStart(
+                    WaylandManager.socketDir(applicationContext).absolutePath,
+                    WaylandManager.xkbDir(applicationContext).absolutePath,
+                    metrics.widthPixels,
+                    metrics.heightPixels,
+                    WaylandManager.displayScale(applicationContext),
+                )
+                if (error != null) {
+                    failure = error
+                    Log.e(TAG, "Cannot start Wayland host: $error")
+                    return@execute
+                }
+                val socket = File(WaylandManager.socketDir(applicationContext), WaylandManager.SOCKET_NAME)
+                if (!socket.exists()) {
+                    val message = "compositor did not create $socket"
+                    failure = message
+                    Log.e(TAG, message)
+                    return@execute
+                }
+                started = true
                 Log.i(TAG, "Wayland host ready: $socket")
             } catch (error: Exception) {
+                failure = error.message ?: error.toString()
                 Log.e(TAG, "Cannot start Wayland host", error)
-                throw error
             }
         }
     }
@@ -72,48 +70,32 @@ class WaylandService : Service() {
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
 
     internal fun awaitReady() {
-        startup.get(5, TimeUnit.SECONDS)
+        executor.submit {}.get(10, TimeUnit.SECONDS)
+        check(started) { "Wayland compositor is not running: ${failure ?: "unknown reason"}" }
     }
 
     internal fun attach(surface: Surface, width: Int, height: Int) {
-        control { compositor ->
-            if (!surface.isValid) return@control
-            if (attachedSurface !== surface) {
-                compositor.pause()
-                compositor.resume(surface)
-                attachedSurface = surface
-            }
-            if (width > 0 && height > 0) compositor.resizeOutput(width, height)
+        executor.execute {
+            attachedSurface = surface
+            attachedSize = width to height
+            NativeCompositor.nativeAttachSurface(surface, width, height)
         }
     }
 
     internal fun detach() {
-        control { compositor ->
-            compositor.pause()
+        executor.execute {
+            NativeCompositor.nativeDetachSurface()
             attachedSurface = null
         }
     }
 
-    private fun control(action: (CompositorSession) -> Unit) {
-        executor.execute {
-            runCatching {
-                startup.get()
-                session?.let(action)
-            }.onFailure { Log.w(TAG, "Cannot update Wayland output", it) }
-        }
+    internal fun setScale(scale: Float) {
+        executor.execute { NativeCompositor.nativeSetScale(scale) }
     }
 
     override fun onDestroy() {
         executor.execute {
-            try {
-                session?.stop()
-            } catch (error: Exception) {
-                Log.w(TAG, "Cannot stop Wayland host", error)
-            } finally {
-                session = null
-                bootstrapOutput?.close()
-                bootstrapOutput = null
-            }
+            NativeCompositor.nativeStop()
         }
         executor.shutdown()
         super.onDestroy()

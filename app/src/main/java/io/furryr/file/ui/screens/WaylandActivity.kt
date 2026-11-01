@@ -34,7 +34,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 
 /**
- * Full-screen Wayland viewer. The embedded wldroid/wlroots compositor runs
+ * Full-screen Wayland viewer. The Smithay compositor (`native/wayland`) runs
  * in a resident service; this activity only attaches its surface and input.
  * Containers connect to its
  * `wayland-0` socket through the bind that [WaylandManager] adds to every

@@ -3,7 +3,7 @@ use std::io;
 use std::os::fd::OwnedFd;
 
 use hub_client::fileagent::{self, agent_event, AgentApprovalReply, AgentAttachRequest,
-    AgentMcpResult, AgentMcpTools, AgentPromptRequest};
+    AgentMcpResult, AgentMcpTools, AgentPromptRequest, AgentYoloRequest};
 use hub_client::filehub::{
     self, hub_request::Op, hub_response, GetAiConfigRequest, GetCapabilitiesRequest,
     GetHistoryRequest, GetModelsRequest, HubRequest, ListSessionsRequest, RemoteMcpCall,
@@ -225,6 +225,13 @@ impl Hub {
             definitions_json: json,
         }))
         .await?;
+        Ok(())
+    }
+
+    /// Enable or disable full auto-approval for the attached session.
+    pub async fn agent_yolo(&mut self, enabled: bool) -> Result<(), String> {
+        self.request(Op::AgentYolo(AgentYoloRequest { enabled }))
+            .await?;
         Ok(())
     }
 

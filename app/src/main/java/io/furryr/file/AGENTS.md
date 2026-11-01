@@ -51,3 +51,14 @@ platform services and calls the library.
 
 - Do NOT add DI frameworks — explicit wiring is deliberate for this small scope.
 - Silent catch (`catch {}`) — only allowed for Shizuku availability checks.
+
+## TODO - Bug checks
+
+- [ ] `ui/components/FileDrawer.kt`: verify remote/SSH location tap closes the drawer immediately and the file list spinner (delayed) covers slow loads.
+- [ ] `ui/components/FileDrawer.kt`: verify SSH host-key approval and connect-error dialogs still appear after the drawer closes, and that trusting a key navigates into the location.
+- [ ] `util/ProcessHelper.kt` + `provider/.../SshTerminal.kt`: verify an SSH terminal survives sheet size changes and that dragging a file icon onto it inserts the quoted path instead of closing the session.
+- [ ] `ui/screens/WaylandActivity.kt`: verify the viewer attaches its surface to the Smithay compositor, renders a container app, and forwards touch/keyboard input.
+- [ ] `ui/screens/WaylandActivity.kt`: verify leaving and reopening the viewer keeps the Wayland socket and connected clients alive.
+- [ ] `AndroidManifest.xml`: verify the merged manifest builds after dropping the wldroid `overrideLibrary` entry and that minSdk 26 is still accepted.
+- [ ] `ui/screens/LicensesScreen.kt`: verify the license list renders with the Smithay/libxkbcommon entries and no removed wldroid entries.
+

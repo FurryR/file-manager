@@ -30,5 +30,11 @@ Thumbs.db
 # Fetched third-party sources (scripts/fetch-wldroid.sh)
 /third_party/
 
+# Cross-compiled libxkbcommon for the Smithay compositor (native/build-xkbcommon.sh)
+/native/wayland/third_party/
+
+# xkeyboard-config data installed by scripts/fetch-xkbdata.sh
+/app/src/main/assets/xkb/
+
 # Local environment
 .env

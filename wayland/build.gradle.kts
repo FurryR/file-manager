@@ -22,10 +22,6 @@ android {
 }
 
 dependencies {
-    // The wldroid compositor stack ships prebuilt natives (wlroots Android
-    // backend, virgl_test_server, guest shims); see scripts/fetch-wldroid.sh.
-    implementation("nu.shel.wldroid:wldroid-compositor:0.0.5")
-    implementation("nu.shel.wldroid:wldroid-virgl:0.0.5")
-    implementation("nu.shel.wldroid:wldroid-shims:0.0.5")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // The compositor itself is native (native/wayland, Smithay) and ships as
+    // jniLibs/arm64-v8a/libwayland_compositor.so; no prebuilt AAR stack.
 }

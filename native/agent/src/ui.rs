@@ -180,6 +180,10 @@ fn draw_meta(frame: &mut Frame, app: &App, area: ratatui::layout::Rect, active: 
     }
     spans.push(Span::styled(" · ", theme::muted()));
     spans.push(Span::styled(app.effort().to_owned(), theme::accent()));
+    if app.yolo() {
+        spans.push(Span::styled(" · ", theme::muted()));
+        spans.push(Span::styled("YOLO", theme::warn()));
+    }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(theme::input_bg()),
         area,

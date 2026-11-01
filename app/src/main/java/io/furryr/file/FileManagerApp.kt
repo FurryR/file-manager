@@ -407,6 +407,8 @@ fun FileManagerApp(
             try {
                 for (source in state.sources) {
                     ensureActive()
+                    lastBytes = 0L
+                    lastTime = System.currentTimeMillis()
                     operationProgress = OperationProgress(0, 0, source.name, state.isCopy)
                     val flow = if (state.isCopy) {
                         Vfs.copy(source.path, targetDir)
@@ -421,11 +423,18 @@ fun FileManagerApp(
                             }
                             return@collect
                         }
+                        // Progress can arrive faster than any useful sample
+                        // window; sample on a fixed period and keep the last
+                        // measured rate in between, instead of reporting 0.
                         val now = System.currentTimeMillis()
                         val elapsed = now - lastTime
-                        val speed = if (elapsed > 100) ((progress.copiedBytes - lastBytes) * 1000 / elapsed) else 0L
-                        lastBytes = progress.copiedBytes
-                        lastTime = now
+                        var speed = operationProgress?.speedBytesPerSec ?: 0L
+                        if (elapsed >= SPEED_SAMPLE_MS) {
+                            val delta = progress.copiedBytes - lastBytes
+                            if (delta >= 0) speed = delta * 1000 / elapsed
+                            lastBytes = progress.copiedBytes
+                            lastTime = now
+                        }
                         operationProgress = OperationProgress(
                             progress.totalBytes, progress.copiedBytes,
                             progress.currentName.ifBlank { source.name },
@@ -1443,6 +1452,9 @@ fun FileManagerApp(
         )
     }
 }
+
+/** Minimum window between two transfer-rate samples shown in the copy dialog. */
+private const val SPEED_SAMPLE_MS = 250L
 
 private fun storagePermissions(): List<String> = when {
     Build.VERSION.SDK_INT >= 29 -> listOf(Manifest.permission.READ_EXTERNAL_STORAGE)

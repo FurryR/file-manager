@@ -26,7 +26,7 @@ import java.io.Closeable
  * - [SessionType.AppShell] -- local shell inside Termux's own PTY
  * - [SessionType.Container] -- proot container process run directly as
  *   the PTY shell; no external bridge needed
- * - [SessionType.Ssh] -- remote shell bridged to the shared SSH connection
+ * - [SessionType.Ssh] -- remote shell on a connection dedicated to the terminal
  *
  * Thread safety is provided via [synchronized] on [mutex] for all map access.
  *
@@ -154,7 +154,8 @@ object SessionManager {
      * Local and container shells spawn on a daemon -- the app daemon for a
      * local shell, the container's own daemon for `container://` -- and
      * Termux's terminal owns the returned PTY fd directly. An SSH session
-     * instead bridges that fd to a shell channel on the shared remote session.
+     * instead bridges that fd to a shell channel on a connection dedicated to
+     * that terminal.
      *
      * @param type    The kind of session to create.
      * @param context Android [Context] (needed for container operations).
@@ -374,8 +375,8 @@ object SessionManager {
      * Create the terminal for a saved SSH remote connection.
      *
      * [ProcessHelper] owns the in-process bridge between the terminal fd and
-     * the SSH shell channel; the SSH session itself stays shared with file
-     * operations on that connection.
+     * the SSH shell channel. The shell runs on a session dedicated to this
+     * terminal; file operations and AI exec keep using the shared connection.
      */
     private suspend fun createSshTerminal(
         type: SessionType.Ssh,

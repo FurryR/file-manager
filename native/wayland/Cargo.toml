@@ -1,0 +1,28 @@
+[package]
+name = "wayland_compositor"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+smithay = { version = "0.7", default-features = false, features = [
+    "wayland_frontend",
+    "desktop",
+    "renderer_gl",
+] }
+# Only used on Android (EGL on ANativeWindow + JNI entry points). The rest of
+# the crate builds on the host so `cargo check` validates the Smithay API.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-sys = "0.6"
+android_logger = "0.14"
+libloading = "0.8"
+log = "0.4"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+log = "0.4"
+
+[build-dependencies]
+cc = "1"

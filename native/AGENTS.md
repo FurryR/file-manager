@@ -32,6 +32,14 @@ native/
 - **Abstract socket**: `create_abstract_server()` + `bind_abstract_socket()` (name derived from `--key`/`--id`)
 - **UID check** for data path: `maybe_android_data_path()` — skips `/Android/data` UID trick when root
 - **Progress tracking**: `TaskState` in `HashMap`, tasks spawn via `tokio::spawn`
+- **Shared hub connection**: the agent's `Hub` methods take `&self` (ids are
+  handed out atomically, `hub-client` serializes frames), so `/yolo`, Esc and
+  mid-run steering reach the hub *while* a run streams. Never reintroduce a
+  mutex held across `agent_run` — that deadlocks every control request behind
+  the running turn, which is exactly the `/yolo` freeze this replaced. Cancel
+  and steering are **write-only** (no reply wait): Esc drops the local run state
+  in the same tick and the hub kills the exec trees on its own side, so the
+  stop button never has a timeout to burn.
 - **Terminal utilities**: `run0/`, `here/`, `agent/`; common wire transport in `hub-client/`
 - **Agent UI/network**: ratatui + crossterm UI in `agent/src/{ui,terminal,app}.rs`; chat/models/history/online MCP go through the hub (`agent/src/hub.rs`), local stdio MCP in `agent/src/mcp.rs`
 
@@ -41,8 +49,15 @@ native/
 - **One reaper owns every child** — `reaper::track` returns a `watch::Receiver`
   for the exit code; only the SIGCHLD sweep calls `waitpid(-1)`. Do not add a
   second `waitpid` owner, and do not enumerate `/proc` (rootless Android cannot
-  traverse it). Every spawn must create its own process group so teardown can
-  signal the group.
+  traverse it).
+- **No process inventory** — the daemon reaps, it does not track what is alive.
+  Every spawn creates its own process group so its *owner* can signal it (PTY
+  close ends the session, `ExecProcess::drop` kills the group); shutdown just
+  closes PTYs and drops execs. Do not reintroduce a global registry, a
+  `/proc` scan, or a shutdown tree walk: they duplicate the handle tables and
+  drift from them. Arm `reaper::arm_parent_death_signal` in the child
+  (`pty.rs` after `fork`, `handlers/exec.rs` in `pre_exec`) — parent death is the
+  one case a live daemon cannot clean up after.
 - **Multi-client** — the daemon serves many concurrent connections. Each has its own
   read loop, write half and response channel; PTYs/handles/broker are shared via `Shared`.
   Disconnecting one client does not affect other authenticated clients.

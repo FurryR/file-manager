@@ -105,6 +105,22 @@ impl Terminal {
     }
 }
 
+/// True once the controlling terminal is gone.
+///
+/// The pty master can outlive the session leader (the app holds a duplicate of
+/// it), so a hang-up does not always surface as EOF on stdin. `tcgetpgrp` fails
+/// with `EIO` only after the kernel has dropped the terminal, which is the
+/// condition a terminal UI can act on: nothing can be read or drawn any more, so
+/// the process must exit instead of polling a dead tty forever.
+///
+/// Deliberately free-standing: the UI loop's `select!` keeps a `next_event()`
+/// future borrowing `Terminal` alive until the statement ends, so a method would
+/// collide with that borrow in another branch's handler.
+pub fn hung_up() -> bool {
+    let foreground = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+    foreground < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EIO)
+}
+
 impl Drop for Terminal {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);

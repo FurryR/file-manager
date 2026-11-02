@@ -47,6 +47,7 @@ message HubRequest {
     fileagent.AgentMcpTools agent_mcp_tools = 38;
     fileagent.AgentCompactRequest agent_compact = 39;
     fileagent.AgentYoloRequest agent_yolo = 40;
+    fileagent.AgentSteerRequest agent_steer = 41;
   }
 }
 

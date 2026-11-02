@@ -16,7 +16,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -25,6 +24,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicLong
 
 /** A live agent conversation attached to one hub connection. */
@@ -48,6 +48,8 @@ class AgentSession(
     private val pendingMcp = ConcurrentHashMap<Long, CompletableDeferred<ToolResult>>()
     private val pendingApproval = ConcurrentHashMap<Long, CompletableDeferred<Boolean>>()
     private val liveExecs = ConcurrentHashMap.newKeySet<PipeChannel>()
+    /** Prompts typed mid-run, inserted at the next gap rather than after it. */
+    private val steering = ConcurrentLinkedQueue<String>()
     private val nextMcp = AtomicLong(1)
     private val nextApproval = AtomicLong(1)
     private var messages = JSONArray()
@@ -150,34 +152,77 @@ class AgentSession(
         }
     }.trimEnd()
 
+    /**
+     * Insert a prompt into the *running* turn.
+     *
+     * The loop drains this queue right after the current turn's tool results, so
+     * a mid-run correction reaches the model at the next gap instead of waiting
+     * for the turn to finish (and starting a second run for it).
+     */
+    fun steer(text: String): Boolean {
+        val prompt = text.trim()
+        if (prompt.isEmpty()) return false
+        steering.add(prompt)
+        return true
+    }
+
+    /** Move queued prompts into the conversation; true when anything was added. */
+    private fun drainSteering(): Boolean {
+        var inserted = false
+        while (true) {
+            val prompt = steering.poll() ?: break
+            append(JSONObject().put("role", "user").put("content", prompt))
+            inserted = true
+        }
+        if (inserted) persist()
+        return inserted
+    }
+
+    /**
+     * Stop the run and kill every process it started, without blocking the
+     * caller: Esc is a stop button, and a stop button that waits for a daemon
+     * round-trip is a freeze. The closes are fired on [execKiller], which the
+     * cancelled job cannot take down with it.
+     */
     fun cancel() {
-        killLiveExecs()
         job?.cancel()
+        steering.clear()
         pendingApproval.values.forEach { it.complete(false) }
         pendingApproval.clear()
         pendingMcp.values.forEach { it.complete(ToolResult(false, "agent cancelled")) }
         pendingMcp.clear()
+        closeExecsLater(takeLiveExecs())
+    }
+
+    private fun closeExecsLater(live: List<PipeChannel>) {
+        if (live.isEmpty()) return
+        execKiller.launch { closeExecs(live) }
+    }
+
+    private fun takeLiveExecs(): List<PipeChannel> {
+        val live = liveExecs.toList()
+        liveExecs.clear()
+        return live
     }
 
     /**
-     * Kill every running exec immediately. The close request runs outside the
-     * cancelled job so it still reaches the daemon; waiting for the run loop to
-     * unwind would leave the process group alive during that wait.
+     * Kill the execs the turn is waiting on, right now.
+     *
+     * The close request kills the exec's process group (and every group its
+     * children moved into) on the daemon side. It must not inherit the cancelled
+     * job's cancellation — the caller is interrupting precisely because the run
+     * loop is stuck in that exec — so it runs non-cancellable, with a bound.
      */
-    private fun killLiveExecs() {
-        for (channel in liveExecs) {
+    private suspend fun closeExecs(live: List<PipeChannel>) {
+        if (live.isEmpty()) return
+        for (channel in live) {
             runCatching { channel.close() }
-            execKiller.launch {
-                withContext(NonCancellable) { runCatching { channel.closeProcess() } }
+        }
+        withContext(NonCancellable) {
+            for (channel in live) {
+                withTimeoutOrNull(KILL_TIMEOUT_MS) { runCatching { channel.closeProcess() } }
             }
         }
-        liveExecs.clear()
-    }
-
-    suspend fun cancelAndWait() {
-        val current = job ?: return
-        current.cancelAndJoin()
-        job = null
     }
 
     fun completeMcp(requestId: Long, ok: Boolean, content: String) {
@@ -205,6 +250,9 @@ class AgentSession(
             persist()
             maybeTitle(prompt)
             while (true) {
+                // Anything that arrived while the previous turn was streaming
+                // lands here, before the next model request.
+                drainSteering()
                 var toolCalls = JSONArray()
                 var error: String? = null
                 val result = AiService.complete(
@@ -252,9 +300,30 @@ class AgentSession(
                         )
                         persist()
                     }
+                    // The gap right after the tool results: a prompt typed while
+                    // those ran is spliced in here, so the next request already
+                    // knows about it.
+                    drainSteering()
                     continue
                 }
                 val answer = result.content.trim()
+                if (steering.isNotEmpty()) {
+                    // The user spoke while the model was writing its answer. Keep
+                    // the turn alive so they are answered by this run instead of
+                    // by a second one minutes later.
+                    if (answer.isNotEmpty()) {
+                        append(
+                            JSONObject().put("role", "assistant").put("content", answer).apply {
+                                if (result.reasoning.isNotBlank()) {
+                                    put("reasoning_content", result.reasoning)
+                                }
+                            },
+                        )
+                        persist()
+                    }
+                    drainSteering()
+                    continue
+                }
                 if (answer.isEmpty()) error("the model returned an empty reply")
                 append(
                     JSONObject().put("role", "assistant").put("content", answer).apply {
@@ -448,8 +517,11 @@ class AgentSession(
     }
 
     fun dispose() {
-        killLiveExecs()
         job?.cancel()
+        steering.clear()
+        // Deliberately outside [scope]: the session is going away, but the
+        // processes it started must still die with it.
+        closeExecsLater(takeLiveExecs())
         scope.cancel()
         pendingMcp.values.forEach { it.complete(ToolResult(false, "agent detached")) }
         pendingApproval.values.forEach { it.complete(false) }
@@ -460,6 +532,7 @@ class AgentSession(
     companion object {
         private val BUILTINS = setOf("read", "write", "copy", "glob", "exec", "list_targets")
         private const val APPROVAL_TIMEOUT_MS = 120_000L
+        private const val KILL_TIMEOUT_MS = 3_000L
         private const val MCP_TIMEOUT_MS = 600_000L
     }
     data class AgentOutcome(val messagesJson: String, val answer: String)

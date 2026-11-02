@@ -42,6 +42,14 @@ const MAX_STRAY_FRAMES: usize = 8 * MAX_STRAY;
 pub struct Connection {
     stream: UnixStream,
     stray: Mutex<Stray>,
+    /// Serializes frame writes. A shared connection can have several requests
+    /// in flight (a run stream plus a control request such as cancel or
+    /// steering), and two concurrent partial writes would splice one frame's
+    /// length prefix into the middle of another.
+    send: tokio::sync::Mutex<()>,
+    /// Serializes frame reads for the same reason. It is held for one frame at a
+    /// time, so a task waiting for its own id can never starve another one.
+    read: tokio::sync::Mutex<()>,
     /// Set once the stream can no longer be trusted; later calls fail fast
     /// instead of silently reading somebody else's response.
     poisoned: AtomicBool,
@@ -64,6 +72,8 @@ impl Connection {
         let connection = Self {
             stream: connect_abstract(name)?,
             stray: Mutex::new(Stray::default()),
+            send: tokio::sync::Mutex::new(()),
+            read: tokio::sync::Mutex::new(()),
             poisoned: AtomicBool::new(false),
         };
         let response = connection
@@ -196,6 +206,7 @@ impl Connection {
     }
 
     pub async fn send_frame(&self, payload: &[u8], attached_fds: &[RawFd]) -> io::Result<()> {
+        let _writing = self.send.lock().await;
         let mut frame = Vec::with_capacity(4 + payload.len());
         frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         frame.extend_from_slice(payload);
@@ -224,6 +235,7 @@ impl Connection {
     }
 
     async fn recv_frame(&self) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> {
+        let _reading = self.read.lock().await;
         let mut attached = Vec::new();
         let header = self.recv_exact(4, &mut attached).await?;
         let size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;

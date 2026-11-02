@@ -13,6 +13,7 @@ use hub_client::filehub::{
 use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::mcp::McpManager;
 use crate::model::{AgentEvent, Message, Usage};
@@ -22,7 +23,9 @@ use crate::model_info::ModelCatalog;
 /// A control connection to the file-manager hub, with the caller's container.
 pub struct Hub {
     connection: hub_client::Connection,
-    next_id: u32,
+    /// Request ids are handed out concurrently: a run stream and a control
+    /// request (cancel, steering, yolo) share one connection without a lock.
+    next_id: AtomicU32,
     pub caller: String,
 }
 
@@ -71,12 +74,12 @@ impl Hub {
         }
         Ok(Self {
             connection,
-            next_id: 1,
+            next_id: AtomicU32::new(1),
             caller: root.container_id,
         })
     }
 
-    async fn request(&mut self, op: Op) -> Result<filehub::HubResponse, String> {
+    async fn request(&self, op: Op) -> Result<filehub::HubResponse, String> {
         let (response, fds) = self.request_with_fds(op).await?;
         // Unexpected descriptors are closed when this vector drops.
         drop(fds);
@@ -84,14 +87,10 @@ impl Hub {
     }
 
     async fn request_with_fds(
-        &mut self,
+        &self,
         op: Op,
     ) -> Result<(filehub::HubResponse, Vec<OwnedFd>), String> {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        if self.next_id == 0 {
-            self.next_id = 1;
-        }
+        let id = self.next_request_id();
         let (response, fds) = self
             .connection
             .round_trip_with_fds(HubRequest { id, op: Some(op) }, &[])
@@ -107,7 +106,7 @@ impl Hub {
         Ok((response, fds))
     }
 
-    pub async fn ai_config(&mut self) -> Result<filehub::AiConfigResponse, String> {
+    pub async fn ai_config(&self) -> Result<filehub::AiConfigResponse, String> {
         let response = self.request(Op::GetAiConfig(GetAiConfigRequest {})).await?;
         match response.result {
             Some(hub_response::Result::AiConfig(config)) => Ok(config),
@@ -115,7 +114,7 @@ impl Hub {
         }
     }
 
-    pub async fn list_sessions(&mut self) -> Result<Vec<SessionEntry>, String> {
+    pub async fn list_sessions(&self) -> Result<Vec<SessionEntry>, String> {
         let response = self
             .request(Op::ListSessions(ListSessionsRequest {}))
             .await?;
@@ -133,7 +132,7 @@ impl Hub {
         }
     }
 
-    pub async fn set_active_session(&mut self, session_id: &str) -> Result<(), String> {
+    pub async fn set_active_session(&self, session_id: &str) -> Result<(), String> {
         self.request(Op::SetActiveSession(SetActiveSessionRequest {
             session_id: session_id.to_owned(),
         }))
@@ -182,7 +181,7 @@ impl Hub {
         Ok(TitleStream { receiver, task })
     }
 
-    pub async fn set_ai_selection(&mut self, model: &str, effort: &str) -> Result<(), String> {
+    pub async fn set_ai_selection(&self, model: &str, effort: &str) -> Result<(), String> {
         self.request(Op::SetAiSelection(SetAiSelectionRequest {
             model: model.to_owned(),
             effort: effort.to_owned(),
@@ -193,7 +192,7 @@ impl Hub {
 
     /// Attach this connection to a Kotlin agent session.
     pub async fn agent_attach(
-        &mut self,
+        &self,
         session_id: &str,
         terminal_id: &str,
         cwd: &str,
@@ -219,7 +218,7 @@ impl Hub {
         }
     }
 
-    pub async fn agent_set_mcp_tools(&mut self, definitions: &[Value]) -> Result<(), String> {
+    pub async fn agent_set_mcp_tools(&self, definitions: &[Value]) -> Result<(), String> {
         let json = serde_json::to_string(definitions).map_err(|error| error.to_string())?;
         self.request(Op::AgentMcpTools(AgentMcpTools {
             definitions_json: json,
@@ -229,14 +228,51 @@ impl Hub {
     }
 
     /// Enable or disable full auto-approval for the attached session.
-    pub async fn agent_yolo(&mut self, enabled: bool) -> Result<(), String> {
+    ///
+    /// Never gate this behind the run's connection lock: the run holds it for
+    /// its whole lifetime, so the toggle would block until the model finished.
+    pub async fn agent_yolo(&self, enabled: bool) -> Result<(), String> {
         self.request(Op::AgentYolo(AgentYoloRequest { enabled }))
             .await?;
         Ok(())
     }
 
+    /// Cancel the attached run and kill everything it started.
+    ///
+    /// Write-only on purpose: Esc must return immediately, so this never waits
+    /// for the answer. The hub cancels the job and closes every exec process
+    /// tree before it replies, but the reply is not what makes the terminal
+    /// responsive again — dropping the local run state is.
+    pub async fn agent_cancel(&self) -> Result<(), String> {
+        let id = self.next_request_id();
+        self.connection
+            .send_request(HubRequest {
+                id,
+                op: Some(Op::AgentCancel(fileagent::AgentCancelRequest {})),
+            })
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Hand a prompt typed mid-run to the agent loop, which inserts it at the
+    /// next gap (right after the current turn's tool results).
+    ///
+    /// Also write-only: typing while a turn streams must never wait on the hub.
+    pub async fn agent_steer(&self, text: &str) -> Result<(), String> {
+        let id = self.next_request_id();
+        self.connection
+            .send_request(HubRequest {
+                id,
+                op: Some(Op::AgentSteer(fileagent::AgentSteerRequest {
+                    text: text.to_owned(),
+                })),
+            })
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     pub async fn agent_compact(
-        &mut self,
+        &self,
         model: &str,
         effort: &str,
     ) -> Result<AgentOutcome, String> {
@@ -295,14 +331,13 @@ impl Hub {
     /// them inline. Approval replies arrive on [approvals] and are forwarded to
     /// the agent while the stream stays open.
     pub async fn agent_run(
-        &mut self,
+        &self,
         text: &str,
         model: &str,
         effort: &str,
         mcp: Arc<McpManager>,
         approvals: &mut UnboundedReceiver<(u64, bool)>,
         events: &UnboundedSender<AgentEvent>,
-        cancel: &mut UnboundedReceiver<()>,
     ) -> Result<AgentOutcome, String> {
         let id = self.next_request_id();
         self.connection
@@ -318,20 +353,10 @@ impl Hub {
             .map_err(|error| error.to_string())?;
         let mut finished: Option<AgentOutcome> = None;
         let mut error: Option<String> = None;
-        let mut cancel_open = true;
+        let mut approvals_open = true;
         loop {
             tokio::select! {
                 biased;
-                signal = cancel.recv(), if cancel_open => {
-                    cancel_open = false;
-                    if signal.is_some() {
-                        // Cancel from inside the run, so the task never aborts
-                        // in the middle of a hub frame and desync the stream.
-                        self.request(Op::AgentCancel(fileagent::AgentCancelRequest {}))
-                            .await?;
-                        return Err("cancelled".to_owned());
-                    }
-                }
                 incoming = self.connection.receive_response(id) => {
                     let (response, _) = incoming.map_err(|error| error.to_string())?;
                     if !response.ok {
@@ -416,13 +441,21 @@ impl Hub {
                         None => {}
                     }
                 }
-                approval = approvals.recv() => {
-                    let Some((approval_id, allow)) = approval else { continue };
-                    self.request(Op::AgentApproval(AgentApprovalReply {
-                        approval_id,
-                        allow,
-                    }))
-                    .await?;
+                approval = approvals.recv(), if approvals_open => {
+                    match approval {
+                        Some((approval_id, allow)) => {
+                            self.request(Op::AgentApproval(AgentApprovalReply {
+                                approval_id,
+                                allow,
+                            }))
+                            .await?;
+                        }
+                        // The UI dropped the approval channel. `continue` here
+                        // made this arm ready again on the very next iteration,
+                        // spinning the run task at a full core for as long as
+                        // the event stream stayed open. Retire the arm instead.
+                        None => approvals_open = false,
+                    }
                 }
             }
         }
@@ -432,7 +465,7 @@ impl Hub {
         finished.ok_or_else(|| "agent returned no final history".to_owned())
     }
 
-    pub async fn load_history(&mut self, session_id: &str) -> Result<(String, String), String> {
+    pub async fn load_history(&self, session_id: &str) -> Result<(String, String), String> {
         let response = self
             .request(Op::GetHistory(GetHistoryRequest {
                 session_id: session_id.to_owned(),
@@ -447,7 +480,7 @@ impl Hub {
     }
 
     pub async fn save_history(
-        &mut self,
+        &self,
         session_id: &str,
         messages: &[Message],
     ) -> Result<(), String> {
@@ -460,7 +493,7 @@ impl Hub {
         Ok(())
     }
 
-    pub async fn catalog(&mut self) -> Result<ModelCatalog, String> {
+    pub async fn catalog(&self) -> Result<ModelCatalog, String> {
         let response = self.request(Op::GetModels(GetModelsRequest {})).await?;
         match response.result {
             Some(hub_response::Result::Models(models)) => {
@@ -470,7 +503,7 @@ impl Hub {
         }
     }
 
-    pub async fn capabilities(&mut self, cwd: &str) -> Result<Capabilities, String> {
+    pub async fn capabilities(&self, cwd: &str) -> Result<Capabilities, String> {
         let response = self
             .request(Op::GetCapabilities(GetCapabilitiesRequest {
                 cwd: cwd.to_owned(),
@@ -489,7 +522,7 @@ impl Hub {
     /// configured name. The hub injects the server's credential headers; the
     /// supplied headers carry protocol state only.
     pub async fn remote_mcp_call(
-        &mut self,
+        &self,
         server: &str,
         cwd: &str,
         method: &str,
@@ -553,11 +586,12 @@ impl Hub {
         Ok(result)
     }
 
-    fn next_request_id(&mut self) -> u32 {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        if self.next_id == 0 {
-            self.next_id = 1;
+    fn next_request_id(&self) -> u32 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        if id == 0 {
+            // Wrapped past the handshake id; never hand out 0 again.
+            self.next_id.store(2, Ordering::Relaxed);
+            return 1;
         }
         id
     }

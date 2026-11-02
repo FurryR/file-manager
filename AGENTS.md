@@ -159,7 +159,7 @@ file-manager/
 | run0 bootstrap | `hub/.../Hub.kt` | Starts the hub, env contract |
 | Unified exec/PTY | `daemon/.../process/ExecService.kt` | `CommandSpec` → `ProcessChannel` |
 | AI gateway | `agent/.../AiService.kt` | OpenAI-compatible streaming, normalized Chat events, model catalog |
-| Agent loop | `agent/.../AgentSession.kt` | Prompt loop, tool dispatch, approval, history persistence |
+| Agent loop | `agent/.../AgentSession.kt` | Prompt loop, tool dispatch, approval, mid-run steering, history persistence |
 | Agent tools | `agent/.../AgentTools.kt` | Built-in tools executed directly through `:daemon` |
 | Agent prompt/policy | `agent/.../SystemPrompt.kt` | System prompt + dangerous-path approval rules |
 | Rust agent shell | `native/agent/src/main.rs` | TUI client: prompt input, rendering, approval, local MCP host |
@@ -170,7 +170,7 @@ file-manager/
 | Container launch | `container/.../ContainerDaemonLauncher.kt` | proot/chroot argv + PulseAudio/Wayland environment; KGSL GPU probe in `ProotRunner` |
 | Terminal IME | `app/.../agent/TerminalViewComposable.kt` | focus hand-off + `showSoftInput`; see NOTES |
 | Native daemon | `native/src/main.rs` | File ops under root/shell |
-| Process subreaper | `native/src/reaper.rs` | Central SIGCHLD reaper; kill tracked process groups on exit |
+| Process subreaper | `native/src/reaper.rs` | Central SIGCHLD reaper; exit-code channels only, no process inventory |
 | IPC protocol | `proto/file_daemon.proto` | Request/Response messages |
 
 ## CONVENTIONS
@@ -361,17 +361,28 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   container shutdown explicitly stop the daemon. There is no transport reconnect
   or request replay. After connection loss, a later operation starts a fresh
   daemon on demand; old PTYs and handles are not restored.
-- **The daemon is a child subreaper** ([`native/src/reaper.rs`]) — orphaned
-  descendants reparent to it instead of escaping to host init. One central
-  SIGCHLD sweep calls `waitpid(-1)`, reaps adopted orphans, and publishes each
-  tracked child's exit code over a watch channel; no other code waits on a
-  child, so a status can never be stolen twice. `reaper::track` returns that
-  channel immediately after spawn, before any await. Rootless Android cannot
-  traverse `/proc`, so the reaper never scans the process table: every spawn
-  creates its own process group, and teardown signals the tracked groups
-  (SIGTERM, then SIGKILL after a 400ms grace) until the registrations drain.
-  Descendants that `setsid()` out of their group are the one case this
-  inventory cannot reach.
+- **The daemon is a child subreaper, and nothing more** ([`native/src/reaper.rs`]) —
+  orphaned descendants reparent to it instead of escaping to host init, and one
+  central SIGCHLD sweep calls `waitpid(-1)` so no zombie outlives its creator.
+  Tracked children get their exit code over a watch channel (`reaper::track`
+  returns it immediately after spawn, before any await); no other code calls
+  `wait*`, so a status can never be stolen twice.
+  It keeps **no process inventory**, and that is deliberate: killing belongs to
+  the handle that owns the process — a PTY owns its session, an exec owns its
+  process group — and the lifetime boundary is the container/app itself. When
+  file-manager or the container goes away, nothing is left to kill, so a global
+  "who is alive" table would only be a second source of truth that drifts from
+  the handles (and rootless Android cannot rebuild it from `/proc`). Daemon
+  shutdown therefore just closes PTYs and drops execs.
+  Every spawn arms `PR_SET_PDEATHSIG(SIGKILL)` in the child
+  (`reaper::arm_parent_death_signal`), which covers the one case no bookkeeping
+  can: the daemon being SIGKILLed (force-stop, LMK, `kill -9`) instead of
+  reaching its shutdown path. That is also what makes "file-manager exits, the
+  container goes with it" hold down to the last process.
+  A descendant that deliberately `setsid()`s into its own session (nohup-style
+  detaching) outlives the group kill. That is accepted: it is not an escape from
+  the subreaper (parentage never changes, it is still reaped), and its lifetime
+  is already bounded by the container/app.
 - Client entry points live in `:daemon` (`DaemonManager.fileService/execService`).
 - **Terminal IME tap race (upstream-worthy)** — Termux's
   `TerminalView.onSingleTapUp()` calls `requestFocus()` on the terminal view, then

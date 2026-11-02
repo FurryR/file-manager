@@ -212,12 +212,11 @@ async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
     connections.abort_all();
     while connections.join_next().await.is_some() {}
 
+    // Handles are the inventory: closing a PTY ends its session, dropping an
+    // exec kills its process group, and children that survive either die with
+    // the daemon through their parent-death signal. Nothing to enumerate.
     shared.pty_manager.lock().await.close_all();
     shared.execs.lock().await.clear();
-    // All async owners are gone: nobody's exit status can be stolen any more.
-    // Signal the tracked process groups, then reap until the tree is quiet.
-    // No /proc enumeration: rootless targets cannot traverse it.
-    reaper::kill_tree(std::time::Duration::from_millis(400));
     *shared.handles.lock().await = HandleTable::new();
     Ok(())
 }

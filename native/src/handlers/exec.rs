@@ -192,6 +192,23 @@ pub(super) async fn run_exec_stream(
     if !cwd.is_empty() {
         cmd.current_dir(&cwd);
     }
+    // The command must die with the daemon even when the daemon is killed
+    // outright: `ReapGuard` and `ExecManager` teardown only run on a path that
+    // reaches shutdown, and an orphaned command otherwise reparents to init.
+    let daemon_pid = unsafe { libc::getpid() };
+    let arm_death_signal = move || -> io::Result<()> {
+        // SAFETY: runs in the forked child; `prctl` and `getppid` are
+        // async-signal-safe and touch no process memory.
+        if unsafe { crate::reaper::arm_parent_death_signal(daemon_pid) } {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(libc::ESRCH))
+        }
+    };
+    // SAFETY: the closure only makes async-signal-safe libc calls.
+    unsafe {
+        cmd.pre_exec(arm_death_signal);
+    }
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => return OutboundResponse::plain(error_response(req_id, error)),
@@ -242,6 +259,23 @@ pub(super) async fn run_exec(
         .stderr(Stdio::piped());
     if !cwd.is_empty() {
         cmd.current_dir(&cwd);
+    }
+    // The command must die with the daemon even when the daemon is killed
+    // outright: `ReapGuard` and `ExecManager` teardown only run on a path that
+    // reaches shutdown, and an orphaned command otherwise reparents to init.
+    let daemon_pid = unsafe { libc::getpid() };
+    let arm_death_signal = move || -> io::Result<()> {
+        // SAFETY: runs in the forked child; `prctl` and `getppid` are
+        // async-signal-safe and touch no process memory.
+        if unsafe { crate::reaper::arm_parent_death_signal(daemon_pid) } {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(libc::ESRCH))
+        }
+    };
+    // SAFETY: the closure only makes async-signal-safe libc calls.
+    unsafe {
+        cmd.pre_exec(arm_death_signal);
     }
     let mut child = match cmd.spawn() {
         Ok(child) => child,

@@ -15,6 +15,7 @@ import io.furryr.file.agent.AgentService
 import io.furryr.file.agent.AgentSession
 import io.furryr.file.daemon.ipc.*
 import io.furryr.file.proto.agent.AgentAttachResponse
+import io.furryr.file.proto.agent.AgentEvent
 import io.furryr.file.daemon.HubActions
 import io.furryr.file.daemon.HubCallerRoot
 import io.furryr.file.proto.hub.ActiveSessionResponse
@@ -374,14 +375,39 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     )
                 }
 
+                HubRequest.OpCase.AGENT_STEER -> {
+                    val agent = state.agent ?: error("agent is not attached")
+                    if (!agent.steer(request.agentSteer.text)) {
+                        error("the prompt is empty")
+                    }
+                    Reply(ok(id))
+                }
+
                 HubRequest.OpCase.AGENT_CANCEL -> {
+                    // Reply as soon as the kill is issued: the session closes its
+                    // exec handles on a detached scope and cancels its own job, so
+                    // nothing here waits for the run to unwind. Esc is the one
+                    // request that must never make the terminal feel stuck.
+                    val streams = state.agentJobs.keys.toList()
                     state.agent?.cancel()
                     state.agentJobs.values.forEach { it.cancel() }
                     state.agentJobs.clear()
-                    // Cancellation normally unwinds at the next suspension. Keep
-                    // the reply bounded even if a request is stuck in a blocking
-                    // read, instead of freezing the agent terminal on Esc.
-                    withTimeoutOrNull(CANCEL_WAIT_MS) { state.agent?.cancelAndWait() }
+                    // Close each open stream explicitly. A cancelled job unwinds by
+                    // throwing, and a stream that never reports `done` would leave
+                    // the terminal waiting on a frame that is never sent.
+                    for (streamId in streams) {
+                        runCatching {
+                            send(
+                                client,
+                                Reply(
+                                    HubResponse.newBuilder().setId(streamId).setOk(true)
+                                        .setAgentEvent(
+                                            AgentEvent.newBuilder().setDone(true).build(),
+                                        ).build(),
+                                ),
+                            )
+                        }
+                    }
                     Reply(ok(id))
                 }
 
@@ -781,7 +807,6 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
         private const val EXEC_WAIT_TIMEOUT_MS = 15 * 60 * 1000L
 
         /** Upper bound on waiting for an agent run to unwind after cancel. */
-        private const val CANCEL_WAIT_MS = 5_000L
 
         /** Bind [endpoint] and start serving. */
         fun listen(endpoint: UdsEndpoint): HubServer = HubServer(UdsServer.listen(endpoint))

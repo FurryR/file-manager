@@ -47,6 +47,13 @@ message AgentCompactRequest {
 
 message AgentCancelRequest {}
 
+message AgentSteerRequest {
+  // A prompt typed while the run is already working. The agent loop appends it
+  // to the conversation at the next gap — right after the tool results of the
+  // current turn — instead of making the user wait for the turn to finish.
+  string text = 1;
+}
+
 message AgentApprovalReply {
   uint64 approval_id = 1;
   bool allow = 2;

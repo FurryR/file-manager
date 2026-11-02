@@ -368,6 +368,10 @@ impl PtyManager {
             return Err(io::Error::last_os_error());
         }
 
+        // The child arms a parent-death signal against this pid, so record it
+        // before the fork: afterwards `getpid` returns the child's own pid.
+        let daemon_pid = unsafe { libc::getpid() };
+
         // 5. Fork
         let pid = unsafe { libc::fork() };
         if pid < 0 {
@@ -383,6 +387,14 @@ impl PtyManager {
                     || libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) != 0
                     || libc::signal(libc::SIGPIPE, libc::SIG_DFL) == libc::SIG_ERR
                 {
+                    libc::_exit(126);
+                }
+
+                // Die with the daemon, even if it is SIGKILLed. The subreaper
+                // only tears the tree down on a graceful exit; an orphaned
+                // session otherwise keeps its pty, its descendants and its CPU
+                // time alive for days after the daemon is gone.
+                if !crate::reaper::arm_parent_death_signal(daemon_pid) {
                     libc::_exit(126);
                 }
 
@@ -529,7 +541,7 @@ impl PtyManager {
         unsafe {
             if handle.exit.borrow().is_none() {
                 libc::kill(-(handle.child_pid as i32), libc::SIGHUP);
-                // SIGKILL to ensure termination
+                // SIGKILL to ensure termination.
                 libc::kill(-(handle.child_pid as i32), libc::SIGKILL);
                 // The parent can close a fresh PTY before the child has called setsid().
                 libc::kill(handle.child_pid as i32, libc::SIGKILL);

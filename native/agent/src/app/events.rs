@@ -180,13 +180,6 @@ impl App {
         self.bump();
     }
 
-    /// Adopt the cancelled run's settled history. The transcript keeps what the
-    /// user already saw; only the message history is synchronized.
-    pub fn complete_cancelled(&mut self, messages: Vec<Message>) {
-        self.history = messages;
-        self.bump();
-    }
-
     pub(super) fn finish_tool(&mut self, status: Option<&str>) {
         let Some(index) = self.active_tool.take() else {
             return;

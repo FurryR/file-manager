@@ -35,7 +35,7 @@ enum Client {
 struct HttpMcp {
     server: String,
     cwd: String,
-    hub: Arc<Mutex<Hub>>,
+    hub: Arc<Hub>,
     session_id: Option<String>,
     next_id: u64,
 }
@@ -146,7 +146,7 @@ impl McpManager {
     /// Local stdio servers are read from the workspace `.agent/mcp.json` when
     /// the caller trusts it; remote servers are reached by name through the
     /// hub, which holds their URLs and credentials.
-    pub async fn connect(capabilities: &Capabilities, hub: Arc<Mutex<Hub>>, cwd: &str) -> Self {
+    pub async fn connect(capabilities: &Capabilities, hub: Arc<Hub>, cwd: &str) -> Self {
         let mut manager = Self {
             tools: Vec::new(),
             clients: HashMap::new(),
@@ -366,8 +366,6 @@ impl HttpMcp {
         }
         let response = self
             .hub
-            .lock()
-            .await
             .remote_mcp_call(
                 &self.server,
                 &self.cwd,
@@ -413,8 +411,6 @@ impl HttpMcp {
         }
         headers.insert("MCP-Protocol-Version".to_owned(), "2025-03-26".to_owned());
         self.hub
-            .lock()
-            .await
             .remote_mcp_call(
                 &self.server,
                 &self.cwd,

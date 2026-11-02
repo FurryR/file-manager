@@ -8,7 +8,6 @@ use crate::hub::SessionEntry;
 use crate::input::Input;
 use crate::model::{Entry, Message, Role};
 use crate::model_info::{ModelCatalog, ModelInfo};
-pub type PromptQueue = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
 mod events;
 mod popup;
@@ -21,7 +20,7 @@ use popup::{PopupAction, PopupKind};
 pub const HELP: &str = "agent - terminal AI chat configured in the file manager
 
 Enter: send   Shift+Enter / Ctrl+J: newline   Esc: stop the run and its commands   Ctrl+C: cancel request / exit   Ctrl+Q: exit
-Enter while a request runs: queue the prompt for after the current tool call
+Enter while a request runs: hand it to the running turn, inserted after the current tool call
 Left/Right/Home/End: move   Up/Down: previous/next line; at first/last line: prompt history   Ctrl+U: clear input   Ctrl+W: delete word
 PageUp/PageDown, Ctrl/Shift+Up/Down, mouse wheel: scroll   click a Thought header: toggle thinking
 Ctrl+P: commands   /models: switch model   /variants: reasoning effort
@@ -40,6 +39,10 @@ pub enum Action {
     Quit,
     Cancel,
     Submit(Vec<Message>),
+    /// A prompt typed while a run is working. It goes to the agent loop right
+    /// away and is spliced into the conversation at the next gap, instead of
+    /// waiting for the run to finish.
+    Steer(String),
     Compact(Vec<Message>),
     PersistSelection,
     PersistHistory(Vec<Message>),
@@ -73,7 +76,6 @@ pub struct App {
     prompts: Vec<String>,
     prompt_index: Option<usize>,
     prompt_draft: String,
-    queued_entries: Vec<usize>,
     input: Input,
     pending: Option<Pending>,
     revision: u64,
@@ -100,7 +102,6 @@ pub struct App {
     completion_tokens: u64,
     requests: u64,
     popup: Option<Popup>,
-    queue: PromptQueue,
     yolo: bool,
 }
 
@@ -281,7 +282,6 @@ impl App {
             prompts: Vec::new(),
             prompt_index: None,
             prompt_draft: String::new(),
-            queued_entries: Vec::new(),
             input: Input::default(),
             pending: None,
             revision: 0,
@@ -308,7 +308,6 @@ impl App {
             completion_tokens: 0,
             requests: 0,
             popup: None,
-            queue: Default::default(),
             yolo: false,
         }
     }
@@ -653,7 +652,6 @@ impl App {
         self.redo.clear();
         self.compact_snapshot = None;
         self.detach_prompt_browse();
-        self.clear_queued();
         self.input.clear();
         self.reasoning_active = None;
         self.active_tool = None;

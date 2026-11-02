@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::Mutex;
 
 use crate::app::{Action, App, HELP};
 use crate::hub::{AgentOutcome, Hub};
@@ -49,7 +48,8 @@ enum TaskKind {
 }
 
 async fn run() -> io::Result<()> {
-    let mut hub = Hub::connect().await?;
+    arm_parent_death_signal()?;
+    let hub = Hub::connect().await?;
     let config = hub.ai_config().await.map_err(io::Error::other)?;
     let initial_provider = config.provider;
     let initial_model = config.model;
@@ -64,9 +64,9 @@ async fn run() -> io::Result<()> {
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| "/".to_owned());
     let capabilities = hub.capabilities(&cwd).await.unwrap_or_default();
-    let mcp_hub = Arc::new(Mutex::new(Hub::connect().await?));
+    let mcp_hub = Arc::new(Hub::connect().await?);
     let mcp = Arc::new(McpManager::connect(&capabilities, mcp_hub, &cwd).await);
-    let mut agent_hub = Hub::connect().await?;
+    let agent_hub = Hub::connect().await?;
     let attached = agent_hub
         .agent_attach(
             &session_id,
@@ -84,8 +84,8 @@ async fn run() -> io::Result<()> {
         .agent_set_mcp_tools(&mcp.definitions())
         .await
         .map_err(io::Error::other)?;
-    let agent_hub = Arc::new(Mutex::new(agent_hub));
-    let hub = Arc::new(Mutex::new(hub));
+    let agent_hub = Arc::new(agent_hub);
+    let hub = Arc::new(hub);
 
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
@@ -96,7 +96,7 @@ async fn run() -> io::Result<()> {
     let (info_sender, mut info_receiver) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         let catalog = match Hub::connect().await {
-            Ok(mut hub) => hub.catalog().await.unwrap_or_default(),
+            Ok(hub) => hub.catalog().await.unwrap_or_default(),
             Err(_) => Default::default(),
         };
         let _ = info_sender.send(catalog);
@@ -115,12 +115,16 @@ async fn run() -> io::Result<()> {
     app.set_yolo(attached.yolo);
     let mut state = UiState::default();
     let mut pending: Option<tokio::task::JoinHandle<Result<AgentOutcome, String>>> = None;
-    let mut pending_cancel: Option<tokio::sync::mpsc::UnboundedSender<()>> = None;
     let mut pending_kind = TaskKind::Chat;
     let mut approvals: Option<tokio::sync::mpsc::UnboundedSender<(u64, bool)>> = None;
     let mut events: Option<tokio::sync::mpsc::UnboundedReceiver<AgentEvent>> = None;
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Session liveness: one wake-up per second, cheap enough to leave running
+    // while idle and fast enough to notice a torn-down session at once.
+    let mut liveness = tokio::time::interval(Duration::from_secs(1));
+    liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut hub_gone = false;
 
     loop {
         terminal.draw(|frame| ui::draw(frame, &mut app, &mut state))?;
@@ -137,35 +141,18 @@ async fn run() -> io::Result<()> {
                     Action::None => {}
                     Action::Quit => break,
                     Action::Cancel => {
-                        // Ask the running task to cancel from inside its own
-                        // stream, then let it finish the cancel round-trip.
-                        // Aborting here can drop a partially read hub frame and
-                        // freeze every later request on that connection.
-                        let has_cancel = pending_cancel.is_some();
-                        if let Some(sender) = pending_cancel.take() {
-                            let _ = sender.send(());
+                        // Esc must not wait for anything: write the cancel and
+                        // drop the local run state in the same tick. The hub
+                        // kills the run and its exec process trees on its own
+                        // side; the answer is not needed here.
+                        if let Err(error) = agent_hub.agent_cancel().await {
+                            app.push_error(&format!("cancel could not be sent: {error}"));
                         }
-                        if let Some(handle) = pending.take() {
-                            if has_cancel {
-                                let _ = handle.await;
-                            } else {
-                                handle.abort();
-                                let _ = handle.await;
-                            }
-                        }
-                        if matches!(pending_kind, TaskKind::Chat) {
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                            if let Ok((history_json, _)) = hub
-                                .lock()
-                                .await
-                                .load_history(&session_id)
-                                .await
-                            {
-                                let messages = serde_json::from_str::<Vec<Message>>(&history_json)
-                                    .unwrap_or_default();
-                                app.complete_cancelled(messages);
-                            }
-                        }
+                        // Detach, never abort: aborting a task that is mid-frame
+                        // would leave the connection desynced. A detached stream
+                        // unwinds on its own, and its frames cannot leak into the
+                        // next run (responses are matched by request id).
+                        pending = None;
                         events = None;
                         approvals = None;
                     }
@@ -174,26 +161,31 @@ async fn run() -> io::Result<()> {
                             handle.abort();
                             let _ = handle.await;
                         }
-                        pending_cancel = None;
                         if let Some(text) = last_user(&messages) {
-                            let (handle, receiver, approval, cancel) = spawn_agent(
+                            let (handle, receiver, approval) = spawn_agent(
                                 &app,
                                 &agent_hub,
                                 Arc::clone(&mcp),
                                 text,
                             );
                             pending = Some(handle);
-                            pending_cancel = Some(cancel);
                             events = Some(receiver);
                             approvals = Some(approval);
                             pending_kind = TaskKind::Chat;
+                        }
+                    }
+                    Action::Steer(text) => {
+                        // Typed while the run is working: hand it over now so the
+                        // agent loop splices it in at the next gap (right after the
+                        // current turn's tool results) instead of after the run.
+                        if let Err(error) = agent_hub.agent_steer(&text).await {
+                            app.push_error(&format!("prompt could not be inserted: {error}"));
                         }
                     }
                     Action::Compact(_messages) => {
                         if let Some(handle) = pending.take() {
                             handle.abort();
                         }
-                        pending_cancel = None;
                         events = None;
                         approvals = None;
                         pending_kind = TaskKind::Compact;
@@ -201,7 +193,7 @@ async fn run() -> io::Result<()> {
                         let effort = app.effort().to_owned();
                         let hub = Arc::clone(&agent_hub);
                         pending = Some(tokio::spawn(async move {
-                            hub.lock().await.agent_compact(&model, &effort).await
+                            hub.agent_compact(&model, &effort).await
                         }));
                     }
                     Action::Approval { id, allow } => {
@@ -210,7 +202,7 @@ async fn run() -> io::Result<()> {
                         }
                     }
                     Action::Yolo(enabled) => {
-                        if let Err(error) = agent_hub.lock().await.agent_yolo(enabled).await {
+                        if let Err(error) = agent_hub.agent_yolo(enabled).await {
                             app.yolo_failed(enabled, &error);
                         }
                     }
@@ -219,13 +211,9 @@ async fn run() -> io::Result<()> {
                     }
                     Action::PersistHistory(messages) => {
                         let _ = hub
-                            .lock()
-                            .await
                             .save_history(&session_id, &messages)
                             .await;
                         let _ = agent_hub
-                            .lock()
-                            .await
                             .agent_attach(
                                 &session_id,
                                 &terminal_id,
@@ -238,13 +226,11 @@ async fn run() -> io::Result<()> {
                             .await
                             .map(|attached| app.set_yolo(attached.yolo));
                         let _ = agent_hub
-                            .lock()
-                            .await
                             .agent_set_mcp_tools(&mcp.definitions())
                             .await;
                     }
                     Action::ListSessions => {
-                        let sessions = hub.lock().await.list_sessions().await.unwrap_or_default();
+                        let sessions = hub.list_sessions().await.unwrap_or_default();
                         app.open_sessions(&sessions, &session_id);
                     }
                     Action::SelectSession { id, title } => {
@@ -254,22 +240,17 @@ async fn run() -> io::Result<()> {
                             handle.abort();
                             let _ = handle.await;
                         }
-                        pending_cancel = None;
                         events = None;
                         approvals = None;
                         let (history_json, stored_title) = hub
-                            .lock()
-                            .await
                             .load_history(&id)
                             .await
                             .unwrap_or_default();
                         let history =
                             serde_json::from_str::<Vec<Message>>(&history_json).unwrap_or_default();
                         // Kotlin agent repairs dangling tool calls when it loads the session.
-                        let _ = hub.lock().await.set_active_session(&id).await;
+                        let _ = hub.set_active_session(&id).await;
                         let attached = agent_hub
-                            .lock()
-                            .await
                             .agent_attach(
                                 &id,
                                 &terminal_id,
@@ -281,8 +262,6 @@ async fn run() -> io::Result<()> {
                             )
                             .await;
                         let _ = agent_hub
-                            .lock()
-                            .await
                             .agent_set_mcp_tools(&mcp.definitions())
                             .await;
                         session_id = id;
@@ -299,14 +278,11 @@ async fn run() -> io::Result<()> {
                             handle.abort();
                             let _ = handle.await;
                         }
-                        pending_cancel = None;
                         events = None;
                         approvals = None;
                         let id = new_session_id(&terminal_id);
-                        let _ = hub.lock().await.set_active_session(&id).await;
+                        let _ = hub.set_active_session(&id).await;
                         let attached = agent_hub
-                            .lock()
-                            .await
                             .agent_attach(
                                 &id,
                                 &terminal_id,
@@ -318,8 +294,6 @@ async fn run() -> io::Result<()> {
                             )
                             .await;
                         let _ = agent_hub
-                            .lock()
-                            .await
                             .agent_set_mcp_tools(&mcp.definitions())
                             .await;
                         session_id = id;
@@ -341,11 +315,16 @@ async fn run() -> io::Result<()> {
                             app.agent_event(event);
                         }
                     }
+                } else {
+                    // The run task dropped its sender. Leaving the stream
+                    // installed makes `recv()` resolve immediately on every
+                    // iteration, which turns this loop into a busy redraw until
+                    // the join handle happens to be polled.
+                    events = None;
                 }
             }
             result = async { pending.as_mut().unwrap().await }, if pending.is_some() => {
                 pending = None;
-                pending_cancel = None;
                 events = None;
                 approvals = None;
                 match (pending_kind, result) {
@@ -354,8 +333,6 @@ async fn run() -> io::Result<()> {
                     }
                     (TaskKind::Chat, Ok(Err(error))) => {
                         let messages = hub
-                            .lock()
-                            .await
                             .load_history(&session_id)
                             .await
                             .ok()
@@ -364,8 +341,6 @@ async fn run() -> io::Result<()> {
                     }
                     (TaskKind::Compact, Ok(Ok(outcome))) => {
                         let _ = hub
-                            .lock()
-                            .await
                             .save_history(&session_id, &outcome.messages)
                             .await;
                         app.complete_compact(outcome.answer)
@@ -376,23 +351,6 @@ async fn run() -> io::Result<()> {
                     (_, Err(error)) if error.is_cancelled() => {}
                     (_, Err(_)) => {
                         app.complete_error("Request failed unexpectedly.".to_owned(), None)
-                    }
-                }
-                let queued = app.queued_prompts();
-                if let Some(messages) = app.resume_queued() {
-                    let text = if queued.is_empty() {
-                        last_user(&messages)
-                    } else {
-                        Some(queued.join("\n\n"))
-                    };
-                    if let Some(text) = text {
-                        let (handle, receiver, approval, cancel) =
-                            spawn_agent(&app, &agent_hub, Arc::clone(&mcp), text);
-                        pending = Some(handle);
-                        pending_cancel = Some(cancel);
-                        events = Some(receiver);
-                        approvals = Some(approval);
-                        pending_kind = TaskKind::Chat;
                     }
                 }
             }
@@ -408,7 +366,13 @@ async fn run() -> io::Result<()> {
                             app.set_title(value);
                         }
                     }
-                    None => titles = None,
+                    None => {
+                        // The hub closed the subscription: the app that owns this
+                        // terminal is gone and every later request on this socket
+                        // would fail. Idling here leaves a headless UI behind.
+                        titles = None;
+                        hub_gone = true;
+                    }
                 }
             }
             info = info_receiver.recv(), if info_pending => {
@@ -421,20 +385,46 @@ async fn run() -> io::Result<()> {
                 }
             }
             _ = ticker.tick(), if pending.is_some() => app.tick(),
+            _ = liveness.tick() => {
+                // Every way a session can die without telling us shows up here:
+                // the controlling terminal hung up (its session leader is gone),
+                // or the hub socket closed. An orphaned UI can neither draw nor
+                // act, so it exits instead of burning a core for days.
+                if hub_gone || crate::terminal::hung_up() {
+                    break;
+                }
+            }
         }
     }
 
-    let has_cancel = pending_cancel.is_some();
-    if let Some(sender) = pending_cancel.take() {
-        let _ = sender.send(());
-    }
+    // Never leave the hub-side session behind: cancelling closes every exec
+    // process it started (process tree included), so quitting the UI cannot
+    // orphan a build, a test run or a container shell.
+    let _ = agent_hub.agent_cancel().await;
     if let Some(handle) = pending.take() {
-        if has_cancel {
-            let _ = handle.await;
-        } else {
-            handle.abort();
-            let _ = handle.await;
-        }
+        handle.abort();
+        let _ = handle.await;
+    }
+    Ok(())
+}
+
+/// Exit together with the shell that started this UI.
+///
+/// A daemon that dies without tearing its session down leaves this process as an
+/// orphan of init, and the pty may still be open in the app, so nothing else ever
+/// ends it. `PR_SET_PDEATHSIG` makes the kernel deliver SIGHUP (already handled
+/// as "quit") the moment the parent dies; the re-check closes the window where
+/// the parent was already gone before the signal could be armed.
+fn arm_parent_death_signal() -> io::Result<()> {
+    let parent = unsafe { libc::getppid() };
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGHUP, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if parent <= 1 || unsafe { libc::getppid() } != parent {
+        return Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "parent process is gone",
+        ));
     }
     Ok(())
 }
@@ -465,23 +455,23 @@ fn last_user(messages: &[Message]) -> Option<String> {
 
 fn spawn_agent(
     app: &App,
-    agent_hub: &Arc<Mutex<Hub>>,
+    agent_hub: &Arc<Hub>,
     mcp: Arc<McpManager>,
     text: String,
 ) -> (
     tokio::task::JoinHandle<Result<AgentOutcome, String>>,
     tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
     tokio::sync::mpsc::UnboundedSender<(u64, bool)>,
-    tokio::sync::mpsc::UnboundedSender<()>,
 ) {
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     let (approval_sender, mut approval_receiver) = tokio::sync::mpsc::unbounded_channel();
-    let (cancel_sender, mut cancel_receiver) = tokio::sync::mpsc::unbounded_channel();
     let hub = Arc::clone(agent_hub);
     let model = app.model().to_owned();
     let effort = app.effort().to_owned();
+    // The connection is shared, not owned: `/yolo`, steering and cancel have to
+    // reach the hub while this run is streaming, so nothing may hold a lock for
+    // the lifetime of a request.
     let handle = tokio::spawn(async move {
-        let mut hub = hub.lock().await;
         hub.agent_run(
             &text,
             &model,
@@ -489,14 +479,13 @@ fn spawn_agent(
             mcp,
             &mut approval_receiver,
             &sender,
-            &mut cancel_receiver,
         )
         .await
     });
-    (handle, receiver, approval_sender, cancel_sender)
+    (handle, receiver, approval_sender)
 }
 
-fn persist_selection(hub: &Arc<Mutex<Hub>>, model: &str, effort: &str) {
+fn persist_selection(hub: &Arc<Hub>, model: &str, effort: &str) {
     if model.is_empty() {
         return;
     }
@@ -504,6 +493,6 @@ fn persist_selection(hub: &Arc<Mutex<Hub>>, model: &str, effort: &str) {
     let model = model.to_owned();
     let effort = effort.to_owned();
     tokio::spawn(async move {
-        let _ = hub.lock().await.set_ai_selection(&model, &effort).await;
+        let _ = hub.set_ai_selection(&model, &effort).await;
     });
 }

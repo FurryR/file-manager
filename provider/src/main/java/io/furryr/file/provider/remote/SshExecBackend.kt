@@ -46,8 +46,9 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         }
     }
     /**
-     * Live sequential reader straight from `cat` on the server. Nothing is
-     * staged locally, so callers see bytes (and progress) while they transfer.
+     * Live reader straight from `tail` on the server. Nothing is staged
+     * locally, so callers see bytes (and progress) while they transfer.
+     * Repositioning reopens the pipe at the requested offset.
      */
     override fun openRead(path: String, size: Long): FileSource {
         val marker = "FMRAW-${UUID.randomUUID()}\n"
@@ -55,30 +56,12 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         // leased session for its whole lifetime; the pool dials another one
         // when every session is busy.
         val lease = SshConnections.open(location)
-        var stdout: InputStream? = null
-        val channel = try {
-            lease.connection.open("exec") { exec: ChannelExec ->
-                exec.setPty(false)
-                exec.setCommand("sh -c " + quote(
-                    "p=${quote(path)}\nn=\$(wc -c < \"\$p\") || exit 72\n" +
-                        "printf '%s%s\\n' ${quote(marker)} \"\$n\"\ncat -- \"\$p\"",
-                ))
-                exec.setErrStream(BoundedOutput(16 * 1024), true)
-                // JSch requires the pipe to exist before connect().
-                stdout = exec.inputStream
-                exec.connect(30_000)
-            }
+        return try {
+            SshSeekableStream(lease, path, size, marker)
         } catch (failure: Throwable) {
             lease.close()
             throw failure
         }
-        return SshDownloadStream(
-            lease,
-            channel,
-            stdout ?: throw IOException("SSH download stream is unavailable"),
-            marker.toByteArray(Charsets.US_ASCII),
-            size,
-        )
     }
     override fun upload(path: String, source: File) {
         mutablePath(path)
@@ -226,33 +209,42 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         @Synchronized fun bytes(): ByteArray = output.toByteArray()
     }
     /**
-     * Sequential [FileSource] reading the stdout pipe of a `cat` exec channel.
-     * The header carries the server-reported length, so a file that changed
-     * after `stat` is rejected unless the whole declared byte count arrived.
+     * Random-access [FileSource] over a live `tail -c +N` exec pipe. Sequential
+     * reads stay on the current pipe; any other offset reopens it. The header
+     * carries the server-reported length, so a file that changed after `stat`
+     * is rejected unless the whole declared byte count arrived.
      */
-    private class SshDownloadStream(
+    private class SshSeekableStream(
         private val lease: SshLease,
-        private val channel: ChannelExec,
-        private val stdout: InputStream,
-        private val marker: ByteArray,
+        private val path: String,
         override val size: Long,
+        private val markerText: String,
     ) : FileSource() {
         override val readable: Boolean get() = true
         override val writable: Boolean get() = false
-        override val seekable: Boolean get() = false
+        override val seekable: Boolean get() = true
         override val absolutePath: String? = null
 
+        private val marker = markerText.toByteArray(Charsets.US_ASCII)
+        private var channel: ChannelExec? = null
+        private var stdout: InputStream? = null
         private var position = 0L
         private var headerRead = false
         private var finished = false
         @Volatile private var closed = false
 
+        init {
+            openAt(0)
+        }
+
         @Synchronized
         override fun readAt(offset: Long, len: Int): ByteArray {
             check(!closed) { "SSH file stream is closed" }
-            require(offset == position) { "SSH file stream only supports sequential reads" }
-            if (finished) return ByteArray(0)
-            if (!headerRead) readHeader()
+            require(offset >= 0 && len >= 0)
+            if (len == 0 || offset >= size) return ByteArray(0)
+            if (offset != position || stdout == null) openAt(offset)
+            val input = stdout ?: throw IOException("SSH download stream is unavailable")
+            if (!headerRead) readHeader(input)
             if (position >= size) {
                 finish()
                 return ByteArray(0)
@@ -261,7 +253,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
             val buffer = ByteArray(wanted)
             var read = 0
             while (read < wanted) {
-                val count = stdout.read(buffer, read, wanted - read)
+                val count = input.read(buffer, read, wanted - read)
                 if (count < 0) throw IOException("Incomplete SSH file response")
                 read += count
             }
@@ -270,12 +262,49 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
             return buffer
         }
 
-        private fun readHeader() {
+        private fun openAt(offset: Long) {
+            releaseChannel()
+            headerRead = false
+            finished = false
+            position = offset
+            var input: InputStream? = null
+            val exec = try {
+                lease.connection.open("exec") { exec: ChannelExec ->
+                    exec.setPty(false)
+                    exec.setCommand("sh -c " + quote(
+                        "p=${quote(path)}\nn=\$(wc -c < \"\$p\") || exit 72\n" +
+                            "printf '%s%s\\n' ${quote(markerText)} \"\$n\"\n" +
+                            "tail -c +${offset + 1} \"\$p\"",
+                    ))
+                    exec.setErrStream(BoundedOutput(16 * 1024), true)
+                    // JSch requires the pipe to exist before connect().
+                    input = exec.inputStream
+                    exec.connect(30_000)
+                }
+            } catch (failure: Throwable) {
+                runCatching { input?.close() }
+                throw failure
+            }
+            channel = exec
+            stdout = input ?: run {
+                runCatching { exec.disconnect() }
+                throw IOException("SSH download stream is unavailable")
+            }
+        }
+
+        private fun releaseChannel() {
+            runCatching { stdout?.close() }
+            runCatching { channel?.disconnect() }
+            stdout = null
+            channel = null
+        }
+
+        private fun readHeader(input: InputStream) {
             headerRead = true
             val head = ByteArray(marker.size)
             var read = 0
             while (read < head.size) {
-                val count = stdout.read(head, read, head.size - read)
+                val count = input.read(head, read, head.size - read)
                 if (count < 0) throw IOException("Incomplete SSH file response")
                 read += count
             }
@@ -284,7 +313,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
             }
             val line = StringBuilder()
             while (true) {
-                val next = stdout.read()
+                val next = input.read()
                 if (next < 0) throw IOException("Incomplete SSH file response")
                 if (next == '\n'.code) break
                 if (next !in '0'.code..'9'.code || line.length >= 32) throw IOException("Invalid SSH file length")
@@ -297,16 +326,17 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         private fun finish() {
             if (finished) return
             finished = true
+            val exec = channel ?: return
             try {
                 val deadline = System.nanoTime() + 5_000_000_000L
                 while (true) {
-                    if (stdout.available() > 0) throw IOException("SSH file changed during transfer")
-                    if (channel.isClosed) break
+                    if ((stdout?.available() ?: 0) > 0) throw IOException("SSH file changed during transfer")
+                    if (exec.isClosed) break
                     interrupted()
                     if (System.nanoTime() > deadline) break
                     Thread.sleep(5)
                 }
-                if (channel.exitStatus != 0) throw IOException("SSH file transfer failed (${channel.exitStatus})")
+                if (exec.exitStatus != 0) throw IOException("SSH file transfer failed (${exec.exitStatus})")
             } catch (interrupted: InterruptedException) {
                 Thread.currentThread().interrupt()
                 throw IOException("Operation cancelled", interrupted)
@@ -315,16 +345,27 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
 
         override fun writeAt(offset: Long, data: ByteArray) =
             throw UnsupportedOperationException("SSH file stream is read-only")
-        override fun seek(position: Long) =
-            throw UnsupportedOperationException("SSH file stream is not seekable")
+        @Synchronized
+        override fun seek(position: Long) {
+            check(!closed) { "SSH file stream is closed" }
+            require(position >= 0)
+            if (position == this.position && stdout != null) return
+            if (position >= size) {
+                releaseChannel()
+                this.position = position
+                headerRead = false
+                finished = true
+                return
+            }
+            openAt(position)
+        }
         override fun truncate(newSize: Long) =
             throw UnsupportedOperationException("SSH file stream is read-only")
 
         override fun close() {
             if (closed) return
             closed = true
-            runCatching { stdout.close() }
-            runCatching { channel.disconnect() }
+            releaseChannel()
             lease.close()
         }
     }

@@ -8,18 +8,19 @@ import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import com.jcraft.jsch.SftpException
+import com.jcraft.jsch.SftpProgressMonitor
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
-import io.furryr.file.core.source.StreamFileSource
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
-import java.io.FilterInputStream
 import java.io.FileNotFoundException
+import java.io.IOException
+import java.io.InputStream
 import java.util.Vector
 
 /**
@@ -179,19 +180,14 @@ object SftpProvider : FileProvider {
         if (mode != OpenMode.READ) throw UnsupportedOperationException("SftpProvider supports READ only")
         val (server, remotePath) = resolveServerPath(path)
         val ch = channel(server)
-        val attrs = ch.lstat(remotePath)
-        if (attrs.isDir) throw FileNotFoundException("Is a directory: $path")
-        val raw = ch.get(remotePath)
-        val wrapped = object : FilterInputStream(raw) {
-            override fun close() {
-                try {
-                    super.close()
-                } finally {
-                    runCatching { ch.disconnect() }
-                }
-            }
+        try {
+            val attrs = ch.lstat(remotePath)
+            if (attrs.isDir) throw FileNotFoundException("Is a directory: $path")
+            SftpReadSource(ch, remotePath, attrs.size)
+        } catch (failure: Throwable) {
+            runCatching { ch.disconnect() }
+            throw failure
         }
-        StreamFileSource(inputStream = wrapped, size = attrs.size, absolutePath = null)
     }
 
     override fun copy(from: String, to: String, isCopy: Boolean): Flow<CopyProgress> {
@@ -306,5 +302,83 @@ object SftpProvider : FileProvider {
         s.setServerAliveInterval(30_000)
         s.connect(TIMEOUT_MS)
         return s
+    }
+}
+
+/**
+ * Random-access [FileSource] over one SFTP channel. JSch starts a download at
+ * the requested offset, so a seek only reopens the remote handle; sequential
+ * reads keep the current stream.
+ */
+private class SftpReadSource(
+    private val channel: ChannelSftp,
+    private val path: String,
+    override val size: Long,
+) : FileSource() {
+    override val readable get() = true
+    override val writable get() = false
+    override val seekable get() = true
+    override val absolutePath: String? = null
+
+    private var stream: InputStream? = null
+    private var streamOffset = -1L
+    private var closed = false
+
+    @Synchronized
+    override fun readAt(offset: Long, len: Int): ByteArray {
+        check(!closed) { "SFTP file source is closed" }
+        require(offset >= 0 && len >= 0)
+        if (len == 0 || offset >= size) {
+            if (offset >= size) releaseStream()
+            return ByteArray(0)
+        }
+        val wanted = minOf(len.toLong(), size - offset).toInt()
+        val input = ensureStream(offset)
+        val buffer = ByteArray(wanted)
+        var read = 0
+        while (read < wanted) {
+            val count = input.read(buffer, read, wanted - read)
+            if (count < 0) throw IOException("Incomplete SFTP file response")
+            read += count
+        }
+        streamOffset = offset + read
+        return buffer
+    }
+
+    private fun ensureStream(offset: Long): InputStream {
+        stream?.let { if (streamOffset == offset) return it }
+        releaseStream()
+        return channel.get(path, null as SftpProgressMonitor?, offset).also {
+            stream = it
+            streamOffset = offset
+        }
+    }
+
+    private fun releaseStream() {
+        runCatching { stream?.close() }
+        stream = null
+        streamOffset = -1L
+    }
+
+    @Synchronized
+    override fun seek(position: Long) {
+        check(!closed) { "SFTP file source is closed" }
+        require(position >= 0)
+        releaseStream()
+        streamOffset = position
+    }
+
+    override fun writeAt(offset: Long, data: ByteArray) =
+        throw UnsupportedOperationException("SFTP file source is read-only")
+
+    override fun truncate(newSize: Long) =
+        throw UnsupportedOperationException("SFTP file source is read-only")
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        releaseStream()
+        runCatching { channel.disconnect() }
     }
 }

@@ -420,3 +420,8 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   `pulse_buffer_ms` defaults to 200 and clamps to 10–1000. Settings travel over
   Messenger because SharedPreferences caches are process-local. Restart the
   engine in place for changes; preserve the listener and its socket inode.
+
+## TODO - Bug checks
+
+- [ ] `provider/.../SftpProvider.kt`: verify SFTP preview/read across forward and backward seeks and EOF against a real server.
+- [ ] `provider/.../remote/SshExecBackend.kt`: verify `ssh://` seeks, sequential copy progress and cancellation against a real server with `tail -c +N` support.

@@ -200,6 +200,11 @@ pub(super) async fn run_exec_stream(
         // SAFETY: runs in the forked child; `prctl` and `getppid` are
         // async-signal-safe and touch no process memory.
         if unsafe { crate::reaper::arm_parent_death_signal(daemon_pid) } {
+            // Join the container group; the command and everything it spawns
+            // inherit it. Async-signal-safe: openat + write, no allocation.
+            crate::cgroup::attach_self();
+            // Narrow the cgroup view to this container (see `isolate_view`).
+            crate::cgroup::isolate_view();
             Ok(())
         } else {
             Err(io::Error::from_raw_os_error(libc::ESRCH))
@@ -268,6 +273,11 @@ pub(super) async fn run_exec(
         // SAFETY: runs in the forked child; `prctl` and `getppid` are
         // async-signal-safe and touch no process memory.
         if unsafe { crate::reaper::arm_parent_death_signal(daemon_pid) } {
+            // Join the container group; the command and everything it spawns
+            // inherit it. Async-signal-safe: openat + write, no allocation.
+            crate::cgroup::attach_self();
+            // Narrow the cgroup view to this container (see `isolate_view`).
+            crate::cgroup::isolate_view();
             Ok(())
         } else {
             Err(io::Error::from_raw_os_error(libc::ESRCH))

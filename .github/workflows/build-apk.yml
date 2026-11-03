@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
@@ -27,14 +27,17 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: Check flake
-        run: nix flake check --no-write-lock-file
+        run: nix flake check --no-write-lock-file --no-update-lock-file
 
       - name: Build native artifacts and APK
         run: |
           nix develop --command bash -c '
             set -euo pipefail
+            bash native/build-xkbcommon.sh aarch64
+            bash scripts/fetch-xkbdata.sh
             bash native/build-android-aarch64.sh
             bash native/build-proot.sh
+            bash native/build-pulse.sh
             gradle clean :app:assembleDebug --no-daemon
           '
 
@@ -43,19 +46,25 @@ jobs:
           set -euo pipefail
           apk=app/build/outputs/apk/debug/app-debug.apk
           test -f "$apk"
+          listing="$(unzip -Z1 "$apk")"
 
           for entry in \
             lib/arm64-v8a/libfiledaemon.so \
             lib/arm64-v8a/libproot.so \
-            lib/arm64-v8a/libvirglhost.so \
+            lib/arm64-v8a/libpulsehost.so \
+            lib/arm64-v8a/libwayland_compositor.so \
+            lib/arm64-v8a/libeglshim.so \
             lib/arm64-v8a/run0 \
             lib/arm64-v8a/here \
-            lib/arm64-v8a/agent; do
-            unzip -Z1 "$apk" | grep -Fx "$entry"
+            lib/arm64-v8a/agent \
+            assets/xkb/rules/evdev \
+            assets/xkb/rules/evdev.xml \
+            assets/xkb/symbols/us; do
+            grep -Fxq "$entry" <<< "$listing"
           done
 
       - name: Upload debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: app-debug-${{ github.sha }}
           path: app/build/outputs/apk/debug/app-debug.apk

@@ -7,6 +7,7 @@
 ```
 native/
 ├── src/main.rs      # All daemon logic (~580 lines)
+├── src/cgroup.rs    # Container cgroup ownership: one write ends the whole container
 ├── Cargo.toml       # Workspace root + file_daemon (Tokio + libc + prost)
 ├── run0/src/main.rs # Privileged command client + local tty bridge
 ├── here/src/main.rs # Reveal a path via one O_PATH descriptor sent to the hub
@@ -30,6 +31,7 @@ native/
 - **Connection lifecycle**: `main()` accept loop + `handle_connection()` — one task per client
 - **Connection auth**: `auth::derive_socket_name` / `auth::verify`; every client must sign the `--key`/`--id`-derived socket's nonce before any request
 - **Abstract socket**: `create_abstract_server()` + `bind_abstract_socket()` (name derived from `--key`/`--id`)
+- **Container lifetime**: the daemon is the container's subreaper (parentage: orphans reparent to it) while `cgroup.procs` is the only enumeration this kernel allows; spawned children join the group and then `unshare(CLONE_NEWCGROUP)` (`cgroup::isolate_view`) so the container manages only its own subtree; `cgroup::install` / `attach_self` / `kill_and_remove` own the group, opened before the chroot and used through `openat`, and `cgroup::sweep` ends groups whose owner died
 - **UID check** for data path: `maybe_android_data_path()` — skips `/Android/data` UID trick when root
 - **Progress tracking**: `TaskState` in `HashMap`, tasks spawn via `tokio::spawn`
 - **Shared hub connection**: the agent's `Hub` methods take `&self` (ids are
@@ -41,7 +43,7 @@ native/
   in the same tick and the hub kills the exec trees on its own side, so the
   stop button never has a timeout to burn.
 - **Terminal utilities**: `run0/`, `here/`, `agent/`; common wire transport in `hub-client/`
-- **Agent UI/network**: ratatui + crossterm UI in `agent/src/{ui,terminal,app}.rs`; chat/models/history/online MCP go through the hub (`agent/src/hub.rs`), local stdio MCP in `agent/src/mcp.rs`
+- **Agent UI/network**: ratatui + crossterm UI in `agent/src/{ui,terminal,app}.rs`; chat/models/history/online MCP go through the hub (`agent/src/hub.rs`), local stdio MCP in `agent/src/mcp.rs`. A finished title stream means the hub is gone — local abstract sockets do not drop on their own and the hub never evicts a client, so the agent must not re-subscribe or probe
 
 ## CONVENTIONS
 
@@ -58,6 +60,27 @@ native/
   drift from them. Arm `reaper::arm_parent_death_signal` in the child
   (`pty.rs` after `fork`, `handlers/exec.rs` in `pre_exec`) — parent death is the
   one case a live daemon cannot clean up after.
+- **Input is an async fd, not crossterm's reader** — `agent/src/terminal.rs` opens
+  `/dev/tty` non-blocking and waits on it with `tokio::io::unix::AsyncFd`, then
+  parses bytes with `termwiz::input::InputParser` and converts to crossterm
+  events. Never route input back through `crossterm::event::{poll,read}` or
+  `EventStream`: on a hung-up pty that source parks in a `read(2)` loop that only
+  leaves on `WouldBlock`, so EOF (`0`) and `EIO` are ignored and it spins at
+  ~1.6M iterations/s — driven from `select!` it wedges the executor, and
+  `EventStream` would put that spin on the runtime thread. With `AsyncFd` a `0`
+  or `EIO` read is simply "input is over". Open a *fresh* `/dev/tty`
+  description: `O_NONBLOCK` is per open file description, so a `dup` of fd 0
+  would also make stdout non-blocking and turn a full pty buffer into `EAGAIN`
+  on draw. A lone Escape stays a key because `maybe_more` is false.
+- **Escaped chroot sessions die by self-detection, not by cleanup** — there is no
+  PID namespace, so a session whose owner died reparents to init(1) and sits in
+  the same table as init's own services: `ppid == 1` proves nothing by itself.
+  It cannot be enumerated cheaply either — walking `/proc` is far too slow to run
+  on a timer and `children` is not exposed — so do not add a janitor, a registry
+  or a shutdown tree walk. Every long-lived process inside a chroot container has
+  to end itself: hang-up detection in its readers, plus
+  `reaper::arm_parent_death_signal` on direct children (it is cleared by `fork`).
+  proot containers need none of this — Android does not let them escape.
 - **Multi-client** — the daemon serves many concurrent connections. Each has its own
   read loop, write half and response channel; PTYs/handles/broker are shared via `Shared`.
   Disconnecting one client does not affect other authenticated clients.
@@ -106,4 +129,5 @@ NDK does not ship).
 - [ ] `wayland/src/text_input.rs`: surrounding text is not mirrored back to the IME (`set_surrounding_text` is stored but unused), so suggestions/autocorrect have no context; verify and decide whether to feed it through reverse JNI.
 - [ ] `wayland/src/render.rs`: verify frames are not re-rendered when nothing changed and that the 60 Hz tick does not spin the CPU while the viewer is closed.
 - [ ] `wayland/src/lib.rs`: verify a client launched from a container connects to `/dev/wayland/wayland-0` (foot: `failed to connect to wayland`), including after an app restart leaves an old socket file behind.
+- [ ] `agent/src/terminal.rs`: verify an `agent` running in a **chroot** container (proot sessions cannot escape, so they are out of scope) exits within one poll interval after the pty master closes (kill the daemon or the app while the UI is open), and that no `agent-input` thread keeps accumulating CPU time afterwards.
 

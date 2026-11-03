@@ -36,6 +36,11 @@ pub struct TitleStream {
 }
 
 impl TitleStream {
+    /// Next title, or `None` once the hub is gone.
+    ///
+    /// A local abstract socket does not drop on its own and the hub does not
+    /// evict clients, so a finished stream is a dead hub — nothing here needs to
+    /// probe for it or to re-subscribe.
     pub async fn recv(&mut self) -> Option<(String, String)> {
         self.receiver.recv().await
     }
@@ -174,7 +179,14 @@ impl Hub {
                             }
                         }
                     }
-                    _ => break,
+                    // A frame-level error on the stream is not the connection
+                    // ending: the hub does not evict clients, so keep reading
+                    // instead of turning one bad frame into a dead UI.
+                    Ok(_) => continue,
+                    // The socket itself ended. A local abstract socket does not
+                    // drop on its own and the hub never closes a client it still
+                    // wants, so this means the hub is gone.
+                    Err(_) => break,
                 }
             }
         });

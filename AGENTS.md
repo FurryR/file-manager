@@ -170,7 +170,8 @@ file-manager/
 | Container launch | `container/.../ContainerDaemonLauncher.kt` | proot/chroot argv + PulseAudio/Wayland environment; KGSL GPU probe in `ProotRunner` |
 | Terminal IME | `app/.../agent/TerminalViewComposable.kt` | focus hand-off + `showSoftInput`; see NOTES |
 | Native daemon | `native/src/main.rs` | File ops under root/shell |
-| Process subreaper | `native/src/reaper.rs` | Central SIGCHLD reaper; exit-code channels only, no process inventory |
+| Child reaping | `native/src/reaper.rs` | Central SIGCHLD reaper + `PR_SET_CHILD_SUBREAPER` (parentage only); exit-code channels, no process inventory |
+| Container cgroup | `native/src/cgroup.rs` | Group ownership opened before the chroot; one write ends the container (v2 kill / freeze, v1 freezer); `sweep` kills groups whose owner died |
 | IPC protocol | `proto/file_daemon.proto` | Request/Response messages |
 
 ## CONVENTIONS
@@ -361,28 +362,57 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   container shutdown explicitly stop the daemon. There is no transport reconnect
   or request replay. After connection loss, a later operation starts a fresh
   daemon on demand; old PTYs and handles are not restored.
-- **The daemon is a child subreaper, and nothing more** ([`native/src/reaper.rs`]) —
-  orphaned descendants reparent to it instead of escaping to host init, and one
-  central SIGCHLD sweep calls `waitpid(-1)` so no zombie outlives its creator.
-  Tracked children get their exit code over a watch channel (`reaper::track`
-  returns it immediately after spawn, before any await); no other code calls
-  `wait*`, so a status can never be stolen twice.
-  It keeps **no process inventory**, and that is deliberate: killing belongs to
-  the handle that owns the process — a PTY owns its session, an exec owns its
-  process group — and the lifetime boundary is the container/app itself. When
-  file-manager or the container goes away, nothing is left to kill, so a global
-  "who is alive" table would only be a second source of truth that drifts from
-  the handles (and rootless Android cannot rebuild it from `/proc`). Daemon
-  shutdown therefore just closes PTYs and drops execs.
+- **The daemon is the container's init stand-in; a cgroup bounds it**
+  ([`native/src/reaper.rs`], [`native/src/cgroup.rs`]) —
+  one central SIGCHLD sweep calls `waitpid(-1)` so no zombie outlives its
+  creator, and tracked children get their exit code over a watch channel
+  (`reaper::track` returns it immediately after spawn, before any await); no
+  other code calls `wait*`, so a status can never be stolen twice. It keeps
+  **no process inventory of its own**: killing belongs to the handle that owns the process
+  — a PTY owns its session, an exec owns its process group.
+  `PR_SET_CHILD_SUBREAPER` makes the daemon the container's **init stand-in**: a
+  descendant whose parent dies is reparented to it instead of to host init, so
+  the daemon reaps it and `getppid()` reports the daemon. That is the *parentage*
+  half of init and costs one `prctl`.
+  It is **not** the enumeration half, and no `prctl` can be: these kernels build
+  no `children` file and `wait*` only reports exits, so a live adopted orphan
+  stays invisible to its subreaper. Listing and killing container processes is
+  `cgroup.procs`' job (needs no parentage, no `/proc` walk). A PID namespace
+  would deliver both halves at once, but this kernel has no `PID_NS`
+  (`/proc/self/ns/pid` is absent, `unshare -p` returns EINVAL), so init is
+  assembled from a subreaper plus a cgroup.
   Every spawn arms `PR_SET_PDEATHSIG(SIGKILL)` in the child
-  (`reaper::arm_parent_death_signal`), which covers the one case no bookkeeping
-  can: the daemon being SIGKILLed (force-stop, LMK, `kill -9`) instead of
-  reaching its shutdown path. That is also what makes "file-manager exits, the
-  container goes with it" hold down to the last process.
-  A descendant that deliberately `setsid()`s into its own session (nohup-style
-  detaching) outlives the group kill. That is accepted: it is not an escape from
-  the subreaper (parentage never changes, it is still reaped), and its lifetime
-  is already bounded by the container/app.
+  (`reaper::arm_parent_death_signal`, cleared by `fork`, so direct children
+  only), which covers the case no bookkeeping can: the daemon being SIGKILLed
+  instead of reaching its shutdown path.
+  The **container-wide** guarantee comes from the cgroup, because that is the one
+  kernel object inherited across `fork` that outlives every process in the tree.
+  A chroot daemon owns `ct/<name>` and every spawned child joins it before
+  `exec` (`cgroup::attach_self`), so anything the container ever starts — a
+  `setsid()`-detached session, a double-forked daemon, a binary this daemon
+  never sees — is a member. Shutdown then ends the container with one write
+  (`cgroup.kill` on kernel 5.14+, else freeze + `cgroup.procs` loop, else the
+  v1 freezer), which no cooperative behaviour can defeat. The handles are
+  opened *before* the chroot and used through `openat`, because cgroupfs is gone
+  from view afterwards.
+  A daemon that is SIGKILLed cannot shoot, so the next launch's `cgroup::sweep`
+  ends any group whose recorded owner (pid + starttime) is gone — one directory
+  listing plus one `/proc/<pid>/stat` per container, never a process-table walk.
+  A spawned child also calls `CLONE_NEWCGROUP` (`cgroup::isolate_view`) right
+  after joining: `ct/<name>` becomes the root of its cgroupfs view, so an init
+  system inside the container can still create and manage sub-groups (systemd
+  does this on startup) while it can no longer see, let alone write, an
+  ancestor's `cgroup.procs`. Without that, `systemctl`/`cgclassify` can
+  accidentally classify the container's own processes out of the group that is
+  supposed to end them.
+  This is **accident prevention, not a boundary**: a container root shares uid 0
+  and the host's PID namespace with the daemon, so `/proc/<daemon>/ns/*` and
+  `/proc/<pid>/mem` are open to it. Do **not** "harden" this by masking
+  `/sys/fs/cgroup` — that breaks the init systems that need it and buys nothing
+  against a root that is already our peer. A real boundary needs a PID namespace,
+  which these kernels do not have.
+  proot containers are out of scope: they are not root, their processes cannot
+  escape, and they own no group.
 - Client entry points live in `:daemon` (`DaemonManager.fileService/execService`).
 - **Terminal IME tap race (upstream-worthy)** — Termux's
   `TerminalView.onSingleTapUp()` calls `requestFocus()` on the terminal view, then

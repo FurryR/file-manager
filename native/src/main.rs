@@ -13,6 +13,7 @@ mod proto {
     include!(concat!(env!("OUT_DIR"), "/filedaemon.rs"));
 }
 mod auth;
+mod cgroup;
 mod container;
 mod copy;
 mod exec;
@@ -92,6 +93,7 @@ async fn main() -> io::Result<()> {
     let socket_name = auth::derive_socket_name(&public_key, &id);
     let chroot_rootfs = parse_value_arg("--chroot");
     let proot_mode = has_flag("--proot");
+    let group_name = parse_value_arg("--group");
 
     eprintln!(
         "[file-daemon] v{} pid={}",
@@ -99,8 +101,11 @@ async fn main() -> io::Result<()> {
         std::process::id()
     );
 
-    // Adopt orphaned descendants instead of letting them escape to init: we
-    // reap their zombies while running and kill the whole tree on exit.
+    // Stand in for init inside the container: a descendant orphaned by a dying
+    // parent is reparented here instead of to host init, so this daemon is the
+    // one that reaps it and the one `getppid()` reports. That is only the
+    // parentage half — enumerating or killing those processes is `cgroup`'s job,
+    // because these kernels have neither `children` nor a PID namespace.
     reaper::enable()?;
 
     // Container daemons own the process tree: become a session/group leader so
@@ -111,6 +116,24 @@ async fn main() -> io::Result<()> {
             libc::setsid();
         }
         list::set_container_mode(true);
+    }
+
+    // Bind the container's lifetime to this daemon. Membership is inherited by
+    // every descendant, so one write covers everything the container will ever
+    // spawn: processes that ignore signals, sessions that call setsid(), and
+    // binaries this daemon never sees. Installed before the chroot because
+    // cgroupfs disappears from view afterwards (see `cgroup`).
+    //
+    // A chroot daemon is launched as `su -c 'exec <daemon>'`, so its parent is
+    // the su daemon rather than the app: an Android force-stop (which kills by
+    // uid, and this daemon runs as root in its own session) cannot take it down.
+    // It outlives the app on purpose — that is what gives it the chance to end
+    // the container when its last client goes away.
+    if let Some(name) = &group_name {
+        match cgroup::install(name) {
+            Ok(()) => eprintln!("[file-daemon] cgroup {name} owned"),
+            Err(error) => eprintln!("[file-daemon] cgroup {name} unavailable: {error}"),
+        }
     }
 
     // chroot backend: isolate the mount tree and enter the rootfs here. The
@@ -218,6 +241,12 @@ async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
     shared.pty_manager.lock().await.close_all();
     shared.execs.lock().await.clear();
     *shared.handles.lock().await = HandleTable::new();
+    // The handles above cover what they own; the group covers the rest --
+    // descendants that ignored SIGHUP, sessions that called setsid(), and
+    // anything spawned by binaries this daemon never saw. One write, issued
+    // after the clients are drained so an in-flight request cannot refill the
+    // group mid-kill.
+    cgroup::kill_and_remove();
     Ok(())
 }
 

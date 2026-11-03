@@ -55,6 +55,11 @@ if [[ "$HOST_TAG" == "windows-x86_64" ]]; then
   ARCHIVER="$(cygpath -m "$ARCHIVER")"
 fi
 
+JNI_DIR="$ROOT_DIR/app/src/main/jniLibs/arm64-v8a"
+# The compositor's build.rs stages libeglshim.so into jniLibs only when the
+# directory already exists, so create it before cargo runs.
+mkdir -p "$JNI_DIR"
+
 rustup target add aarch64-linux-android
 # NOTE: keep the daemon dynamically linked. proot crashes (SIGSEGV) on static
 # binaries; the dynamic daemon runs under proot as long as /apex (bionic) and
@@ -64,8 +69,6 @@ CC_aarch64_linux_android="$LINKER" \
 AR_aarch64_linux_android="$ARCHIVER" \
   cargo build --manifest-path "$NATIVE_DIR/Cargo.toml" --workspace --locked --release --target aarch64-linux-android
 
-JNI_DIR="$ROOT_DIR/app/src/main/jniLibs/arm64-v8a"
-mkdir -p "$JNI_DIR"
 cp "$NATIVE_DIR/target/aarch64-linux-android/release/file_daemon" \
   "$JNI_DIR/libfiledaemon.so"
 # Smithay-based Wayland compositor. Requires libxkbcommon first:

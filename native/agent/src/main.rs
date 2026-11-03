@@ -92,6 +92,10 @@ async fn run() -> io::Result<()> {
     let mut hangup = signal(SignalKind::hangup())?;
     let mut quit = signal(SignalKind::quit())?;
     let mut suspend = signal(SignalKind::from_raw(libc::SIGTSTP))?;
+    // The input source is a plain fd now, so crossterm no longer turns SIGWINCH
+    // into `Event::Resize`. Waking the loop is enough: ratatui re-reads the size
+    // on every draw, and the draw is the first thing the loop does.
+    let mut resize = signal(SignalKind::window_change())?;
 
     let (info_sender, mut info_receiver) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
@@ -135,6 +139,8 @@ async fn run() -> io::Result<()> {
             _ = hangup.recv() => break,
             _ = quit.recv() => break,
             _ = suspend.recv() => break,
+            _ = resize.recv() => {},
+
             maybe_event = terminal.next_event() => {
                 let Some(event) = maybe_event else { break };
                 match app.handle_event(event) {
@@ -367,9 +373,11 @@ async fn run() -> io::Result<()> {
                         }
                     }
                     None => {
-                        // The hub closed the subscription: the app that owns this
-                        // terminal is gone and every later request on this socket
-                        // would fail. Idling here leaves a headless UI behind.
+                        // A local abstract socket does not drop on its own and
+                        // the hub does not evict clients, so a finished title
+                        // stream means the hub is gone: every later request on
+                        // this connection would fail. Exit instead of leaving a
+                        // headless UI behind.
                         titles = None;
                         hub_gone = true;
                     }

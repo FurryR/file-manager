@@ -28,19 +28,25 @@
 
           android = pkgs.androidenv.composeAndroidPackages {
             platformVersions = [ "35" ];
-            buildToolsVersions = [ "34.0.0" "35.0.0" ];
+            buildToolsVersions = [ "35.0.0" ];
+            # Pinned so the native scripts' NDK layout stays stable.
             includeNDK = true;
+            ndkVersion = "27.2.12479018";
             includeEmulator = false;
             includeSources = false;
             includeSystemImages = false;
           };
 
+          # AGP 8.6.1 needs a Gradle 8.x; nixpkgs' default `gradle` may be 9.x.
+          # The repo does not commit gradle/wrapper/gradle-wrapper.jar (see
+          # .gitignore), so this is the only usable gradle in CI.
           gradlePackage =
             if pkgs ? gradle_8 then pkgs.gradle_8 else pkgs.gradle;
           jdkPackage = pkgs.jdk17;
           pythonPackage = pkgs.python3.withPackages (ps: [ ps.pip ]);
           androidSdkRoot = "${android.androidsdk}/libexec/android-sdk";
-          buildToolsVersion = "34.0.0";
+          # Must match compileSdk 35; AGP runs this aapt2 instead of the Maven one.
+          buildToolsVersion = "35.0.0";
           buildToolsDir = "${androidSdkRoot}/build-tools/${buildToolsVersion}";
         in
         {
@@ -53,10 +59,21 @@
               pythonPackage
               pkgs.git
               pkgs.curl
+              pkgs.cacert
               pkgs.gawk
+              # Native builds: xkbcommon/xkeyboard-config/PulseAudio use meson,
+              # libsndfile uses cmake, libltdl uses configure + make + m4.
+              pkgs.meson
+              pkgs.ninja
+              pkgs.cmake
+              pkgs.pkg-config
+              pkgs.gnumake
+              pkgs.gnum4
+              pkgs.bison
               pkgs.file
               pkgs.gnutar
               pkgs.gzip
+              pkgs.xz
               pkgs.unzip
               pkgs.zip
               pkgs.android-tools
@@ -69,6 +86,9 @@
             ANDROID_SDK_ROOT = androidSdkRoot;
             ANDROID_NDK_HOME = "${androidSdkRoot}/ndk-bundle";
             GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${buildToolsDir}/aapt2";
+            # The Nix-provided curl/git ignore the host CA bundle.
+            SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+            NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
 
             shellHook = ''
               export GRADLE_USER_HOME="''${XDG_CACHE_HOME:-$HOME/.cache}/gradle"
@@ -88,9 +108,13 @@
               echo "Android NDK: $ANDROID_NDK_HOME"
               echo "JDK: $JAVA_HOME"
               echo "Gradle: $(gradle --version | awk '/^Gradle / { print $2; exit }')"
-              echo "Build APK: gradle :app:assembleDebug"
-              echo "Build native artifacts first: bash native/build-android-aarch64.sh"
-              echo "Build proot separately: bash native/build-proot.sh"
+              echo "Full native + APK build:"
+              echo "  bash native/build-xkbcommon.sh aarch64"
+              echo "  bash scripts/fetch-xkbdata.sh"
+              echo "  bash native/build-android-aarch64.sh"
+              echo "  bash native/build-proot.sh"
+              echo "  bash native/build-pulse.sh"
+              echo "  gradle :app:assembleDebug"
             '';
           };
         });

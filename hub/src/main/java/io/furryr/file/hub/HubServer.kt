@@ -284,7 +284,28 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                     }
                                 }
                             } else {
-                                send(client, dispatch(request!!, state, client))
+                                // A failed request must not cost the client its
+                                // connection. `dispatch` reports errors by
+                                // throwing (`require(...)`), and letting that
+                                // escape closes the socket through the outer
+                                // catch/finally — so one malformed or rejected
+                                // call would take down every other request and
+                                // every stream multiplexed on that connection.
+                                val reply = try {
+                                    dispatch(request!!, state, client)
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    Reply(failure(request!!.id, e.message ?: "hub request failed"))
+                                }
+                                try {
+                                    send(client, reply)
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "hub response delivery failed", e)
+                                    client.close()
+                                }
                             }
                         } finally {
                             event.frame.close()

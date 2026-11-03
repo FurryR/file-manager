@@ -15,6 +15,10 @@ import io.furryr.file.wayland.WaylandManager
  * `:core` never sees it.
  *
  * - chroot: launched as root via `su -c '<daemon> --key <pub> --id <id> --chroot <rootfs> --bind …'`.
+ *   It also owns the container cgroup (`--group <name>`): the daemon outlives the
+ *   app on purpose (its parent is the su daemon, not the app) so that it can end
+ *   the container when its last client goes away, and `cgroup::sweep` ends groups
+ *   whose owner died. proot needs none of this: it is not root and cannot escape.
  *   The daemon isolates the mount tree and chroots itself.
  * - proot: launched as the app UID through proot, so the daemon process itself
  *   lives inside the container.
@@ -45,6 +49,7 @@ object ContainerDaemonLauncher {
             "--key", shellQuote(request.publicKey),
             "--id", shellQuote(request.id),
             "--chroot", shellQuote(container.rootfsPath),
+            "--group", shellQuote(container.name),
         )
         for ((source, target) in ProotRunner.chrootBinds(context, container)) {
             tokens.add("--bind")

@@ -1,19 +1,23 @@
-//! Subreaper support: adopt orphaned descendants and reap the zombies nobody
-//! owns.
+//! Child reaping and init-style adoption: one `waitpid(-1)` per SIGCHLD.
 //!
 //! This module owns exactly two jobs. Every child state change arrives as
-//! `SIGCHLD`, and one central `waitpid(-1)` reaps tracked children and adopted
-//! orphans alike, so no zombie outlives the process that created it. Owners get
-//! their exit code over a watch channel instead of racing the reaper with their
-//! own `waitpid`.
+//! `SIGCHLD`, and one central `waitpid(-1)` reaps them, so no zombie outlives the
+//! process that created it. Owners get their exit code over a watch channel
+//! instead of racing the reaper with their own `waitpid`.
 //!
-//! It deliberately keeps no process inventory. Killing is the business of the
-//! handle that owns the process — a PTY owns its session, an exec owns its
-//! process group — and the lifetime boundary is the container/app itself: when
-//! file-manager (or the container) goes away, nothing is left to kill. A global
-//! "who is alive" table would be a second source of truth that only drifts from
-//! the handles, and rootless Android cannot enumerate `/proc` to rebuild it.
-//! `arm_parent_death_signal` covers the abrupt case that no bookkeeping can.
+//! `PR_SET_CHILD_SUBREAPER` makes this daemon the container's init stand-in: a
+//! descendant whose parent dies is reparented here instead of to host init, so
+//! the daemon is the one that reaps it and the one `getppid()` reports. That is
+//! the *parentage* half of init, and it costs a single `prctl`.
+//!
+//! It is not the *enumeration* half, and no `prctl` can be: these kernels build
+//! no `/proc/<pid>/task/<tid>/children`, and `wait*` only reports exits, so a
+//! live adopted orphan stays invisible to its subreaper. Listing (and killing)
+//! container processes is `cgroup.procs`' job (`crate::cgroup`), which needs no
+//! parentage and no `/proc` walk. A PID namespace would hand over both halves at
+//! once; this kernel has no `PID_NS` (`/proc/self/ns/pid` is absent and
+//! `unshare -p` fails with EINVAL), so init is assembled from a subreaper plus a
+//! cgroup. `arm_parent_death_signal` covers the abrupt case no bookkeeping can.
 use std::collections::HashMap;
 use std::io;
 use std::sync::{Mutex, OnceLock};
@@ -43,11 +47,14 @@ pub fn track(pid: u32) -> watch::Receiver<Option<i32>> {
 }
 
 /// Forget a child without waiting for it. The next `SIGCHLD` sweep reaps the
-/// zombie as an adopted orphan.
+/// zombie.
 pub fn release(pid: u32) {
     children().lock().unwrap().remove(&(pid as i32));
 }
 
+/// Become the container's init stand-in: a descendant orphaned by a dying parent
+/// is reparented here instead of to host init (the parentage half of init;
+/// enumeration is `crate::cgroup`).
 pub fn enable() -> io::Result<()> {
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
         return Err(io::Error::last_os_error());
@@ -89,7 +96,7 @@ fn exit_code(status: i32) -> i32 {
 }
 
 /// Reap every child that has changed state. Tracked pids publish their exit
-/// code; adopted orphans are discarded.
+/// code; untracked children are discarded.
 ///
 /// This is the only `wait*` call on children in the daemon. Keeping it in one
 /// place prevents two owners from stealing the same exit status, and it works

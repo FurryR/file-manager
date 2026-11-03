@@ -390,13 +390,22 @@ impl PtyManager {
                     libc::_exit(126);
                 }
 
-                // Die with the daemon, even if it is SIGKILLed. The subreaper
-                // only tears the tree down on a graceful exit; an orphaned
-                // session otherwise keeps its pty, its descendants and its CPU
-                // time alive for days after the daemon is gone.
+                // Die with the daemon, even if it is SIGKILLed, so this session
+                // cannot outlive it. `PDEATHSIG` only covers us (a direct child);
+                // the daemon's cgroup is what reaches the rest of the container.
                 if !crate::reaper::arm_parent_death_signal(daemon_pid) {
                     libc::_exit(126);
                 }
+
+                // Join the container group before `exec`: membership is inherited
+                // by every descendant, so this one write is what lets the daemon
+                // end the whole container even when it is SIGKILLed.
+                crate::cgroup::attach_self();
+                // Narrow the cgroup view to this container before `exec`, so an
+                // init system inside cannot classify its own processes out of the
+                // group that ends them (accident prevention, not isolation: the
+                // container root shares uid 0 and the PID namespace with us).
+                crate::cgroup::isolate_view();
 
                 // Create new session (child becomes session leader, no ctty)
                 libc::setsid();

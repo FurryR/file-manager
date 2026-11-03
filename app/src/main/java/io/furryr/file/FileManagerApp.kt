@@ -979,7 +979,7 @@ fun FileManagerApp(
                                     },
                                     trailingIcon = {
                                         IconButton(onClick = { searchMode = false; filterText = "" }) {
-                                            Icon(Icons.Default.Close, contentDescription = "Close search")
+                                            Icon(Icons.Default.Close, contentDescription = stringResource(R.string.cd_close_search))
                                         }
                                     },
                                     modifier = Modifier.fillMaxWidth(),
@@ -1001,13 +1001,13 @@ fun FileManagerApp(
                         },
                         navigationIcon = {
                             IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                Icon(Icons.Default.Menu, contentDescription = "Menu")
+                                Icon(Icons.Default.Menu, contentDescription = stringResource(R.string.cd_menu))
                             }
                         },
                         actions = {
                             Box {
                                 IconButton(onClick = { showMoreMenu = true }) {
-                                    Icon(Icons.Default.MoreVert, contentDescription = "More")
+                                    Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.cd_more))
                                 }
                                 DropdownMenu(
                                     expanded = showMoreMenu,
@@ -1148,7 +1148,7 @@ fun FileManagerApp(
                             pendingTabIndex = tabs.lastIndex
                         }
                     ) {
-                        Icon(Icons.Default.Add, contentDescription = "New tab")
+                        Icon(Icons.Default.Add, contentDescription = stringResource(R.string.cd_new_tab))
                     }
                 }
 

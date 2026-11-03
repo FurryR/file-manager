@@ -176,7 +176,7 @@ internal fun RemoteServerDialog(
                     )
                 },
                 enabled = host.isNotBlank(),
-            ) { Text("OK") }
+            ) { Text(stringResource(R.string.ok)) }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }

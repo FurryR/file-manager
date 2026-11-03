@@ -46,7 +46,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.surfaceColorAtElevation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -416,7 +415,7 @@ fun TerminalSheet(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = alpha))
+                    .background(MaterialTheme.colorScheme.scrim.copy(alpha = alpha))
                     .pointerInput(Unit) { detectTapGestures { currentOnDismiss() } }
             )
         }
@@ -431,14 +430,14 @@ fun TerminalSheet(
                     .fillMaxWidth()
                     // adjustResize keeps this height bounded by the space above the IME.
                     .height(with(density) { sheetHeightPx.value.toDp() })
-                    .shadow(elevation = 16.dp, shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                    .shadow(elevation = 16.dp, shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
                     .background(
-                        MaterialTheme.colorScheme.surfaceColorAtElevation(3.dp),
-                        RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+                        MaterialTheme.colorScheme.surfaceContainer,
+                        RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
                     )
                     .then(if (dropHovered) Modifier.border(
                         2.dp, MaterialTheme.colorScheme.primary,
-                        RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                        RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
                     ) else Modifier)
             ) {
                 // Handle row

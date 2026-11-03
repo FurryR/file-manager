@@ -88,7 +88,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -505,7 +504,7 @@ private fun FileRow(
         animationSpec = tween(durationMillis = 120, easing = FastOutSlowInEasing),
         label = "swipeOffset"
     )
-    val backgroundColor = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+    val backgroundColor = if (selected) MaterialTheme.colorScheme.secondaryContainer
         else MaterialTheme.colorScheme.background
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -542,8 +541,7 @@ private fun FileRow(
         Icon(
             imageVector = iconForFile(entry.name, isDir),
             contentDescription = null,
-            tint = if (isDir) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant,
+            tint = fileIconTint(entry.name, isDir),
             modifier = if (selectionMode) {
                 Modifier
             } else Modifier.dragAndDropSource {
@@ -583,7 +581,7 @@ private fun FileRow(
         if (entry.isSymlink) {
             Text(
                 text = " ->",
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.primary
             )
         }

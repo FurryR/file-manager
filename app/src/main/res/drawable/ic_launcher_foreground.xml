@@ -3,11 +3,16 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:fillColor="#F4C430"
-        android:pathData="M18,31h28l8,10h36v36c0,5.5 -4.5,10 -10,10H28c-5.5,0 -10,-4.5 -10,-10z" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:fillAlpha="0.35"
-        android:pathData="M18,43h72v9H18z" />
+    <!-- Material "folder" filled icon, white on the black adaptive background.
+         The 24dp glyph is scaled to 44dp and centred, which keeps it inside
+         the 66dp adaptive-icon safe zone for every launcher mask. -->
+    <group
+        android:translateX="27.6"
+        android:translateY="27.6"
+        android:scaleX="2.2"
+        android:scaleY="2.2">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M10,4H4c-1.1,0 -1.99,0.9 -1.99,2L2,18c0,1.1 0.9,2 2,2h16c1.1,0 2,-0.9 2,-2V8c0,-1.1 -0.9,-2 -2,-2h-8l-2,-2z" />
+    </group>
 </vector>

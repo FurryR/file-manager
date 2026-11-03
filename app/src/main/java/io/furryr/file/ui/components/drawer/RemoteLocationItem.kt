@@ -47,7 +47,7 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.LightMode
-import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.SdCard
@@ -155,8 +155,8 @@ internal fun RemoteLocationItem(
                     .then(dragHandleModifier),
             ) {
                 Icon(
-                    Icons.Default.Menu,
-                    contentDescription = "Drag to reorder",
+                    Icons.Default.DragHandle,
+                    contentDescription = stringResource(R.string.cd_drag_reorder),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }

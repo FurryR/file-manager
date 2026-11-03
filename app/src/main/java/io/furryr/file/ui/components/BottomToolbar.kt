@@ -28,7 +28,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import io.furryr.file.R
 
 @Composable
 fun BottomToolbar(
@@ -63,44 +65,44 @@ fun BottomToolbar(
                 .padding(vertical = 6.dp)
         ) {
             IconButton(enabled = selectionMode || canGoBack, onClick = if (selectionMode) onSelectAll else onBack) {
-                Icon(if (selectionMode) Icons.Default.SelectAll else Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "Back")
+                Icon(if (selectionMode) Icons.Default.SelectAll else Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = stringResource(R.string.cd_back))
             }
             IconButton(enabled = selectionMode || canGoForward, onClick = if (selectionMode) onInvertSelection else onForward) {
-                Icon(if (selectionMode) Icons.Default.FlipToBack else Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Forward")
+                Icon(if (selectionMode) Icons.Default.FlipToBack else Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = stringResource(R.string.cd_forward))
             }
             if (copyMoveActive) {
                 IconButton(onClick = onCopyMoveConfirm) {
-                    Icon(Icons.Default.Done, contentDescription = "Confirm")
+                    Icon(Icons.Default.Done, contentDescription = stringResource(R.string.cd_confirm))
                 }
             } else if (selectionMode) {
                 IconButton(onClick = onCancelSelection) {
-                    Icon(Icons.Default.Close, contentDescription = "Cancel selection")
+                    Icon(Icons.Default.Close, contentDescription = stringResource(R.string.cd_cancel_selection))
                 }
             } else {
                 IconButton(enabled = canCreate, onClick = onCreateFile) {
-                    Icon(Icons.Default.Add, contentDescription = "Create file")
+                    Icon(Icons.Default.Add, contentDescription = stringResource(R.string.cd_create_file))
                 }
             }
             if (copyMoveActive) {
                 IconButton(onClick = onCopyMoveCancel) {
-                    Icon(Icons.Default.Close, contentDescription = "Cancel")
+                    Icon(Icons.Default.Close, contentDescription = stringResource(R.string.cd_cancel))
                 }
             } else if (selectionMode) {
                 IconButton(onClick = onSelectSameType) {
-                    Icon(Icons.Default.Flip, contentDescription = "Select same type")
+                    Icon(Icons.Default.Flip, contentDescription = stringResource(R.string.cd_select_same_type))
                 }
             } else {
                 IconButton(enabled = canOpenTerminal, onClick = onTerminal) {
-                    Icon(Icons.Default.Terminal, contentDescription = "Terminal")
+                    Icon(Icons.Default.Terminal, contentDescription = stringResource(R.string.cd_terminal))
                 }
             }
             if (selectionMode) {
                 IconButton(enabled = canShare, onClick = onShare) {
-                    Icon(Icons.Default.Share, contentDescription = "Share")
+                    Icon(Icons.Default.Share, contentDescription = stringResource(R.string.cd_share))
                 }
             } else {
                 IconButton(enabled = canGoParent, onClick = onParent) {
-                    Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Parent")
+                    Icon(Icons.Default.KeyboardArrowUp, contentDescription = stringResource(R.string.cd_parent))
                 }
             }
         }

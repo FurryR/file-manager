@@ -33,7 +33,19 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
 import com.termux.view.TerminalViewClient
+import io.furryr.file.ui.theme.PaletteStore
+import io.furryr.file.ui.theme.TerminalPalette
+import io.furryr.file.ui.theme.terminalPalette
 import kotlin.math.roundToInt
+
+// ANSI colours live in the emulator, not the view, so a palette change has to
+// rewrite them in place and repaint; TerminalView.onScreenUpdated() also
+// re-renders the visible transcript.
+private fun applyTerminalPalette(view: TerminalView, palette: TerminalPalette) {
+    val colors = view.mEmulator?.mColors?.mCurrentColors ?: return
+    palette.applyTo(colors)
+    view.onScreenUpdated()
+}
 
 @Composable
 fun TerminalViewComposable(
@@ -42,8 +54,10 @@ fun TerminalViewComposable(
     enabled: Boolean = true,
     inputState: TerminalInputState = remember { TerminalInputState() },
 ) {
-    val backgroundColor = MaterialTheme.colorScheme.surface.toArgb()
+    val colorScheme = MaterialTheme.colorScheme
+    val backgroundColor = colorScheme.surface.toArgb()
     val context = LocalContext.current
+    val terminalPalette = colorScheme.terminalPalette(PaletteStore.current(context))
     val density = LocalDensity.current
 
     val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -110,7 +124,10 @@ fun TerminalViewComposable(
             session?.let { terminalView.attachSession(it) }
             terminalView.isEnabled = enabled
             inputState.terminalView = terminalView
-            terminalView.post { terminalView.onScreenUpdated() }
+            terminalView.post {
+                applyTerminalPalette(terminalView, terminalPalette)
+                terminalView.onScreenUpdated()
+            }
 
             wrapper
         },
@@ -130,6 +147,7 @@ fun TerminalViewComposable(
             tv.isEnabled = enabled
             if (!enabled) inputState.resetModifiers()
             tv.setBackgroundColor(backgroundColor)
+            applyTerminalPalette(tv, terminalPalette)
         },
         onRelease = { view ->
             (view as? TerminalInputView)?.releaseInput()

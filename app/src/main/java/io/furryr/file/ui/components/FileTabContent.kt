@@ -16,7 +16,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import io.furryr.file.R
 import io.furryr.file.model.FileTab
 
 @Composable
@@ -46,7 +48,7 @@ internal fun FileTabContent(
                 if (showClose) {
                     Icon(
                         Icons.Default.Close,
-                        contentDescription = "Close tab",
+                        contentDescription = stringResource(R.string.cd_close_tab),
                         modifier = Modifier
                             .align(Alignment.CenterEnd)
                             .size(16.dp)

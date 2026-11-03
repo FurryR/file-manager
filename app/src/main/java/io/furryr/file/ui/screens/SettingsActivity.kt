@@ -17,7 +17,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -25,8 +28,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -52,6 +57,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -136,6 +142,7 @@ private fun SettingsMainPage(
     var showTerminalFontSizeDialog by remember { mutableStateOf(false) }
     var terminalFontSize by remember { mutableStateOf(prefs.getInt("terminal_font_size", 9).toString()) }
     var showLanguageDialog by remember { mutableStateOf(false) }
+    var showColorSchemeDialog by remember { mutableStateOf(false) }
     var showAboutDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     var applyingPermissions by remember { mutableStateOf(false) }
@@ -218,6 +225,14 @@ private fun SettingsMainPage(
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
         ) {
+            SettingsSection(stringResource(R.string.settings_appearance))
+            SettingsValueRow(
+                title = stringResource(R.string.settings_color_scheme),
+                value = stringResource(colorSchemeLabel(PaletteStore.current(context))),
+                onClick = { showColorSchemeDialog = true },
+            )
+            SettingsDivider()
+
             SettingsSection(stringResource(R.string.startup))
             SettingsToggleRow(
                 title = stringResource(R.string.root_enabled),
@@ -413,6 +428,40 @@ private fun SettingsMainPage(
         )
     }
 
+    if (showColorSchemeDialog) {
+        var selected by remember { mutableStateOf(PaletteStore.current(context)) }
+        AlertDialog(
+            onDismissRequest = { showColorSchemeDialog = false },
+            title = { Text(stringResource(R.string.settings_color_scheme)) },
+            text = {
+                Column {
+                    ColorPalette.entries.forEach { palette ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable { selected = palette }
+                        ) {
+                            RadioButton(selected = selected == palette, onClick = { selected = palette })
+                            Text(
+                                stringResource(colorSchemeLabel(palette)),
+                                modifier = Modifier.weight(1f)
+                            )
+                            PaletteSwatches(palette)
+                        }
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showColorSchemeDialog = false }) { Text(stringResource(R.string.cancel)) }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showColorSchemeDialog = false
+                    PaletteStore.select(context, selected)
+                }) { Text(stringResource(R.string.confirm)) }
+            },
+        )
+    }
+
     if (pendingPermissionChange != null) {
         AlertDialog(
             onDismissRequest = { pendingPermissionChange = null },
@@ -512,6 +561,30 @@ private fun SettingsMainPage(
                 showTerminalFontSizeDialog = false
             },
         )
+    }
+}
+
+private fun colorSchemeLabel(palette: ColorPalette): Int = when (palette) {
+    ColorPalette.Indigo -> R.string.color_scheme_indigo
+    ColorPalette.Sage -> R.string.color_scheme_sage
+    ColorPalette.Rose -> R.string.color_scheme_rose
+    ColorPalette.Amber -> R.string.color_scheme_amber
+    ColorPalette.Graphite -> R.string.color_scheme_graphite
+}
+
+// Three accent dots preview a palette without needing a full card.
+@Composable
+private fun PaletteSwatches(palette: ColorPalette) {
+    val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    val scheme = if (dark) palette.darkColors() else palette.lightColors()
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        listOf(scheme.primary, scheme.tertiary, scheme.secondary).forEach { color ->
+            Box(
+                Modifier
+                    .size(16.dp)
+                    .background(color, CircleShape)
+            )
+        }
     }
 }
 

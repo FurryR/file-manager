@@ -117,10 +117,10 @@ fun JumpDialog(initialPath: String, onDismiss: () -> Unit, onConfirm: (String) -
 fun InfoDialog(path: String, info: DirectoryStats, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Info") },
+        title = { Text(stringResource(R.string.info_title)) },
         text = { Text("$path\n${info.summary(LocalContext.current)}") },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("OK") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.ok)) }
         }
     )
 }
@@ -131,14 +131,27 @@ fun EntryInfoDialog(entry: FileEntry, onDismiss: () -> Unit) {
         onDismissRequest = onDismiss,
         title = { Text(entry.name) },
         text = {
+            val type = if (entry.isDirectory) {
+                stringResource(R.string.info_folder)
+            } else {
+                stringResource(R.string.info_file)
+            }
+            val symlink = if (entry.isSymlink) {
+                " (${stringResource(R.string.info_symlink)})"
+            } else {
+                ""
+            }
             Column {
-                Text("Path: ${entry.path}")
-                Text("Type: ${if (entry.isDirectory) "Folder" else "File"}${if (entry.isSymlink) " (symlink)" else ""}")
-                Text("Modified: ${formatModifiedTime(entry.modifiedAt)}")
+                Text("${stringResource(R.string.path_label)}: ${entry.path}")
+                Text("${stringResource(R.string.info_type)}: $type$symlink")
+                Text(
+                    "${stringResource(R.string.info_modified)}: " +
+                        formatModifiedTime(entry.modifiedAt)
+                )
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("OK") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.ok)) }
         }
     )
 }
@@ -163,11 +176,11 @@ fun CreateDialog(
                 modifier = Modifier.fillMaxWidth()
             )
         },
-        dismissButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+        },
         confirmButton = {
-            Row(modifier = Modifier.fillMaxWidth()) {
-                TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
-                Spacer(Modifier.weight(1f))
+            Row {
                 TextButton(
                     onClick = { if (name.isNotBlank()) onCreateFile(name) }
                 ) { Text(stringResource(R.string.file_button)) }
@@ -243,22 +256,10 @@ fun OperationProgressDialog(
     AlertDialog(
         onDismissRequest = {},
         title = {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    if (progress.isCopy) stringResource(R.string.copying_title)
-                    else stringResource(R.string.moving_title),
-                    modifier = Modifier.weight(1f)
-                )
-                TextButton(onClick = onHide) {
-                    Text(stringResource(R.string.hide))
-                }
-                TextButton(onClick = onCancel) {
-                    Text(stringResource(R.string.cancel))
-                }
-            }
+            Text(
+                if (progress.isCopy) stringResource(R.string.copying_title)
+                else stringResource(R.string.moving_title)
+            )
         },
         text = {
             Column {
@@ -308,8 +309,16 @@ fun OperationProgressDialog(
                 }
             }
         },
-        confirmButton = {},
-        dismissButton = {}
+        dismissButton = {
+            TextButton(onClick = onHide) {
+                Text(stringResource(R.string.hide))
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onCancel) {
+                Text(stringResource(R.string.cancel))
+            }
+        }
     )
 }
 

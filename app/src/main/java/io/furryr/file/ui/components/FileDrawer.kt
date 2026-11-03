@@ -50,7 +50,6 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.LightMode
-import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.SdCard
@@ -344,7 +343,7 @@ fun FileDrawer(
                         IconButton(onClick = onToggleTheme) {
                             Icon(
                                 if (darkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
-                                contentDescription = "Toggle theme"
+                                contentDescription = stringResource(R.string.cd_toggle_theme)
                             )
                         }
                     }
@@ -359,7 +358,7 @@ fun FileDrawer(
                         }) {
                             Icon(
                                 if (sortMode) Icons.Default.Check else Icons.Default.MoreVert,
-                                contentDescription = if (sortMode) "Done sorting" else "More"
+                                contentDescription = stringResource(if (sortMode) R.string.cd_done_sorting else R.string.cd_more)
                             )
                         }
                         if (!sortMode) {
@@ -385,7 +384,7 @@ fun FileDrawer(
                             )
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.drawer_sort)) },
-                                leadingIcon = { Icon(Icons.Default.Menu, null) },
+                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
                                 onClick = {
                                     showDrawerMenu = false
                                     onToggleSortMode()
@@ -1038,7 +1037,7 @@ fun FileDrawer(
                         renameText = ""
                         dialogTargetName = null
                     }
-                ) { Text("OK") }
+                ) { Text(stringResource(R.string.ok)) }
             },
             dismissButton = {
                 TextButton(onClick = {
@@ -1093,7 +1092,7 @@ fun FileDrawer(
                         id?.let { onLocalRename(it, localRenameText.ifBlank { current?.name ?: it }) }
                         localRenameTarget = null
                     }
-                ) { Text("OK") }
+                ) { Text(stringResource(R.string.ok)) }
             },
             dismissButton = {
                 TextButton(onClick = { localRenameTarget = null }) {
@@ -1146,7 +1145,7 @@ fun FileDrawer(
                         hex?.let { onSafRename(it, safRenameText.ifBlank { it }) }
                         safRenameTarget = null
                     }
-                ) { Text("OK") }
+                ) { Text(stringResource(R.string.ok)) }
             },
             dismissButton = {
                 TextButton(onClick = { safRenameTarget = null }) {

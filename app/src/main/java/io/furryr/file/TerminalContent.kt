@@ -39,6 +39,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardReturn
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronLeft
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -47,7 +48,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.surfaceColorAtElevation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -86,7 +86,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.termux.terminal.TerminalSession
 import io.furryr.file.agent.SessionManager
 import io.furryr.file.container.ContainerUriResolver
@@ -189,7 +188,7 @@ internal fun ContentWithDrawer(
                 modifier = Modifier
                     .width(DrawerWidth)
                     .fillMaxHeight()
-                    .background(MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
             ) {
                 DrawerContent(
                     tabs = tabs,
@@ -229,7 +228,7 @@ internal fun DrawerContent(
                         .fillMaxWidth()
                         .clickable { onSwitchTab(idx) }
                         .background(
-                            if (isActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                            if (isActive) MaterialTheme.colorScheme.secondaryContainer
                             else Color.Transparent
                         )
                         .padding(horizontal = 12.dp, vertical = 8.dp)
@@ -238,18 +237,20 @@ internal fun DrawerContent(
                         "[${idx + 1}] ${tab.label}",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
-                        color = if (isActive) MaterialTheme.colorScheme.primary
+                        color = if (isActive) MaterialTheme.colorScheme.onSecondaryContainer
                                 else MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.weight(1f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                     if (tabs.size > 1) {
-                        Text(
-                            "×",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 16.sp,
-                            modifier = Modifier.clickable { onCloseTab(tab) }
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = stringResource(R.string.cd_close_tab),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .size(16.dp)
+                                .clickable { onCloseTab(tab) }
                         )
                     }
                 }

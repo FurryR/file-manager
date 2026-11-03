@@ -26,15 +26,52 @@
             };
           };
 
+          # nixpkgs pins the NDK catalogue in repo.json. The pinned revision
+          # predates r30, so add its repository entry here: androidenv then
+          # fetches, deploys and patchelfs it like a built-in version. Drop
+          # this override once the pinned nixpkgs knows r30.
+          ndkVersion = "30.0.16248370";
+          androidRepo = pkgs.lib.recursiveUpdate
+            (builtins.fromJSON (builtins.readFile (pkgs.path + "/pkgs/development/mobile/androidenv/repo.json")))
+            {
+              packages.ndk.${ndkVersion} = {
+                archives = [
+                  {
+                    arch = "all";
+                    os = "linux";
+                    sha1 = "5107f898313790e449e87eee2183d9a20602dee9";
+                    size = 738633529;
+                    url = "https://dl.google.com/android/repository/android-ndk-r30-linux.zip";
+                  }
+                ];
+                displayName = "NDK (Side by side) ${ndkVersion}";
+                license = "android-sdk-license";
+                name = "ndk";
+                path = "ndk/${ndkVersion}";
+                revision = ndkVersion;
+                revision-details = {
+                  "major:0" = "30";
+                  "minor:1" = "0";
+                  "micro:2" = "16248370";
+                };
+                type-details = {
+                  element-attributes = {
+                    "xsi:type" = "ns5:genericDetailsType";
+                  };
+                };
+              };
+            };
+
           android = pkgs.androidenv.composeAndroidPackages {
             platformVersions = [ "35" ];
             # AGP 8.6.1 defaults to build-tools 34.0.0 even for compileSdk 35.
             # Keep 34.0.0 installed as well, otherwise Gradle tries to download
             # it into the read-only /nix/store SDK and the build fails.
             buildToolsVersions = [ "34.0.0" "35.0.0" ];
-            # Pinned so the native scripts' NDK layout stays stable.
+            # One NDK for local scripts and CI.
             includeNDK = true;
-            ndkVersion = "27.2.12479018";
+            inherit ndkVersion;
+            repo = androidRepo;
             includeEmulator = false;
             includeSources = false;
             includeSystemImages = false;

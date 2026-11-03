@@ -29,7 +29,7 @@ if [[ -z "$NDK_ROOT" ]]; then
 fi
 
 if [[ -z "$NDK_ROOT" || ! -d "$NDK_ROOT" ]]; then
-  echo "Android NDK not found. Install it with: sdkmanager 'ndk;27.2.12479018'" >&2
+  echo "Android NDK not found. Install it with: sdkmanager 'ndk;30.0.16248370'" >&2
   exit 1
 fi
 
@@ -245,13 +245,6 @@ echo "  Linking ${#OBJ_FILES[@]} objects..."
 OUT_BIN="$BUILD_DIR/proot-aarch64"
 "$CC" -static "${OBJ_FILES[@]}" "$BUILD_DIR/libtalloc.a" \
     -o "$OUT_BIN" -Wl,-z,noexecstack
-
-# ARM64 bionic TLS alignment fix
-if [[ -f "$NATIVE_DIR/align_fix.py" ]]; then
-    python3 "$NATIVE_DIR/align_fix.py" "$OUT_BIN"
-else
-    echo "Warning: align_fix.py not found; skipping TLS alignment fix." >&2
-fi
 
 # --- Strip and install ---
 echo "==> Stripping and installing"

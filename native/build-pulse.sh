@@ -109,7 +109,7 @@ mkdir -p "$OUT"
     "$PA_BUILD/src/libpulsecommon-17.0.a" "$PA_BUILD/src/pulse/libpulse.a" \
     "$PREFIX/lib/libsndfile.a" "$PREFIX/lib/libltdl.a" \
     -Wl,--end-group -Wl,--exclude-libs,ALL -Wl,--gc-sections \
-    -Wl,-z,defs -Wl,-z,max-page-size=16384 -Wl,-soname,libpulsehost.so \
+    -Wl,-z,defs -Wl,-soname,libpulsehost.so \
     -lm -llog -ldl -o "$OUT/libpulsehost.so"
 "$STRIP" --strip-unneeded "$OUT/libpulsehost.so"
 JNI_DIR="$ROOT_DIR/app/src/main/jniLibs/arm64-v8a"

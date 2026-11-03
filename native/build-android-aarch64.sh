@@ -34,7 +34,7 @@ if [[ -z "$NDK_ROOT" ]]; then
 fi
 
 if [[ -z "$NDK_ROOT" || ! -d "$NDK_ROOT" ]]; then
-  echo "Android NDK not found. Install it with: sdkmanager 'ndk;27.2.12479018'" >&2
+  echo "Android NDK not found. Install it with: sdkmanager 'ndk;30.0.16248370'" >&2
   exit 1
 fi
 

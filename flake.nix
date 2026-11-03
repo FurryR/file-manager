@@ -28,7 +28,10 @@
 
           android = pkgs.androidenv.composeAndroidPackages {
             platformVersions = [ "35" ];
-            buildToolsVersions = [ "35.0.0" ];
+            # AGP 8.6.1 defaults to build-tools 34.0.0 even for compileSdk 35.
+            # Keep 34.0.0 installed as well, otherwise Gradle tries to download
+            # it into the read-only /nix/store SDK and the build fails.
+            buildToolsVersions = [ "34.0.0" "35.0.0" ];
             # Pinned so the native scripts' NDK layout stays stable.
             includeNDK = true;
             ndkVersion = "27.2.12479018";

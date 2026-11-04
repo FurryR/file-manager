@@ -21,13 +21,14 @@ data class FileTab(
         }
 }
 
-fun DirectoryStats.summary(context: Context): String = context.getString(
-    R.string.directory_summary,
-    folderCount,
-    fileCount,
-    formatSize(usableBytes),
-    formatSize(totalBytes),
-)
+// Only the volume usage is a useful directory summary; folder/file counts are
+// already visible in the listing. Matches the drawer: used = total - usable.
+fun DirectoryStats.summary(context: Context): String =
+    if (totalBytes > 0) context.getString(
+        R.string.directory_summary,
+        formatSize(totalBytes - usableBytes),
+        formatSize(totalBytes),
+    ) else ""
 
 data class CopyMoveSource(
     val path: String,

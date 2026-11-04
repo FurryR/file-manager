@@ -14,7 +14,7 @@ platform services and calls the library.
 | `model/` | `Models.kt`, `LocationAddress.kt`, `ErrorState.kt` |
 | `ui/components/` | `BottomToolbar.kt`, `TopBarContent.kt`, `FileDrawer.kt`, `Dialogs.kt` |
 | `ui/screens/` | `FileListScreen.kt`, `SettingsActivity.kt`, `LicensesScreen.kt` |
-| `ui/theme/` | `FileManagerTheme.kt` (Material3 dark/light) |
+| `ui/theme/` | `FileManagerTheme.kt` (Material3 dark/light), `Color.kt` (palettes + AMOLED canvas), `PaletteStore.kt` |
 | `ui/util/` | `Formatters.kt`, `FileIcons.kt`, `FileOpen.kt`, `OperationNotification.kt` |
 
 > The VFS abstraction lives in `:core`; protocol providers (Local/FTP/SFTP/

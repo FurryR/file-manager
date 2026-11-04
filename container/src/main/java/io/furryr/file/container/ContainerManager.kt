@@ -23,7 +23,8 @@ import java.io.File
  * All file I/O and process management runs on [Dispatchers.IO].
  *
  * Container processes are not tracked here — the app supplies
- * [ContainerRuntime.isRunning] from its terminal session manager.
+ * [ContainerRuntime.isRunning] from the daemon registry, so liveness is the
+ * container daemon's, not a terminal session's.
  *
  * Directory layout under [Context.filesDir]:
  *   containers/<name>/             – extracted rootfs + distro.json

@@ -36,7 +36,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import io.furryr.file.DefaultPath
 import io.furryr.file.core.DirectoryStats
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.model.OperationProgress
@@ -89,29 +88,6 @@ fun FrontEllipsisText(
     )
 }
 
-@Composable
-fun JumpDialog(initialPath: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
-    var value by remember(initialPath) { mutableStateOf(initialPath) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.jump_title)) },
-        text = {
-            OutlinedTextField(
-                value = value,
-                onValueChange = { value = it },
-                label = { Text(stringResource(R.string.path_label)) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
-        },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(value.ifBlank { DefaultPath }) }) { Text(stringResource(R.string.confirm)) }
-        }
-    )
-}
 
 @Composable
 fun InfoDialog(path: String, info: DirectoryStats, onDismiss: () -> Unit) {

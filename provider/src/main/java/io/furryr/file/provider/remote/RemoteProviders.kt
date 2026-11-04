@@ -49,17 +49,23 @@ private class RemoteProvider(private val context: Context, private val kind: Rem
     override fun isAvailable() = true
     override suspend fun connect() = Result.success(Unit)
     override suspend fun disconnect() {
-        if (kind == RemoteKind.SSH) SshConnections.disconnectAll()
+        if (kind == RemoteKind.SSH) {
+            SshControls.closeAll()
+            SshConnections.disconnectAll()
+        }
     }
 
     override suspend fun list(path: String): Result<List<FileEntry>> = io {
         if (path == "/") RemoteLocationStore.all().filter { it.kind == kind }.map {
-            FileEntry(it.name, it.uri, true, 0, mode = 0x41ED)
+            // The connection list shows the same address the paths use, so the
+            // folder name matches what the agent and the path bar display.
+            val label = if (kind == RemoteKind.SSH) it.pathAuthority else it.name
+            FileEntry(label, it.entryUri, true, 0, mode = 0x41ED)
         } else {
             val (location, remote) = resolve(path)
             backend(location).list(remote).map { entry ->
                 validName(entry.name)
-                FileEntry(entry.name, "${kind.scheme}://${location.id}${remote.trimEnd('/')}/${entry.name}",
+                FileEntry(entry.name, "${kind.scheme}://${location.pathAuthority}${remote.trimEnd('/')}/${entry.name}",
                     entry.isDirectory, entry.modifiedAt, entry.isSymlink, mode = entry.mode, size = entry.size)
             }
         }
@@ -67,9 +73,15 @@ private class RemoteProvider(private val context: Context, private val kind: Rem
     override suspend fun stat(path: String): Result<ProviderStat> = io {
         if (path == "/") ProviderStat(exists = true, isDirectory = true) else {
             val (location, remote) = resolve(path)
-            val info = backend(location).stat(remote)
+            val client = backend(location)
+            val info = client.stat(remote)
+            // A directory reports its volume's capacity, not the entry size, so
+            // the footer shows what can still be written there.
+            val space = if (info?.isDirectory == true) runCatching { client.space(remote) }.getOrNull() else null
             ProviderStat(exists = info != null, isDirectory = info?.isDirectory == true,
-                totalBytes = info?.size ?: 0, canEnter = info?.isDirectory == true)
+                totalBytes = space?.totalBytes ?: info?.size ?: 0,
+                usableBytes = space?.usableBytes ?: 0,
+                canEnter = info?.isDirectory == true)
         }
     }
     override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
@@ -103,7 +115,7 @@ private class RemoteProvider(private val context: Context, private val kind: Rem
     override suspend fun open(path: String, mode: OpenMode): Result<FileSource> = io {
         val (location, remote) = resolve(path)
         val client = backend(location)
-        val display = "${kind.scheme}://${location.id}$remote"
+        val display = "${kind.scheme}://${location.pathAuthority}$remote"
         if (mode == OpenMode.WRITE) {
             val file = newCache()
             return@io try {
@@ -185,8 +197,9 @@ private class RemoteProvider(private val context: Context, private val kind: Rem
     private fun resolve(path: String): Pair<RemoteLocation, String> {
         require(path != "/") { "Select a remote connection first" }
         val inner = path.trimStart('/')
-        val id = inner.substringBefore('/')
-        val location = RemoteLocationStore.find(id)
+        val authority = inner.substringBefore('/')
+        val location = resolveRemoteReference(kind, authority)
+            ?: error("Remote connection $authority no longer exists; edit the location")
         require(location.kind == kind) { "Remote protocol does not match this connection" }
         return location to normalizeRemotePath(if ('/' in inner) "/" + inner.substringAfter('/') else "/")
     }

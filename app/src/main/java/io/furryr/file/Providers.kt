@@ -55,7 +55,7 @@ fun installFileProviders(context: Context) {
         }
     }
 
-    ContainerRuntime.isRunning = SessionManager::hasContainerSession
+    ContainerRuntime.isRunning = DaemonManager::isNamedConnected
 
     val local = LocalProvider()
     Vfs.setDefault(local)

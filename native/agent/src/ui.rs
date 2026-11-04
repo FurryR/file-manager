@@ -258,7 +258,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     }
     spans.extend(right);
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::new().bg(Color::Black)),
+        Paragraph::new(Line::from(spans)).style(Style::new().bg(Color::Reset)),
         area,
     );
 }
@@ -391,7 +391,7 @@ fn draw_border(frame: &mut Frame, area: ratatui::layout::Rect, active: bool) {
         ),
     ]);
     frame.render_widget(
-        Paragraph::new(line).style(Style::new().bg(Color::Black)),
+        Paragraph::new(line).style(Style::new().bg(Color::Reset)),
         area,
     );
 }

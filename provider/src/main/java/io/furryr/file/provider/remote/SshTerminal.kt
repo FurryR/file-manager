@@ -87,9 +87,9 @@ class SshShell internal constructor(
 }
 
 object SshTerminals {
-    fun find(id: String): RemoteLocation = RemoteLocationStore.find(id).also {
-        require(it.kind == RemoteKind.SSH) { "Remote connection is not SSH" }
-    }
+    fun find(id: String): RemoteLocation =
+        (resolveRemoteReference(RemoteKind.SSH, id) ?: error("Remote connection no longer exists; edit the location"))
+            .also { require(it.kind == RemoteKind.SSH) { "Remote connection is not SSH" } }
 
     fun open(location: RemoteLocation, startPath: String?, rows: Int, cols: Int): SshShell {
         require(location.kind == RemoteKind.SSH) { "Remote connection is not SSH" }

@@ -150,13 +150,11 @@ object Vfs {
         }
     }.flowOn(Dispatchers.IO)
 
-    suspend fun info(path: String, entries: List<FileEntry>): DirectoryStats {
+    suspend fun info(path: String): DirectoryStats {
         val stat = resolve(path).getOrNull()?.let { resolved ->
             resolved.provider.stat(resolved.innerPath).getOrNull()
         }
         return DirectoryStats(
-            folderCount = entries.count { it.isDirectory },
-            fileCount = entries.count { !it.isDirectory },
             usableBytes = stat?.usableBytes ?: 0,
             totalBytes = stat?.totalBytes ?: 0,
         )

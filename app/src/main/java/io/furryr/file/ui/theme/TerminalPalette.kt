@@ -1,15 +1,11 @@
 package io.furryr.file.ui.theme
 
-import androidx.compose.material3.ColorScheme
-import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.toArgb
-
-// ANSI palette handed to the embedded terminal. The 16 base colours keep their
-// conventional hue families (red stays red, green stays green); each app
-// palette only nudges hue by at most 8 degrees and scales chroma, so a palette
-// switch restyles the terminal without breaking `ls`/`git` colours.
+// ANSI palette handed to the embedded terminal. A scheme is self-contained:
+// 16 ANSI colours plus the default foreground, background and cursor. The
+// terminal therefore keeps its own identity and does not follow the app's
+// Material palette.
 class TerminalPalette(
-    private val ansi: IntArray,
+    val ansi: IntArray,
     val foreground: Int,
     val background: Int,
     val cursor: Int
@@ -25,211 +21,176 @@ class TerminalPalette(
     }
 }
 
-fun ColorScheme.terminalPalette(palette: ColorPalette): TerminalPalette {
-    val dark = surface.luminance() < 0.5f
-    return TerminalPalette(
-        ansi = palette.terminalAnsi(dark),
-        foreground = onSurface.toArgb(),
-        background = surface.toArgb(),
-        cursor = primary.toArgb()
-    )
+// Well-known terminal themes: the xterm.js default plus the schemes published
+// by Solarized, Dracula, Nord, One Dark, Gruvbox, Tokyo Night, Monokai,
+// Catppuccin and GitHub, so users recognise them from other terminals.
+enum class TerminalScheme(
+    val id: String,
+    val displayName: String,
+    private val ansi: IntArray,
+    val foreground: Int,
+    val background: Int,
+    val cursor: Int,
+) {
+    // xterm.js defaults (Tango ANSI set).
+    Xterm(
+        id = "xterm",
+        displayName = "Xterm",
+        ansi = intArrayOf(
+            0xFF2E3436.toInt(), 0xFFCC0000.toInt(), 0xFF4E9A06.toInt(), 0xFFC4A000.toInt(),
+            0xFF3465A4.toInt(), 0xFF75507B.toInt(), 0xFF06989A.toInt(), 0xFFD3D7CF.toInt(),
+            0xFF555753.toInt(), 0xFFEF2929.toInt(), 0xFF8AE234.toInt(), 0xFFFCE94F.toInt(),
+            0xFF729FCF.toInt(), 0xFFAD7FA8.toInt(), 0xFF34E2E2.toInt(), 0xFFEEEEEC.toInt(),
+        ),
+        foreground = 0xFFFFFFFF.toInt(),
+        background = 0xFF000000.toInt(),
+        cursor = 0xFFFFFFFF.toInt(),
+    ),
+
+    Dracula(
+        id = "dracula",
+        displayName = "Dracula",
+        ansi = intArrayOf(
+            0xFF21222C.toInt(), 0xFFFF5555.toInt(), 0xFF50FA7B.toInt(), 0xFFF1FA8C.toInt(),
+            0xFFBD93F9.toInt(), 0xFFFF79C6.toInt(), 0xFF8BE9FD.toInt(), 0xFFF8F8F2.toInt(),
+            0xFF6272A4.toInt(), 0xFFFF6E6E.toInt(), 0xFF69FF94.toInt(), 0xFFFFFFA5.toInt(),
+            0xFFD6ACFF.toInt(), 0xFFFF92DF.toInt(), 0xFFA4FFFF.toInt(), 0xFFFFFFFF.toInt(),
+        ),
+        foreground = 0xFFF8F8F2.toInt(),
+        background = 0xFF282A36.toInt(),
+        cursor = 0xFFF8F8F2.toInt(),
+    ),
+
+    SolarizedDark(
+        id = "solarized_dark",
+        displayName = "Solarized Dark",
+        ansi = intArrayOf(
+            0xFF073642.toInt(), 0xFFDC322F.toInt(), 0xFF859900.toInt(), 0xFFB58900.toInt(),
+            0xFF268BD2.toInt(), 0xFFD33682.toInt(), 0xFF2AA198.toInt(), 0xFFEEE8D5.toInt(),
+            0xFF002B36.toInt(), 0xFFCB4B16.toInt(), 0xFF586E75.toInt(), 0xFF657B83.toInt(),
+            0xFF839496.toInt(), 0xFF6C71C4.toInt(), 0xFF93A1A1.toInt(), 0xFFFDF6E3.toInt(),
+        ),
+        foreground = 0xFF839496.toInt(),
+        background = 0xFF002B36.toInt(),
+        cursor = 0xFF839496.toInt(),
+    ),
+
+    SolarizedLight(
+        id = "solarized_light",
+        displayName = "Solarized Light",
+        ansi = intArrayOf(
+            0xFF073642.toInt(), 0xFFDC322F.toInt(), 0xFF859900.toInt(), 0xFFB58900.toInt(),
+            0xFF268BD2.toInt(), 0xFFD33682.toInt(), 0xFF2AA198.toInt(), 0xFFEEE8D5.toInt(),
+            0xFF002B36.toInt(), 0xFFCB4B16.toInt(), 0xFF586E75.toInt(), 0xFF657B83.toInt(),
+            0xFF839496.toInt(), 0xFF6C71C4.toInt(), 0xFF93A1A1.toInt(), 0xFFFDF6E3.toInt(),
+        ),
+        foreground = 0xFF657B83.toInt(),
+        background = 0xFFFDF6E3.toInt(),
+        cursor = 0xFF657B83.toInt(),
+    ),
+
+    Nord(
+        id = "nord",
+        displayName = "Nord",
+        ansi = intArrayOf(
+            0xFF3B4252.toInt(), 0xFFBF616A.toInt(), 0xFFA3BE8C.toInt(), 0xFFEBCB8B.toInt(),
+            0xFF81A1C1.toInt(), 0xFFB48EAD.toInt(), 0xFF88C0D0.toInt(), 0xFFE5E9F0.toInt(),
+            0xFF4C566A.toInt(), 0xFFBF616A.toInt(), 0xFFA3BE8C.toInt(), 0xFFEBCB8B.toInt(),
+            0xFF81A1C1.toInt(), 0xFFB48EAD.toInt(), 0xFF8FBCBB.toInt(), 0xFFECEFF4.toInt(),
+        ),
+        foreground = 0xFFD8DEE9.toInt(),
+        background = 0xFF2E3440.toInt(),
+        cursor = 0xFFD8DEE9.toInt(),
+    ),
+
+    OneDark(
+        id = "one_dark",
+        displayName = "One Dark",
+        ansi = intArrayOf(
+            0xFF1E2127.toInt(), 0xFFE06C75.toInt(), 0xFF98C379.toInt(), 0xFFD19A66.toInt(),
+            0xFF61AFEF.toInt(), 0xFFC678DD.toInt(), 0xFF56B6C2.toInt(), 0xFFABB2BF.toInt(),
+            0xFF5C6370.toInt(), 0xFFE06C75.toInt(), 0xFF98C379.toInt(), 0xFFD19A66.toInt(),
+            0xFF61AFEF.toInt(), 0xFFC678DD.toInt(), 0xFF56B6C2.toInt(), 0xFFFFFFFF.toInt(),
+        ),
+        foreground = 0xFFABB2BF.toInt(),
+        background = 0xFF282C34.toInt(),
+        cursor = 0xFF528BFF.toInt(),
+    ),
+
+    GruvboxDark(
+        id = "gruvbox_dark",
+        displayName = "Gruvbox Dark",
+        ansi = intArrayOf(
+            0xFF282828.toInt(), 0xFFCC241D.toInt(), 0xFF98971A.toInt(), 0xFFD79921.toInt(),
+            0xFF458588.toInt(), 0xFFB16286.toInt(), 0xFF689D6A.toInt(), 0xFFA89984.toInt(),
+            0xFF928374.toInt(), 0xFFFB4934.toInt(), 0xFFB8BB26.toInt(), 0xFFFABD2F.toInt(),
+            0xFF83A598.toInt(), 0xFFD3869B.toInt(), 0xFF8EC07C.toInt(), 0xFFEBDBB2.toInt(),
+        ),
+        foreground = 0xFFEBDBB2.toInt(),
+        background = 0xFF282828.toInt(),
+        cursor = 0xFFEBDBB2.toInt(),
+    ),
+
+    TokyoNight(
+        id = "tokyo_night",
+        displayName = "Tokyo Night",
+        ansi = intArrayOf(
+            0xFF15161E.toInt(), 0xFFF7768E.toInt(), 0xFF9ECE6A.toInt(), 0xFFE0AF68.toInt(),
+            0xFF7AA2F7.toInt(), 0xFFBB9AF7.toInt(), 0xFF7DCFFF.toInt(), 0xFFA9B1D6.toInt(),
+            0xFF414868.toInt(), 0xFFF7768E.toInt(), 0xFF9ECE6A.toInt(), 0xFFE0AF68.toInt(),
+            0xFF7AA2F7.toInt(), 0xFFBB9AF7.toInt(), 0xFF7DCFFF.toInt(), 0xFFC0CAF5.toInt(),
+        ),
+        foreground = 0xFFC0CAF5.toInt(),
+        background = 0xFF1A1B26.toInt(),
+        cursor = 0xFFC0CAF5.toInt(),
+    ),
+
+    Monokai(
+        id = "monokai",
+        displayName = "Monokai",
+        ansi = intArrayOf(
+            0xFF272822.toInt(), 0xFFF92672.toInt(), 0xFFA6E22E.toInt(), 0xFFF4BF75.toInt(),
+            0xFF66D9EF.toInt(), 0xFFAE81FF.toInt(), 0xFFA1EFE4.toInt(), 0xFFF8F8F2.toInt(),
+            0xFF75715E.toInt(), 0xFFF92672.toInt(), 0xFFA6E22E.toInt(), 0xFFF4BF75.toInt(),
+            0xFF66D9EF.toInt(), 0xFFAE81FF.toInt(), 0xFFA1EFE4.toInt(), 0xFFF9F8F5.toInt(),
+        ),
+        foreground = 0xFFF8F8F2.toInt(),
+        background = 0xFF272822.toInt(),
+        cursor = 0xFFF8F8F0.toInt(),
+    ),
+
+    CatppuccinMocha(
+        id = "catppuccin_mocha",
+        displayName = "Catppuccin Mocha",
+        ansi = intArrayOf(
+            0xFF45475A.toInt(), 0xFFF38BA8.toInt(), 0xFFA6E3A1.toInt(), 0xFFF9E2AF.toInt(),
+            0xFF89B4FA.toInt(), 0xFFF5C2E7.toInt(), 0xFF94E2D5.toInt(), 0xFFBAC2DE.toInt(),
+            0xFF585B70.toInt(), 0xFFF38BA8.toInt(), 0xFFA6E3A1.toInt(), 0xFFF9E2AF.toInt(),
+            0xFF89B4FA.toInt(), 0xFFF5C2E7.toInt(), 0xFF94E2D5.toInt(), 0xFFA6ADC8.toInt(),
+        ),
+        foreground = 0xFFCDD6F4.toInt(),
+        background = 0xFF1E1E2E.toInt(),
+        cursor = 0xFFF5E0DC.toInt(),
+    ),
+
+    GithubLight(
+        id = "github_light",
+        displayName = "GitHub Light",
+        ansi = intArrayOf(
+            0xFF24292F.toInt(), 0xFFCF222E.toInt(), 0xFF116329.toInt(), 0xFF4D2D00.toInt(),
+            0xFF0969DA.toInt(), 0xFF8250DF.toInt(), 0xFF1B7C83.toInt(), 0xFF6E7781.toInt(),
+            0xFF57606A.toInt(), 0xFFA40E26.toInt(), 0xFF1A7F37.toInt(), 0xFF633C01.toInt(),
+            0xFF218BFF.toInt(), 0xFFA475F9.toInt(), 0xFF3192AA.toInt(), 0xFF8C959F.toInt(),
+        ),
+        foreground = 0xFF24292F.toInt(),
+        background = 0xFFFFFFFF.toInt(),
+        cursor = 0xFF24292F.toInt(),
+    );
+
+    fun palette(): TerminalPalette = TerminalPalette(ansi, foreground, background, cursor)
+
+    companion object {
+        fun fromId(id: String?): TerminalScheme =
+            entries.firstOrNull { it.id == id } ?: Xterm
+    }
 }
-
-private fun ColorPalette.terminalAnsi(dark: Boolean): IntArray = when (this) {
-    ColorPalette.Indigo -> if (dark) IndigoDarkAnsi else IndigoLightAnsi
-    ColorPalette.Sage -> if (dark) SageDarkAnsi else SageLightAnsi
-    ColorPalette.Rose -> if (dark) RoseDarkAnsi else RoseLightAnsi
-    ColorPalette.Amber -> if (dark) AmberDarkAnsi else AmberLightAnsi
-    ColorPalette.Graphite -> if (dark) GraphiteDarkAnsi else GraphiteLightAnsi
-}
-
-private val IndigoDarkAnsi = intArrayOf(
-    0xFF333537.toInt(), // black
-    0xFFC98C85.toInt(), // red
-    0xFF7FA483.toInt(), // green
-    0xFFB69760.toInt(), // yellow
-    0xFF819EBD.toInt(), // blue
-    0xFFAF91B7.toInt(), // magenta
-    0xFF70A4A4.toInt(), // cyan
-    0xFFDDDCDF.toInt(), // white
-    0xFF6A6A6D.toInt(), // bright black
-    0xFFFFB4AB.toInt(), // bright red
-    0xFF96D5A0.toInt(), // bright green
-    0xFFEFBF67.toInt(), // bright yellow
-    0xFF99CBFF.toInt(), // bright blue
-    0xFFE6B5F5.toInt(), // bright magenta
-    0xFF79D5D5.toInt(), // bright cyan
-    0xFFFAF9FC.toInt() // bright white
-)
-
-private val IndigoLightAnsi = intArrayOf(
-    0xFF242628.toInt(), // black
-    0xFF8A554F.toInt(), // red
-    0xFF486B4E.toInt(), // green
-    0xFF795F2E.toInt(), // yellow
-    0xFF4A6682.toInt(), // blue
-    0xFF755A7D.toInt(), // magenta
-    0xFF386B6B.toInt(), // cyan
-    0xFFF1F0F3.toInt(), // white
-    0xFF515255.toInt(), // bright black
-    0xFF75322C.toInt(), // bright red
-    0xFF125129.toInt(), // bright green
-    0xFF5E4200.toInt(), // bright yellow
-    0xFF064A77.toInt(), // bright blue
-    0xFF5E376D.toInt(), // bright magenta
-    0xFF004F50.toInt(), // bright cyan
-    0xFFC6C6C9.toInt() // bright white
-)
-
-private val SageDarkAnsi = intArrayOf(
-    0xFF323534.toInt(), // black
-    0xFFCC8B83.toInt(), // red
-    0xFF7FA57E.toInt(), // green
-    0xFFB7965B.toInt(), // yellow
-    0xFF7AA0BE.toInt(), // blue
-    0xFFAF91BC.toInt(), // magenta
-    0xFF6CA69E.toInt(), // cyan
-    0xFFDBDDDB.toInt(), // white
-    0xFF686B69.toInt(), // bright black
-    0xFFFFB4AB.toInt(), // bright red
-    0xFF97D598.toInt(), // bright green
-    0xFFF1BF61.toInt(), // bright yellow
-    0xFF8DCDFE.toInt(), // bright blue
-    0xFFE4B5FB.toInt(), // bright magenta
-    0xFF74D7CC.toInt(), // bright cyan
-    0xFFF8FAF7.toInt() // bright white
-)
-
-private val SageLightAnsi = intArrayOf(
-    0xFF232625.toInt(), // black
-    0xFF8C544E.toInt(), // red
-    0xFF486C49.toInt(), // green
-    0xFF7B5F29.toInt(), // yellow
-    0xFF416783.toInt(), // blue
-    0xFF745981.toInt(), // magenta
-    0xFF326D66.toInt(), // cyan
-    0xFFEFF1EE.toInt(), // white
-    0xFF505351.toInt(), // bright black
-    0xFF77312A.toInt(), // bright red
-    0xFF165123.toInt(), // bright green
-    0xFF5E4200.toInt(), // bright yellow
-    0xFF004B6F.toInt(), // bright blue
-    0xFF5D3772.toInt(), // bright magenta
-    0xFF00504A.toInt(), // bright cyan
-    0xFFC5C7C4.toInt() // bright white
-)
-
-private val RoseDarkAnsi = intArrayOf(
-    0xFF3A3335.toInt(), // black
-    0xFFD4877E.toInt(), // red
-    0xFF84A56C.toInt(), // green
-    0xFFB9964E.toInt(), // yellow
-    0xFF7D9DCB.toInt(), // blue
-    0xFFBA8CBC.toInt(), // magenta
-    0xFF5DA7A8.toInt(), // cyan
-    0xFFE6DADC.toInt(), // white
-    0xFF71686A.toInt(), // bright black
-    0xFFFFB4AB.toInt(), // bright red
-    0xFFA2D580.toInt(), // bright green
-    0xFFF1BF52.toInt(), // bright yellow
-    0xFFA4C9FF.toInt(), // bright blue
-    0xFFF4AFF8.toInt(), // bright magenta
-    0xFF5DD8DA.toInt(), // bright cyan
-    0xFFFFF8F8.toInt() // bright white
-)
-
-private val RoseLightAnsi = intArrayOf(
-    0xFF2B2426.toInt(), // black
-    0xFF92514A.toInt(), // red
-    0xFF4D6C39.toInt(), // green
-    0xFF7C5F1C.toInt(), // yellow
-    0xFF45658F.toInt(), // blue
-    0xFF7E5581.toInt(), // magenta
-    0xFF1B6E6F.toInt(), // cyan
-    0xFFFBEEF0.toInt(), // white
-    0xFF595052.toInt(), // bright black
-    0xFF7B2D26.toInt(), // bright red
-    0xFF26500B.toInt(), // bright green
-    0xFF5C4300.toInt(), // bright yellow
-    0xFF004883.toInt(), // bright blue
-    0xFF68306F.toInt(), // bright magenta
-    0xFF004F50.toInt(), // bright cyan
-    0xFFCFC4C6.toInt() // bright white
-)
-
-private val AmberDarkAnsi = intArrayOf(
-    0xFF3A3430.toInt(), // black
-    0xFFC98C85.toInt(), // red
-    0xFF8AA377.toInt(), // green
-    0xFFAE9A60.toInt(), // yellow
-    0xFF869DBF.toInt(), // blue
-    0xFFB490B4.toInt(), // magenta
-    0xFF72A59A.toInt(), // cyan
-    0xFFE5DBD5.toInt(), // white
-    0xFF716965.toInt(), // bright black
-    0xFFFFB4AB.toInt(), // bright red
-    0xFFA9D28C.toInt(), // bright green
-    0xFFE3C467.toInt(), // bright yellow
-    0xFFA4C9FF.toInt(), // bright blue
-    0xFFEDB3EF.toInt(), // bright magenta
-    0xFF7DD6C4.toInt(), // bright cyan
-    0xFFFFF8F5.toInt() // bright white
-)
-
-private val AmberLightAnsi = intArrayOf(
-    0xFF2A2521.toInt(), // black
-    0xFF8A554F.toInt(), // red
-    0xFF536A43.toInt(), // green
-    0xFF73622E.toInt(), // yellow
-    0xFF4E6484.toInt(), // blue
-    0xFF79597A.toInt(), // magenta
-    0xFF3A6C62.toInt(), // cyan
-    0xFFFAEFE9.toInt(), // white
-    0xFF58514D.toInt(), // bright black
-    0xFF75322C.toInt(), // bright red
-    0xFF2D4F18.toInt(), // bright green
-    0xFF574500.toInt(), // bright yellow
-    0xFF1B4879.toInt(), // bright blue
-    0xFF633568.toInt(), // bright magenta
-    0xFF005046.toInt(), // bright cyan
-    0xFFCFC4BF.toInt() // bright white
-)
-
-private val GraphiteDarkAnsi = intArrayOf(
-    0xFF353535.toInt(), // black
-    0xFFC98C85.toInt(), // red
-    0xFF7FA483.toInt(), // green
-    0xFFB69760.toInt(), // yellow
-    0xFF819EBD.toInt(), // blue
-    0xFFAF91B8.toInt(), // magenta
-    0xFF70A4A3.toInt(), // cyan
-    0xFFDFDCDC.toInt(), // white
-    0xFF6C6A6A.toInt(), // bright black
-    0xFFFFB4AB.toInt(), // bright red
-    0xFF96D5A0.toInt(), // bright green
-    0xFFEFBF67.toInt(), // bright yellow
-    0xFF98CBFE.toInt(), // bright blue
-    0xFFE6B5F5.toInt(), // bright magenta
-    0xFF79D5D4.toInt(), // bright cyan
-    0xFFFCF8F8.toInt() // bright white
-)
-
-private val GraphiteLightAnsi = intArrayOf(
-    0xFF262626.toInt(), // black
-    0xFF8A554F.toInt(), // red
-    0xFF486B4E.toInt(), // green
-    0xFF795F2E.toInt(), // yellow
-    0xFF496682.toInt(), // blue
-    0xFF755A7D.toInt(), // magenta
-    0xFF386B6B.toInt(), // cyan
-    0xFFF3F0F0.toInt(), // white
-    0xFF535252.toInt(), // bright black
-    0xFF75322C.toInt(), // bright red
-    0xFF125129.toInt(), // bright green
-    0xFF5E4200.toInt(), // bright yellow
-    0xFF014A76.toInt(), // bright blue
-    0xFF5E376E.toInt(), // bright magenta
-    0xFF00504F.toInt(), // bright cyan
-    0xFFC9C6C6.toInt() // bright white
-)
-

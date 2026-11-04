@@ -197,7 +197,7 @@ fun FileListScreen(
                 if (generation != loadGeneration || requestedPath != currentPath) return@launch
                 val raw = result.getOrDefault(emptyList())
                 val newEntries = sort(raw)
-                val directoryInfo = withContext(Dispatchers.IO) { folder.info(raw) }
+                val directoryInfo = withContext(Dispatchers.IO) { folder.info() }
                 if (generation != loadGeneration || requestedPath != currentPath) return@launch
                 val directoryChanged = loadedPath != requestedPath
                 val visibleEntries = if (filterText.isBlank()) newEntries

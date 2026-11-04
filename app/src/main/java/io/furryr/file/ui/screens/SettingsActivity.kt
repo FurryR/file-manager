@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -57,6 +58,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -141,8 +143,10 @@ private fun SettingsMainPage(
     var terminalFont by remember { mutableStateOf(prefs.getString("terminal_font", "") ?: "") }
     var showTerminalFontSizeDialog by remember { mutableStateOf(false) }
     var terminalFontSize by remember { mutableStateOf(prefs.getInt("terminal_font_size", 9).toString()) }
+    var showTerminalColorSchemeDialog by remember { mutableStateOf(false) }
     var showLanguageDialog by remember { mutableStateOf(false) }
     var showColorSchemeDialog by remember { mutableStateOf(false) }
+    var amoledBlack by remember { mutableStateOf(PaletteStore.amoled(context)) }
     var showAboutDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     var applyingPermissions by remember { mutableStateOf(false) }
@@ -230,6 +234,16 @@ private fun SettingsMainPage(
                 title = stringResource(R.string.settings_color_scheme),
                 value = stringResource(colorSchemeLabel(PaletteStore.current(context))),
                 onClick = { showColorSchemeDialog = true },
+            )
+            SettingsDivider()
+            SettingsToggleRow(
+                title = stringResource(R.string.settings_amoled_black),
+                description = stringResource(R.string.settings_amoled_black_desc),
+                checked = amoledBlack,
+                onCheckedChange = { enabled ->
+                    amoledBlack = enabled
+                    PaletteStore.setAmoled(context, enabled)
+                },
             )
             SettingsDivider()
 
@@ -360,6 +374,12 @@ private fun SettingsMainPage(
                 onClick = { showTerminalFontSizeDialog = true },
             )
             SettingsDivider()
+            SettingsValueRow(
+                title = stringResource(R.string.settings_terminal_color_scheme),
+                value = TerminalSchemeStore.current(context).displayName,
+                onClick = { showTerminalColorSchemeDialog = true },
+            )
+            SettingsDivider()
             SettingsSection(stringResource(R.string.settings_other))
             SettingsValueRow(
                 title = stringResource(R.string.about),
@@ -379,6 +399,8 @@ private fun SettingsMainPage(
                     when (AppLocale.current(context)) {
                         AppLocale.ENGLISH -> R.string.language_english
                         AppLocale.CHINESE -> R.string.language_chinese
+                        AppLocale.CHINESE_TRADITIONAL -> R.string.language_chinese_traditional
+                        AppLocale.JAPANESE -> R.string.language_japanese
                         else -> R.string.language_system
                     },
                 ),
@@ -402,6 +424,8 @@ private fun SettingsMainPage(
                         AppLocale.SYSTEM to R.string.language_system,
                         AppLocale.ENGLISH to R.string.language_english,
                         AppLocale.CHINESE to R.string.language_chinese,
+                        AppLocale.CHINESE_TRADITIONAL to R.string.language_chinese_traditional,
+                        AppLocale.JAPANESE to R.string.language_japanese,
                     ).forEach { (value, label) ->
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -457,6 +481,40 @@ private fun SettingsMainPage(
                 TextButton(onClick = {
                     showColorSchemeDialog = false
                     PaletteStore.select(context, selected)
+                }) { Text(stringResource(R.string.confirm)) }
+            },
+        )
+    }
+
+    if (showTerminalColorSchemeDialog) {
+        var selected by remember { mutableStateOf(TerminalSchemeStore.current(context)) }
+        AlertDialog(
+            onDismissRequest = { showTerminalColorSchemeDialog = false },
+            title = { Text(stringResource(R.string.settings_terminal_color_scheme)) },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    TerminalScheme.entries.forEach { scheme ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable { selected = scheme }
+                        ) {
+                            RadioButton(selected = selected == scheme, onClick = { selected = scheme })
+                            Text(
+                                scheme.displayName,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TerminalSchemeSwatches(scheme)
+                        }
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTerminalColorSchemeDialog = false }) { Text(stringResource(R.string.cancel)) }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showTerminalColorSchemeDialog = false
+                    TerminalSchemeStore.select(context, selected)
                 }) { Text(stringResource(R.string.confirm)) }
             },
         )
@@ -583,6 +641,32 @@ private fun PaletteSwatches(palette: ColorPalette) {
                 Modifier
                     .size(16.dp)
                     .background(color, CircleShape)
+            )
+        }
+    }
+}
+
+// A miniature terminal cell: the scheme's background with its key ANSI colours.
+@Composable
+private fun TerminalSchemeSwatches(scheme: TerminalScheme) {
+    val palette = scheme.palette()
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        modifier = Modifier
+            .background(Color(palette.background), RoundedCornerShape(4.dp))
+            .padding(horizontal = 6.dp, vertical = 4.dp)
+    ) {
+        listOf(
+            palette.ansi[1], // red
+            palette.ansi[2], // green
+            palette.ansi[3], // yellow
+            palette.ansi[4], // blue
+            palette.foreground,
+        ).forEach { color ->
+            Box(
+                Modifier
+                    .size(8.dp)
+                    .background(Color(color), CircleShape)
             )
         }
     }

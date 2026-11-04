@@ -26,7 +26,35 @@ data class RemoteLocation(
     val hostKey: String = "",
     val sortOrder: Int = 0,
 ) {
-    val uri: String get() = "${kind.scheme}://$id${normalizeRemotePath(basePath)}"
+    /**
+     * Authority used in URIs and provider routing.
+     *
+     * SSH connections use `user@host` (plus `:port` when it is not 22) so paths
+     * stay readable in the UI and in agent tool calls. AList keeps the stored
+     * connection id because the server has no user-qualified address.
+     */
+    val pathAuthority: String
+        get() = when (kind) {
+            RemoteKind.ALIST -> id
+            RemoteKind.SSH -> buildString {
+                append(username).append('@')
+                // IPv6 literals need brackets in a URI authority, otherwise the
+                // address colons read as a port separator.
+                if (':' in host) append('[').append(host).append(']') else append(host)
+                if (port != 22) append(':').append(port)
+            }
+        }
+
+    val uri: String get() = "${kind.scheme}://$pathAuthority${normalizeRemotePath(basePath)}"
+
+    /**
+     * Entry point when the connection is opened. SSH starts at the server root:
+     * the configured base path is a default directory, not the connection root.
+     */
+    val entryUri: String
+        get() = if (kind == RemoteKind.SSH) "${kind.scheme}://$pathAuthority/"
+        else uri
+
     fun validate() {
         require(id.matches(Regex("[a-zA-Z0-9-]+")) && name.isNotBlank()) { "A connection name is required" }
         require(basePath.startsWith('/') && '\u0000' !in basePath) { "The starting directory must be an absolute path" }
@@ -47,6 +75,9 @@ internal data class RemoteEntry(
     val modifiedAt: Long = 0, val isSymlink: Boolean = false, val mode: Int = 0,
 )
 
+/** Capacity of the filesystem volume that holds a remote path. */
+internal data class RemoteSpace(val totalBytes: Long, val usableBytes: Long)
+
 internal interface RemoteBackend {
     fun list(path: String): List<RemoteEntry>
     fun stat(path: String): RemoteEntry?
@@ -58,6 +89,9 @@ internal interface RemoteBackend {
     fun rename(path: String, newName: String)
     fun prepareReplacement(original: String, replacement: String) = Unit
     fun canWrite(path: String): Boolean = true
+
+    /** Remaining capacity of the filesystem backing [path]; null when the backend cannot report it. */
+    fun space(path: String): RemoteSpace? = null
 
     /** True when reads/writes can stream through live channels instead of staged cache files. */
     val streams: Boolean get() = false
@@ -90,6 +124,17 @@ internal fun normalizeRemotePath(path: String): String {
 internal fun validName(name: String): String {
     require(name.isNotEmpty() && name != "." && name != ".." && '/' !in name && '\u0000' !in name) { "Invalid file name" }
     return name
+}
+
+/**
+ * Resolve a stored connection by id, or (for SSH) by its readable
+ * `user@host` authority (with `:port` when it is not 22). Ids are kept as a fallback so older links and
+ * terminal session targets keep working.
+ */
+internal fun resolveRemoteReference(kind: RemoteKind, reference: String): RemoteLocation? {
+    val locations = RemoteLocationStore.all().filter { it.kind == kind }
+    return locations.firstOrNull { it.id == reference }
+        ?: locations.firstOrNull { it.pathAuthority == reference }
 }
 internal fun parentPath(path: String): String = path.substringBeforeLast('/').ifEmpty { "/" }
 internal fun mutablePath(path: String): String = normalizeRemotePath(path).also {

@@ -18,9 +18,19 @@ import javax.crypto.spec.GCMParameterSpec
 object RemoteLocationStore {
     private lateinit var storage: AtomicFile
     private const val ALIAS = "io.furryr.file.remote.locations"
-    @Synchronized fun init(context: Context) { storage = AtomicFile(File(context.noBackupFilesDir, "remote-locations.enc")) }
+
+    // Every provider call resolves a connection, and every browse makes several
+    // calls. Keep the decrypted records in memory and drop them only when this
+    // process writes the store.
+    private var cached: List<RemoteLocation>? = null
+
+    @Synchronized fun init(context: Context) {
+        storage = AtomicFile(File(context.noBackupFilesDir, "remote-locations.enc"))
+        cached = null
+    }
 
     @Synchronized fun all(): List<RemoteLocation> {
+        cached?.let { return it }
         if (!storage.baseFile.exists()) return emptyList()
         val envelope = storage.openRead().use { JSONObject(it.readBytes().toString(Charsets.UTF_8)) }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -35,7 +45,7 @@ object RemoteLocationStore {
                 directoryPassword = row.optString("directoryPassword"), hostKey = row.optString("hostKey"),
                 sortOrder = row.optInt("sortOrder", 0),
             )
-        } }.sortedBy { it.sortOrder }
+        } }.sortedBy { it.sortOrder }.also { cached = it }
     }
     @Synchronized fun find(id: String): RemoteLocation = all().firstOrNull { it.id == id }
         ?: error("Remote connection no longer exists; edit the location")
@@ -47,15 +57,18 @@ object RemoteLocationStore {
                 ?: ((existing.maxOfOrNull { it.sortOrder } ?: -1) + 1),
         )
         write(existing.filterNot { it.id == location.id } + ordered)
+        cached = null
     }
     @Synchronized fun remove(id: String) {
         write(all().filterNot { it.id == id }.mapIndexed { index, entry -> entry.copy(sortOrder = index) })
+        cached = null
     }
     @Synchronized fun reorder(ids: List<String>) {
         val existing = all()
         val byId = existing.associateBy { it.id }
         val ordered = ids.mapNotNull { byId[it] } + existing.filter { it.id !in ids }
         write(ordered.mapIndexed { index, entry -> entry.copy(sortOrder = index) })
+        cached = null
     }
 
     private fun write(locations: List<RemoteLocation>) {

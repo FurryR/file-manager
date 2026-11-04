@@ -8,6 +8,8 @@ object AppLocale {
     const val SYSTEM = "system"
     const val ENGLISH = "en"
     const val CHINESE = "zh"
+    const val CHINESE_TRADITIONAL = "zh-TW"
+    const val JAPANESE = "ja"
     private const val PREFS = "settings"
     private const val KEY = "language"
 

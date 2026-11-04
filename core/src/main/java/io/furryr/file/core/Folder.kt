@@ -20,11 +20,9 @@ class Folder internal constructor(
 
     suspend fun capabilities(): DirectoryCapabilities = provider.directoryCapabilities(innerPath)
 
-    suspend fun info(entries: List<FileEntry>): DirectoryStats {
+    suspend fun info(): DirectoryStats {
         val stat = stat().getOrNull()
         return DirectoryStats(
-            folderCount = entries.count { it.isDirectory },
-            fileCount = entries.count { !it.isDirectory },
             usableBytes = stat?.usableBytes ?: 0,
             totalBytes = stat?.totalBytes ?: 0,
         )

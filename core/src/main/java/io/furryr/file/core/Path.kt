@@ -169,7 +169,9 @@ class Path private constructor(
             when (seg) {
                 ".." -> {
                     if (resolved.isNotEmpty()) resolved.removeAt(resolved.lastIndex)
-                    else if (host != null) return Path(scheme, userInfo, null, port, resolved)
+                    // Leaving a host root goes back to the scheme root (the list
+                    // of connections), not to a user-less `scheme://user@/`.
+                    else if (host != null) return Path(scheme, null, null, null, resolved)
                 }
                 "." -> { /* skip */ }
                 else -> resolved.add(seg)
@@ -210,19 +212,22 @@ class Path private constructor(
     }
 
     /**
-     * Inner path for provider routing — includes host as first segment.
+     * Inner path for provider routing — includes user info, host and port as
+     * the first segment.
      *
      * ```
      * Path.parse("container://alpine/home/test").toInnerPath()  // => "/alpine/home/test"
-     * Path.parse("container://alpine").toInnerPath()            // => "/alpine"
+     * Path.parse("ssh://user@host:2222/home").toInnerPath()     // => "/user@host:2222/home"
      * Path.parse("container:///").toInnerPath()                 // => "/"
      * ```
      */
     fun toInnerPath(): String {
         val sb = StringBuilder().append('/')
+        if (userInfo != null) sb.append(userInfo).append('@')
         if (host != null) sb.append(host)
+        if (port != null) sb.append(':').append(port)
         if (segments.isNotEmpty()) {
-            if (host != null) sb.append('/')
+            if (host != null || userInfo != null) sb.append('/')
             sb.append(segments.joinToString("/"))
         }
         return sb.toString()

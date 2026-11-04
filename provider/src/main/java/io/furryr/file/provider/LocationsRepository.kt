@@ -17,6 +17,7 @@ import io.furryr.file.provider.remote.RemoteLocation
 import io.furryr.file.provider.remote.RemoteLocationStore
 import io.furryr.file.provider.remote.RemoteProviders
 import io.furryr.file.provider.remote.SshConnections
+import io.furryr.file.provider.remote.SshControls
 import io.furryr.file.provider.model.LocalLocation
 
 /**
@@ -114,8 +115,9 @@ object LocationsRepository {
             entries += LocationEntry(
                 id = location.id,
                 title = location.name,
-                subtitle = "${location.kind.scheme}://${location.endpoint.ifBlank { location.host }}",
-                root = "${location.kind.scheme}://${location.id}${location.basePath}",
+                subtitle = if (location.kind == RemoteKind.SSH) "ssh://${location.pathAuthority}"
+                else "${location.kind.scheme}://${location.endpoint}",
+                root = location.entryUri,
                 provider = provider,
                 kind = location.kind.scheme,
                 actions = object : LocationActions {
@@ -192,11 +194,15 @@ object LocationsRepository {
     fun insertRemote(location: RemoteLocation) = RemoteLocationStore.put(location)
 
     fun updateRemote(location: RemoteLocation) {
-        if (location.kind == RemoteKind.SSH) SshConnections.disconnect(location.id)
+        if (location.kind == RemoteKind.SSH) {
+            SshControls.close(location.id)
+            SshConnections.disconnect(location.id)
+        }
         RemoteLocationStore.put(location)
     }
 
     fun deleteRemote(id: String) {
+        SshControls.close(id)
         SshConnections.disconnect(id)
         RemoteLocationStore.remove(id)
     }

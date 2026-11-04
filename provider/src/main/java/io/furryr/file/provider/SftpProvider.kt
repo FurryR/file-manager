@@ -120,10 +120,23 @@ object SftpProvider : FileProvider {
         val ch = channel(server)
         try {
             val attrs = ch.lstat(remotePath)
+            // Directories report the volume's free space; a file keeps its size.
+            var total = if (attrs.isDir) 0L else attrs.size
+            var usable = 0L
+            if (attrs.isDir) {
+                val vfs = runCatching { ch.statVFS(remotePath) }.getOrNull()
+                if (vfs != null) {
+                    val unit = vfs.fragmentSize.takeIf { it > 0 } ?: 1L
+                    val available = vfs.availForNonRoot.takeIf { it > 0 } ?: vfs.avail
+                    total = unit * vfs.blocks
+                    usable = unit * available
+                }
+            }
             ProviderStat(
                 exists = true,
                 isDirectory = attrs.isDir,
-                totalBytes = if (attrs.isDir) 0L else attrs.size,
+                totalBytes = total,
+                usableBytes = usable,
             )
         } catch (e: SftpException) {
             if (e.id == ChannelSftp.SSH_FX_NO_SUCH_FILE) ProviderStat(exists = false) else throw e

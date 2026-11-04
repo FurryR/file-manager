@@ -142,28 +142,38 @@ internal fun ContentWithDrawer(
                     )
                 }
         ) {
-            when {
-                sessionError != null -> {
-                    Text(
-                        sessionError,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.align(Alignment.Center).padding(16.dp),
+            val currentTab = tabs.getOrNull(activeTabIndex)
+            if (currentTab != null) {
+                Column(Modifier.fillMaxSize()) {
+                    TerminalViewComposable(
+                        session = currentTab.session,
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        enabled = enabled,
+                        inputState = inputState,
+                    )
+                    TerminalExtraKeys(
+                        inputState = inputState,
+                        enabled = enabled,
+                        onOpenDrawer = onOpenDrawer,
                     )
                 }
-                tabs.getOrNull(activeTabIndex) != null -> {
-                    val currentTab = tabs[activeTabIndex]
-                    Column(Modifier.fillMaxSize()) {
-                        TerminalViewComposable(
-                            session = currentTab.session,
-                            modifier = Modifier.weight(1f).fillMaxWidth(),
-                            enabled = enabled,
-                            inputState = inputState,
-                        )
-                        TerminalExtraKeys(
-                            inputState = inputState,
-                            enabled = enabled,
-                            onOpenDrawer = onOpenDrawer,
-                        )
+            } else {
+                // No live tab: show the failure (if any) but keep a way out, so
+                // one failed SSH connection cannot strand the sheet.
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.padding(16.dp),
+                    ) {
+                        if (sessionError != null) {
+                            Text(sessionError, color = MaterialTheme.colorScheme.error)
+                        }
+                        TextButton(
+                            onClick = onNewTab,
+                            modifier = Modifier.padding(top = 8.dp),
+                        ) {
+                            Text(stringResource(R.string.drawer_new_terminal))
+                        }
                     }
                 }
             }
@@ -243,16 +253,14 @@ internal fun DrawerContent(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (tabs.size > 1) {
-                        Icon(
-                            Icons.Default.Close,
-                            contentDescription = stringResource(R.string.cd_close_tab),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier
-                                .size(16.dp)
-                                .clickable { onCloseTab(tab) }
-                        )
-                    }
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = stringResource(R.string.cd_close_tab),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .size(16.dp)
+                            .clickable { onCloseTab(tab) }
+                    )
                 }
             }
         }

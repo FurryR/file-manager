@@ -13,6 +13,8 @@
     <string name="language_system">跟随系统</string>
     <string name="language_english">English</string>
     <string name="language_chinese">简体中文</string>
+    <string name="language_chinese_traditional">繁體中文</string>
+    <string name="language_japanese">日本語</string>
     <string name="available">可用</string>
     <string name="used">已用</string>
     <string name="startup">启动</string>
@@ -89,7 +91,7 @@
     <string name="batch_rename_title">重命名 %1$d 项</string>
     <string name="regex_label">正则</string>
     <string name="replacement_label">替换为</string>
-    <string name="directory_summary">文件夹 %1$d | 文件 %2$d | 可用 %3$s/%4$s</string>
+    <string name="directory_summary">已用 %1$s/%2$s</string>
     <string name="jump_title">跳转</string>
     <string name="path_label">路径</string>
     <string name="delete_location_title">删除位置</string>
@@ -187,8 +189,11 @@
     <string name="settings_docker_hub_key_desc">可选认证令牌</string>
     <string name="settings_terminal_font_desc">字体文件路径（TTF/OTF）</string>
     <string name="settings_terminal_font_size_desc">默认终端文字大小</string>
+    <string name="settings_terminal_color_scheme">终端配色方案</string>
     <string name="settings_appearance">外观</string>
     <string name="settings_color_scheme">颜色方案</string>
+    <string name="settings_amoled_black">AMOLED 黑色</string>
+    <string name="settings_amoled_black_desc">暗色模式将显示为纯黑以在 AMOLED 上省电</string>
     <string name="color_scheme_indigo">靛蓝</string>
     <string name="color_scheme_sage">松绿</string>
     <string name="color_scheme_rose">玫瑰</string>

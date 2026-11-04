@@ -20,18 +20,19 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
     override val streams: Boolean get() = true
 
     override fun list(path: String): List<RemoteEntry> {
-        val script = "[ -d ${quote(path)} ] || exit 45\n" +
-            "find ${quote(path)} -mindepth 1 -maxdepth 1 -exec sh -c ${quote(METADATA)} sh {} +"
-        return parse(capture(script))
+        // The listing and its directory probe share one control-channel command:
+        // a folder tap is one round trip, and stat/canWrite/space then read the
+        // probe from the cache.
+        val bytes = capture(listScript(path))
+        return parseListing(path, bytes)
     }
-    override fun stat(path: String): RemoteEntry? = if (path == "/") {
-        parse(capture("sh -c ${quote(METADATA)} sh /" )).singleOrNull()
-    } else list(parentPath(path)).firstOrNull { it.name == path.substringAfterLast('/') }
-
-    override fun canWrite(path: String): Boolean {
-        val result = capture("if [ -d ${quote(path)} ] && [ -w ${quote(path)} ] && [ -x ${quote(path)} ]; then printf y; else printf n; fi")
-        return result.contentEquals(byteArrayOf('y'.code.toByte()))
-    }
+    // One `stat` probe answers existence, write access and volume capacity in a
+    // single round trip. Directory browsing asks for the same path through
+    // stat/canWrite/space, so caching the probe keeps a folder tap to one exec
+    // instead of a full parent listing plus two extra commands.
+    override fun stat(path: String): RemoteEntry? = probe(path).entry
+    override fun canWrite(path: String): Boolean = probe(path).canWrite
+    override fun space(path: String): RemoteSpace? = probe(path).space
     override fun download(path: String, destination: File) {
         openRead(path, stat(path)?.size ?: 0).use { source ->
             destination.outputStream().use { output ->
@@ -74,6 +75,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         SshConnections.open(location).use { lease ->
             execute(uploadScript(path, length), input = source, connection = lease.connection)
         }
+        invalidate(location.id)
     }
 
     private fun uploadScript(path: String, length: Long): String {
@@ -100,17 +102,26 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
     }
     override fun createFile(path: String) {
         mutablePath(path)
-        execute("[ ! -e ${quote(path)} ] && [ ! -L ${quote(path)} ] || exit 46\n(set -C; : > ${quote(path)})")
+        control("[ ! -e ${quote(path)} ] && [ ! -L ${quote(path)} ] || exit 46\n(set -C; : > ${quote(path)})")
+        invalidate(location.id)
     }
-    override fun createDirectory(path: String) { execute("mkdir -- ${quote(mutablePath(path))}") }
-    override fun delete(path: String) { execute("rm -rf -- ${quote(mutablePath(path))}") }
+    override fun createDirectory(path: String) {
+        control("mkdir -- ${quote(mutablePath(path))}")
+        invalidate(location.id)
+    }
+    override fun delete(path: String) {
+        control("rm -rf -- ${quote(mutablePath(path))}")
+        invalidate(location.id)
+    }
     override fun rename(path: String, newName: String) {
         val destination = parentPath(mutablePath(path)).trimEnd('/') + "/" + validName(newName)
-        execute("[ ! -e ${quote(destination)} ] && [ ! -L ${quote(destination)} ] || exit 46\nmv -- ${quote(path)} ${quote(destination)}")
+        control("[ ! -e ${quote(destination)} ] && [ ! -L ${quote(destination)} ] || exit 46\nmv -- ${quote(path)} ${quote(destination)}")
+        invalidate(location.id)
     }
 
     override fun prepareReplacement(original: String, replacement: String) {
-        execute(metadataScript(mutablePath(original), mutablePath(replacement)))
+        control(metadataScript(mutablePath(original), mutablePath(replacement)))
+        invalidate(location.id)
     }
 
     private fun metadataScript(original: String, replacement: String): String {
@@ -143,12 +154,53 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         """.trimIndent()
     }
 
-    private fun capture(script: String): ByteArray {
-        val output = BoundedOutput(32 * 1024 * 1024)
-        execute(script, output = output)
-        if (output.overflowed) throw IOException("SSH directory metadata is too large")
-        return output.bytes()
+    // Short metadata and mutation commands share the location's control shell;
+    // only streaming transfers pay for their own channel.
+    private fun capture(script: String): ByteArray = SshControls.get(location).run(script)
+
+    private fun control(script: String) {
+        SshControls.get(location).run(script)
     }
+
+    private fun listScript(path: String): String = """
+        p=${quote(path)}
+        [ -d "${'$'}p" ] || exit 45
+        find "${'$'}p" -mindepth 1 -maxdepth 1 -exec sh -c ${quote(METADATA)} sh {} +
+        w=n
+        if [ -w "${'$'}p" ] && [ -x "${'$'}p" ]; then w=y; fi
+        d=${'$'}(LC_ALL=C df -Pk "${'$'}p" 2>/dev/null | tail -n 1)
+        set -- ${'$'}d
+        printf 'P/\000d\000%s\000%s\000%s\000' "${'$'}{2:-0}" "${'$'}{4:-0}" "${'$'}w"
+    """.trimIndent()
+
+    private fun probe(path: String): Probe {
+        val key = location.id + '\u0000' + path
+        cachedProbe(key)?.let { return it }
+        val fields = capture(probeScript(path)).toString(Charsets.UTF_8).split('\u0000').dropLast(1)
+        val result = parseProbe(path, fields)
+        storeProbe(key, result)
+        return result
+    }
+
+    private fun probeScript(path: String): String = """
+        p=${quote(path)}
+        v=${'$'}(stat -c '%s %Y' -- "${'$'}p" 2>/dev/null) || v=${'$'}(stat -f '%z %m' "${'$'}p" 2>/dev/null) || { printf 'M\000'; exit 0; }
+        set -- ${'$'}v
+        [ "${'$'}#" -eq 2 ] || { printf 'M\000'; exit 0; }
+        k=f
+        if [ -d "${'$'}p" ] && [ ! -L "${'$'}p" ]; then k=d; fi
+        l=n
+        if [ -L "${'$'}p" ]; then l=y; fi
+        w=n
+        if [ "${'$'}k" = d ] && [ -w "${'$'}p" ] && [ -x "${'$'}p" ]; then w=y; fi
+        printf 'E\000%s\000%s\000%s\000%s\000' "${'$'}k" "${'$'}1" "${'$'}2" "${'$'}l"
+        printf 'W\000%s\000' "${'$'}w"
+        if [ "${'$'}k" = d ]; then
+            d=${'$'}(LC_ALL=C df -Pk "${'$'}p" 2>/dev/null | tail -n 1)
+            set -- ${'$'}d
+            if [ "${'$'}#" -ge 4 ]; then printf 'S\000%s\000%s\000' "${'$'}2" "${'$'}4"; fi
+        fi
+    """.trimIndent()
     private fun execute(
         script: String,
         input: InputStream? = null,
@@ -184,7 +236,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
             while (!channel.isClosed) {
                 interrupted()
                 if (System.nanoTime() - activity.get() > 120_000_000_000L) throw IOException("SSH operation timed out")
-                Thread.sleep(25)
+                Thread.sleep(5)
             }
             val exit = channel.exitStatus
             if (exit != 0) {
@@ -371,18 +423,97 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
     }
     private object Discard : OutputStream() { override fun write(value: Int) = Unit; override fun write(bytes: ByteArray, offset: Int, length: Int) = Unit }
 
-    private fun parse(bytes: ByteArray): List<RemoteEntry> {
+    private fun parseListing(path: String, bytes: ByteArray): List<RemoteEntry> {
         if (bytes.isEmpty()) return emptyList()
         require(bytes.last() == 0.toByte()) { "Incomplete SSH metadata response" }
         val fields = bytes.toString(Charsets.UTF_8).split('\u0000').dropLast(1)
         require(fields.size % 5 == 0) { "Invalid SSH metadata response; a login script may be writing to stdout" }
-        return fields.chunked(5).map { values ->
+        val entries = ArrayList<RemoteEntry>(fields.size / 5)
+        var dirProbe: Probe? = null
+        fields.chunked(5).forEach { values ->
+            if (values[0] == "P/") {
+                // Trailer record for the listed directory itself: its write
+                // access and volume capacity were already gathered for free.
+                val blocks = values[2].toLongOrNull() ?: 0
+                val available = values[3].toLongOrNull() ?: 0
+                dirProbe = Probe(
+                    entry = RemoteEntry(
+                        name = path.substringAfterLast('/').ifEmpty { "/" },
+                        isDirectory = true,
+                        mode = 0x41ED,
+                    ),
+                    canWrite = values[4] == "y",
+                    space = if (blocks > 0) RemoteSpace(blocks * 1024, available * 1024) else null,
+                    at = System.currentTimeMillis(),
+                )
+                return@forEach
+            }
             require(values[1] in setOf("d", "f") && values[4] in setOf("y", "n")) { "Invalid SSH metadata fields" }
-            RemoteEntry(values[0], values[1] == "d", values[2].toLong(), values[3].toLong() * 1000,
+            entries += RemoteEntry(values[0], values[1] == "d", values[2].toLong(), values[3].toLong() * 1000,
                 values[4] == "y", if (values[1] == "d") 0x41ED else 0x81A4)
         }
+        dirProbe?.let { storeProbe(location.id + '\u0000' + path, it) }
+        return entries
     }
     companion object {
+        private const val PROBE_TTL_MS = 3_000L
+        private val probes = HashMap<String, Probe>()
+
+        private data class Probe(
+            val entry: RemoteEntry?,
+            val canWrite: Boolean,
+            val space: RemoteSpace?,
+            val at: Long,
+        )
+
+        private fun cachedProbe(key: String): Probe? = synchronized(probes) {
+            val hit = probes[key] ?: return@synchronized null
+            if (System.currentTimeMillis() - hit.at > PROBE_TTL_MS) {
+                probes.remove(key)
+                null
+            } else hit
+        }
+
+        private fun storeProbe(key: String, probe: Probe) {
+            synchronized(probes) {
+                if (probes.size >= 128) probes.clear()
+                probes[key] = probe
+            }
+        }
+
+        private fun invalidate(id: String) {
+            synchronized(probes) { probes.keys.removeAll { it.startsWith("$id\u0000") } }
+        }
+
+        private fun parseProbe(path: String, fields: List<String>): Probe {
+            val now = System.currentTimeMillis()
+            if (fields.size == 1 && fields[0] == "M") return Probe(null, false, null, now)
+            require(fields.size >= 7 && fields[0] == "E" && fields[5] == "W") {
+                "Invalid SSH metadata response; a login script may be writing to stdout"
+            }
+            val isDirectory = fields[1] == "d"
+            val size = fields[2].toLongOrNull()
+            val modified = fields[3].toLongOrNull()
+            require(size != null && modified != null) {
+                "Invalid SSH metadata response; a login script may be writing to stdout"
+            }
+            val entry = RemoteEntry(
+                name = path.substringAfterLast('/').ifEmpty { "/" },
+                isDirectory = isDirectory,
+                size = size,
+                modifiedAt = modified * 1000,
+                isSymlink = fields[4] == "y",
+                mode = if (isDirectory) 0x41ED else 0x81A4,
+            )
+            val space = if (fields.size >= 10 && fields[7] == "S") {
+                RemoteSpace(
+                    totalBytes = fields[8].toLong() * 1024,
+                    usableBytes = fields[9].toLong() * 1024,
+                )
+            } else null
+            return Probe(entry, fields[6] == "y", space, now)
+        }
+
         private fun quote(value: String): String { require('\u0000' !in value); return "'" + value.replace("'", "'\\''") + "'" }
         private val METADATA = """
             for p do

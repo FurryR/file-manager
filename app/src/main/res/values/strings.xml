@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">File Manager</string>
+    <string name="app_name">File</string>
     <string name="permission_denied">Permission denied</string>
-    <string name="drawer_title">File Manager</string>
+    <string name="drawer_title">File</string>
     <string name="nav_home">Internal storage</string>
     <string name="nav_root">Root /</string>
     <string name="nav_settings">Settings</string>
@@ -13,6 +13,8 @@
     <string name="language_system">System default</string>
     <string name="language_english">English</string>
     <string name="language_chinese">简体中文</string>
+    <string name="language_chinese_traditional">繁體中文</string>
+    <string name="language_japanese">日本語</string>
     <string name="available">Available</string>
     <string name="used">Used</string>
     <string name="startup">Startup</string>
@@ -89,7 +91,7 @@
     <string name="batch_rename_title">Rename %1$d items</string>
     <string name="regex_label">Regex</string>
     <string name="replacement_label">Replacement</string>
-    <string name="directory_summary">Folders %1$d | Files %2$d | Available %3$s/%4$s</string>
+    <string name="directory_summary">Used %1$s/%2$s</string>
     <string name="jump_title">Go to path</string>
     <string name="path_label">Path</string>
     <string name="delete_location_title">Delete location</string>
@@ -189,8 +191,11 @@
     <string name="settings_docker_hub_key_desc">Optional authentication token</string>
     <string name="settings_terminal_font_desc">Font file path (TTF/OTF)</string>
     <string name="settings_terminal_font_size_desc">Default terminal text size</string>
+    <string name="settings_terminal_color_scheme">Terminal color scheme</string>
     <string name="settings_appearance">Appearance</string>
     <string name="settings_color_scheme">Color scheme</string>
+    <string name="settings_amoled_black">AMOLED black</string>
+    <string name="settings_amoled_black_desc">Dark mode uses pure black to save power on AMOLED displays</string>
     <string name="color_scheme_indigo">Indigo</string>
     <string name="color_scheme_sage">Sage</string>
     <string name="color_scheme_rose">Rose</string>

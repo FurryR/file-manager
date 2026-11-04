@@ -16,7 +16,6 @@ import android.view.inputmethod.InputConnection
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -25,7 +24,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
@@ -33,9 +31,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
 import com.termux.view.TerminalViewClient
-import io.furryr.file.ui.theme.PaletteStore
 import io.furryr.file.ui.theme.TerminalPalette
-import io.furryr.file.ui.theme.terminalPalette
+import io.furryr.file.ui.theme.TerminalSchemeStore
 import kotlin.math.roundToInt
 
 // ANSI colours live in the emulator, not the view, so a palette change has to
@@ -54,10 +51,10 @@ fun TerminalViewComposable(
     enabled: Boolean = true,
     inputState: TerminalInputState = remember { TerminalInputState() },
 ) {
-    val colorScheme = MaterialTheme.colorScheme
-    val backgroundColor = colorScheme.surface.toArgb()
     val context = LocalContext.current
-    val terminalPalette = colorScheme.terminalPalette(PaletteStore.current(context))
+    // The terminal owns its colours; the app theme never recolours it.
+    val terminalPalette = TerminalSchemeStore.current(context).palette()
+    val backgroundColor = terminalPalette.background
     val density = LocalDensity.current
 
     val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)

@@ -329,7 +329,7 @@ fun TerminalSheet(
             val inner = path.removePrefix("ssh://")
             val location = SshTerminals.find(inner.substringBefore('/'))
             val remotePath = if ('/' in inner) "/" + inner.substringAfter('/').trimStart('/') else "/"
-            SessionManager.SessionType.Ssh(location.id, location.name, remotePath) to location.name
+            SessionManager.SessionType.Ssh(location.id, location.name, remotePath, location.pathAuthority) to location.name
         } else if (path.startsWith("container://")) {
             val resolved = ContainerUriResolver.resolveContainerUri(path).getOrThrow()
             val name = resolved.containerName
@@ -370,6 +370,7 @@ fun TerminalSheet(
     fun createNewTab() {
         if (tabs.isEmpty() && activeTabIndex < 0) {
             scope.launch {
+                sessionError = null
                 try {
                     val (type, label) = resolveSessionType(currentPath)
                     val session = SessionManager.createSession(type, context).getOrThrow()
@@ -385,6 +386,7 @@ fun TerminalSheet(
                         )
                     )
                     activeTabIndex = tabs.lastIndex
+                    sessionError = null
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to create terminal", e)
                     sessionError = e.message ?: "Failed to create terminal"
@@ -395,6 +397,7 @@ fun TerminalSheet(
 
     LaunchedEffect(visible) {
         if (visible) {
+            sessionError = null
             DaemonManager.warmUp()
             restoreTabs()
             createNewTab()
@@ -512,6 +515,7 @@ fun TerminalSheet(
                     onOpenDrawer = { showDrawer = true },
                     onNewTab = {
                         scope.launch {
+                            sessionError = null
                             try {
                                 val (type, label) = resolveSessionType(currentPath)
                                 val session = SessionManager.createSession(type, context).getOrThrow()
@@ -527,6 +531,7 @@ fun TerminalSheet(
                                     )
                                 )
                                 activeTabIndex = tabs.lastIndex
+                                sessionError = null
                                 showDrawer = false
                                 showTabToast(activeTabIndex)
                             } catch (e: Exception) {

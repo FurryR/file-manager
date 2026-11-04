@@ -31,11 +31,6 @@ fun formatSize(bytes: Long): String {
     return "$stripped$unit"
 }
 
-fun abbreviateStart(path: String): String {
-    if (path.length <= 42) return path
-    return "..." + path.takeLast(39)
-}
-
 fun mimeType(file: File): String {
     val extension = file.extension.lowercase(Locale.ROOT)
     return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension) ?: "*/*"

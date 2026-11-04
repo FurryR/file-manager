@@ -88,6 +88,8 @@ object SessionManager {
             val locationName: String,
             /** Remote directory to enter after the shell starts. */
             val startPath: String? = null,
+            /** Readable `user@host` authority used in file paths: `[host]` for IPv6, `:port` when not 22. */
+            val authority: String = "",
         ) : SessionType()
     }
 
@@ -264,13 +266,6 @@ object SessionManager {
     }
 
     /**
-     * Check whether a container terminal session is currently active.
-     */
-    fun hasContainerSession(containerName: String): Boolean = synchronized(mutex) {
-        sessions.values.any { it.type is SessionType.Container && (it.type as SessionType.Container).containerName == containerName }
-    }
-
-    /**
      * Return a snapshot of all active terminal sessions.
      *
      * The returned list is a copy -- iteration is safe without holding the lock.
@@ -305,7 +300,7 @@ object SessionManager {
     fun terminalTarget(sessionId: String): String = synchronized(mutex) {
         terminalTargets[sessionId]?.lastOrNull()?.second ?: when (val type = sessions[sessionId]?.type) {
             is SessionType.Container -> "container-${type.containerName}"
-            is SessionType.Ssh -> "ssh://${type.locationId}"
+            is SessionType.Ssh -> "ssh://${type.authority.ifEmpty { type.locationId }}"
             else -> "app"
         }
     }
@@ -393,7 +388,7 @@ object SessionManager {
         ProcessHelper.prepareSshTerminal(terminalId, shell)
         return try {
             createTerminalSession(
-                "ssh://${type.locationId}",
+                "ssh://${type.authority.ifEmpty { type.locationId }}",
                 context,
                 customCwd = "/",
                 startPath = type.startPath,

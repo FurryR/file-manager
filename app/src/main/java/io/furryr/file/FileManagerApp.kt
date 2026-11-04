@@ -56,7 +56,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
@@ -90,6 +90,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -133,7 +140,6 @@ fun FileManagerApp(
     val tabs = remember { mutableStateListOf(FileTab(path = DefaultPath)) }
     var selectedTabIndex by remember { mutableIntStateOf(0) }
     var currentInfo by remember { mutableStateOf(DirectoryStats()) }
-    var showJumpDialog by remember { mutableStateOf(false) }
     var showInfoDialog by remember { mutableStateOf(false) }
     var showCreateDialog by remember { mutableStateOf(false) }
     var containerError by remember(containerErrorRequest) { mutableStateOf(containerErrorRequest) }
@@ -217,6 +223,13 @@ fun FileManagerApp(
     val scope = rememberCoroutineScope()
 
     // Exit sort mode when drawer closes
+    // Any tap outside the inline path editor dismisses it, like an address
+    // bar. Compose touch targets do not move focus on their own, so the root
+    // sees every press before its children and clears focus for out-of-bounds
+    // presses only.
+    val focusManager = LocalFocusManager.current
+    var titleBounds by remember { mutableStateOf<Rect?>(null) }
+    var rootCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
     LaunchedEffect(drawerState.isClosed) {
         if (drawerState.isClosed) drawerSortMode = false
     }
@@ -246,6 +259,34 @@ fun FileManagerApp(
         highlightRefreshToken = null
         pendingScrollPath = null
         pendingNavigation = tab.copy(path = path, backStack = tab.backStack + tab.path, forwardStack = emptyList())
+    }
+
+    // Inline path submit: directories navigate, files open their parent with the
+    // entry selected, matching the old jump dialog behaviour.
+    fun jumpTo(path: String) {
+        scope.launch {
+            val stat = withContext(Dispatchers.IO) { Vfs.stat(path).getOrNull() }
+            if (stat != null && stat.exists && !stat.isDirectory) {
+                val parent = Vfs.navigate(path, "..")
+                if (parent != null) {
+                    if (parent == currentTab().path) {
+                        replaceCurrent(currentTab().copy(
+                            selectedPaths = setOf(path),
+                            lastSelectedIndex = currentEntries.indexOfFirst { it.path == path }
+                        ))
+                        pendingScrollPath = path
+                    } else {
+                        navigateTo(parent)
+                        highlightPath = path
+                        highlightDirectory = parent
+                        highlightRefreshToken = null
+                        pendingScrollPath = path
+                    }
+                }
+            } else {
+                navigateTo(path)
+            }
+        }
     }
 
     fun goBack() {
@@ -518,11 +559,12 @@ fun FileManagerApp(
         }
     }
 
-    // Refresh container running status when terminal sessions change.
+    // Container liveness is the named daemon's, so refresh when the daemon set
+    // changes rather than when a terminal opens or closes.
     DisposableEffect(Unit) {
         val listener: () -> Unit = { containerRefreshKey++ }
-        SessionManager.addSessionChangeListener(listener)
-        onDispose { SessionManager.removeSessionChangeListener(listener) }
+        DaemonManager.addNamedChangeListener(listener)
+        onDispose { DaemonManager.removeNamedChangeListener(listener) }
     }
 
     LaunchedEffect(Unit) {
@@ -955,6 +997,22 @@ fun FileManagerApp(
         }
     ) {
         Scaffold(
+            modifier = Modifier
+                .onGloballyPositioned { rootCoordinates = it }
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.type != PointerEventType.Press) continue
+                            val change = event.changes.firstOrNull() ?: continue
+                            val bounds = titleBounds
+                            val coordinates = rootCoordinates
+                            if (bounds == null || coordinates == null) continue
+                            val position = coordinates.localToWindow(change.position)
+                            if (!bounds.contains(position)) focusManager.clearFocus()
+                        }
+                    }
+                },
             topBar = {
                 Column {
                     if (copyMoveState != null) {
@@ -965,7 +1023,7 @@ fun FileManagerApp(
                                 .background(MaterialTheme.colorScheme.primary)
                         )
                     }
-                    CenterAlignedTopAppBar(
+                    TopAppBar(
                         title = {
                             if (searchMode) {
                                 TextField(
@@ -995,7 +1053,8 @@ fun FileManagerApp(
                                 TitleBlock(
                                     path = currentTab().path,
                                     info = currentInfo,
-                                    onClick = { showJumpDialog = true }
+                                    onNavigate = { jumpTo(it) },
+                                    onBounds = { titleBounds = it }
                                 )
                             }
                         },
@@ -1229,39 +1288,6 @@ fun FileManagerApp(
                 )
             }
         }
-    }
-
-    if (showJumpDialog) {
-        JumpDialog(
-            initialPath = currentTab().path,
-            onDismiss = { showJumpDialog = false },
-            onConfirm = { path ->
-                showJumpDialog = false
-                scope.launch {
-                    val stat = withContext(Dispatchers.IO) { Vfs.stat(path).getOrNull() }
-                    if (stat != null && stat.exists && !stat.isDirectory) {
-                            val parent = Vfs.navigate(path, "..")
-                        if (parent != null) {
-                            if (parent == currentTab().path) {
-                                replaceCurrent(currentTab().copy(
-                                    selectedPaths = setOf(path),
-                                    lastSelectedIndex = currentEntries.indexOfFirst { it.path == path }
-                                ))
-                                pendingScrollPath = path
-                            } else {
-                                navigateTo(parent)
-                                highlightPath = path
-                                highlightDirectory = parent
-                                highlightRefreshToken = null
-                                pendingScrollPath = path
-                            }
-                        }
-                    } else {
-                        navigateTo(path)
-                    }
-                }
-            }
-        )
     }
 
     if (showInfoDialog) {

@@ -86,6 +86,10 @@
     <string name="toast_copied">Copied %1$s</string>
     <string name="toast_moved">Moved %1$s</string>
     <string name="toast_deleted">Deleted %1$s</string>
+    <string name="session_manager">Sessions</string>
+    <string name="history_title">History</string>
+    <string name="done">Done</string>
+    <string name="toast_deleted_count">Deleted %1$d items</string>
     <string name="toast_renamed">Renamed to %1$s</string>
     <string name="toast_failed">Failed</string>
     <string name="batch_rename_title">Rename %1$d items</string>
@@ -136,9 +140,10 @@
     <string name="drawer_add_unified_location">Add location</string>
     <string name="use_external_storage">Use external storage</string>
     <string name="location_path">Location path</string>
-    <string name="location_path_hint">/storage/emulated/0 or ftp://host/</string>
+    <string name="location_path_hint">/storage/emulated/0, ftp://host/ or https://example.com/</string>
     <string name="location_scheme">Protocol</string>
-    <string name="location_invalid">Enter a local path, ftp:// URL, or sftp:// URL</string>
+    <string name="location_url_label">Web address</string>
+    <string name="location_invalid">Enter a local path, ftp://, sftp://, ssh:// address, or an http(s):// web link</string>
     <string name="drawer_add_ftp">Add FTP location</string>
     <string name="ftp_add_title">Add FTP location</string>
     <string name="ftp_edit_title">Edit FTP location</string>
@@ -163,6 +168,7 @@
     <string name="container_state_deleted">Deleted</string>
     <string name="terminal_drawer_title">Terminals</string>
     <string name="terminal_key_enter">Enter</string>
+    <string name="terminal_drop_hint">Drop here to insert the path</string>
     <string name="wizard_pull_title">Pull a Linux rootfs from Docker Hub</string>
     <string name="wizard_pull_desc">Enter a Docker image reference to create a container.</string>
     <string name="wizard_image_placeholder">library/alpine:latest</string>
@@ -193,6 +199,8 @@
     <string name="settings_terminal_font_size_desc">Default terminal text size</string>
     <string name="settings_terminal_color_scheme">Terminal color scheme</string>
     <string name="settings_appearance">Appearance</string>
+    <string name="settings_browse">Browse</string>
+    <string name="settings_search_engine">Search engine</string>
     <string name="settings_color_scheme">Color scheme</string>
     <string name="settings_amoled_black">AMOLED black</string>
     <string name="settings_amoled_black_desc">Dark mode uses pure black to save power on AMOLED displays</string>

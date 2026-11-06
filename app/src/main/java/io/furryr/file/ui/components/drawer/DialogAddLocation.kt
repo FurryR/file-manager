@@ -117,6 +117,14 @@ internal fun AddLocationDialog(
         address = LocationAddressParser.parse(value) ?: LocationAddress()
         invalid = false
     }
+    fun updateWebUrl(value: String) {
+        val previousName = address.name
+        path = value
+        address = LocationAddressParser.parse(value)?.let {
+            if (previousName.isNotBlank() && it.isWeb) it.copy(name = previousName) else it
+        } ?: LocationAddress()
+        invalid = false
+    }
     fun updateRemote(update: LocationAddress) {
         address = update
         path = update.toUrl()
@@ -137,7 +145,24 @@ internal fun AddLocationDialog(
                     isError = invalid,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                if (address.isRemote) {
+                if (address.isWeb) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(stringResource(R.string.location_scheme) + ": ${address.scheme}", style = MaterialTheme.typography.labelLarge)
+                    OutlinedTextField(
+                        address.name,
+                        { address = address.copy(name = it) },
+                        label = { Text(stringResource(R.string.ftp_name_label)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        address.url,
+                        ::updateWebUrl,
+                        label = { Text(stringResource(R.string.location_url_label)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else if (address.isRemote) {
                     Spacer(Modifier.height(8.dp))
                     Text(stringResource(R.string.location_scheme) + ": ${address.scheme}", style = MaterialTheme.typography.labelLarge)
                     OutlinedTextField(address.name, { updateRemote(address.copy(name = it)) }, label = { Text(stringResource(R.string.ftp_name_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -186,7 +211,7 @@ internal fun AddLocationDialog(
                 }
                 TextButton(onClick = {
                     val parsed = LocationAddressParser.parse(path)
-                    val missingHost = parsed != null && parsed.isRemote && parsed.host.isBlank()
+                    val missingHost = parsed != null && (parsed.isRemote || parsed.isWeb) && parsed.host.isBlank()
                     val missingSshUser = parsed?.scheme == "ssh" && parsed.username.isBlank()
                     if (parsed == null || missingHost || missingSshUser) invalid = true else onConfirm(parsed)
                 }) { Text(stringResource(R.string.confirm)) }

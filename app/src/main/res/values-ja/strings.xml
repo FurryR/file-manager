@@ -86,6 +86,10 @@
     <string name="toast_copied">%1$s をコピーしました</string>
     <string name="toast_moved">%1$s を移動しました</string>
     <string name="toast_deleted">%1$s を削除しました</string>
+    <string name="session_manager">セッション</string>
+    <string name="history_title">履歴</string>
+    <string name="done">完了</string>
+    <string name="toast_deleted_count">%1$d 件を削除しました</string>
     <string name="toast_renamed">%1$s に名前を変更しました</string>
     <string name="toast_failed">失敗</string>
     <string name="batch_rename_title">%1$d 項目の名前を変更</string>
@@ -136,9 +140,10 @@
     <string name="drawer_add_unified_location">場所を追加</string>
     <string name="use_external_storage">外部ストレージを使用</string>
     <string name="location_path">場所のパス</string>
-    <string name="location_path_hint">/storage/emulated/0 または ftp://host/</string>
+    <string name="location_path_hint">/storage/emulated/0、ftp://host/、https://example.com/</string>
     <string name="location_scheme">プロトコル</string>
-    <string name="location_invalid">ローカルパス、ftp:// URL、または sftp:// URL を入力してください</string>
+    <string name="location_url_label">Web アドレス</string>
+    <string name="location_invalid">ローカルパス、ftp:// / sftp:// / ssh:// アドレス、または http(s):// の Web アドレスを入力してください</string>
     <string name="drawer_add_ftp">FTP の場所を追加</string>
     <string name="ftp_add_title">FTP の場所を追加</string>
     <string name="ftp_edit_title">FTP の場所を編集</string>
@@ -163,6 +168,7 @@
     <string name="container_state_deleted">削除済み</string>
     <string name="terminal_drawer_title">ターミナル</string>
     <string name="terminal_key_enter">Enter</string>
+    <string name="terminal_drop_hint">ここにドロップしてパスを挿入</string>
     <string name="wizard_pull_title">Docker Hub から Linux rootfs を取得</string>
     <string name="wizard_pull_desc">Docker イメージ参照を入力してコンテナを作成します。</string>
     <string name="wizard_image_placeholder">library/alpine:latest</string>
@@ -193,6 +199,8 @@
     <string name="settings_terminal_font_size_desc">ターミナルの既定の文字サイズ</string>
     <string name="settings_terminal_color_scheme">ターミナルの配色</string>
     <string name="settings_appearance">外観</string>
+    <string name="settings_browse">ブラウズ</string>
+    <string name="settings_search_engine">検索エンジン</string>
     <string name="settings_color_scheme">配色</string>
     <string name="settings_amoled_black">AMOLED ブラック</string>
     <string name="settings_amoled_black_desc">ダークモードを純黒で表示し、AMOLED での消費電力を抑えます</string>

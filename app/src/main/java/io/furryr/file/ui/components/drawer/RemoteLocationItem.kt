@@ -77,6 +77,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -113,6 +114,7 @@ internal fun RemoteLocationItem(
     isDragging: Boolean = false,
     dragOffsetDp: Float = 0f,
     dragHandleModifier: Modifier = Modifier,
+    icon: ImageVector = Icons.Default.Cloud,
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -126,7 +128,7 @@ internal fun RemoteLocationItem(
             .padding(horizontal = 20.dp, vertical = 8.dp),
     ) {
         Icon(
-            Icons.Default.Cloud,
+            icon,
             contentDescription = null,
             modifier = Modifier.width(24.dp)
         )

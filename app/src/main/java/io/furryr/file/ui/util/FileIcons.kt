@@ -40,8 +40,8 @@ private fun kindOfFile(name: String, isDirectory: Boolean): FileKind {
         "mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", "opus" -> FileKind.Audio
         // Documents
         "pdf" -> FileKind.Pdf
-        // Archives
-        "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "apk", "jar" -> FileKind.Archive
+        // Archives (an APK is a package, not a browsable container)
+        "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "jar" -> FileKind.Archive
         // Code
         "kt", "java", "py", "js", "ts", "html", "css", "xml",
         "json", "yaml", "yml", "toml", "rs", "go", "c", "cpp",

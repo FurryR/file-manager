@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 01 · 一条路径怎么变成节点</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+
+<nav class="course-tag">
+  <span>file-manager · VFS</span>
+  <a href="../MISSION.md">mission</a>
+  <a href="../reference/vfs-glossary.html">术语表</a>
+  <a href="../RESOURCES.md">资源</a>
+</nav>
+
+<h1>一条路径怎么变成节点</h1>
+<p class="subtitle">课程 01 · 路由契约。学完你能对任意路径说出：落到哪个 provider、provider 收到什么字符串。</p>
+
+<dl class="goal">
+  <dt>收获</dt>
+  <dd>手写完整 trace：<code>Path.parse</code> → <code>Vfs.resolve</code> → <code>innerPath</code> → <code>VFolder</code>/<code>VFile</code>。</dd>
+  <dt>前置</dt>
+  <dd>读过 <code>core/.../Vfs.kt</code> 的 <code>resolve()</code>，知道 Kotlin 的 <code>Result</code>。</dd>
+  <dt>用时</dt>
+  <dd>约 8 分钟。</dd>
+</dl>
+
+<div class="recall">
+  <h2>先回忆，不要往下看</h2>
+  <p>合上源码，用一句话回答这三个问题。想不起来就直接说“不知道”，这比偷看有效。</p>
+  <ol>
+    <li><code>Path</code> 内部用什么表示路径？为什么不用字符串切片？</li>
+    <li>哪个函数把 <code>scheme</code> 变成具体的 <code>FileProvider</code>？</li>
+    <li>为什么 provider 的 <code>list(path)</code> 收不到 <code>container://</code> 前缀？</li>
+  </ol>
+  <p class="aside" style="margin-bottom:0">回忆失败是正常的：下面每一步都对应一个你答不出的点。</p>
+</div>
+
+<h2>五步</h2>
+
+<ol class="steps">
+  <li>
+    <span class="label">Path.parse</span>
+    <strong>字符串 → 结构化地址。</strong>
+    拆成 <code>scheme</code> / <code>userInfo</code> / <code>host</code> / <code>port</code> / <code>segments</code>。
+    空 <code>segments</code> 就是该上下文的根。<br>
+    <a href="../../../core/src/main/java/io/furryr/file/core/Path.kt">Path.kt</a>
+  </li>
+  <li>
+    <span class="label">Vfs.resolve</span>
+    <strong>scheme → provider。</strong>
+    裸路径（以 <code>/</code> 开头）走 default provider；其余按 scheme 查表，查不到就返回失败。
+    <a href="../../../core/src/main/java/io/furryr/file/core/Vfs.kt">Vfs.kt:44</a>
+  </li>
+  <li>
+    <span class="label">ResolvedProvider.innerPath</span>
+    <strong>URI → provider 私有路径。</strong>
+    <code>file</code> 与裸路径用 <code>toLocalPath()</code>，其余用 <code>toInnerPath()</code>（authority 变成第一段）。
+    <a href="../../../core/src/main/java/io/furryr/file/core/ResolvedProvider.kt">ResolvedProvider.kt:9</a>
+  </li>
+  <li>
+    <span class="label">provider 操作</span>
+    <strong>只认字符串。</strong>
+    <code>list</code> / <code>stat</code> / <code>open</code> 全部接收上一步的 innerPath，返回
+    <code>FileEntry</code>、<code>ProviderStat</code>、<code>FileSource</code>。
+  </li>
+  <li>
+    <span class="label">VFolder / VFile</span>
+    <strong>门面对象。</strong>
+    节点持有 <code>(path, provider, innerPath)</code>，对外只暴露 <code>parent</code> / <code>child</code> /
+    <code>listNodes</code> / <code>open</code>，以及稳定的 <code>ref()</code>。
+    <a href="../../../core/src/main/java/io/furryr/file/core/Folder.kt">Folder.kt:13</a>
+  </li>
+</ol>
+
+<pre><code>// 以 sftp://user@host:2222/home/a.txt 为例
+Path.parse(...)        -> scheme=sftp, userInfo=user, host=host, port=2222,
+                          segments=[home, a.txt]
+Vfs.resolve(...)       -> SftpProvider
+ResolvedProvider       -> innerPath = "/user@host:2222/home/a.txt"
+provider.stat(inner)   -> ProviderStat(isDirectory=false, ...)
+File(path, provider, innerPath)
+file.ref()             -> ViewRef.Node(NodeRef.Vfs("sftp://user@host:2222/home/a.txt"),
+                                       viewId="vfs", path=[])</code></pre>
+
+<div class="callout">
+  <p><strong>一句话记住边界：</strong>URI 语法只活在 <code>Vfs.resolve</code> 之前。
+  越过 <code>innerPath</code> 之后，provider 眼里没有 scheme，只有原生路径。</p>
+</div>
+
+<h2>三个易错点</h2>
+
+<table>
+  <thead>
+    <tr><th>直觉</th><th>实际</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>provider 收到完整 URI</td>
+      <td>收到 innerPath；authority 被压成第一段，scheme 被丢弃</td>
+    </tr>
+    <tr>
+      <td><code>file:///sdcard/a</code> 和 <code>/sdcard/a</code> 走两条路</td>
+      <td>都走 <code>toLocalPath()</code>，结果相同</td>
+    </tr>
+    <tr>
+      <td>zip 内容是另一个 scheme 的节点</td>
+      <td>不是。它是 <code>ViewRef.Node(viewId="archive", path=[...])</code>，没有 <code>zip:</code> scheme</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>练习</h2>
+
+<div class="quiz" data-quiz>
+  <p class="quiz-q">1. <code>Path.parse("sftp://user@host:2222/home/a")</code> 的 <code>host</code> 是？</p>
+  <button class="opt" data-why="那是 userInfo，位于 @ 之前。">user@host</button>
+  <button class="opt" data-why="2222 是 port，由 authority 里最后一个冒号切出。">2222</button>
+  <button class="opt" data-ok data-why="对。@ 之后、冒号之前才是 host。">host</button>
+  <button class="opt" data-why="sftp 是 scheme，位于 :// 之前。">sftp</button>
+  <p class="quiz-explain" hidden></p>
+</div>
+
+<div class="quiz" data-quiz>
+  <p class="quiz-q">2. <code>SftpProvider</code> 的 <code>list()</code> 实际收到哪个字符串？</p>
+  <button class="opt" data-ok data-why="对。innerPath 把 authority 压成第一段，丢掉 scheme。">/user@host:2222/home/a</button>
+  <button class="opt" data-why="少了 authority，provider 就不知道连哪台机器。">/home/a</button>
+  <button class="opt" data-why="完整 URI 只存在于 Vfs 之外，provider 不解析它。">sftp://user@host:2222/home/a</button>
+  <button class="opt" data-why="双斜杠是把 host 当成了路径根，不是 innerPath 的格式。">//host/home/a</button>
+  <p class="quiz-explain" hidden></p>
+</div>
+
+<div class="quiz" data-quiz>
+  <p class="quiz-q">3. 对同一个 scheme 再调用一次 <code>Vfs.register()</code> 会？</p>
+  <button class="opt" data-why="register 用 putIfAbsent，不会静默覆盖。">后者静默覆盖前者</button>
+  <button class="opt" data-why="路由表是一对一，没有轮询机制。">两个 provider 轮询</button>
+  <button class="opt" data-ok data-why="对。这是刻意的一对一约束，重复注册属于设计错误。">立即抛出异常并终止</button>
+  <button class="opt" data-why="没有自动改名的逻辑，scheme 必须由实现者决定。">自动生成新 scheme</button>
+  <p class="quiz-explain" hidden></p>
+</div>
+
+<div class="quiz" data-quiz>
+  <p class="quiz-q">4. zip 内某个文件被持久化后，它的身份是？</p>
+  <button class="opt" data-why="项目里不存在 zip: scheme，归档不是 provider。">一条 zip:// 开头的 URI</button>
+  <button class="opt" data-why="Nested 递归类型被刻意删掉了，zip 套 zip 只是更长的 path。">递归嵌套的 Nested 引用</button>
+  <button class="opt" data-why="Session 只用于终端与 DevTools，不代表文件。">一个 Session 引用</button>
+  <button class="opt" data-ok data-why="对。ViewRef.Node + viewId=archive + 扁平 path。">带 archive 视图的扁平引用</button>
+  <p class="quiz-explain" hidden></p>
+</div>
+
+<h3>手写 trace</h3>
+<p>把每个输入对应的 <code>innerPath</code> 写进去，按 Enter 或点“核对”。错了会提示你错在哪一段。</p>
+
+<ul>
+  <li><code>container://alpine/home</code> →
+    <span class="trace" data-expect="/alpine/home">
+      <input class="answer" aria-label="innerPath 答案">
+      <button class="check">核对</button>
+      <span class="verdict" aria-live="polite"></span>
+    </span>
+  </li>
+  <li><code>/storage/emulated/0</code> →
+    <span class="trace" data-expect="/storage/emulated/0">
+      <input class="answer" aria-label="innerPath 答案">
+      <button class="check">核对</button>
+      <span class="verdict" aria-live="polite"></span>
+    </span>
+  </li>
+  <li><code>file:///sdcard/a.txt</code> →
+    <span class="trace" data-expect="/sdcard/a.txt">
+      <input class="answer" aria-label="innerPath 答案">
+      <button class="check">核对</button>
+      <span class="verdict" aria-live="polite"></span>
+    </span>
+  </li>
+</ul>
+
+<details>
+<summary>对完答案再看：这三题为什么能当模板</summary>
+<p>第一题练 authority 折叠（host 变成第一段）。第二题练裸路径默认 provider，输入输出同形。
+第三题练 <code>file</code> 特殊分支：它和裸路径一样走 <code>toLocalPath()</code>，所以
+<code>file:///sdcard/a.txt</code> 与 <code>/sdcard/a.txt</code> 得到同一个 innerPath。</p>
+</details>
+
+<h2>读一篇</h2>
+<p>主资源：<a href="https://docs.kernel.org/filesystems/vfs.html">Linux 内核 VFS 概览</a>。
+只读开头到 “The Virtual Filesystem” 结构图部分，重点看它如何用
+<em>superblock / inode / dentry / file</em> 四层把不同文件系统统一——
+本项目的 <code>FileProvider</code> / <code>VNode</code> / <code>ViewRef</code> 是同一思路的 Android 缩小版。</p>
+
+<p>对照阅读（可选）：<a href="https://plugins.jetbrains.com/docs/intellij/virtual-file-system.html">IntelliJ 的 Virtual File System</a>，
+它是“对象层 + 按协议分派”最接近本项目的工业实现。</p>
+
+<div class="aside">
+  <p><strong>下一步预告：</strong>课程 02 会把今天的 trace 反过来用——写出一个最小
+  <code>FileProvider</code>，并证明除了 <code>Providers.kt</code> 一处注册，不需要改任何
+  core 代码。若你更想先看“为什么归档不用 zip: scheme”，告诉我，我换成那条线。</p>
+</div>
+
+<div class="footer">
+  <div class="next">
+    <a href="../reference/vfs-glossary.html">术语表</a>
+    <a href="../MISSION.md">mission</a>
+    <a href="../RESOURCES.md">资源清单</a>
+    <a href="../lessons/0001-path-to-provider.html">本课固定链接</a>
+  </div>
+  <p style="margin:0">有卡住的地方直接问我——我是这门课的常驻老师，可以拆解任意一步、补例子或改练习难度。</p>
+</div>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

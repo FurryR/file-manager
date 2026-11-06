@@ -12,10 +12,14 @@ data class LocationAddress(
     val directoryPassword: String = "",
     val privateKey: String = "",
     val passphrase: String = "",
+    /** Full URL for a web location; [path] stays the filesystem form. */
+    val url: String = "",
 ) {
     val isRemote: Boolean get() = scheme in RemoteSchemes
+    val isWeb: Boolean get() = scheme in WebSchemes
 
     fun toUrl(): String {
+        if (isWeb) return url.ifBlank { path }
         if (!isRemote) return path
         val userInfo = when {
             username.isBlank() -> ""
@@ -29,11 +33,25 @@ data class LocationAddress(
 }
 
 private val RemoteSchemes = setOf("ftp", "sftp", "ssh", "alist")
+private val WebSchemes = setOf("http", "https")
 
 object LocationAddressParser {
     fun parse(raw: String): LocationAddress? {
         val value = raw.trim()
         if (value.isBlank()) return null
+        val webScheme = WebSchemes.firstOrNull { value.startsWith("$it://", ignoreCase = true) }
+        if (webScheme != null) {
+            val uri = runCatching { android.net.Uri.parse(value) }.getOrNull()
+                ?: return LocationAddress(scheme = webScheme, path = value, url = value)
+            val host = uri.host.orEmpty()
+            return LocationAddress(
+                scheme = webScheme,
+                name = host,
+                host = host,
+                path = value,
+                url = value,
+            )
+        }
         if (RemoteSchemes.none { value.startsWith("$it://") }) {
             return LocationAddress(path = value)
         }

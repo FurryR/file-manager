@@ -5,6 +5,8 @@ import io.furryr.file.ui.components.*
 import io.furryr.file.ui.util.*
 import io.furryr.file.model.*
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -25,15 +27,18 @@ import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import io.furryr.file.R
 
 @Composable
 fun BottomToolbar(
+    modifier: Modifier = Modifier,
     canGoBack: Boolean,
     canGoForward: Boolean,
     canGoParent: Boolean,
@@ -51,11 +56,15 @@ fun BottomToolbar(
     onSelectSameType: () -> Unit = {},
     onCancelSelection: () -> Unit = {},
     onShare: () -> Unit = {},
+    /** Revealed pixels while the history drawer is dragged up from the bar. */
+    onHistoryDrag: (Float) -> Unit = {},
+    /** Final revealed pixels when the drag ends; the caller decides to open. */
+    onHistoryDragEnd: (Float) -> Unit = {},
     canShare: Boolean = true,
     canOpenTerminal: Boolean = true,
     canCreate: Boolean = true
 ) {
-    Column {
+    Column(modifier = modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)) {
         HorizontalDivider()
         Row(
             horizontalArrangement = Arrangement.SpaceEvenly,
@@ -101,7 +110,29 @@ fun BottomToolbar(
                     Icon(Icons.Default.Share, contentDescription = stringResource(R.string.cd_share))
                 }
             } else {
-                IconButton(enabled = canGoParent, onClick = onParent) {
+                IconButton(
+                    enabled = canGoParent,
+                    onClick = onParent,
+                    modifier = Modifier.pointerInput(Unit) {
+                        var revealed = 0f
+                        detectVerticalDragGestures(
+                            onDragStart = { revealed = 0f },
+                            onVerticalDrag = { change, amount ->
+                                revealed = (revealed - amount).coerceAtLeast(0f)
+                                change.consume()
+                                onHistoryDrag(revealed)
+                            },
+                            onDragEnd = {
+                                onHistoryDragEnd(revealed)
+                                revealed = 0f
+                            },
+                            onDragCancel = {
+                                onHistoryDragEnd(0f)
+                                revealed = 0f
+                            },
+                        )
+                    },
+                ) {
                     Icon(Icons.Default.KeyboardArrowUp, contentDescription = stringResource(R.string.cd_parent))
                 }
             }

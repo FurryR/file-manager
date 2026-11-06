@@ -17,7 +17,18 @@ import io.furryr.file.provider.model.SafLocation
 import io.furryr.file.provider.model.FtpServer
 import io.furryr.file.provider.model.SftpServer
 import io.furryr.file.provider.LocationsRepository
+import io.furryr.file.core.Folder
+import io.furryr.file.core.VFolder
+import io.furryr.file.core.VFile
 import io.furryr.file.core.Vfs
+import io.furryr.file.render.Openers
+import io.furryr.file.render.RenderCapabilities
+import io.furryr.file.render.RenderHost
+import io.furryr.file.render.RenderTarget
+import io.furryr.file.render.Renderers
+import io.furryr.file.render.WebContent
+import io.furryr.file.render.WebHistoryEntry
+import io.furryr.file.render.WebRendererSession
 import io.furryr.file.provider.remote.RemoteLocation
 import android.app.Activity
 import android.Manifest
@@ -33,13 +44,16 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -64,6 +78,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Scaffold
@@ -79,8 +94,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -90,6 +107,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -120,6 +138,7 @@ import io.furryr.file.ui.util.ContainerNotification
 import io.furryr.file.ui.util.formatSize
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -128,7 +147,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun FileManagerApp(
     darkTheme: Boolean = true,
@@ -155,7 +174,7 @@ fun FileManagerApp(
 
     // Context menu & file operations state
     var contextMenuEntry by remember { mutableStateOf<FileEntry?>(null) }
-    var showDeleteConfirm by remember { mutableStateOf<FileEntry?>(null) }
+    var showDeleteConfirm by remember { mutableStateOf<List<FileEntry>?>(null) }
     var showRenameDialog by remember { mutableStateOf<FileEntry?>(null) }
     var showBatchRenameDialog by remember { mutableStateOf(false) }
     var showEntryInfo by remember { mutableStateOf<FileEntry?>(null) }
@@ -172,8 +191,27 @@ fun FileManagerApp(
     var showTerminalSheet by remember { mutableStateOf(false) }
     var terminalDropAccepted by remember { mutableStateOf(false) }
     var terminalDragGeneration by remember { mutableIntStateOf(0) }
+    var showSessionManager by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
+    // Pixels of history panel revealed by an in-flight drag from the toolbar.
+    var historyDragPx by remember { mutableFloatStateOf(0f) }
+    // How far the bar must be pulled before the panel stays open.
+    val historyRevealThresholdPx = with(LocalDensity.current) { 96.dp.toPx() }
+    // Measured so the history panel can dock above the toolbar instead of
+    // sliding over it from the bottom of the window.
+    var bottomBarHeightPx by remember { mutableIntStateOf(0) }
+    // One live renderer session per tab, keyed by FileTab.id. Switching tabs
+    // keeps the WebView (and its own back/forward history) alive.
+    val webSessions = remember { mutableStateMapOf<String, WebRendererSession>() }
     LaunchedEffect(terminalOpenRequest) {
-        if (terminalOpenRequest > 0) showTerminalSheet = true
+        if (terminalOpenRequest > 0) {
+            showTerminalSheet = true
+        }
+    }
+    // The terminal sheet stacks above everything, so a history panel left open
+    // underneath it would only be dead weight; collapse it when the terminal opens.
+    LaunchedEffect(showTerminalSheet) {
+        if (showTerminalSheet) showHistory = false
     }
     var containerRefreshKey by remember { mutableIntStateOf(0) }
     var drawerSortMode by remember { mutableStateOf(false) }
@@ -241,7 +279,24 @@ fun FileManagerApp(
 
     fun currentTab(): FileTab = tabs[selectedTabIndex]
 
-    var pendingNavigation by remember(selectedTabIndex, currentTab().path) { mutableStateOf<FileTab?>(null) }
+    fun folderLabel(folder: VFolder): String {
+        val ancestry = generateSequence(folder) { it.parent }.toList().asReversed()
+        val providerIndex = ancestry.indexOfFirst { it is Folder }
+        if (providerIndex < 0) return ancestry.joinToString("/") { it.name }
+        // Keep the real provider path as the base; nested segments are appended
+        // without inventing a new scheme. This keeps the address bar showing
+        // /storage/emulated/0/a.zip/docs instead of "Local Storage / ...".
+        val base = (ancestry[providerIndex] as Folder).path.toString().trimEnd('/')
+        val nested = ancestry.drop(providerIndex + 1).joinToString("/") { it.name }
+        return when {
+            base.isEmpty() && nested.isEmpty() -> "/"
+            base.isEmpty() -> "/$nested"
+            nested.isEmpty() -> base
+            else -> "$base/$nested"
+        }
+    }
+
+    var pendingNavigation by remember(selectedTabIndex, currentTab().path, currentTab().folder) { mutableStateOf<FileTab?>(null) }
 
     var directoryCapabilities by remember {
         mutableStateOf(DirectoryCapabilities())
@@ -251,70 +306,443 @@ fun FileManagerApp(
         tabs[selectedTabIndex] = tab
     }
 
+    fun updateTab(id: String, transform: (FileTab) -> FileTab) {
+        val index = tabs.indexOfFirst { it.id == id }
+        if (index >= 0) tabs[index] = transform(tabs[index])
+    }
+
+    fun closeWeb(id: String) {
+        webSessions.remove(id)?.close()
+        updateTab(id) { it.copy(webUrl = null, webTitle = null) }
+    }
+
+    fun showWeb(id: String, session: WebRendererSession, url: String) {
+        webSessions.remove(id)?.close()
+        webSessions[id] = session
+        updateTab(id) { it.copy(webUrl = url, webTitle = null) }
+    }
+
+    fun currentWebUrl(tab: FileTab): String? =
+        webSessions[tab.id]?.address?.takeIf { BrowseAddress.isWebUrl(it) }
+            ?: tab.webUrl?.takeIf { BrowseAddress.isWebUrl(it) }
+
+    /** Push the current location onto the tab history before navigation. */
+    fun recordCurrentHistory(tab: FileTab): FileTab {
+        val url = currentWebUrl(tab)
+        return tab.copy(
+            backStack = tab.backStack + (url ?: tab.path),
+            folderBackStack = tab.folderBackStack + (if (url != null) null else tab.folder),
+            forwardStack = emptyList(),
+            folderForwardStack = emptyList(),
+        )
+    }
+
     fun navigateTo(path: String) {
         val tab = currentTab()
         if (path == tab.path || pendingNavigation != null) return
+        val next = recordCurrentHistory(tab).copy(
+            path = path,
+            folder = null,
+            webUrl = null,
+            webTitle = null,
+        )
+        closeWeb(tab.id)
         highlightPath = null
         highlightDirectory = null
         highlightRefreshToken = null
         pendingScrollPath = null
-        pendingNavigation = tab.copy(path = path, backStack = tab.backStack + tab.path, forwardStack = emptyList())
+        pendingNavigation = next
+    }
+
+    fun navigateToFolder(folder: VFolder) {
+        val tab = currentTab()
+        if (pendingNavigation != null) return
+        val next = recordCurrentHistory(tab).copy(
+            path = folder.name,
+            folder = folder,
+            webUrl = null,
+            webTitle = null,
+            selectedPaths = emptySet(),
+            lastSelectedIndex = -1,
+        )
+        closeWeb(tab.id)
+        highlightPath = null
+        highlightDirectory = null
+        highlightRefreshToken = null
+        pendingScrollPath = null
+        pendingNavigation = next
+    }
+
+    fun renderHostFor(id: String): RenderHost {
+        val hostScope = scope
+        return object : RenderHost {
+            override val scope: CoroutineScope get() = hostScope
+
+            override fun navigate(node: io.furryr.file.core.VNode, rendererId: String?) {
+                if (node is VFolder) {
+                    webSessions.remove(id)?.close()
+                    navigateToFolder(node)
+                }
+            }
+
+            override fun updateTitle(title: String?) {
+                // A late title from a page whose tab already left the web view
+                // must not rename the directory tab.
+                if (webSessions[id] == null) return
+                updateTab(id) { it.copy(webTitle = title) }
+            }
+
+            override fun updateCapabilities(capabilities: RenderCapabilities) = Unit
+
+            override fun reportError(error: Throwable) {
+                Toast.makeText(context, error.message ?: "Renderer failed", Toast.LENGTH_SHORT).show()
+            }
+
+            override fun requestClose() {
+                closeWeb(id)
+            }
+        }
+    }
+
+    fun openNode(file: VFile, entry: FileEntry, insideContainer: Boolean) {
+        val tabId = currentTab().id
+        scope.launch {
+            val content = withContext(Dispatchers.IO) { file.describe().getOrNull() }
+            val opener = content?.let { Openers.resolve(file, it) }
+            if (opener == null) {
+                val target = content?.let { RenderTarget.Node(file, it) }
+                val renderer = target?.let { Renderers.resolve(it) }
+                if (target != null && renderer != null) {
+                    val session = withContext(Dispatchers.IO) {
+                        renderer.create(target, renderHostFor(tabId))
+                    }.getOrNull()
+                    if (session is WebRendererSession) {
+                        showWeb(tabId, session, entry.path)
+                        return@launch
+                    }
+                    session?.close()
+                }
+                if (insideContainer) {
+                    Toast.makeText(
+                        context,
+                        context.getString(R.string.toast_cannot_open, entry.name),
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                } else {
+                    openFile(context, entry)
+                }
+                return@launch
+            }
+            val result = withContext(Dispatchers.IO) { opener.open(file) }
+            val node = result.getOrNull()
+            if (node is VFolder) {
+                navigateToFolder(node)
+            } else {
+                Toast.makeText(
+                    context,
+                    result.exceptionOrNull()?.message
+                        ?: context.getString(R.string.toast_cannot_open, entry.name),
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
     }
 
     // Inline path submit: directories navigate, files open their parent with the
     // entry selected, matching the old jump dialog behaviour.
-    fun jumpTo(path: String) {
+    fun openUrl(url: String, recordHistory: Boolean = true) {
+        val tabId = currentTab().id
+        // Reuse the tab's URL WebView when it already exists: only the page
+        // changes, so the renderer does not pay WebView start-up again.
+        val existing = webSessions[tabId]
+        if (existing != null && existing.document == null) {
+            existing.load(url)
+            updateTab(tabId) { it.copy(webUrl = url, webTitle = null) }
+            return
+        }
+        if (recordHistory) updateTab(tabId) { recordCurrentHistory(it) }
+        val target = RenderTarget.Url(url)
+        val factory = Renderers.resolve(target) ?: return
         scope.launch {
-            val stat = withContext(Dispatchers.IO) { Vfs.stat(path).getOrNull() }
-            if (stat != null && stat.exists && !stat.isDirectory) {
-                val parent = Vfs.navigate(path, "..")
-                if (parent != null) {
-                    if (parent == currentTab().path) {
-                        replaceCurrent(currentTab().copy(
-                            selectedPaths = setOf(path),
-                            lastSelectedIndex = currentEntries.indexOfFirst { it.path == path }
-                        ))
-                        pendingScrollPath = path
-                    } else {
-                        navigateTo(parent)
-                        highlightPath = path
-                        highlightDirectory = parent
-                        highlightRefreshToken = null
-                        pendingScrollPath = path
+            val session = withContext(Dispatchers.IO) {
+                factory.create(target, renderHostFor(tabId))
+            }.getOrNull()
+            if (session is WebRendererSession) {
+                showWeb(tabId, session, url)
+            } else {
+                session?.close()
+            }
+        }
+    }
+
+    fun jumpTo(raw: String) {
+        val input = raw.trim()
+        if (input.isEmpty()) return
+        if (BrowseAddress.isWebUrl(input)) {
+            openUrl(input)
+            return
+        }
+        scope.launch {
+            val stat = withContext(Dispatchers.IO) { Vfs.stat(input).getOrNull() }
+            when {
+                stat != null && stat.exists && !stat.isDirectory -> {
+                    val parent = Vfs.navigate(input, "..")
+                    if (parent != null) {
+                        if (parent == currentTab().path) {
+                            closeWeb(currentTab().id)
+                            replaceCurrent(currentTab().copy(
+                                selectedPaths = setOf(input),
+                                lastSelectedIndex = currentEntries.indexOfFirst { it.path == input }
+                            ))
+                            pendingScrollPath = input
+                        } else {
+                            navigateTo(parent)
+                            highlightPath = input
+                            highlightDirectory = parent
+                            highlightRefreshToken = null
+                            pendingScrollPath = input
+                        }
                     }
                 }
-            } else {
-                navigateTo(path)
+                stat != null && stat.exists -> navigateTo(input)
+                // Bare host: only after the path check, so a real file named
+                // like a domain never turns into a web request.
+                else -> BrowseAddress.normalize(input)?.let { url ->
+                    openUrl(url)
+                } ?: openUrl(SearchSettings.searchUrl(context, input))
             }
         }
     }
 
     fun goBack() {
-        if (pendingNavigation != null) return
         val tab = currentTab()
-        val target = tab.backStack.lastOrNull() ?: return
-        pendingNavigation =
-            tab.copy(
-                path = target,
+        val session = webSessions[tab.id]
+        if (session != null) {
+            if (session.onBack()) return
+            // WebView history exhausted: leave the page and consume the tab's
+            // previous history entry (the folder the page was opened from).
+            val url = currentWebUrl(tab)
+            val target = tab.backStack.lastOrNull()
+            val targetFolder = tab.folderBackStack.lastOrNull()
+            val forwarded = if (url != null) listOf(url) + tab.forwardStack else tab.forwardStack
+            val forwardedFolders =
+                if (url != null) listOf<VFolder?>(null) + tab.folderForwardStack else tab.folderForwardStack
+            closeWeb(tab.id)
+            if (target == null) {
+                updateTab(tab.id) {
+                    it.copy(
+                        forwardStack = forwarded,
+                        folderForwardStack = forwardedFolders,
+                    )
+                }
+                return
+            }
+            val next = tab.copy(
+                path = if (BrowseAddress.isWebUrl(target)) tab.path else target,
+                folder = if (BrowseAddress.isWebUrl(target)) null else targetFolder,
                 backStack = tab.backStack.dropLast(1),
-                forwardStack = listOf(tab.path) + tab.forwardStack
+                folderBackStack = tab.folderBackStack.dropLast(1),
+                forwardStack = forwarded,
+                folderForwardStack = forwardedFolders,
+                webUrl = null,
+                webTitle = null,
             )
+            if (BrowseAddress.isWebUrl(target)) {
+                replaceCurrent(next)
+                openUrl(target, recordHistory = false)
+            } else {
+                pendingNavigation = next
+            }
+            return
+        }
+        if (pendingNavigation != null) return
+        val target = tab.backStack.lastOrNull() ?: return
+        val next = tab.copy(
+            backStack = tab.backStack.dropLast(1),
+            folderBackStack = tab.folderBackStack.dropLast(1),
+            forwardStack = listOf(tab.path) + tab.forwardStack,
+            folderForwardStack = listOf(tab.folder) + tab.folderForwardStack,
+            webUrl = null,
+            webTitle = null,
+        )
+        if (BrowseAddress.isWebUrl(target)) {
+            replaceCurrent(next)
+            openUrl(target, recordHistory = false)
+        } else {
+            pendingNavigation = next.copy(
+                path = target,
+                folder = tab.folderBackStack.lastOrNull(),
+            )
+        }
     }
 
     fun goForward() {
-        if (pendingNavigation != null) return
         val tab = currentTab()
+        val session = webSessions[tab.id]
+        if (session != null) {
+            if (session.goForward()) return
+            return
+        }
+        if (pendingNavigation != null) return
         val target = tab.forwardStack.firstOrNull() ?: return
+        val targetFolder = tab.folderForwardStack.firstOrNull()
+        if (BrowseAddress.isWebUrl(target)) {
+            replaceCurrent(
+                tab.copy(
+                    backStack = tab.backStack + tab.path,
+                    folderBackStack = tab.folderBackStack + tab.folder,
+                    forwardStack = tab.forwardStack.drop(1),
+                    folderForwardStack = tab.folderForwardStack.drop(1),
+                    webUrl = null,
+                    webTitle = null,
+                )
+            )
+            openUrl(target, recordHistory = false)
+            return
+        }
         pendingNavigation =
             tab.copy(
                 path = target,
+                folder = targetFolder,
                 backStack = tab.backStack + tab.path,
-                forwardStack = tab.forwardStack.drop(1)
+                folderBackStack = tab.folderBackStack + tab.folder,
+                forwardStack = tab.forwardStack.drop(1),
+                folderForwardStack = tab.folderForwardStack.drop(1),
+                webUrl = null,
+                webTitle = null,
             )
     }
 
+    /** Primary line for a history stop: the folder name, or the last path segment. */
+    fun historyLabel(path: String, folder: VFolder?): String =
+        folder?.name ?: Path.parse(path).name ?: path
+
+    /**
+     * Secondary line for a history stop: the full address. Folder views keep
+     * their provider path plus nested segments, web pages keep the whole URL.
+     */
+    fun historyDetail(path: String, folder: VFolder?): String =
+        if (folder != null) folderLabel(folder) else path
+
+    /** Primary line for a page entry: its title, else the host, else the URL. */
+    fun webHistoryLabel(entry: WebHistoryEntry): String =
+        entry.title?.takeIf { it.isNotBlank() }
+            ?: runCatching { java.net.URI(entry.address).host }.getOrNull()
+                ?.takeIf { it.isNotBlank() }
+            ?: entry.address
+
+    fun historyStops(): List<HistoryStop> {
+        val tab = currentTab()
+        val session = webSessions[tab.id]
+        val stops = mutableListOf<HistoryStop>()
+        tab.backStack.forEachIndexed { index, path ->
+            val folder = tab.folderBackStack.getOrNull(index)
+            stops += HistoryStop(
+                path = path,
+                label = historyLabel(path, folder),
+                detail = historyDetail(path, folder),
+                isWeb = BrowseAddress.isWebUrl(path),
+                folder = folder,
+            )
+        }
+        if (session != null) {
+            // The live page owns its own back/forward list; every URL the user
+            // visited lives there, including in-page link navigations.
+            val snapshot = session.historySnapshot()
+            snapshot.entries.forEachIndexed { index, entry ->
+                stops += HistoryStop(
+                    path = entry.address,
+                    label = webHistoryLabel(entry),
+                    detail = entry.address,
+                    isWeb = true,
+                    current = index == snapshot.currentIndex,
+                )
+            }
+        } else {
+            val url = currentWebUrl(tab)
+            if (url != null) {
+                stops += HistoryStop(
+                    path = url,
+                    label = url,
+                    detail = url,
+                    isWeb = true,
+                    current = true,
+                )
+            } else {
+                stops += HistoryStop(
+                    path = tab.path,
+                    label = historyLabel(tab.path, tab.folder),
+                    detail = historyDetail(tab.path, tab.folder),
+                    isWeb = false,
+                    current = true,
+                    folder = tab.folder,
+                )
+            }
+        }
+        tab.forwardStack.forEachIndexed { index, path ->
+            val folder = tab.folderForwardStack.getOrNull(index)
+            stops += HistoryStop(
+                path = path,
+                label = historyLabel(path, folder),
+                detail = historyDetail(path, folder),
+                isWeb = BrowseAddress.isWebUrl(path),
+                folder = folder,
+            )
+        }
+        return stops
+    }
+
+    fun jumpToHistory(index: Int) {
+        val stops = historyStops()
+        if (index !in stops.indices) return
+        val tab = currentTab()
+        val session = webSessions[tab.id]
+        val sessionStart = tab.backStack.size
+        val sessionCount = session?.historySnapshot()?.entries?.size ?: 0
+        if (session != null && index in sessionStart until sessionStart + sessionCount) {
+            // Already inside the live page history: traverse it without
+            // tearing the session down.
+            session.jumpToHistory(index - sessionStart)
+            return
+        }
+        val target = stops[index]
+        webSessions.remove(tab.id)?.close()
+        // Page entries only exist while their session does, so the tab stacks
+        // are rebuilt from the locations that surround them.
+        val appStops = stops.filterIndexed { i, _ ->
+            i < sessionStart || i >= sessionStart + sessionCount
+        }
+        val appIndex = if (index < sessionStart) index else index - sessionCount
+        val back = appStops.take(appIndex)
+        val forward = appStops.drop(appIndex + 1)
+        val stacks = tab.copy(
+            backStack = back.map { it.path },
+            folderBackStack = back.map { it.folder },
+            forwardStack = forward.map { it.path },
+            folderForwardStack = forward.map { it.folder },
+            webUrl = null,
+            webTitle = null,
+        )
+        if (target.isWeb) {
+            replaceCurrent(stacks.copy(path = tab.path))
+            openUrl(target.path, recordHistory = false)
+        } else {
+            pendingNavigation = stacks.copy(path = target.path, folder = target.folder)
+        }
+    }
+
     fun goParent() {
-        val path = pendingNavigation?.path ?: currentTab().path
+        val tab = currentTab()
+        val activeFolder = pendingNavigation?.folder ?: tab.folder
+        if (activeFolder != null) {
+            val parent = activeFolder.parent ?: return
+            pendingNavigation = null
+            highlightPath = null
+            pendingScrollPath = null
+            if (parent is Folder) navigateTo(parent.path.toString()) else navigateToFolder(parent)
+            return
+        }
+        val path = pendingNavigation?.path ?: tab.path
         val parent = Vfs.navigate(path, "..") ?: return
         pendingNavigation = null
         highlightPath = null
@@ -327,8 +755,43 @@ fun FileManagerApp(
         if (animate) animationTrigger++
     }
 
+    /**
+     * Single refresh entry point for the toolbar/menu. The active renderer gets
+     * first refusal; the transitional directory view falls back to its token.
+     */
+    fun refreshActive() {
+        val session = webSessions[currentTab().id]
+        if (session?.refresh() == true) return
+        refreshFileList(animate = true)
+    }
+
+    /** Capabilities of whatever owns the current tab: renderer or directory. */
+    fun currentCapabilities(): RenderCapabilities {
+        val tab = currentTab()
+        val folder = pendingNavigation?.folder ?: tab.folder
+        val canParent = folder?.parent != null ||
+            (folder == null && Vfs.navigate(pendingNavigation?.path ?: tab.path, "..") != null)
+        val session = webSessions[tab.id]
+        if (session != null) {
+            return session.capabilities.copy(
+                // Back also leaves the page for the tab's previous location.
+                canGoBack = session.canGoBack || tab.backStack.isNotEmpty(),
+                canGoParent = canParent,
+            )
+        }
+        return RenderCapabilities(
+            canGoBack = tab.backStack.isNotEmpty(),
+            canGoForward = tab.forwardStack.isNotEmpty(),
+            canGoParent = canParent,
+            canRefresh = true,
+            canCreate = directoryCapabilities.canCreate,
+            canTerminal = directoryCapabilities.canOpenTerminal,
+        )
+    }
+
     val handleHereRequest by rememberUpdatedState(newValue = { request: HereNavigation.Request ->
         val tab = currentTab()
+        webSessions.remove(tab.id)?.close()
         // A here request supersedes an in-flight navigation in the current tab.
         pendingNavigation = null
         filterText = ""
@@ -340,10 +803,15 @@ fun FileManagerApp(
         pendingScrollPath = request.selectedPath
         val destination = tab.copy(
             path = request.directory,
+            folder = null,
+            webUrl = null,
+            webTitle = null,
             selectedPaths = emptySet(),
             lastSelectedIndex = -1,
             backStack = if (tab.path == request.directory) tab.backStack else tab.backStack + tab.path,
+            folderBackStack = if (tab.path == request.directory) tab.folderBackStack else tab.folderBackStack + tab.folder,
             forwardStack = if (tab.path == request.directory) tab.forwardStack else emptyList(),
+            folderForwardStack = if (tab.path == request.directory) tab.folderForwardStack else emptyList(),
         )
         if (tab.path == request.directory) replaceCurrent(destination)
         else pendingNavigation = destination
@@ -363,10 +831,38 @@ fun FileManagerApp(
         }
     }
 
+    // Renderer sessions are owned per tab and survive tab switches.
+    DisposableEffect(Unit) {
+        onDispose {
+            webSessions.values.forEach { it.close() }
+            webSessions.clear()
+        }
+    }
+
+    val activeWeb = webSessions[currentTab().id]
+
     fun closeTab(index: Int) {
         if (tabs.size <= 1) return
-        tabs.removeAt(index)
+        val closing = tabs.removeAt(index)
+        webSessions.remove(closing.id)?.close()
         selectedTabIndex = selectedTabIndex.coerceAtMost(tabs.lastIndex)
+    }
+
+    fun moveTab(from: Int, to: Int) {
+        if (from == to || from !in tabs.indices || to !in tabs.indices) return
+        val selectedId = currentTab().id
+        val moved = tabs.removeAt(from)
+        tabs.add(to, moved)
+        selectedTabIndex = tabs.indexOfFirst { it.id == selectedId }.coerceAtLeast(0)
+    }
+
+    fun moveTabBy(id: String, direction: Int): Boolean {
+        val index = tabs.indexOfFirst { it.id == id }
+        if (index < 0) return false
+        val target = index + direction
+        if (target !in tabs.indices) return false
+        moveTab(index, target)
+        return true
     }
 
     /**
@@ -382,7 +878,10 @@ fun FileManagerApp(
             parsed.scheme == "container" && parsed.host == name
         }
         if (matches.isEmpty()) return
-        matches.sortedDescending().forEach { tabs.removeAt(it) }
+        matches.sortedDescending().forEach {
+            val removed = tabs.removeAt(it)
+            webSessions.remove(removed.id)?.close()
+        }
         if (tabs.isEmpty()) {
             tabs.add(FileTab(path = DefaultPath))
             selectedTabIndex = 0
@@ -428,7 +927,7 @@ fun FileManagerApp(
                 targetPath = currentPath
             )
             "rename" -> if (currentTab().selectedPaths.isNotEmpty()) showBatchRenameDialog = true else showRenameDialog = entry
-            "delete" -> showDeleteConfirm = entry
+            "delete" -> showDeleteConfirm = batchEntries
             "properties" -> showEntryInfo = entry
             "share" -> shareEntries(context, batchEntries)
         }
@@ -587,6 +1086,11 @@ fun FileManagerApp(
             clearSelection()
         } else if (drawerState.isOpen) {
             scope.launch { drawerState.close() }
+        } else if (activeWeb != null) {
+            // A page's own back list wins over directory navigation: the
+            // gesture must retrace the pages the user visited, not climb out of
+            // the folder the page was opened from.
+            goBack()
         } else if (pendingNavigation != null) {
             pendingNavigation = null
             highlightPath = null
@@ -605,6 +1109,10 @@ fun FileManagerApp(
 
     ModalNavigationDrawer(
         drawerState = drawerState,
+        // A WebView consumes horizontal scrolling itself, so the open-from-edge
+        // gesture stays off there. An already open drawer keeps the gesture so
+        // it can still be swiped shut.
+        gesturesEnabled = activeWeb == null || drawerState.isOpen,
         drawerContent = {
             FileDrawer(
                 darkTheme = darkTheme,
@@ -993,6 +1501,52 @@ fun FileManagerApp(
                         }
                     }
                 },
+                webLocations = locations.webLocations,
+                onAddWeb = { url, name ->
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching { LocationsRepository.insertWeb(url, name) }
+                        }
+                        if (result.isFailure) {
+                            Toast.makeText(
+                                context,
+                                result.exceptionOrNull()?.message ?: "Failed to add web location",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                        locations.refreshWeb()
+                    }
+                },
+                onWebClick = { url ->
+                    openUrl(url)
+                    scope.launch { drawerState.close() }
+                },
+                onWebRename = { id, newName ->
+                    scope.launch {
+                        withContext(Dispatchers.IO) { LocationsRepository.renameWeb(id, newName) }
+                        locations.refreshWeb()
+                    }
+                },
+                onWebDelete = { id ->
+                    scope.launch {
+                        withContext(Dispatchers.IO) { LocationsRepository.deleteWeb(id) }
+                        locations.refreshWeb()
+                    }
+                },
+                webOrder = locations.webLocations.map { it.id },
+                onWebReorder = { from, to ->
+                    val mutable = locations.webLocations.toMutableList()
+                    if (from in mutable.indices && to in mutable.indices) {
+                        val item = mutable.removeAt(from)
+                        mutable.add(to, item)
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                LocationsRepository.reorderWeb(mutable.map { it.id })
+                            }
+                            locations.refreshWeb()
+                        }
+                    }
+                },
             )
         }
     ) {
@@ -1014,6 +1568,9 @@ fun FileManagerApp(
                     }
                 },
             topBar = {
+                val caps = currentCapabilities()
+                val webLoading = activeWeb?.loading == true
+                val webProgress = (activeWeb?.progress ?: 0) / 100f
                 Column {
                     if (copyMoveState != null) {
                         Box(
@@ -1021,6 +1578,15 @@ fun FileManagerApp(
                                 .fillMaxWidth()
                                 .height(2.dp)
                                 .background(MaterialTheme.colorScheme.primary)
+                        )
+                    } else if (webLoading) {
+                        // Same top strip as copy/move progress, so page loading
+                        // never adds a second bar or re-measures the content.
+                        LinearProgressIndicator(
+                            progress = { webProgress },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(2.dp),
                         )
                     }
                     TopAppBar(
@@ -1050,11 +1616,18 @@ fun FileManagerApp(
                                     )
                                 )
                             } else {
+                                val titleTab = currentTab()
+                                val titleFolder = pendingNavigation?.folder ?: titleTab.folder
+                                val titleWeb = webSessions[titleTab.id]
                                 TitleBlock(
-                                    path = currentTab().path,
-                                    info = currentInfo,
+                                    path = titleTab.path,
+                                    info = if (titleWeb == null) currentInfo else DirectoryStats(),
                                     onNavigate = { jumpTo(it) },
-                                    onBounds = { titleBounds = it }
+                                    onBounds = { titleBounds = it },
+                                    displayPath = titleWeb?.address
+                                        ?: titleFolder?.let { folderLabel(it) }
+                                        ?: titleTab.path,
+                                    editable = titleWeb != null || titleFolder == null,
                                 )
                             }
                         },
@@ -1075,8 +1648,9 @@ fun FileManagerApp(
                                     DropdownMenuItem(
                                         text = { Text(stringResource(R.string.refresh)) },
                                         leadingIcon = { Icon(Icons.Default.Refresh, null) },
+                                        enabled = caps.canRefresh,
                                         onClick = {
-                                            refreshFileList(animate = true)
+                                            refreshActive()
                                             showMoreMenu = false
                                         }
                                     )
@@ -1121,21 +1695,30 @@ fun FileManagerApp(
             },
             bottomBar = {
                 val toolTab = currentTab()
+                val toolWeb = webSessions[toolTab.id]
+                val caps = currentCapabilities()
                 BottomToolbar(
-                    canGoBack = toolTab.backStack.isNotEmpty(),
-                    canGoForward = toolTab.forwardStack.isNotEmpty(),
-                    canGoParent = Vfs.navigate(pendingNavigation?.path ?: toolTab.path, "..") != null,
+                    modifier = Modifier.onGloballyPositioned {
+                        bottomBarHeightPx = it.size.height
+                    },
+                    canGoBack = caps.canGoBack,
+                    canGoForward = caps.canGoForward,
+                    canGoParent = caps.canGoParent,
                     onBack = ::goBack,
                     onForward = ::goForward,
-                    onCreateFile = { if (directoryCapabilities.canCreate) showCreateDialog = true },
-                    canCreate = directoryCapabilities.canCreate,
-                    onTerminal = { showTerminalSheet = true },
-                    canOpenTerminal = directoryCapabilities.canOpenTerminal,
+                    onCreateFile = { if (caps.canCreate) showCreateDialog = true },
+                    canCreate = caps.canCreate,
+                    onTerminal = {
+                        if (caps.canTerminal) {
+                            showTerminalSheet = true
+                        }
+                    },
+                    canOpenTerminal = caps.canTerminal,
                     onParent = ::goParent,
                     copyMoveActive = copyMoveState != null,
                     onCopyMoveConfirm = { showCopyMovePlaceDialog = true },
                     onCopyMoveCancel = ::cancelCopyMove,
-                    selectionMode = toolTab.selectedPaths.isNotEmpty(),
+                    selectionMode = toolWeb == null && toolTab.selectedPaths.isNotEmpty(),
                     onSelectAll = {
                         replaceCurrent(currentTab().copy(selectedPaths = currentEntries.map { it.path }.toSet()))
                     },
@@ -1156,7 +1739,15 @@ fun FileManagerApp(
                     },
                     onCancelSelection = ::clearSelection,
                     onShare = { shareEntries(context, selectedEntries()) },
-                    canShare = toolTab.selectedPaths.isNotEmpty() && selectedEntries().all { !it.isDirectory }
+                    onHistoryDrag = { if (!showHistory) historyDragPx = it },
+                    onHistoryDragEnd = { revealed ->
+                        historyDragPx = 0f
+                        if (!showHistory && revealed >= historyRevealThresholdPx) {
+                            showHistory = true
+                        }
+                    },
+                    canShare = toolTab.folder == null && toolTab.selectedPaths.isNotEmpty() &&
+                        selectedEntries().all { !it.isDirectory }
                 )
             }
         ) { padding ->
@@ -1172,13 +1763,14 @@ fun FileManagerApp(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 tabs.forEachIndexed { index, tab ->
-                                    FileTabContent(
+                                    DraggableFileTab(
                                         index = index,
                                         tab = tab,
                                         selected = index == selectedTabIndex,
                                         showClose = tabs.size > 1,
                                         onClick = { selectedTabIndex = index },
                                         onClose = { closeTab(index) },
+                                        onMove = ::moveTabBy,
                                     )
                                 }
                             }
@@ -1189,32 +1781,42 @@ fun FileManagerApp(
                                 edgePadding = 0.dp
                             ) {
                                 tabs.forEachIndexed { index, tab ->
-                                    FileTabContent(
+                                    DraggableFileTab(
                                         index = index,
                                         tab = tab,
                                         selected = index == selectedTabIndex,
                                         showClose = tabs.size > 1,
                                         onClick = { selectedTabIndex = index },
                                         onClose = { closeTab(index) },
+                                        onMove = ::moveTabBy,
                                     )
                                 }
                             }
                         }
                     }
-                    IconButton(
-                        onClick = {
-                            tabs.add(FileTab(path = DefaultPath))
-                            pendingTabIndex = tabs.lastIndex
-                        }
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .combinedClickable(
+                                onClick = {
+                                    tabs.add(FileTab(path = DefaultPath))
+                                    pendingTabIndex = tabs.lastIndex
+                                },
+                                onLongClick = { showSessionManager = true },
+                            ),
+                        contentAlignment = Alignment.Center,
                     ) {
                         Icon(Icons.Default.Add, contentDescription = stringResource(R.string.cd_new_tab))
                     }
                 }
 
                 val tab = currentTab()
-                FileListScreen(
+                val activeFolder = pendingNavigation?.folder ?: tab.folder
+                if (activeWeb == null) {
+                    FileListScreen(
                     path = pendingNavigation?.path ?: tab.path,
                     committedPath = tab.path,
+                    folderOverride = activeFolder,
                     onNavigationLoaded = { loadedPath ->
                         pendingNavigation?.takeIf { it.path == loadedPath }?.let {
                             replaceCurrent(it)
@@ -1264,6 +1866,14 @@ fun FileManagerApp(
                     },
                     onDirectoryClick = ::navigateTo,
                     onFileClick = { openFile(context, it) },
+                    onDirectoryNodeClick = if (activeFolder != null) {
+                        { folder, _ -> navigateToFolder(folder) }
+                    } else {
+                        null
+                    },
+                    onFileNodeClick = { file, entry ->
+                        openNode(file, entry, insideContainer = activeFolder != null)
+                    },
                     onLongPress = { contextMenuEntry = it },
                     selectionMode = copyMoveState == null && currentTab().selectedPaths.isNotEmpty(),
                     selectedPaths = currentTab().selectedPaths,
@@ -1285,7 +1895,10 @@ fun FileManagerApp(
                             }
                         }
                     },
-                )
+                    )
+                } else {
+                    WebContent(activeWeb, Modifier.fillMaxSize())
+                }
             }
         }
     }
@@ -1298,7 +1911,7 @@ fun FileManagerApp(
         )
     }
 
-    if (showCreateDialog && directoryCapabilities.canCreate) {
+    if (showCreateDialog && currentCapabilities().canCreate) {
         CreateDialog(
             initialPath = currentTab().path,
             onDismiss = { showCreateDialog = false },
@@ -1336,24 +1949,39 @@ fun FileManagerApp(
             onDelete = { executeEntryAction(entry, "delete") },
             onProperties = { executeEntryAction(entry, "properties") },
             onShare = { executeEntryAction(entry, "share") },
-            canShare = sharesForMenu.all { !it.isDirectory }
+            canShare = currentTab().folder == null && sharesForMenu.all { !it.isDirectory },
+            canModify = currentTab().folder == null
         )
     }
 
-    showDeleteConfirm?.let { entry ->
+    showDeleteConfirm?.let { entries ->
         DeleteConfirmDialog(
-            entry = entry,
+            entries = entries,
             onDismiss = { showDeleteConfirm = null },
             onConfirm = {
-                val result = Vfs.delete(entry.path)
-                Toast.makeText(
-                    context,
-                    if (result.isSuccess) context.getString(R.string.toast_deleted, entry.name)
-                    else result.exceptionOrNull()?.message ?: context.getString(R.string.toast_failed),
-                    Toast.LENGTH_SHORT
-                ).show()
                 showDeleteConfirm = null
-                refreshFileList()
+                val targets = entries
+                scope.launch {
+                    var failure: Throwable? = null
+                    withContext(Dispatchers.IO) {
+                        for (entry in targets) {
+                            val result = runCatching { Vfs.delete(entry.path).getOrThrow() }
+                            if (result.isFailure) {
+                                failure = result.exceptionOrNull()
+                                break
+                            }
+                        }
+                    }
+                    val error = failure
+                    val message = when {
+                        error != null -> error.message ?: context.getString(R.string.toast_failed)
+                        targets.size == 1 -> context.getString(R.string.toast_deleted, targets.first().name)
+                        else -> context.getString(R.string.toast_deleted_count, targets.size)
+                    }
+                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                    clearSelection()
+                    refreshFileList()
+                }
             }
         )
     }
@@ -1456,6 +2084,32 @@ fun FileManagerApp(
             },
         )
     }
+
+    if (showSessionManager) {
+        SessionManagerDialog(
+            tabs = tabs.toList(),
+            selectedIndex = selectedTabIndex,
+            onSelect = {
+                selectedTabIndex = it
+                showSessionManager = false
+            },
+            onClose = { closeTab(it) },
+            onMove = { from, to -> moveTab(from, to) },
+            onDismiss = { showSessionManager = false },
+        )
+    }
+
+    HistorySheet(
+        visible = showHistory,
+        dragPx = historyDragPx,
+        stops = historyStops(),
+        bottomInset = with(LocalDensity.current) { bottomBarHeightPx.toDp() },
+        onSelect = {
+            jumpToHistory(it)
+            showHistory = false
+        },
+        onDismiss = { showHistory = false },
+    )
 
     TerminalSheet(
         visible = showTerminalSheet,

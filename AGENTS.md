@@ -93,8 +93,9 @@ file-manager/
 - `:uds` is the **proto-agnostic transport**: opaque frames + optional fds.
 - `:core` is the **pure VFS abstraction** (Kotlin/JVM): `Path`, `Vfs`,
   `Folder`/`File`, `FileProvider`, location entries, models and the
-  `FileSource` interface. It must not import Android, `:uds`, `:daemon`, or any
-  concrete provider.
+  `FileSource` interface. It also owns the node/view model (`VNode`, `VFile`,
+  `VFolder`, flat `ViewRef`, `ContentInfo`, `Navigator`, `NodeService`). It
+  must not import Android, `:uds`, `:daemon`, or any concrete provider.
 - `:daemon` is the **daemon protocol layer over `:uds.Transport`**: IPC,
   protobuf, `DaemonManager`, `FileService`, `ExecService`, hub callbacks. It
   depends on `:core` for neutral models and the `FileSource` contract.
@@ -127,7 +128,63 @@ file-manager/
   (AudioTrack, RECORD_AUDIO, microphone foreground service) stays in Kotlin.
   Containers use only `PULSE_SERVER=unix:/dev/pulse`.
 - `:app` is the UI shell and platform wiring: Compose, terminal/session,
-  `ForwardFileProvider`, provider registration. It must not implement routing.
+  `ForwardFileProvider`, provider registration and the Android renderer layer
+  under `app/.../render/`. It must not implement routing.
+
+## RENDERER / VIEWREF (NEW)
+
+- **Object model, not provider strings.** `core/.../VNode.kt` defines
+  `VNode`/`VFile`/`VFolder`, `NodeRef` and the **flat** `ViewRef`:
+  - `NodeRef` is only a real Vfs URI (`NodeRef.Vfs`).
+  - `ViewRef.Node(root, viewId, path)` is a flattened view. A zip inside a
+    zip is a longer `path`, never a recursive `Nested`/`Proxy` type. There is
+    no `zip:` scheme and no mount table.
+  - `VFolder.listNodes()`, `child()` and `VNode.parent` are the navigation
+    currency. Renderers receive nodes/`ViewRef`s, never provider paths. Only
+    `Vfs` and `NodeService` may turn a reference into a node.
+- **Archives.** `core/.../ArchiveFolder.kt` owns `ArchiveFolder`/
+  `ArchiveFile`/`ArchiveSource`. `ViewRef.Node(root, "archive", path)`
+  auto-enters intermediate archive files when more path segments follow.
+  `app/.../render/ZipArchiveSource.kt` reads the central directory in place
+  when the outer `FileSource` is seekable (local/daemon fd or handle, SFTP/SSH,
+  AList cache) and inflates entries on demand, so opening a large archive never
+  copies it into the cache. Stream-only backends (SAF, FTP, content URIs) are
+  staged once. Entries are read-only; `ArchiveFolder.capabilities()` is what
+  greys out create/terminal/share/modify actions. An APK is a zip but is not
+  offered as an archive: `ContentTypes` maps it to the package MIME kind so it
+  opens with the installer.
+- **Content facts.** `core/.../ContentInfo.kt` defines `ContentInfo`,
+  `ContentKind` and `ContentTypes` (extension map + magic sniffing).
+  `ProviderStat` carries `size`. `VFile.describe()` is the only place renderer
+  selection should read MIME/kind/seekable from.
+- **Navigation/history.** `core/.../Navigator.kt` owns current node,
+  back/forward and breadcrumb ancestry. `NodeService.kt` is the string-free
+  resolve/list/open facade. `app/.../render/ViewRefJson.kt` is the persistence
+  codec; `Address.kt` is the breadcrumb projection.
+- **Renderers/Openers.** `app/.../render/Renderer.kt` defines
+  `RenderTarget` (`Node`/`Url`), `RendererFactory`/`RendererSession`,
+  `RenderHost`, `Renderers` and `Openers`. `DirectorySession` is the shared
+  directory controller; `FileListScreen` is still its transitional view.
+  `ArchiveOpener` turns a zip file into an `ArchiveFolder`; it draws nothing.
+- **HTML.** `HtmlDocument`/`DocumentView`/`WebRenderer.kt` project both HTML
+  files and HTTP(S) URLs as a `DocumentView`; `WebContent` is the WebView.
+  Relative assets resolve through the node graph (`file.parent.child(...)`),
+  so HTML inside a zip works. WebView never learns about `zip:`/`ssh:`; a
+  future `_vfs` gateway + `WebAccessPolicy` is the way to expose other
+  providers, not provider aliases.
+- **UI wiring.** `FileListScreen` accepts `folderOverride` and node callbacks;
+  `FileManagerApp` keeps `FileTab.folder` plus flat folder back/forward
+  stacks, enters `ArchiveFolder` on archive open, and displays
+  `WebContent` for HTML/URL renderers. A `WebRendererSession` is kept per tab
+  (`FileTab.id`), so tab switches preserve the WebView's own history, and
+  `webUrl`/`webTitle` carry the address and page title for the address bar and
+  tab label. It is still not a full per-tab `NavTarget`.
+- **Agent.** `AgentEnvironment.nodeService` is injected with
+  `DefaultNodeService`. `archive_list`/`archive_read`/`archive_copy` are
+  read-only and never teach the daemon or hub about archives.
+- **Do not** register a second provider for the same scheme to add terminal,
+  browser or editor features. `Vfs` scheme routing stays strict; new features
+  add services/renderers, not providers.
 
 ## WHERE TO LOOK
 
@@ -137,6 +194,11 @@ file-manager/
 | File listing | `app/.../ui/screens/FileListScreen.kt` | LazyColumn, pull-to-refresh |
 | Settings | `app/.../ui/screens/SettingsActivity.kt` | Root/shell toggles, su path → `DaemonManager` |
 | File operations | `core/.../Vfs.kt` | Scheme-strict routing + Folder/File facade; UI only calls this |
+| Node/view model | `core/.../VNode.kt` | `VNode`/`VFile`/`VFolder`, flat `ViewRef`, no `Nested` |
+| Archive view | `core/.../ArchiveFolder.kt` + `app/.../render/ZipArchiveSource.kt` | Kotlin archive index, read-only, flat path |
+| Renderers/openers | `app/.../render/Renderer.kt` | `RenderTarget`, `Renderers`, `Openers`, `RenderHost` |
+| HTML/WebView | `app/.../render/WebRenderer.kt` | `DocumentView`, `HtmlDocument`, `WebContent` |
+| Agent archive tools | `agent/.../AgentTools.kt` | `archive_list`/`archive_read`/`archive_copy` via `NodeService` |
 | Provider locations | `provider/.../LocationsRepository.kt` | Location entries + actions for SAF/FTP/SFTP/local/remote |
 | Provider implementations | `provider/.../` | Protocol domains with internal location subinstances |
 | Provider wiring | `app/.../Providers.kt` | Daemon config, container runtime seam, registrations |

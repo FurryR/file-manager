@@ -272,6 +272,9 @@ fun TerminalSheet(
                 imm?.hideSoftInputFromWindow(view.windowToken, 0)
                 focusManager.clearFocus(force = true)
                 (context as? Activity)?.currentFocus?.clearFocus()
+                // The sheet owns this drawer overlay; it must not reappear
+                // next time the terminal is opened.
+                showDrawer = false
             }
             sheetHeightPx.animateTo(0f, spring(dampingRatio = Spring.DampingRatioNoBouncy))
         }

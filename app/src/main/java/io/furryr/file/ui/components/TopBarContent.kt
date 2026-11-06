@@ -58,11 +58,15 @@ fun TitleBlock(
     info: DirectoryStats,
     onNavigate: (String) -> Unit,
     onBounds: (Rect?) -> Unit = {},
+    /** Human-readable address; may differ from the editable Vfs path. */
+    displayPath: String = path,
+    /** Container views show a breadcrumb but do not parse it as a path. */
+    editable: Boolean = true,
 ) {
     val summary = info.summary(LocalContext.current)
-    var editing by rememberSaveable(path) { mutableStateOf(false) }
-    var field by rememberSaveable(path, stateSaver = TextFieldValue.Saver) {
-        mutableStateOf(TextFieldValue(path))
+    var editing by rememberSaveable(path, displayPath) { mutableStateOf(false) }
+    var field by rememberSaveable(path, displayPath, stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(displayPath))
     }
     // Only a focus loss after this edit actually took focus may cancel the
     // edit; otherwise the first unfocused callback would close it instantly.
@@ -76,7 +80,7 @@ fun TitleBlock(
     fun submit() {
         val target = field.text.trim()
         editing = false
-        if (target.isNotEmpty() && target != path) onNavigate(target)
+        if (target.isNotEmpty() && target != displayPath) onNavigate(target)
     }
 
     BackHandler(enabled = editing) { editing = false }
@@ -97,8 +101,8 @@ fun TitleBlock(
             .fillMaxWidth()
             .fillMaxHeight()
             .onGloballyPositioned { onBounds(it.boundsInWindow()) }
-            .clickable(enabled = !editing) {
-                field = TextFieldValue(path, selection = TextRange(0, path.length))
+            .clickable(enabled = !editing && editable) {
+                field = TextFieldValue(displayPath, selection = TextRange(0, displayPath.length))
                 focusedOnce = false
                 editing = true
             }
@@ -130,8 +134,8 @@ fun TitleBlock(
             val measurer = rememberTextMeasurer()
             BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
                 val width = constraints.maxWidth
-                val text = remember(path, width, style) {
-                    tailEllipsized(measurer, path, style, width)
+                val text = remember(displayPath, width, style) {
+                    tailEllipsized(measurer, displayPath, style, width)
                 }
                 Text(
                     text = text,

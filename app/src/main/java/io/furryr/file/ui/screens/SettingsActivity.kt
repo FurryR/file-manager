@@ -146,6 +146,8 @@ private fun SettingsMainPage(
     var showTerminalColorSchemeDialog by remember { mutableStateOf(false) }
     var showLanguageDialog by remember { mutableStateOf(false) }
     var showColorSchemeDialog by remember { mutableStateOf(false) }
+    var showSearchEngineDialog by remember { mutableStateOf(false) }
+    var searchEngine by remember { mutableStateOf(SearchSettings.current(context)) }
     var amoledBlack by remember { mutableStateOf(PaletteStore.amoled(context)) }
     var showAboutDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -244,6 +246,14 @@ private fun SettingsMainPage(
                     amoledBlack = enabled
                     PaletteStore.setAmoled(context, enabled)
                 },
+            )
+            SettingsDivider()
+
+            SettingsSection(stringResource(R.string.settings_browse))
+            SettingsValueRow(
+                title = stringResource(R.string.settings_search_engine),
+                value = searchEngine.label,
+                onClick = { showSearchEngineDialog = true },
             )
             SettingsDivider()
 
@@ -481,6 +491,37 @@ private fun SettingsMainPage(
                 TextButton(onClick = {
                     showColorSchemeDialog = false
                     PaletteStore.select(context, selected)
+                }) { Text(stringResource(R.string.confirm)) }
+            },
+        )
+    }
+
+    if (showSearchEngineDialog) {
+        var selected by remember { mutableStateOf(searchEngine) }
+        AlertDialog(
+            onDismissRequest = { showSearchEngineDialog = false },
+            title = { Text(stringResource(R.string.settings_search_engine)) },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    SearchEngine.entries.forEach { engine ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable { selected = engine }
+                        ) {
+                            RadioButton(selected = selected == engine, onClick = { selected = engine })
+                            Text(engine.label, modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSearchEngineDialog = false }) { Text(stringResource(R.string.cancel)) }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showSearchEngineDialog = false
+                    searchEngine = selected
+                    SearchSettings.select(context, selected)
                 }) { Text(stringResource(R.string.confirm)) }
             },
         )

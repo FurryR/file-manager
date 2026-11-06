@@ -152,15 +152,16 @@ fun CreateDialog(
                 modifier = Modifier.fillMaxWidth()
             )
         },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
-        },
         confirmButton = {
-            Row {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+                Spacer(Modifier.weight(1f))
                 TextButton(
                     onClick = { if (name.isNotBlank()) onCreateFile(name) }
                 ) { Text(stringResource(R.string.file_button)) }
-                Spacer(Modifier.width(8.dp))
                 TextButton(
                     onClick = { if (name.isNotBlank()) onCreateFolder(name) }
                 ) { Text(stringResource(R.string.folder_button)) }
@@ -179,19 +180,20 @@ fun ContextMenu(
     onDelete: () -> Unit,
     onProperties: () -> Unit,
     onShare: () -> Unit,
-    canShare: Boolean = true
+    canShare: Boolean = true,
+    canModify: Boolean = true
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
                 Row(modifier = Modifier.fillMaxWidth()) {
-                    ActionButton(stringResource(R.string.copy), Icons.Default.ContentCopy, onCopy, Modifier.weight(1f))
-                    ActionButton(stringResource(R.string.move_), Icons.Default.ContentCut, onMove, Modifier.weight(1f))
+                    ActionButton(stringResource(R.string.copy), Icons.Default.ContentCopy, onCopy, Modifier.weight(1f), enabled = canModify)
+                    ActionButton(stringResource(R.string.move_), Icons.Default.ContentCut, onMove, Modifier.weight(1f), enabled = canModify)
                 }
                 Row(modifier = Modifier.fillMaxWidth()) {
-                    ActionButton(stringResource(R.string.rename), Icons.Default.DriveFileRenameOutline, onRename, Modifier.weight(1f))
-                    ActionButton(stringResource(R.string.delete), Icons.Default.Delete, onDelete, Modifier.weight(1f))
+                    ActionButton(stringResource(R.string.rename), Icons.Default.DriveFileRenameOutline, onRename, Modifier.weight(1f), enabled = canModify)
+                    ActionButton(stringResource(R.string.delete), Icons.Default.Delete, onDelete, Modifier.weight(1f), enabled = canModify)
                 }
                 Row(modifier = Modifier.fillMaxWidth()) {
                     ActionButton(stringResource(R.string.properties), Icons.Default.Info, onProperties, Modifier.weight(1f))
@@ -340,11 +342,15 @@ fun BatchRenameDialog(
 }
 
 @Composable
-fun DeleteConfirmDialog(entry: FileEntry, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+fun DeleteConfirmDialog(entries: List<FileEntry>, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    val names = remember(entries) {
+        val shown = entries.take(5).joinToString("\n") { it.name }
+        if (entries.size > 5) "$shown\n…" else shown
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.delete)) },
-        text = { Text("${stringResource(R.string.delete_confirm)}\n\n${entry.name}") },
+        text = { Text("${stringResource(R.string.delete_confirm)}\n\n$names") },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
         },

@@ -66,14 +66,14 @@ object Vfs {
         return Result.success(File(resolved.path, resolved.provider, resolved.innerPath))
     }
 
-    suspend fun node(path: String): Result<Node> {
+    suspend fun node(path: String): Result<VNode> {
         val resolved = resolve(path).getOrElse { return Result.failure(it) }
         val stat = resolved.provider.stat(resolved.innerPath).getOrElse { return Result.failure(it) }
         return Result.success(
             if (stat.isDirectory) {
-                Node.Directory(Folder(resolved.path, resolved.provider, resolved.innerPath))
+                Folder(resolved.path, resolved.provider, resolved.innerPath)
             } else {
-                Node.Entry(File(resolved.path, resolved.provider, resolved.innerPath))
+                File(resolved.path, resolved.provider, resolved.innerPath)
             },
         )
     }

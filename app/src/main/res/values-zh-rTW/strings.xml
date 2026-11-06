@@ -86,6 +86,10 @@
     <string name="toast_copied">已複製 %1$s</string>
     <string name="toast_moved">已移動 %1$s</string>
     <string name="toast_deleted">已刪除 %1$s</string>
+    <string name="session_manager">工作階段</string>
+    <string name="history_title">歷史記錄</string>
+    <string name="done">完成</string>
+    <string name="toast_deleted_count">已刪除 %1$d 項</string>
     <string name="toast_renamed">已重新命名為 %1$s</string>
     <string name="toast_failed">失敗</string>
     <string name="batch_rename_title">重新命名 %1$d 個項目</string>
@@ -136,9 +140,10 @@
     <string name="drawer_add_unified_location">新增位置</string>
     <string name="use_external_storage">使用外部儲存空間</string>
     <string name="location_path">位置路徑</string>
-    <string name="location_path_hint">/storage/emulated/0 或 ftp://host/</string>
+    <string name="location_path_hint">/storage/emulated/0、ftp://host/ 或 https://example.com/</string>
     <string name="location_scheme">協定</string>
-    <string name="location_invalid">請輸入本機路徑、ftp:// 或 sftp:// 位址</string>
+    <string name="location_url_label">網頁位址</string>
+    <string name="location_invalid">請輸入本機路徑、ftp:// / sftp:// / ssh:// 位址，或 http(s):// 網頁位址</string>
     <string name="drawer_add_ftp">新增 FTP 位置</string>
     <string name="ftp_add_title">新增 FTP 位置</string>
     <string name="ftp_edit_title">編輯 FTP 位置</string>
@@ -163,6 +168,7 @@
     <string name="container_state_deleted">已刪除</string>
     <string name="terminal_drawer_title">終端機</string>
     <string name="terminal_key_enter">Enter</string>
+    <string name="terminal_drop_hint">拖到此處插入路徑</string>
     <string name="wizard_pull_title">從 Docker Hub 取得 Linux rootfs</string>
     <string name="wizard_pull_desc">輸入 Docker 映像參照以建立容器。</string>
     <string name="wizard_image_placeholder">library/alpine:latest</string>
@@ -193,6 +199,8 @@
     <string name="settings_terminal_font_size_desc">預設終端機文字大小</string>
     <string name="settings_terminal_color_scheme">終端機配色方案</string>
     <string name="settings_appearance">外觀</string>
+    <string name="settings_browse">瀏覽</string>
+    <string name="settings_search_engine">搜尋引擎</string>
     <string name="settings_color_scheme">顏色方案</string>
     <string name="settings_amoled_black">AMOLED 黑色</string>
     <string name="settings_amoled_black_desc">深色模式將以純黑顯示，以節省 AMOLED 電力</string>

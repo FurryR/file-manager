@@ -19,6 +19,7 @@ import io.furryr.file.provider.remote.RemoteProviders
 import io.furryr.file.provider.remote.SshConnections
 import io.furryr.file.provider.remote.SshControls
 import io.furryr.file.provider.model.LocalLocation
+import io.furryr.file.provider.model.WebLocation
 
 /**
  * App-facing facade over the provider location stores (SAF trees, FTP/SFTP
@@ -156,6 +157,18 @@ object LocationsRepository {
     fun deleteLocal(id: String) = LocalLocationStore.delete(id)
 
     fun reorderLocal(ids: List<String>) = LocalLocationStore.reorder(ids)
+
+    // ── Web links (drawer network group) ────────────────────────────
+
+    fun webLocations(): List<WebLocation> = WebLocationStore.all()
+
+    fun insertWeb(url: String, name: String = ""): String = WebLocationStore.add(url, name)
+
+    fun renameWeb(id: String, name: String) = WebLocationStore.rename(id, name)
+
+    fun deleteWeb(id: String) = WebLocationStore.delete(id)
+
+    fun reorderWeb(ids: List<String>) = WebLocationStore.reorder(ids)
 
     // ── FTP ─────────────────────────────────────────────────────────
 

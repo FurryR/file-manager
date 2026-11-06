@@ -1,5 +1,7 @@
 package io.furryr.file.agent
 
+import io.furryr.file.core.NodeService
+
 /**
  * App-owned services the agent needs. The app installs every callback at
  * startup; the agent never reads Android preferences directly.
@@ -56,6 +58,13 @@ object AgentEnvironment {
     /** Persist the active session id for a terminal. */
     @Volatile
     var activeSessionSave: ((String, String) -> Unit)? = null
+
+    /**
+     * Kotlin-side node access for archive entries. The app installs this; the
+     * agent never parses a zip itself and never teaches the daemon about one.
+     */
+    @Volatile
+    var nodeService: NodeService? = null
 }
 
 data class AgentAiConfig(

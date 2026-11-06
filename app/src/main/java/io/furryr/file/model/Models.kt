@@ -4,16 +4,37 @@ import io.furryr.file.R
 import io.furryr.file.ui.util.formatSize
 import io.furryr.file.core.DirectoryStats
 import io.furryr.file.core.Path
+import io.furryr.file.core.VFolder
 
 data class FileTab(
+    /**
+     * Stable identity. Tab order changes when a tab is closed, so renderer
+     * sessions and history are keyed by this value instead of an index.
+     */
+    val id: String = java.util.UUID.randomUUID().toString(),
     val path: String,
+    /** Non-null while this tab is inside a container (zip, ...). */
+    val folder: VFolder? = null,
     val backStack: List<String> = emptyList(),
+    /** Parallel to [backStack]: the node to restore for each history entry. */
+    val folderBackStack: List<VFolder?> = emptyList(),
     val forwardStack: List<String> = emptyList(),
+    val folderForwardStack: List<VFolder?> = emptyList(),
     val selectedPaths: Set<String> = emptySet(),
-    val lastSelectedIndex: Int = -1
+    val lastSelectedIndex: Int = -1,
+    /** Web address shown by this tab's renderer, or null for a directory. */
+    val webUrl: String? = null,
+    /** Page title reported by the WebView, preferred over the path label. */
+    val webTitle: String? = null,
 ) {
     val title: String
         get() {
+            webTitle?.takeIf { it.isNotBlank() }?.let { return it }
+            webUrl?.let { url ->
+                runCatching { java.net.URI(url).host }.getOrNull()
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { return it }
+            }
             val p = Path.parse(path)
             p.name?.let { return it }
             p.host?.let { return it }

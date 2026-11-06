@@ -8,4 +8,5 @@ data class ProviderStat(
     val isDirectory: Boolean = false,
     val canCreateChildren: Boolean = false,
     val canEnter: Boolean = false,
+    val size: Long = 0L,
 )

@@ -86,6 +86,10 @@
     <string name="toast_copied">已复制 %1$s</string>
     <string name="toast_moved">已移动 %1$s</string>
     <string name="toast_deleted">已删除 %1$s</string>
+    <string name="session_manager">会话</string>
+    <string name="history_title">历史记录</string>
+    <string name="done">完成</string>
+    <string name="toast_deleted_count">已删除 %1$d 项</string>
     <string name="toast_renamed">已重命名为 %1$s</string>
     <string name="toast_failed">失败</string>
     <string name="batch_rename_title">重命名 %1$d 项</string>
@@ -134,9 +138,10 @@
     <string name="drawer_add_unified_location">添加位置</string>
     <string name="use_external_storage">使用外部存储</string>
     <string name="location_path">位置路径</string>
-    <string name="location_path_hint">/storage/emulated/0 或 ftp://host/</string>
+    <string name="location_path_hint">/storage/emulated/0、ftp://host/ 或 https://example.com/</string>
     <string name="location_scheme">协议</string>
-    <string name="location_invalid">请输入本地路径、ftp:// 或 sftp:// 地址</string>
+    <string name="location_url_label">网页地址</string>
+    <string name="location_invalid">请输入本地路径、ftp:// / sftp:// / ssh:// 地址，或 http(s):// 网页地址</string>
     <string name="drawer_add_ftp">添加 FTP 位置</string>
     <string name="ftp_add_title">添加 FTP 位置</string>
     <string name="ftp_edit_title">编辑 FTP 位置</string>
@@ -161,6 +166,7 @@
     <string name="container_state_deleted">已删除</string>
     <string name="terminal_drawer_title">终端</string>
     <string name="terminal_key_enter">回车</string>
+    <string name="terminal_drop_hint">拖到此处插入路径</string>
     <string name="wizard_pull_title">从 Docker Hub 拉取 Linux rootfs</string>
     <string name="wizard_pull_desc">输入 Docker 镜像引用以创建容器。</string>
     <string name="wizard_image_placeholder">library/alpine:latest</string>
@@ -191,6 +197,8 @@
     <string name="settings_terminal_font_size_desc">默认终端文字大小</string>
     <string name="settings_terminal_color_scheme">终端配色方案</string>
     <string name="settings_appearance">外观</string>
+    <string name="settings_browse">浏览</string>
+    <string name="settings_search_engine">搜索引擎</string>
     <string name="settings_color_scheme">颜色方案</string>
     <string name="settings_amoled_black">AMOLED 黑色</string>
     <string name="settings_amoled_black_desc">暗色模式将显示为纯黑以在 AMOLED 上省电</string>

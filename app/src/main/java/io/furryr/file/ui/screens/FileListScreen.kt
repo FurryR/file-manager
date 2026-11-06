@@ -1,6 +1,9 @@
 package io.furryr.file.ui.screens
 import io.furryr.file.core.DirectoryCapabilities
 import io.furryr.file.core.Vfs
+import io.furryr.file.core.VFile
+import io.furryr.file.core.VFolder
+import io.furryr.file.core.VNode
 import io.furryr.file.ui.theme.*
 import io.furryr.file.ui.screens.*
 import io.furryr.file.ui.components.*
@@ -99,6 +102,8 @@ enum class SortMode { NAME, DATE, SIZE, TYPE }
 fun FileListScreen(
     path: String,
     committedPath: String = path,
+    /** When set, this node is listed instead of resolving [path] through Vfs. */
+    folderOverride: VFolder? = null,
     onNavigationLoaded: (String) -> Unit = {},
     onNavigationCancelled: () -> Unit = {},
     refreshToken: Int,
@@ -113,6 +118,8 @@ fun FileListScreen(
     onCapabilitiesChange: (DirectoryCapabilities) -> Unit = {},
     onDirectoryClick: (String) -> Unit,
     onFileClick: (FileEntry) -> Unit,
+    onDirectoryNodeClick: ((VFolder, FileEntry) -> Unit)? = null,
+    onFileNodeClick: ((VFile, FileEntry) -> Unit)? = null,
     onLongPress: (FileEntry) -> Unit,
     selectionMode: Boolean = false,
     selectedPaths: Set<String> = emptySet(),
@@ -122,6 +129,7 @@ fun FileListScreen(
     onFileDragEnd: () -> Unit = {},
 ) {
     var entries by remember { mutableStateOf<List<FileEntry>>(emptyList()) }
+    var nodesByName by remember { mutableStateOf<Map<String, VNode>>(emptyMap()) }
     var error by remember { mutableStateOf<Throwable?>(null) }
     var isRefreshing by remember { mutableStateOf(false) }
     var showSpinner by remember { mutableStateOf(false) }
@@ -189,22 +197,24 @@ fun FileListScreen(
                     }
                 }
                 val folder = withContext(Dispatchers.IO) {
-                    Vfs.folder(requestedPath).getOrThrow()
+                    folderOverride ?: Vfs.folder(requestedPath).getOrThrow()
                 }
                 val result = withContext(Dispatchers.IO) { folder.list() }
+                val nodes = withContext(Dispatchers.IO) { folder.listNodes() }
                 if (generation != loadGeneration || requestedPath != currentPath) return@launch
                 val capabilities = withContext(Dispatchers.IO) { folder.capabilities() }
                 if (generation != loadGeneration || requestedPath != currentPath) return@launch
                 val raw = result.getOrDefault(emptyList())
                 val newEntries = sort(raw)
+                val newNodes = nodes.getOrDefault(emptyList()).associateBy { it.name }
                 val directoryInfo = withContext(Dispatchers.IO) { folder.info() }
                 if (generation != loadGeneration || requestedPath != currentPath) return@launch
                 val directoryChanged = loadedPath != requestedPath
                 val visibleEntries = if (filterText.isBlank()) newEntries
                     else newEntries.filter { it.name.contains(filterText, ignoreCase = true) }
-                val returnPath = loadedPath?.takeIf {
+                val returnPath = if (folderOverride == null) loadedPath?.takeIf {
                     Path.parse(it).navigate("..") == Path.parse(requestedPath)
-                }
+                } else null
                 val firstVisible = if (directoryChanged) {
                     visibleEntries.indexOfFirst { returnPath != null && Path.parse(it.path) == Path.parse(returnPath) }
                         .coerceAtLeast(0)
@@ -226,6 +236,7 @@ fun FileListScreen(
                     activeAnimationRun = 0
                 }
                 entries = newEntries
+                nodesByName = newNodes
                 currentOnEntriesChange(requestedPath, requestedRefreshToken, newEntries)
                 loadSequence++
                 animateNextLoad = false
@@ -242,6 +253,7 @@ fun FileListScreen(
                     currentOnNavigationLoaded(requestedPath)
                     currentOnCapabilitiesChange(loadedCapabilities)
                     entries = emptyList()
+                    nodesByName = emptyMap()
                     currentOnEntriesChange(requestedPath, requestedRefreshToken, emptyList())
                     onInfoChange(DirectoryStats())
                     error = e
@@ -268,7 +280,7 @@ fun FileListScreen(
         currentOnNavigationCancelled()
     }
 
-    LaunchedEffect(path, refreshToken, animationToken, sortMode, sortReverse) {
+    LaunchedEffect(folderOverride, path, refreshToken, animationToken, sortMode, sortReverse) {
         Log.d("FileListScreen", "LaunchedEffect: path=$path, refreshToken=$refreshToken, animationToken=$animationToken")
         val pathChanged = lastPath != path
         val refreshChanged = lastRefreshToken != refreshToken
@@ -343,10 +355,22 @@ fun FileListScreen(
                     }
                 }
                 else -> itemsIndexed(filteredEntries, key = { i, entry -> "${i}_${entry.path}" }) { index, entry ->
+                    val node = nodesByName[entry.name]
                     val onClick = {
                         if (!isLoading && path == committedPath) {
-                            if (entry.isDirectory) onDirectoryClick(entry.path)
-                            else onFileClick(entry)
+                            if (entry.isDirectory) {
+                                if (node is VFolder && onDirectoryNodeClick != null) {
+                                    onDirectoryNodeClick(node, entry)
+                                } else {
+                                    onDirectoryClick(entry.path)
+                                }
+                            } else {
+                                if (node is VFile && onFileNodeClick != null) {
+                                    onFileNodeClick(node, entry)
+                                } else {
+                                    onFileClick(entry)
+                                }
+                            }
                         }
                     }
                     val onLongPress = { if (!isLoading && path == committedPath) onLongPress(entry) }
@@ -355,6 +379,7 @@ fun FileListScreen(
                             AnimatedFileRow(
                                 entry = entry,
                                 isInternal = isInternal,
+                                draggable = folderOverride == null,
                                 selected = entry.path in selectedPaths,
                                 selectionMode = selectionMode,
                                 onFileDragStart = onFileDragStart,
@@ -371,6 +396,7 @@ fun FileListScreen(
                         FileRow(
                             entry = entry,
                             isInternal = isInternal,
+                            draggable = folderOverride == null,
                             selected = entry.path in selectedPaths,
                             selectionMode = selectionMode,
                             onFileDragStart = onFileDragStart,
@@ -427,6 +453,7 @@ private fun errorMessage(error: Throwable?): String = when (error) {
 private fun AnimatedFileRow(
     entry: FileEntry,
     isInternal: Boolean,
+    draggable: Boolean,
     selected: Boolean,
     selectionMode: Boolean,
     onFileDragStart: () -> Unit,
@@ -468,6 +495,7 @@ private fun AnimatedFileRow(
         FileRow(
             entry = entry,
             isInternal = isInternal,
+            draggable = draggable,
             selected = selected,
             selectionMode = selectionMode,
             onFileDragStart = onFileDragStart,
@@ -485,6 +513,7 @@ private fun AnimatedFileRow(
 private fun FileRow(
     entry: FileEntry,
     isInternal: Boolean,
+    draggable: Boolean,
     selected: Boolean,
     selectionMode: Boolean,
     onFileDragStart: () -> Unit,

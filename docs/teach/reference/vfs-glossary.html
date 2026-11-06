@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参考 · VFS 术语与路由速查</title>
+<link rel="stylesheet" href="../assets/course.css">
+</head>
+<body>
+
+<nav class="course-tag">
+  <span>reference</span>
+  <a href="../lessons/0001-path-to-provider.html">课程 01</a>
+  <a href="../MISSION.md">mission</a>
+</nav>
+
+<h1>VFS 术语与路由速查</h1>
+<p class="subtitle">一页纸。课程里出现的每个名字都以这里为准。</p>
+
+<h2>路由链路</h2>
+
+<table>
+  <thead><tr><th>名字</th><th>是什么</th><th>边界</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>Path</code></td>
+      <td>不可变值对象：<code>scheme / userInfo / host / port / segments</code></td>
+      <td>唯一允许解析 URI 的类型</td>
+    </tr>
+    <tr>
+      <td><code>scheme</code></td>
+      <td><code>://</code> 之前的部分；裸路径为 <code>null</code></td>
+      <td>路由键，必须全局唯一</td>
+    </tr>
+    <tr>
+      <td><code>authority</code></td>
+      <td><code>userInfo@host:port</code> 整段</td>
+      <td>进入 provider 前被折叠成 innerPath 第一段</td>
+    </tr>
+    <tr>
+      <td><code>toFullUri()</code></td>
+      <td>规范字符串，用于身份与持久化</td>
+      <td><code>toString()</code> 即它</td>
+    </tr>
+    <tr>
+      <td><code>toInnerPath()</code></td>
+      <td>provider 私有路径，authority 当第一段</td>
+      <td>provider 唯一见得到的路径形态</td>
+    </tr>
+    <tr>
+      <td><code>toLocalPath()</code></td>
+      <td>只保留 segments 的绝对路径</td>
+      <td>用于裸路径与 <code>file</code> scheme</td>
+    </tr>
+    <tr>
+      <td><code>ResolvedProvider</code></td>
+      <td><code>(provider, path, originalUri, innerPath)</code></td>
+      <td>路由结果 DTO，也是 URI→innerPath 的唯一切换点</td>
+    </tr>
+    <tr>
+      <td><code>Vfs</code></td>
+      <td>单例路由表：<code>scheme → FileProvider</code> + default provider</td>
+      <td>仅它与 <code>NodeService</code> 能产出节点</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>provider 契约</h2>
+
+<table>
+  <thead><tr><th>名字</th><th>是什么</th><th>备注</th></tr></thead>
+  <tbody>
+    <tr><td><code>FileProvider</code></td><td>后端 SPI</td><td>参数全是原生字符串；返回 <code>Result</code></td></tr>
+    <tr><td><code>ProviderFeature</code></td><td>能力位集合</td><td>粗粒度，供 UI 灰化操作</td></tr>
+    <tr><td><code>DirectoryCapabilities</code></td><td>目录级能力</td><td><code>canCreate</code> 等，比 feature 更细</td></tr>
+    <tr><td><code>copy(from,to,isCopy)</code></td><td>同 provider 拷贝</td><td>可走 daemon 零拷贝</td></tr>
+    <tr><td><code>copy(src,dest,isCopy)</code></td><td>跨 provider 拷贝</td><td>源是 <code>FileSource</code>，流式</td></tr>
+    <tr><td><code>FileSource</code></td><td>通用可读/可写流</td><td>带 <code>size</code>、<code>seekable</code>、<code>readAt</code></td></tr>
+    <tr><td><code>ProviderStat</code></td><td>stat 结果</td><td>含目录标志、大小、剩余容量</td></tr>
+    <tr><td><code>FileEntry</code></td><td>列表原始 DTO</td><td><code>listNodes()</code> 会把它包成节点</td></tr>
+  </tbody>
+</table>
+
+<h2>对象与身份</h2>
+
+<table>
+  <thead><tr><th>名字</th><th>是什么</th><th>规则</th></tr></thead>
+  <tbody>
+    <tr><td><code>VNode</code></td><td>已解析节点</td><td>只有 <code>name / parent / ref()</code></td></tr>
+    <tr><td><code>VFile</code></td><td>文件节点</td><td><code>open</code> + <code>describe</code>（MIME/可寻址）</td></tr>
+    <tr><td><code>VFolder</code></td><td>目录节点</td><td><code>listNodes / child / capabilities</code></td></tr>
+    <tr><td><code>NodeRef</code></td><td>真实 Vfs 节点身份</td><td>只有一个变体：<code>Vfs(uri)</code></td></tr>
+    <tr><td><code>ViewRef.Node</code></td><td>扁平视图引用</td><td><code>root + viewId + path</code></td></tr>
+    <tr><td><code>viewId</code></td><td>视图类型</td><td><code>"vfs"</code> 普通目录；<code>"archive"</code> 归档</td></tr>
+    <tr><td><code>ViewRef.Url</code></td><td>网页位置</td><td>没有 Vfs 节点，归 renderer 管</td></tr>
+    <tr><td><code>ViewRef.Session</code></td><td>终端/DevTools</td><td>归 service 管，不是文件</td></tr>
+    <tr><td><code>NodeService</code></td><td>引用 → 节点</td><td>实现：<code>DefaultNodeService</code>；自动进入中间归档</td></tr>
+    <tr><td><code>Navigator</code></td><td>单标签导航状态</td><td>当前节点 + 前进/后退栈 + 面包屑</td></tr>
+    <tr><td><code>ArchiveSource</code></td><td>归档解析后端</td><td>只依赖 <code>FileSource</code>，只读</td></tr>
+  </tbody>
+</table>
+
+<h2>加东西该改哪里</h2>
+
+<table>
+  <thead><tr><th>需求</th><th>改动点</th><th>不要做</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>新协议后端（WebDAV 等）</td>
+      <td>实现 <code>FileProvider</code>；在 <code>Providers.kt</code> 注册一次</td>
+      <td>不要动 <code>Vfs</code> 或加分支判断</td>
+    </tr>
+    <tr>
+      <td>新视图（tar、PDF 页面树）</td>
+      <td>实现 <code>VFolder</code>/<code>VFile</code> + 新 <code>viewId</code> + <code>NodeService</code> 分支</td>
+      <td>不要注册新 scheme</td>
+    </tr>
+    <tr>
+      <td>新操作（chmod、分享）</td>
+      <td><code>FileProvider</code> 默认方法或 service 层</td>
+      <td>不要为它复制一个 provider</td>
+    </tr>
+    <tr>
+      <td>新渲染器</td>
+      <td><code>render/Renderer.kt</code> 的 <code>Renderers</code>/<code>Openers</code></td>
+      <td>不要改 <code>VNode</code> 接口</td>
+    </tr>
+    <tr>
+      <td>持久化位置</td>
+      <td>存 <code>ViewRef</code>，恢复时交给 <code>NodeService</code></td>
+      <td>不要存 provider 私有的 innerPath</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>已知摩擦点</h2>
+
+<ul>
+  <li><code>Vfs.list/stat/copy</code> 用 <code>runBlocking</code> 包 suspend provider，和节点 API 形成两套入口。</li>
+  <li><code>Vfs.node()</code> 先 stat 再分类，与 <code>NodeService.resolve()</code> 重叠。</li>
+  <li><code>Folder.innerPathFor()</code> 每个子节点都重建一次 <code>ResolvedProvider</code>，未缓存绑定。</li>
+</ul>
+
+<div class="footer">
+  <p style="margin:0">术语有歧义就问我；定稿后所有课程沿用这里的叫法。</p>
+</div>
+
+</body>
+</html>

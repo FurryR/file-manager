@@ -35,3 +35,11 @@ data class LocalLocation(
     val path: String,
     val sortOrder: Int,
 )
+
+/** A persisted web page shown in the drawer's network group. */
+data class WebLocation(
+    val id: String,
+    val name: String,
+    val url: String,
+    val sortOrder: Int,
+)

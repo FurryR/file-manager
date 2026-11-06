@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.SdCard
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
@@ -95,6 +96,7 @@ import io.furryr.file.provider.model.SafLocation
 import io.furryr.file.provider.model.LocalLocation
 import io.furryr.file.provider.model.FtpServer
 import io.furryr.file.provider.model.SftpServer
+import io.furryr.file.provider.model.WebLocation
 import io.furryr.file.model.LocationAddress
 import io.furryr.file.model.LocationAddressParser
 import kotlinx.coroutines.Dispatchers
@@ -159,6 +161,13 @@ fun FileDrawer(
     onRemoteDelete: (id: String) -> Unit = {},
     remoteOrder: List<String> = emptyList(),
     onRemoteReorder: (from: Int, to: Int) -> Unit = { _, _ -> },
+    webLocations: List<WebLocation> = emptyList(),
+    onAddWeb: (url: String, name: String) -> Unit = { _, _ -> },
+    onWebClick: (url: String) -> Unit = {},
+    onWebRename: (id: String, name: String) -> Unit = { _, _ -> },
+    onWebDelete: (id: String) -> Unit = {},
+    webOrder: List<String> = emptyList(),
+    onWebReorder: (from: Int, to: Int) -> Unit = { _, _ -> },
 ) {
     val configuration = LocalConfiguration.current
     val context = LocalContext.current
@@ -217,6 +226,14 @@ fun FileDrawer(
     var draggedRemoteId by remember { mutableStateOf<String?>(null) }
     var remoteDragOffsetDp by remember { mutableStateOf(0f) }
 
+    // Web link dialog states
+    var webContextMenuTarget by remember { mutableStateOf<String?>(null) }
+    var webDeleteTarget by remember { mutableStateOf<String?>(null) }
+    var webRenameTarget by remember { mutableStateOf<String?>(null) }
+    var webRenameText by remember { mutableStateOf("") }
+    var draggedWebId by remember { mutableStateOf<String?>(null) }
+    var webDragOffsetDp by remember { mutableStateOf(0f) }
+
     // Display order for pinned local paths
     val displayLocalLocations = remember(localLocations, localOrder, sortMode) {
         if (sortMode && localOrder.isNotEmpty()) {
@@ -262,6 +279,15 @@ fun FileDrawer(
         }
     }
 
+    // Display order for pinned web links
+    val displayWebLocations = remember(webLocations, webOrder, sortMode) {
+        if (sortMode && webOrder.isNotEmpty()) {
+            webOrder.mapNotNull { id -> webLocations.find { it.id == id } }
+        } else {
+            webLocations.sortedBy { it.sortOrder }
+        }
+    }
+
     // Stable references for drag gesture handlers
     val currentContainerOrder by rememberUpdatedState(containerOrder)
     val currentOnReorder by rememberUpdatedState(onContainerReorder)
@@ -275,6 +301,8 @@ fun FileDrawer(
     val currentOnSftpReorder by rememberUpdatedState(onSftpReorder)
     val currentRemoteOrder by rememberUpdatedState(remoteOrder)
     val currentOnRemoteReorder by rememberUpdatedState(onRemoteReorder)
+    val currentWebOrder by rememberUpdatedState(webOrder)
+    val currentOnWebReorder by rememberUpdatedState(onWebReorder)
 
     // Ordered container list for sort mode
     val displayContainers = remember(containers, containerOrder, sortMode) {
@@ -603,7 +631,7 @@ fun FileDrawer(
             }
             if (1 !in collapsedGroups) {
                 if (displayFtpLocations.isEmpty() && displaySftpLocations.isEmpty() &&
-                    displayRemoteLocations.isEmpty()
+                    displayRemoteLocations.isEmpty() && displayWebLocations.isEmpty()
                 ) {
                     item {
                         Text(
@@ -828,6 +856,82 @@ fun FileDrawer(
                                     leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
                                     onClick = {
                                         remoteContextMenuTarget = null
+                                        onToggleSortMode()
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    itemsIndexed(
+                        displayWebLocations,
+                        key = { _, location -> "web_${location.id}" }
+                    ) { _, location ->
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            RemoteLocationItem(
+                                name = location.name,
+                                detail = location.url,
+                                icon = Icons.Default.Language,
+                                onClick = { onWebClick(location.url) },
+                                onLongClick = { webContextMenuTarget = location.id },
+                                sortMode = sortMode,
+                                isDragging = draggedWebId == location.id,
+                                dragOffsetDp = if (draggedWebId == location.id) webDragOffsetDp else 0f,
+                                dragHandleModifier = if (sortMode) {
+                                    Modifier.pointerInput(location.id) {
+                                        detectVerticalDragGestures(
+                                            onDragStart = { draggedWebId = location.id },
+                                            onVerticalDrag = { change, dragAmount ->
+                                                change.consume()
+                                                webDragOffsetDp += dragAmount.toDp().value
+                                            },
+                                            onDragEnd = {
+                                                val id = draggedWebId
+                                                if (id != null) {
+                                                    val from = currentWebOrder.indexOf(id)
+                                                    if (from >= 0) {
+                                                        val itemH = 56f
+                                                        val steps = (webDragOffsetDp / itemH).toInt()
+                                                        val to = (from + steps).coerceIn(currentWebOrder.indices)
+                                                        if (to != from) currentOnWebReorder(from, to)
+                                                    }
+                                                }
+                                                draggedWebId = null
+                                                webDragOffsetDp = 0f
+                                            },
+                                            onDragCancel = {
+                                                draggedWebId = null
+                                                webDragOffsetDp = 0f
+                                            },
+                                        )
+                                    }
+                                } else Modifier,
+                            )
+                            DropdownMenu(
+                                expanded = webContextMenuTarget == location.id,
+                                onDismissRequest = { webContextMenuTarget = null },
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.drawer_rename)) },
+                                    leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
+                                    onClick = {
+                                        webRenameTarget = location.id
+                                        webRenameText = location.name
+                                        webContextMenuTarget = null
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.drawer_delete)) },
+                                    leadingIcon = { Icon(Icons.Default.Delete, null) },
+                                    onClick = {
+                                        webDeleteTarget = location.id
+                                        webContextMenuTarget = null
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.drawer_sort)) },
+                                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
+                                    onClick = {
+                                        webContextMenuTarget = null
                                         onToggleSortMode()
                                     }
                                 )
@@ -1314,6 +1418,59 @@ fun FileDrawer(
         )
     }
 
+    // ── Web link rename dialog ─────────────────────────────────────────────
+    if (webRenameTarget != null) {
+        val id = webRenameTarget
+        AlertDialog(
+            onDismissRequest = { webRenameTarget = null },
+            title = { Text(stringResource(R.string.rename_location_title)) },
+            text = {
+                OutlinedTextField(
+                    value = webRenameText,
+                    onValueChange = { webRenameText = it },
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.name_label)) },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        id?.let { onWebRename(it, webRenameText.ifBlank { webLocations.find { w -> w.id == it }?.name ?: it }) }
+                        webRenameTarget = null
+                    }
+                ) { Text(stringResource(R.string.ok)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { webRenameTarget = null }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
+
+    // ── Web link delete dialog ─────────────────────────────────────────────
+    if (webDeleteTarget != null) {
+        val id = webDeleteTarget
+        AlertDialog(
+            onDismissRequest = { webDeleteTarget = null },
+            title = { Text(stringResource(R.string.delete_location_title)) },
+            text = { Text(stringResource(R.string.delete_location_confirm)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        id?.let { onWebDelete(it) }
+                        webDeleteTarget = null
+                    }
+                ) { Text(stringResource(R.string.delete)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { webDeleteTarget = null }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
+
     // ── SSH host key verification ──────────────────────────────────────────
     remoteApproval?.let { pending ->
         AlertDialog(
@@ -1382,6 +1539,7 @@ fun FileDrawer(
                     "sftp" -> onAddSftp(address.host, address.name.ifBlank { address.host }, address.port ?: 22, address.username, address.password)
                     "ssh" -> onAddRemote(remoteLocationFrom(address, RemoteKind.SSH))
                     "alist" -> onAddRemote(remoteLocationFrom(address, RemoteKind.ALIST))
+                    "http", "https" -> onAddWeb(address.toUrl(), address.name)
                     else -> onAddLocalPath(address.path)
                 }
             },

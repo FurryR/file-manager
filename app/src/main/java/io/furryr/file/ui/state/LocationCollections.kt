@@ -13,6 +13,7 @@ import io.furryr.file.provider.model.FtpServer
 import io.furryr.file.provider.model.LocalLocation
 import io.furryr.file.provider.model.SafLocation
 import io.furryr.file.provider.model.SftpServer
+import io.furryr.file.provider.model.WebLocation
 import io.furryr.file.provider.remote.RemoteLocation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -44,6 +45,11 @@ internal class LocationCollections {
     var remoteRefreshKey by mutableIntStateOf(0)
         private set
 
+    var webLocations by mutableStateOf<List<WebLocation>>(emptyList())
+        private set
+    var webRefreshKey by mutableIntStateOf(0)
+        private set
+
     fun refreshSaf() {
         safRefreshKey++
     }
@@ -62,6 +68,10 @@ internal class LocationCollections {
 
     fun refreshRemote() {
         remoteRefreshKey++
+    }
+
+    fun refreshWeb() {
+        webRefreshKey++
     }
 
     suspend fun loadSaf() {
@@ -87,6 +97,12 @@ internal class LocationCollections {
             runCatching { LocationsRepository.remoteLocations() }.getOrDefault(emptyList())
         }
     }
+
+    suspend fun loadWeb() {
+        webLocations = withContext(Dispatchers.IO) {
+            runCatching { LocationsRepository.webLocations() }.getOrDefault(emptyList())
+        }
+    }
 }
 
 @Composable
@@ -97,5 +113,6 @@ internal fun rememberLocationCollections(): LocationCollections {
     LaunchedEffect(state.ftpRefreshKey) { state.loadFtp() }
     LaunchedEffect(state.sftpRefreshKey) { state.loadSftp() }
     LaunchedEffect(state.remoteRefreshKey) { state.loadRemote() }
+    LaunchedEffect(state.webRefreshKey) { state.loadWeb() }
     return state
 }

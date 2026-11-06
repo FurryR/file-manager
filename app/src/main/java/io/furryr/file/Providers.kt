@@ -1,6 +1,7 @@
 package io.furryr.file
 
 import android.content.Context
+import io.furryr.file.agent.AgentEnvironment
 import io.furryr.file.agent.AgentSettings
 import io.furryr.file.agent.SessionManager
 import io.furryr.file.container.ContainerDaemonLauncher
@@ -14,10 +15,17 @@ import io.furryr.file.provider.LocationsRepository
 import io.furryr.file.provider.DocumentFileProvider
 import io.furryr.file.provider.FtpProvider
 import io.furryr.file.provider.LocalLocationStore
+import io.furryr.file.provider.WebLocationStore
 import io.furryr.file.provider.SAFProvider
 import io.furryr.file.provider.SftpProvider
 import io.furryr.file.core.Vfs
 import io.furryr.file.provider.remote.RemoteProviders
+import io.furryr.file.render.ArchiveOpener
+import io.furryr.file.render.DefaultNodeService
+import io.furryr.file.render.DirectoryRendererFactory
+import io.furryr.file.render.Openers
+import io.furryr.file.render.Renderers
+import io.furryr.file.render.WebRendererFactory
 
 private var runtimeListenerInstalled = false
 private var fileProvidersInstalled = false
@@ -36,6 +44,7 @@ fun installFileProviders(context: Context) {
 
     DaemonManager.init(appContext)
     LocalLocationStore.init(appContext)
+    WebLocationStore.init(appContext)
     AgentSettings.install(appContext)
     DaemonManager.configure(
         rootEnabled = prefs.getBoolean("root_enabled", false),
@@ -80,5 +89,11 @@ fun installFileProviders(context: Context) {
     RemoteProviders.providers(appContext).forEach {
         Vfs.register(it.scheme, it)
     }
+    // Container openers and renderers are Kotlin-side; they never touch a
+    // daemon API. The list screen is the shared directory renderer.
+    Openers.register(100, ArchiveOpener(appContext))
+    Renderers.register(10, DirectoryRendererFactory())
+    Renderers.register(20, WebRendererFactory())
+    AgentEnvironment.nodeService = DefaultNodeService(appContext)
     fileProvidersInstalled = true
 }

@@ -72,19 +72,29 @@ class FdFileSource(
 ) : FileSource() {
     override val readable get() = mode == OpenMode.READ || mode == OpenMode.READ_WRITE
     override val writable get() = mode == OpenMode.WRITE || mode == OpenMode.READ_WRITE
-    override val seekable get() = false
+    override val seekable get() = true
     private var closed = false
-    private var position = 0L
     private val inputStream = FileInputStream(fileDescriptor)
+    private val channel = inputStream.channel
+    private var position = 0L
 
     override fun readAt(offset: Long, len: Int): ByteArray {
         check(!closed) { "fd closed" }
-        require(offset == position) { "fd source only supports sequential reads" }
-        val buffer = ByteArray(len)
-        val read = inputStream.read(buffer)
-        if (read <= 0) return ByteArray(0)
-        position += read
-        return buffer.copyOf(read)
+        if (len <= 0) return ByteArray(0)
+        // A reported size of 0 means "unknown" for special files (/proc),
+        // so only clamp when the size is real.
+        val end = if (size > 0L) minOf(offset + len, size) else offset + len
+        if (offset >= end) return ByteArray(0)
+        val buffer = java.nio.ByteBuffer.allocate((end - offset).toInt())
+        var total = 0
+        while (buffer.hasRemaining()) {
+            // Positional read: does not disturb any other reader of the same fd.
+            val read = channel.read(buffer, offset + total)
+            if (read <= 0) break
+            total += read
+        }
+        position = offset + total
+        return buffer.array().copyOf(total)
     }
 
     override fun writeAt(offset: Long, data: ByteArray) {
@@ -93,17 +103,19 @@ class FdFileSource(
     }
 
     override fun seek(position: Long) {
-        throw UnsupportedOperationException("seek not supported on fd; use HandleFileSource")
+        check(!closed) { "fd closed" }
+        this.position = position
     }
 
     override fun truncate(newSize: Long) {
+        check(!closed) { "fd closed" }
         throw UnsupportedOperationException("truncate not supported on fd; use HandleFileSource")
     }
 
     override fun close() {
         if (closed) return
         closed = true
-        runCatching { inputStream.close() }
+        runCatching { channel.close() }
         onClose()
     }
 }

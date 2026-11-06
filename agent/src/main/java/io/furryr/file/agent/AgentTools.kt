@@ -1,6 +1,12 @@
 package io.furryr.file.agent
 
+import io.furryr.file.core.NodeRef
+import io.furryr.file.core.ViewRef
+import io.furryr.file.core.VFile
+import io.furryr.file.core.VFolder
+import io.furryr.file.core.Vfs
 import io.furryr.file.core.model.FileEntry
+import io.furryr.file.core.source.OpenMode
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.daemon.process.CommandSpec
@@ -21,6 +27,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -31,6 +38,9 @@ import java.io.InputStream
 internal const val MAX_TOOL_OUTPUT = 128 * 1024
 private const val MAX_EXEC_CAPTURE = 1024 * 1024
 private const val MAX_LIVE_OUTPUT = 256 * 1024
+private const val MAX_ARCHIVE_ENTRIES = 2_000
+private const val DEFAULT_ARCHIVE_READ = 64L * 1024
+private const val MAX_ARCHIVE_READ = 1024L * 1024
 private const val MAX_WRITE_PREVIEW = 256 * 1024
 private const val MAX_DIFF_LINES = 1_500
 private const val EXEC_TIMEOUT_MS = 600_000L
@@ -64,6 +74,9 @@ internal object AgentTools {
         put(globDefinition())
         put(execDefinition())
         put(listTargetsDefinition())
+        put(archiveListDefinition())
+        put(archiveReadDefinition())
+        put(archiveCopyDefinition())
     }
 
     fun info(name: String, arguments: String): ToolInfo {
@@ -74,6 +87,9 @@ internal object AgentTools {
             "write" -> simpleInfo(args.optString("path", "?"), "←")
             "glob" -> simpleInfo(args.optString("pattern", "?"), "→")
             "copy" -> simpleInfo("${args.optString("from", "?")} -> ${args.optString("to", "?")}")
+            "archive_list" -> simpleInfo("${args.optString("archive", "?")}!/${args.optString("path", "")}")
+            "archive_read" -> simpleInfo("${args.optString("archive", "?")}!/${args.optString("path", "?")}", "→")
+            "archive_copy" -> simpleInfo("${args.optString("archive", "?")}!/${args.optString("path", "?")} -> ${args.optString("to", "?")}")
             "exec" -> {
                 val command = args.optString("command", "?")
                 val container = args.optString("container_id").takeIf { it.isNotBlank() }
@@ -106,6 +122,9 @@ internal object AgentTools {
                 "glob" -> glob(args, context)
                 "exec" -> exec(args, context)
                 "list_targets" -> listTargets(context)
+                "archive_list" -> archiveList(args, context)
+                "archive_read" -> archiveRead(args, context)
+                "archive_copy" -> archiveCopy(args, context)
                 else -> error("unknown tool '$name'")
             }
             ToolResult(true, bound(content))
@@ -333,6 +352,104 @@ internal object AgentTools {
         collected
     }
 
+    private fun archiveRef(args: JSONObject, context: ToolContext): ViewRef {
+        val archive = callerPath(context.target, stringArg(args, "archive"), "archive")
+        val inner = args.optString("path").trim('/')
+        val segments = if (inner.isEmpty()) {
+            emptyList()
+        } else {
+            inner.split('/').filter { it.isNotEmpty() }
+        }
+        require(segments.none { it == "." || it == ".." }) { "invalid archive path" }
+        return ViewRef.Node(NodeRef.Vfs(archive), viewId = "archive", path = segments)
+    }
+
+    private suspend fun archiveList(args: JSONObject, context: ToolContext): String {
+        val service = AgentEnvironment.nodeService ?: error("archive access is unavailable")
+        val ref = archiveRef(args, context)
+        val all = service.list(ref).getOrThrow()
+        val nodes = all.take(MAX_ARCHIVE_ENTRIES)
+        val total = all.size
+        return buildString {
+            append(refLabel(args)).append('\n')
+            if (nodes.isEmpty()) {
+                append("(empty archive directory)\n")
+            } else {
+                for (node in nodes) {
+                    val kind = if (node is VFolder) "dir " else "file"
+                    val size = if (node is VFile) {
+                        node.stat().getOrNull()?.size ?: 0L
+                    } else {
+                        0L
+                    }
+                    append("  ").append(kind).append(' ').append(node.name)
+                    if (node is VFile) append("  (").append(size).append(" bytes)")
+                    append('\n')
+                }
+            }
+            if (total > nodes.size) append("[listing truncated]\n")
+        }
+    }
+
+    private suspend fun archiveRead(args: JSONObject, context: ToolContext): String {
+        val service = AgentEnvironment.nodeService ?: error("archive access is unavailable")
+        val ref = archiveRef(args, context)
+        val file = service.resolve(ref).getOrThrow() as? VFile
+            ?: error("not a file in archive: ${args.optString("path")}")
+        val offset = args.optLong("offset", 0L).coerceAtLeast(0L)
+        val requested = args.optInt("length", 0).let {
+            if (it <= 0) DEFAULT_ARCHIVE_READ else it.toLong()
+        }.coerceAtMost(MAX_ARCHIVE_READ)
+        return file.open(OpenMode.READ).getOrThrow().use { source ->
+            val output = ByteArrayOutputStream()
+            var position = 0L
+            while (position < offset) {
+                val skip = (offset - position).coerceAtMost(64L * 1024).toInt()
+                val chunk = source.readAt(position, skip)
+                if (chunk.isEmpty()) break
+                position += chunk.size
+            }
+            while (output.size() < requested) {
+                val remaining = (requested - output.size()).coerceAtMost(64L * 1024).toInt()
+                val chunk = source.readAt(position, remaining)
+                if (chunk.isEmpty()) break
+                output.write(chunk)
+                position += chunk.size
+            }
+            val text = output.toString(Charsets.UTF_8.name())
+            if (position < source.size) {
+                "$text\n\n[truncated at byte $position of ${source.size}]"
+            } else {
+                text
+            }
+        }
+    }
+
+    private suspend fun archiveCopy(args: JSONObject, context: ToolContext): String {
+        val service = AgentEnvironment.nodeService ?: error("archive access is unavailable")
+        val ref = archiveRef(args, context)
+        val file = service.resolve(ref).getOrThrow() as? VFile
+            ?: error("not a file in archive: ${args.optString("path")}")
+        val destination = callerPath(context.target, stringArg(args, "to"), "copy destination")
+        val resolved = Vfs.resolve(destination).getOrThrow()
+        val source = file.open(OpenMode.READ).getOrThrow()
+        var copied = 0L
+        try {
+            resolved.provider.copy(source, resolved.innerPath, true).collect { progress ->
+                copied = progress.copiedBytes
+            }
+        } finally {
+            source.close()
+        }
+        return "Copied $copied bytes from ${refLabel(args)} to $destination"
+    }
+
+    private fun refLabel(args: JSONObject): String {
+        val archive = args.optString("archive")
+        val path = args.optString("path").trim('/')
+        return if (path.isEmpty()) archive else "$archive/$path"
+    }
+
     private suspend fun listTargets(context: ToolContext): String {
         val live = DaemonManager.liveEndpoints().associateBy { it.name }
         val names = LinkedHashSet<String>()
@@ -506,6 +623,36 @@ internal object AgentTools {
         "List every execution target (host, app, containers) and every registered file location. Each entry shows its root URI when it has one, ready to use as a copy/read/write/glob path prefix.",
         JSONObject(),
         emptyList(),
+    )
+
+    private fun archiveListDefinition() = function(
+        "archive_list",
+        "List entries inside a zip-compatible archive. archive is a normal VFS path to the archive file; path is relative inside it. Read-only.",
+        JSONObject()
+            .put("archive", stringProp("Absolute path or VFS URI of the archive file, never an internal pseudo-URI."))
+            .put("path", stringProp("Relative directory inside the archive. Defaults to the archive root.")),
+        listOf("archive"),
+    )
+
+    private fun archiveReadDefinition() = function(
+        "archive_read",
+        "Read one file inside a zip-compatible archive without extracting it first. Read-only.",
+        JSONObject()
+            .put("archive", stringProp("Absolute path or VFS URI of the archive file."))
+            .put("path", stringProp("Relative file path inside the archive."))
+            .put("offset", intProp("Byte offset to start reading from. Defaults to 0."))
+            .put("length", intProp("Maximum bytes to read. Defaults to 64 KiB.")),
+        listOf("archive", "path"),
+    )
+
+    private fun archiveCopyDefinition() = function(
+        "archive_copy",
+        "Copy one file from a zip-compatible archive to a normal destination path without extracting the whole archive.",
+        JSONObject()
+            .put("archive", stringProp("Absolute path or VFS URI of the archive file."))
+            .put("path", stringProp("Relative file path inside the archive."))
+            .put("to", stringProp("Exact destination path or VFS URI. Its parent directory must exist.")),
+        listOf("archive", "path", "to"),
     )
 
     private fun function(

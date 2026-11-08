@@ -1,12 +1,13 @@
-package io.furryr.file.provider
+package io.furryr.file.store
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import io.furryr.file.provider.SafLocationSource
 import io.furryr.file.provider.model.SafLocation
 
-class SafDatabase(context: Context) : SQLiteOpenHelper(context, "saf_locations.db", null, 2) {
-    private val db = writableDatabase
+class SafDatabase(context: Context) : SQLiteOpenHelper(context, "saf_locations.db", null, 2),
+    SafLocationSource {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""
@@ -82,6 +83,10 @@ class SafDatabase(context: Context) : SQLiteOpenHelper(context, "saf_locations.d
         }
         return null
     }
+
+    override fun safLocations(): List<SafLocation> = getAll()
+
+    override fun safLocation(hexId: String): SafLocation? = findByHexId(hexId)
 
     private fun guessName(treeUri: String): String {
         val decoded = java.net.URLDecoder.decode(treeUri, "UTF-8")

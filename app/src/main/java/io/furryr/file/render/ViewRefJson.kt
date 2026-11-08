@@ -13,7 +13,14 @@ object ViewRefJson {
     fun encode(ref: ViewRef): JSONObject = when (ref) {
         is ViewRef.Node -> JSONObject()
             .put("kind", "node")
-            .put("root", ref.root.let { (it as NodeRef.Vfs).uri })
+            .put("rootKind", when (val root = ref.root) {
+                is NodeRef.Vfs -> "vfs"
+                is NodeRef.Url -> "url"
+            })
+            .put("root", when (val root = ref.root) {
+                is NodeRef.Vfs -> root.uri
+                is NodeRef.Url -> root.url
+            })
             .put("view", ref.viewId)
             .put("path", JSONArray(ref.path))
         is ViewRef.Url -> JSONObject()
@@ -27,7 +34,11 @@ object ViewRefJson {
 
     fun decode(json: JSONObject): ViewRef = when (json.getString("kind")) {
         "node" -> ViewRef.Node(
-            root = NodeRef.Vfs(json.getString("root")),
+            // Older records have no rootKind and can only be Vfs URIs.
+            root = when (json.optString("rootKind", "vfs")) {
+                "url" -> NodeRef.Url(json.getString("root"))
+                else -> NodeRef.Vfs(json.getString("root"))
+            },
             viewId = json.getString("view"),
             path = json.getJSONArray("path").let { array ->
                 buildList { for (i in 0 until array.length()) add(array.getString(i)) }

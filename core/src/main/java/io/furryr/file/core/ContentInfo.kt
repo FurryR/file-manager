@@ -123,6 +123,27 @@ object ContentTypes {
         return mimeByExtension[name.substring(dot + 1).lowercase(Locale.ROOT)]
     }
 
+    /** True for the types a browser must render as a page, not save as a file. */
+    fun isHtmlMime(mime: String?): Boolean {
+        val value = mime?.substringBefore(';')?.trim()?.lowercase(Locale.ROOT) ?: return false
+        return value == "text/html" || value == "application/xhtml+xml"
+    }
+
+    /** Server headers that carry no usable type; the name/sniff must decide. */
+    private val genericMimes = setOf(
+        "application/octet-stream",
+        "binary/octet-stream",
+        "application/unknown",
+        "unknown/unknown",
+    )
+
+    /** True when [mime] names no concrete type (null/octet-stream). */
+    fun isGenericMime(mime: String?): Boolean {
+        val value = mime?.substringBefore(';')?.trim()?.lowercase(Locale.ROOT)
+            ?.takeIf { it.isNotEmpty() } ?: return true
+        return value in genericMimes
+    }
+
     fun kindOf(mime: String?, name: String): ContentKind {
         val value = mime?.lowercase(Locale.ROOT)
         if (value == null) return ContentKind.BINARY
@@ -165,8 +186,27 @@ object ContentTypes {
         if (head.size >= 12 && String(head, 0, 4, Charsets.US_ASCII) == "RIFF" &&
             String(head, 8, 4, Charsets.US_ASCII) == "WEBP"
         ) return "image/webp"
+        if (looksLikeHtml(head)) return "text/html"
         isProbablyText(head)?.let { return if (it) "text/plain" else null }
         return null
+    }
+
+    /**
+     * A page starts with a doctype or `<html` once BOM and whitespace are
+     * skipped. Servers that mislabel pages as `text/plain`/octet-stream still
+     * reach the WebView through this check.
+     */
+    private fun looksLikeHtml(head: ByteArray): Boolean {
+        if (head.isEmpty()) return false
+        val text = String(head, Charsets.UTF_8)
+            .removePrefix("\uFEFF")
+            .trimStart()
+            .take(512)
+            .lowercase(Locale.ROOT)
+        return text.startsWith("<!doctype html") ||
+            text.startsWith("<html") ||
+            text.startsWith("<head") ||
+            (text.startsWith("<?xml") && text.contains("<html"))
     }
 
     /**
@@ -193,8 +233,17 @@ object ContentTypes {
         size: Long,
         head: ByteArray,
         seekable: Boolean,
+        declaredMime: String? = null,
     ): ContentInfo {
-        val mime = fromName(name) ?: sniffMime(head)
+        // The response header is authoritative when the server names a real
+        // type. Octet-stream means "no type": fall back to the extension, then
+        // to magic bytes (a `.git` link served as HTML must still be a page).
+        val declared = declaredMime
+            ?.substringBefore(';')
+            ?.trim()
+            ?.lowercase(Locale.ROOT)
+            ?.takeIf { it.isNotEmpty() && it !in genericMimes }
+        val mime = declared ?: fromName(name) ?: sniffMime(head)
         var kind = kindOf(mime, name)
         if (kind == ContentKind.BINARY && mime == null && isProbablyText(head) == true) {
             kind = ContentKind.TEXT

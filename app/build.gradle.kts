@@ -87,6 +87,7 @@ dependencies {
     implementation(project(":core"))
     implementation(project(":daemon"))
     implementation(project(":hub"))
+    implementation(project(":opener"))
     implementation(project(":provider"))
     implementation(project(":pulse"))
     implementation(project(":wayland"))

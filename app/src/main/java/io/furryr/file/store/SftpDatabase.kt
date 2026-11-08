@@ -1,12 +1,13 @@
-package io.furryr.file.provider
+package io.furryr.file.store
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import io.furryr.file.provider.SftpServerSource
 import io.furryr.file.provider.model.SftpServer
 
-class SftpDatabase(context: Context) : SQLiteOpenHelper(context, "sftp_servers.db", null, 1) {
-    private val db = writableDatabase
+class SftpDatabase(context: Context) : SQLiteOpenHelper(context, "sftp_servers.db", null, 1),
+    SftpServerSource {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""
@@ -79,6 +80,10 @@ class SftpDatabase(context: Context) : SQLiteOpenHelper(context, "sftp_servers.d
         }
         return null
     }
+
+    override fun sftpServers(): List<SftpServer> = getAll()
+
+    override fun sftpServer(host: String): SftpServer? = findByHost(host)
 
     private fun uniqueName(base: String): String {
         val names = getAll().map { it.name }.toSet()

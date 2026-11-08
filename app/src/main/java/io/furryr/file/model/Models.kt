@@ -1,6 +1,7 @@
 package io.furryr.file.model
 import android.content.Context
 import io.furryr.file.R
+import io.furryr.file.isHomePath
 import io.furryr.file.ui.util.formatSize
 import io.furryr.file.core.DirectoryStats
 import io.furryr.file.core.Path
@@ -35,6 +36,9 @@ data class FileTab(
                     ?.takeIf { it.isNotBlank() }
                     ?.let { return it }
             }
+            // Home is the fallback location behind a page, so it must not
+            // override the page's own title.
+            if (isHomePath(path)) return "Home"
             val p = Path.parse(path)
             p.name?.let { return it }
             p.host?.let { return it }

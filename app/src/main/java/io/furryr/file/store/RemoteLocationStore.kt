@@ -1,10 +1,13 @@
-package io.furryr.file.provider.remote
+package io.furryr.file.store
 
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.AtomicFile
 import android.util.Base64
+import io.furryr.file.provider.RemoteLocationSource
+import io.furryr.file.provider.remote.RemoteKind
+import io.furryr.file.provider.remote.RemoteLocation
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -15,7 +18,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /** Encrypted connection records live outside Android backup; keys stay in Android Keystore. */
-object RemoteLocationStore {
+object RemoteLocationStore : RemoteLocationSource {
     private lateinit var storage: AtomicFile
     private const val ALIAS = "io.furryr.file.remote.locations"
 
@@ -70,6 +73,8 @@ object RemoteLocationStore {
         write(ordered.mapIndexed { index, entry -> entry.copy(sortOrder = index) })
         cached = null
     }
+
+    override fun remoteLocations(): List<RemoteLocation> = all()
 
     private fun write(locations: List<RemoteLocation>) {
         val records = JSONArray()

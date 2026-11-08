@@ -24,6 +24,14 @@ file-manager/
 │       ├── ResolvedProvider.kt / Directory*.kt
 │       ├── model/                # FileEntry, ProviderStat, CopyProgress
 │       └── source/               # FileSource interface + stream/cache sources
+├── opener/              # :opener — opener SPI + container views (Kotlin/JVM, no Android)
+│   └── src/main/java/io/furryr/file/opener/
+│       ├── Opener.kt           # Opener SPI + priority registry + openFolder
+│       ├── OpenRouter.kt       # generic ordered open-with table (C, R)
+│       ├── ArchiveOpener.kt    # zip-compatible file → ArchiveFolder
+│       ├── ArchiveFolder.kt    # ArchiveFolder/ArchiveFile/ArchiveSource
+│       ├── Archives.kt         # process-wide mount cache keyed by ViewRef
+│       └── ZipArchiveSource.kt # in-place central-directory index + entry reads
 ├── daemon/              # :daemon — daemon IPC over :uds.Transport
 │   └── src/main/java/io/furryr/file/daemon/
 │       ├── DaemonManager.kt      # Lifecycle, targets, launcher SPI, services
@@ -37,9 +45,9 @@ file-manager/
 │   └── src/main/java/io/furryr/file/provider/
 │       ├── LocalProvider.kt      # Local filesystem over :daemon
 │       ├── FtpProvider / SftpProvider / SAFProvider / DocumentFileProvider
-│       ├── remote/               # AList/SSH backends + encrypted location store
-│       ├── model/                # Persisted location records
-│       └── LocationsRepository.kt
+│       ├── LocationSources.kt    # app-supplied read-only location contracts
+│       ├── remote/               # AList/SSH backends
+│       └── model/                # Persisted location records
 ├── container/           # :container — container management + one ContainerProvider
 │   └── src/main/java/io/furryr/file/container/
 │       ├── ContainerManager.kt / ContainerModels.kt / ContainerPaths.kt
@@ -96,13 +104,24 @@ file-manager/
   `FileSource` interface. It also owns the node/view model (`VNode`, `VFile`,
   `VFolder`, flat `ViewRef`, `ContentInfo`, `Navigator`, `NodeService`). It
   must not import Android, `:uds`, `:daemon`, or any concrete provider.
+- `:opener` is the **file-to-view route** (Kotlin/JVM): `Opener`/`Openers`,
+  the generic `OpenRouter<C, R>` open-with table, concrete openers and the
+  views they return (`ArchiveFolder`, `ArchiveFile`, `ArchiveSource`). It
+  depends only on `:core`; the staging directory for stream-only archives is
+  passed in as a `File`, never a `Context`. The router knows outcome types only
+  through its caller's `R`, so `:opener` never imports app renderers or UI.
+  Renderers know nothing about openers: the app resolves a file through the
+  table (`app/.../OpenRoutes.kt`) and applies the returned outcome.
 - `:daemon` is the **daemon protocol layer over `:uds.Transport`**: IPC,
   protobuf, `DaemonManager`, `FileService`, `ExecService`, hub callbacks. It
   depends on `:core` for neutral models and the `FileSource` contract.
 - `:provider` implements **protocol domains** over `:core`: Local (`:daemon`),
   FTP/SFTP, SAF/Document and remote AList/SSH. One provider instance owns all
   locations of its protocol (internal subinstances), so Router keys are strict
-  scheme names with no duplicates.
+  scheme names with no duplicates. **No provider owns persistence**: the app
+  opens the SQLite/preference/encrypted stores and passes the current records
+  through `SafLocationSource` / `FtpServerSource` / `SftpServerSource` /
+  `RemoteLocationSource` / `DocumentTreeSource` at `init()` time.
 - `:container` owns container lifecycle and exposes **one** `ContainerProvider`
   for all containers. It depends on `:core`, `:daemon`, `:pulse` and `:wayland`.
 - `:wayland` hosts the nested compositor and wires it into containers: the
@@ -126,7 +145,9 @@ file-manager/
   `native/pulse/pulse_host.c` embeds the native protocol, mixer, sink and source
   in `libpulsehost.so`; D-Bus and dynamic modules are disabled. Audio policy
   (AudioTrack, RECORD_AUDIO, microphone foreground service) stays in Kotlin.
-  Containers use only `PULSE_SERVER=unix:/dev/pulse`.
+  Containers use only `PULSE_SERVER=unix:/dev/pulse`. The module never reads
+  preferences: `app/.../settings/PulseSettings.kt` persists `pulse_enabled`,
+  `pulse_mic_enabled` and `pulse_buffer_ms`, then calls `PulseManager.configure`.
 - `:app` is the UI shell and platform wiring: Compose, terminal/session,
   `ForwardFileProvider`, provider registration and the Android renderer layer
   under `app/.../render/`. It must not implement routing.
@@ -142,30 +163,37 @@ file-manager/
   - `VFolder.listNodes()`, `child()` and `VNode.parent` are the navigation
     currency. Renderers receive nodes/`ViewRef`s, never provider paths. Only
     `Vfs` and `NodeService` may turn a reference into a node.
-- **Archives.** `core/.../ArchiveFolder.kt` owns `ArchiveFolder`/
-  `ArchiveFile`/`ArchiveSource`. `ViewRef.Node(root, "archive", path)`
-  auto-enters intermediate archive files when more path segments follow.
-  `app/.../render/ZipArchiveSource.kt` reads the central directory in place
+- **Archives.** `opener/.../ArchiveFolder.kt` owns `ArchiveFolder`/
+  `ArchiveFile`/`ArchiveSource`; core only knows `VFile`/`VFolder` and the
+  `Openers` SPI. `ViewRef.Node(root, viewId, path)` auto-enters intermediate
+  files through the opener registry when more path segments follow.
+  `opener/.../ZipArchiveSource.kt` reads the central directory in place
   when the outer `FileSource` is seekable (local/daemon fd or handle, SFTP/SSH,
   AList cache) and inflates entries on demand, so opening a large archive never
   copies it into the cache. Stream-only backends (SAF, FTP, content URIs) are
   staged once. Entries are read-only; `ArchiveFolder.capabilities()` is what
   greys out create/terminal/share/modify actions. An APK is a zip but is not
   offered as an archive: `ContentTypes` maps it to the package MIME kind so it
-  opens with the installer.
+  opens with the installer. Opening an entry externally signs its flat
+  `ViewRef` into a `ForwardFileProvider` URI; the provider resolves it through
+  `DefaultNodeService`, so a zip member never needs a synthetic VFS path.
 - **Content facts.** `core/.../ContentInfo.kt` defines `ContentInfo`,
   `ContentKind` and `ContentTypes` (extension map + magic sniffing).
   `ProviderStat` carries `size`. `VFile.describe()` is the only place renderer
   selection should read MIME/kind/seekable from.
 - **Navigation/history.** `core/.../Navigator.kt` owns current node,
-  back/forward and breadcrumb ancestry. `NodeService.kt` is the string-free
-  resolve/list/open facade. `app/.../render/ViewRefJson.kt` is the persistence
-  codec; `Address.kt` is the breadcrumb projection.
+  back/forward and breadcrumb ancestry. `core/.../NodeService.kt` is the
+  string-free resolve/list/open facade; `app/.../DefaultNodeService.kt` applies
+  the "enter an intermediate file through `Openers`" policy.
+  `app/.../render/ViewRefJson.kt` is the persistence codec; `Address.kt` is
+  the breadcrumb projection.
 - **Renderers/Openers.** `app/.../render/Renderer.kt` defines
   `RenderTarget` (`Node`/`Url`), `RendererFactory`/`RendererSession`,
-  `RenderHost`, `Renderers` and `Openers`. `DirectorySession` is the shared
-  directory controller; `FileListScreen` is still its transitional view.
-  `ArchiveOpener` turns a zip file into an `ArchiveFolder`; it draws nothing.
+  `RenderHost` and `Renderers`. Only Directory and Web renderers are
+  registered. `opener/.../Opener.kt` defines the format-agnostic `Opener`/
+  `Openers` route. `DirectorySession` is the shared directory controller;
+  `FileListScreen` is still its transitional view. `ArchiveOpener` turns a zip
+  file into an `ArchiveFolder`; it draws nothing.
 - **HTML.** `HtmlDocument`/`DocumentView`/`WebRenderer.kt` project both HTML
   files and HTTP(S) URLs as a `DocumentView`; `WebContent` is the WebView.
   Relative assets resolve through the node graph (`file.parent.child(...)`),
@@ -195,11 +223,15 @@ file-manager/
 | Settings | `app/.../ui/screens/SettingsActivity.kt` | Root/shell toggles, su path → `DaemonManager` |
 | File operations | `core/.../Vfs.kt` | Scheme-strict routing + Folder/File facade; UI only calls this |
 | Node/view model | `core/.../VNode.kt` | `VNode`/`VFile`/`VFolder`, flat `ViewRef`, no `Nested` |
-| Archive view | `core/.../ArchiveFolder.kt` + `app/.../render/ZipArchiveSource.kt` | Kotlin archive index, read-only, flat path |
-| Renderers/openers | `app/.../render/Renderer.kt` | `RenderTarget`, `Renderers`, `Openers`, `RenderHost` |
+| Node service | `app/.../DefaultNodeService.kt` | Resolves `ViewRef`, auto-enters intermediate files via `Openers.openFolder` |
+| Open-with table | `opener/.../OpenRouter.kt` + `app/.../OpenRoutes.kt` | Generic `OpenRouter<C, R>` in `:opener`; app registers web-page/opener/renderer/external order |
+| Archive view | `opener/.../ArchiveFolder.kt` + `opener/.../ZipArchiveSource.kt` | Opener-owned view; core knows only `VFile`/`VFolder` |
+| Renderers | `app/.../render/Renderer.kt` | `RenderTarget`, `Renderers`, `RenderHost` (Directory + Web only) |
+| Openers route | `opener/.../Opener.kt` | Format-agnostic SPI + priority registry; archive implementation lives beside it |
 | HTML/WebView | `app/.../render/WebRenderer.kt` | `DocumentView`, `HtmlDocument`, `WebContent` |
 | Agent archive tools | `agent/.../AgentTools.kt` | `archive_list`/`archive_read`/`archive_copy` via `NodeService` |
-| Provider locations | `provider/.../LocationsRepository.kt` | Location entries + actions for SAF/FTP/SFTP/local/remote |
+| Provider locations | `app/.../store/LocationsRepository.kt` | Location entries + actions for SAF/FTP/SFTP/local/remote |
+| Location stores | `app/.../store/LocationStores.kt` | App-owned SQLite/preferences/encrypted stores passed to providers |
 | Provider implementations | `provider/.../` | Protocol domains with internal location subinstances |
 | Provider wiring | `app/.../Providers.kt` | Daemon config, container runtime seam, registrations |
 | Daemon facade | `daemon/.../DaemonManager.kt` | Lifecycle, targets, launcher SPI |
@@ -293,6 +325,7 @@ file-manager/
 ./gradlew :uds:compileDebugKotlin                # Compile the UDS transport layer only
 ./gradlew :daemon:compileDebugKotlin             # Compile daemon communication layer only
 ./gradlew :core:compileKotlin                    # Compile the pure VFS abstraction
+./gradlew :opener:compileKotlin                  # Compile the opener SPI + archive view
 bash native/build-android-aarch64.sh             # Cross-compile Rust daemon
 bash native/build-proot.sh                       # Cross-compile proot binary
 bash native/build-pulse.sh                       # Cross-compile embedded PulseAudio host (libpulsehost.so)

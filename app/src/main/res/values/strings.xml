@@ -5,6 +5,15 @@
     <string name="drawer_title">File</string>
     <string name="nav_home">Internal storage</string>
     <string name="nav_root">Root /</string>
+    <string name="home_title">Home</string>
+    <string name="home_empty">Nothing here yet</string>
+    <string name="home_recent_files">Recent files</string>
+    <string name="home_recent_locations">Recent locations</string>
+    <string name="home_bookmarks">Bookmarks</string>
+    <string name="home_clear">Clear</string>
+    <string name="bookmark_add">Bookmark this location</string>
+    <string name="bookmark_remove">Remove bookmark</string>
+    <string name="toast_location_missing">Location is no longer available</string>
     <string name="nav_settings">Settings</string>
     <string name="settings">Settings</string>
     <string name="settings_other">Other</string>
@@ -104,6 +113,10 @@
     <string name="operation_notification_channel_name">Operation progress</string>
     <string name="copying_notification_text">Copying files from %1$s</string>
     <string name="moving_notification_text">Moving files from %1$s</string>
+
+    <string name="web_transfer_channel_name">Downloads</string>
+    <string name="web_download_title">Downloading file</string>
+    <string name="web_download_on_demand_title">Downloading file on demand</string>
 
     <!-- Drawer groups -->
     <string name="drawer_group_local">Local</string>

@@ -1,16 +1,16 @@
-package io.furryr.file.render
+package io.furryr.file.opener
 
-import android.content.Context
 import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.ContentKind
 import io.furryr.file.core.VFile
 import io.furryr.file.core.VNode
+import java.io.File
 
 /**
  * Opens zip-compatible files as a container root. This is an opener, not a
  * renderer: it draws nothing and never touches navigation history.
  */
-class ArchiveOpener(private val context: Context) : Opener {
+class ArchiveOpener(private val stagingDir: File) : Opener {
     override val id: String = "archive"
 
     override fun supports(node: VNode, content: ContentInfo): Boolean {
@@ -27,7 +27,7 @@ class ArchiveOpener(private val context: Context) : Opener {
 
     override suspend fun open(node: VNode): Result<VNode> = runCatching {
         val file = node as? VFile ?: error("archive opener requires a file")
-        Archives.open(context, file).getOrThrow()
+        Archives.open(stagingDir, file).getOrThrow()
     }
 
     private companion object {

@@ -1,8 +1,5 @@
-package io.furryr.file.render
+package io.furryr.file.opener
 
-import android.content.Context
-import io.furryr.file.core.ArchiveEntry
-import io.furryr.file.core.ArchiveSource
 import io.furryr.file.core.VFile
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
@@ -220,7 +217,7 @@ class ZipArchiveSource private constructor(
         private const val LOCAL_SIG = 0x04034b50L
         private const val MAX_INDEX_BYTES = 256L * 1024 * 1024
 
-        suspend fun open(context: Context, backing: VFile): Result<ZipArchiveSource> =
+        suspend fun open(stagingDir: File, backing: VFile): Result<ZipArchiveSource> =
             withContext(Dispatchers.IO) {
                 runCatching {
                     val opened = backing.open(OpenMode.READ).getOrThrow()
@@ -234,7 +231,7 @@ class ZipArchiveSource private constructor(
                         }
                     } else {
                         val temp = try {
-                            stage(context, opened)
+                            stage(stagingDir, opened)
                         } finally {
                             runCatching { opened.close() }
                         }
@@ -250,8 +247,8 @@ class ZipArchiveSource private constructor(
             }
 
         /** Copy a stream-only backend once; [SeekableCacheFileSource] deletes it on close. */
-        private fun stage(context: Context, source: FileSource): File {
-            val temp = File.createTempFile("archive-", ".zip", context.cacheDir)
+        private fun stage(stagingDir: File, source: FileSource): File {
+            val temp = File.createTempFile("archive-", ".zip", stagingDir)
             try {
                 FileOutputStream(temp).use { output ->
                     var offset = 0L

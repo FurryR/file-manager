@@ -4,7 +4,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
-import android.content.SharedPreferences
 import android.os.IBinder
 import android.os.Message
 import android.os.Messenger
@@ -36,10 +35,6 @@ object PulseManager {
     private const val TAG = "PulseManager"
     private const val SOCKET_NAME = "pulse"
     private const val MAX_PENDING_CLIENTS = 64
-    private const val PREFS_NAME = "settings"
-    private const val PREF_ENABLED = "pulse_enabled"
-    private const val PREF_MIC = "pulse_mic_enabled"
-    private const val PREF_BUFFER = "pulse_buffer_ms"
 
     /** Sink latency bounds in milliseconds; the default matches the old fixed cap. */
     const val DEFAULT_BUFFER_MS = 200
@@ -60,73 +55,54 @@ object PulseManager {
     private val pendingClients = ArrayDeque<ParcelFileDescriptor>()
     private var deliveryScheduled = false
 
-    // Synced from the preference by every context-bearing entry point, so the
-    // context-free [environment] sees the current value.
+    // Supplied by the app through configure()/setters. The module never reads
+    // preferences, and the context-free [environment] sees the current value.
     @Volatile
     private var enabled = true
+    @Volatile
+    private var micEnabled = false
+    @Volatile
+    private var bufferMs = DEFAULT_BUFFER_MS
 
-    private fun preferences(context: Context): SharedPreferences {
-        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        // Keep existing choices when upgrading from the replaced backend.
-        val editor = prefs.edit()
-        for (key in listOf(PREF_ENABLED, PREF_MIC, PREF_BUFFER)) {
-            val legacy = key.replaceFirst("pulse_", "pipewire_")
-            if (!prefs.contains(key) && prefs.contains(legacy)) {
-                if (key == PREF_BUFFER) editor.putInt(key, prefs.getInt(legacy, DEFAULT_BUFFER_MS))
-                else editor.putBoolean(key, prefs.getBoolean(legacy, key == PREF_ENABLED))
-            }
-        }
-        editor.apply()
-        return prefs
+    /** Load the app-owned configuration; does not start or stop audio. */
+    fun configure(enabled: Boolean, micEnabled: Boolean, bufferMs: Int) {
+        this.enabled = enabled
+        this.micEnabled = micEnabled
+        this.bufferMs = bufferMs.coerceIn(MIN_BUFFER_MS, MAX_BUFFER_MS)
     }
 
-    fun isEnabled(context: Context): Boolean {
-        enabled = preferences(context).getBoolean(PREF_ENABLED, true)
-        return enabled
-    }
+    fun isEnabled(): Boolean = enabled
 
-    fun isMicEnabled(context: Context): Boolean =
-        preferences(context).getBoolean(PREF_MIC, false)
+    fun isMicEnabled(): Boolean = micEnabled
 
     /** Sink latency in milliseconds: lower is faster, too low underruns. */
-    fun bufferMs(context: Context): Int =
-        preferences(context)
-            .getInt(PREF_BUFFER, DEFAULT_BUFFER_MS)
-            .coerceIn(MIN_BUFFER_MS, MAX_BUFFER_MS)
+    fun bufferMs(): Int = bufferMs
 
-    /** Persist the preference and apply it: bind the app listener, or stop audio. */
+    /** Apply the enabled preference: bind the app listener, or stop audio. */
     fun setEnabled(context: Context, value: Boolean) {
         val appContext = context.applicationContext
-        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit().putBoolean(PREF_ENABLED, value).apply()
         enabled = value
         if (value) ensureResident(appContext) else releaseHost()
     }
 
     /**
-     * Persist the microphone preference. The core decides at creation time
+     * Apply the microphone preference. The core decides at creation time
      * whether to expose a source, so a running core is restarted to apply it —
      * in place, without touching the listener or the socket.
      */
-    fun setMicEnabled(context: Context, value: Boolean) {
-        val appContext = context.applicationContext
-        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit().putBoolean(PREF_MIC, value).apply()
-        restartCore(appContext)
+    fun setMicEnabled(value: Boolean) {
+        micEnabled = value
+        restartCore()
     }
 
     /**
-     * Persist the sink latency. The core reads it when the sink is created,
+     * Apply the sink latency. The core reads it when the sink is created,
      * so a running core is restarted to apply it — in place, without touching
      * the listener or the socket.
      */
-    fun setBufferMs(context: Context, value: Int) {
-        val appContext = context.applicationContext
-        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putInt(PREF_BUFFER, value.coerceIn(MIN_BUFFER_MS, MAX_BUFFER_MS))
-            .apply()
-        restartCore(appContext)
+    fun setBufferMs(value: Int) {
+        bufferMs = value.coerceIn(MIN_BUFFER_MS, MAX_BUFFER_MS)
+        restartCore()
     }
 
     /**
@@ -137,11 +113,10 @@ object PulseManager {
      * connectable throughout; when no host is bound, the next connection
      * simply reads the current settings.
      */
-    private fun restartCore(context: Context) {
-        val appContext = context.applicationContext
+    private fun restartCore() {
         control.execute {
             val target = synchronized(lock) { messenger } ?: return@execute
-            runCatching { target.send(coreMessage(appContext, PulseService.MSG_RESTART_CORE)) }
+            runCatching { target.send(coreMessage(PulseService.MSG_RESTART_CORE)) }
                 .onFailure { error -> Log.w(TAG, "cannot restart PulseAudio core", error) }
         }
     }
@@ -164,7 +139,7 @@ object PulseManager {
      * Bind only the app-side listener. No service process or audio engine starts.
      */
     fun ensureResident(context: Context) {
-        if (!isEnabled(context)) return
+        if (!enabled) return
         val appContext = context.applicationContext
         synchronized(lock) {
             if (!enabled || listener != null) return
@@ -234,8 +209,8 @@ object PulseManager {
         }
     }
 
-    private fun coreMessage(context: Context, what: Int): Message = Message.obtain(
-        null, what, if (isMicEnabled(context)) 1 else 0, bufferMs(context),
+    private fun coreMessage(what: Int): Message = Message.obtain(
+        null, what, if (micEnabled) 1 else 0, bufferMs,
     )
 
     /** Called under lock. Never perform Binder work while holding the container-launch lock. */
@@ -304,7 +279,7 @@ object PulseManager {
                     val target = Messenger(service)
                     control.execute {
                         synchronized(lock) { if (binding !== this) return@execute }
-                        runCatching { target.send(coreMessage(appContext, PulseService.MSG_CONFIGURE)) }
+                        runCatching { target.send(coreMessage(PulseService.MSG_CONFIGURE)) }
                             .onFailure {
                                 Log.w(TAG, "cannot configure PulseAudio core", it)
                                 synchronized(lock) { if (binding === this) closePendingClients() }

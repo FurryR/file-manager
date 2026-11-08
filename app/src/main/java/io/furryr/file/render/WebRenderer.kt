@@ -2,10 +2,14 @@ package io.furryr.file.render
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Build
+import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.ProgressBar
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -24,13 +28,19 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.viewinterop.AndroidView
+import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.ContentTypes
 import io.furryr.file.core.VFile
+import io.furryr.file.ui.util.BrowseAddress
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 
 private const val ASSET_HOST = "file-manager.local"
 private const val DOCUMENT_PATH = "__document__"
+private const val LOADING_TAG = "web-loading"
 
 /** One page of the WebView's own back/forward list, already display-formatted. */
 data class WebHistoryEntry(val address: String, val title: String?)
@@ -62,7 +72,11 @@ class WebRendererSession(
     var progress by mutableIntStateOf(0)
         internal set
 
-    var loading by mutableStateOf(false)
+    var loading by mutableStateOf(true)
+        internal set
+
+    /** True once the current page produced its first visible frame. */
+    var contentVisible by mutableStateOf(false)
         internal set
 
     var canGoBack by mutableStateOf(false)
@@ -73,6 +87,8 @@ class WebRendererSession(
 
     private var webView: WebView? = null
     private var darkTheme = true
+    /** URLs this session already decided to load itself. */
+    private val approvedNavigations = mutableSetOf<String>()
 
     override val capabilities: RenderCapabilities
         get() = RenderCapabilities(
@@ -89,6 +105,8 @@ class WebRendererSession(
         initialUrl = url
         address = url
         loading = true
+        progress = 0
+        contentVisible = false
         webView?.loadUrl(url)
     }
 
@@ -112,7 +130,11 @@ class WebRendererSession(
 
     override fun refresh(): Boolean {
         // A web tab always owns refresh, even before its view is re-attached.
-        webView?.reload() ?: run { loading = true }
+        webView?.reload() ?: run {
+            loading = true
+            progress = 0
+            contentVisible = false
+        }
         return true
     }
 
@@ -123,6 +145,7 @@ class WebRendererSession(
         canGoForward = false
         loading = false
         progress = 0
+        contentVisible = false
         view.stopLoading()
         view.loadUrl("about:blank")
         view.destroy()
@@ -174,16 +197,85 @@ class WebRendererSession(
                     view: WebView?,
                     request: WebResourceRequest?,
                 ): Boolean {
-                    // Keep every link inside this WebView; update the address
-                    // immediately instead of waiting for onPageStarted.
-                    request?.url?.toString()?.let { updateAddress(it) }
-                    return false
+                    // Only user-facing main-frame navigations are candidates;
+                    // resources and POST submissions stay with the WebView.
+                    if (request == null || !request.isForMainFrame) return false
+                    if (request.method != "GET") return false
+                    val uri = request.url ?: return false
+                    // A local document owns its own pages through ASSET_HOST.
+                    if (document != null && uri.host == ASSET_HOST) return false
+                    if (!BrowseAddress.isWebUrl(uri.toString())) return false
+                    val url = uri.toString()
+                    if (approvedNavigations.remove(url)) return false
+                    // Same-document fragment jumps must not start a request.
+                    val current = view?.url
+                    if (current != null && stripFragment(current) == stripFragment(url)) return false
+                    val target = view ?: return false
+                    // A visible page extension is definitive: load it without
+                    // the probe round-trip.
+                    if (WebUrlFile.hasHtmlExtension(url)) return false
+                    // Everything else is decided by the response, not the name.
+                    // `github.com/user/repo.git` is a page, and an extensionless
+                    // `/download?id=1` may be a PDF: only Content-Type (with
+                    // magic-byte/sniff fallbacks) can tell them apart.
+                    val file = WebUrlFile(url, referer = current)
+                    loading = true
+                    this@WebRendererSession.progress = 0
+                    host.scope.launch {
+                        // A page is recognized from HEAD alone, so the WebView
+                        // fetches it exactly once. A concrete non-HTML type is
+                        // a file and goes to the shared opener pipeline.
+                        val head = withContext(Dispatchers.IO) { file.peek() }
+                        if (head != null && ContentTypes.isHtmlMime(head.mime)) {
+                            target.post {
+                                if (webView !== target) return@post
+                                approvedNavigations += url
+                                target.loadUrl(url)
+                            }
+                            return@launch
+                        }
+                        val concrete = head != null &&
+                            !ContentTypes.isGenericMime(head.mime) &&
+                            // `text/plain` is also what misconfigured servers
+                            // send for HTML: let the body sniff decide.
+                            head.mime != "text/plain"
+                        if (concrete) {
+                            target.post {
+                                if (webView !== target) return@post
+                                loading = false
+                                host.openFile(file)
+                            }
+                            return@launch
+                        }
+                        val content = withContext(Dispatchers.IO) {
+                            file.describe().getOrNull()
+                        }
+                        target.post {
+                            // The tab may have closed or navigated while the
+                            // probe was in flight.
+                            if (webView !== target) return@post
+                            if (content == null || WebUrlFile.isHtml(content, file.name)) {
+                                approvedNavigations += url
+                                target.loadUrl(url)
+                            } else {
+                                loading = false
+                                host.openFile(file, content)
+                            }
+                        }
+                    }
+                    return true
                 }
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                     updateAddress(url)
                     refreshHistory(view)
                     loading = true
+                    this@WebRendererSession.progress = 0
+                    contentVisible = false
+                }
+
+                override fun onPageCommitVisible(view: WebView?, url: String?) {
+                    contentVisible = true
                 }
 
                 override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
@@ -195,6 +287,7 @@ class WebRendererSession(
                     updateAddress(url)
                     refreshHistory(view)
                     loading = false
+                    contentVisible = true
                     view?.let { injectColorScheme(it) }
                 }
             }
@@ -288,12 +381,15 @@ class WebRendererSession(
 
     private fun updateAddress(url: String?) {
         if (url == null) return
+        approvedNavigations.clear()
         val next = displayAddress(url)
         if (next == address) return
         address = next
         // The old page's title must not label the new page while it loads.
         host.updateTitle(null)
     }
+
+    private fun stripFragment(url: String): String = url.substringBefore('#')
 
     /** Turn a WebView URL into what the address bar and history should show. */
     private fun displayAddress(url: String): String {
@@ -330,8 +426,10 @@ class WebRendererFactory : RendererFactory {
         is RenderTarget.Node -> {
             val content = target.content
             val mime = content?.mime ?: ContentTypes.fromName(target.node.name)
-            mime == "text/html" || target.node.name.endsWith(".html", ignoreCase = true) ||
-                target.node.name.endsWith(".htm", ignoreCase = true)
+            ContentTypes.isHtmlMime(mime) ||
+                target.node.name.endsWith(".html", ignoreCase = true) ||
+                target.node.name.endsWith(".htm", ignoreCase = true) ||
+                target.node.name.endsWith(".xhtml", ignoreCase = true)
         }
     }
 
@@ -358,6 +456,8 @@ fun WebContent(
     val surface = MaterialTheme.colorScheme.surface
     val surfaceArgb = surface.toArgb()
     val dark = surface.luminance() < 0.5f
+    val contentVisible = session.contentVisible
+    val spinnerTint = MaterialTheme.colorScheme.primary.toArgb()
     key(session) {
         // The WebView is attached only after this holder has been laid out.
         // Creating Chromium inside the first AndroidView pass can leave the
@@ -377,9 +477,14 @@ fun WebContent(
             },
             update = { host ->
                 host.setBackgroundColor(surfaceArgb)
+                val spinner = host.findViewWithTag<View>(LOADING_TAG)
                 val view = session.currentView
                 if (view != null && view.parent === host) {
                     session.applyTheme(view, dark, surfaceArgb)
+                    spinner?.let {
+                        it.setBackgroundColor(surfaceArgb)
+                        it.visibility = if (contentVisible) View.GONE else View.VISIBLE
+                    }
                 } else if (host.tag == null && host.childCount == 0) {
                     host.tag = Unit
                     host.post {
@@ -395,6 +500,33 @@ fun WebContent(
                             ),
                         )
                         session.applyTheme(web, dark, surfaceArgb)
+                        // A blank WebView must not replace the page background
+                        // while a remote document or a slow page is loading.
+                        // The cover sits above the WebView with the real
+                        // surface colour, so Chromium keeps rendering and its
+                        // first white frame never reaches the screen.
+                        val cover = FrameLayout(host.context).apply {
+                            tag = LOADING_TAG
+                            setBackgroundColor(surfaceArgb)
+                            layoutParams = FrameLayout.LayoutParams(
+                                FrameLayout.LayoutParams.MATCH_PARENT,
+                                FrameLayout.LayoutParams.MATCH_PARENT,
+                            )
+                            addView(
+                                ProgressBar(context).apply {
+                                    isIndeterminate = true
+                                    indeterminateTintList = ColorStateList.valueOf(spinnerTint)
+                                    layoutParams = FrameLayout.LayoutParams(
+                                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                                        Gravity.CENTER,
+                                    )
+                                },
+                            )
+                        }
+                        host.addView(cover)
+                        cover.visibility =
+                            if (session.contentVisible) View.GONE else View.VISIBLE
                     }
                 }
             },

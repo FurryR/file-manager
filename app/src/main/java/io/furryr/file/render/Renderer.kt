@@ -1,6 +1,7 @@
 package io.furryr.file.render
 
 import io.furryr.file.core.ContentInfo
+import io.furryr.file.core.VFile
 import io.furryr.file.core.ViewRef
 import io.furryr.file.core.VNode
 import kotlinx.coroutines.CoroutineScope
@@ -40,6 +41,13 @@ interface RenderHost {
     fun updateCapabilities(capabilities: RenderCapabilities)
     fun reportError(error: Throwable)
     fun requestClose()
+
+    /**
+     * Ask the tab to open [file] through the shared opener/renderer pipeline.
+     * A web page uses this for links whose response is not HTML, so archive,
+     * external and document handling stay in one place.
+     */
+    fun openFile(file: VFile, content: ContentInfo? = null) {}
 }
 
 /** One live renderer instance, owned by a tab entry. */
@@ -100,38 +108,6 @@ object Renderers {
             .toList()
 
     fun resolve(target: RenderTarget): RendererFactory? = candidates(target).firstOrNull()
-}
-
-/**
- * An opener turns a file into a different navigable node (archive -> nested
- * folder, package -> ...). It is not a renderer: it does not draw anything and
- * does not own history.
- */
-interface Opener {
-    val id: String
-    fun supports(node: VNode, content: ContentInfo): Boolean
-    suspend fun open(node: VNode): Result<VNode>
-}
-
-object Openers {
-    private val entries = mutableListOf<Pair<Int, Opener>>()
-
-    @Synchronized
-    fun register(priority: Int, opener: Opener) {
-        entries.removeAll { it.second.id == opener.id }
-        entries += priority to opener
-        entries.sortByDescending { it.first }
-    }
-
-    @Synchronized
-    fun candidates(node: VNode, content: ContentInfo): List<Opener> =
-        entries.asSequence()
-            .map { it.second }
-            .filter { it.supports(node, content) }
-            .toList()
-
-    fun resolve(node: VNode, content: ContentInfo): Opener? =
-        candidates(node, content).firstOrNull()
 }
 
 /** Optional helper shared by renderers that need a stable node identity. */

@@ -1,5 +1,14 @@
-package io.furryr.file.core
+package io.furryr.file.opener
 
+import io.furryr.file.core.ContentInfo
+import io.furryr.file.core.ContentTypes
+import io.furryr.file.core.DirectoryCapabilities
+import io.furryr.file.core.DirectoryStats
+import io.furryr.file.core.NodeRef
+import io.furryr.file.core.VFile
+import io.furryr.file.core.VFolder
+import io.furryr.file.core.VNode
+import io.furryr.file.core.ViewRef
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
 import io.furryr.file.core.source.FileSource
@@ -27,6 +36,26 @@ interface ArchiveSource {
 }
 
 /**
+ * Flatten the backing file's own reference with the container path, so a zip
+ * inside a zip becomes one longer path. The root may be a Vfs URI or a URL:
+ * a remote archive is the same kind of view, only its bytes come from HTTP.
+ */
+private fun archiveViewRef(backing: VFile, path: List<String>): ViewRef.Node =
+    when (val base = backing.ref()) {
+        is ViewRef.Node -> ViewRef.Node(
+            root = base.root,
+            viewId = "archive",
+            path = base.path + path,
+        )
+        is ViewRef.Url -> ViewRef.Node(
+            root = NodeRef.Url(base.url),
+            viewId = "archive",
+            path = path,
+        )
+        is ViewRef.Session -> error("a session cannot back an archive view")
+    }
+
+/**
  * Folder inside a container. [backing] is the file that was opened (which may
  * itself live inside another [ArchiveFolder]); [path] is relative to the
  * archive root. There is no synthetic URI scheme: identity is [ViewRef.Node] with viewId = "archive".
@@ -41,7 +70,7 @@ class ArchiveFolder(
     override val parent: VFolder?
         get() = if (path.isEmpty()) backing.parent else ArchiveFolder(backing, source, path.dropLast(1))
 
-    override fun ref(): ViewRef.Node = (backing.ref() as ViewRef.Node).archivePath(path)
+    override fun ref(): ViewRef.Node = archiveViewRef(backing, path)
 
     override suspend fun list(): Result<List<FileEntry>> = listNodes().map { nodes ->
         nodes.map { node ->
@@ -125,7 +154,7 @@ class ArchiveFile(
     override val parent: VFolder
         get() = ArchiveFolder(backing, source, path.dropLast(1))
 
-    override fun ref(): ViewRef.Node = (backing.ref() as ViewRef.Node).archivePath(path)
+    override fun ref(): ViewRef.Node = archiveViewRef(backing, path)
 
     override suspend fun stat(): Result<ProviderStat> = Result.success(
         ProviderStat(

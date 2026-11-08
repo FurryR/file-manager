@@ -11,6 +11,14 @@ import android.os.Environment
 val DefaultPath: String
     get() = Environment.getExternalStorageDirectory().absolutePath
 
+/**
+ * Tab location for the home page. It is not a Vfs scheme: the UI shows the
+ * home screen before any provider is resolved, so Vfs routing stays strict.
+ */
+const val HomePath = "home://"
+
+fun isHomePath(path: String): Boolean = path == HomePath
+
 const val ProviderAuthority = "io.furryr.file.provider"
 
 /** Authority of [io.furryr.file.forward.ForwardFileProvider]. */

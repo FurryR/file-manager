@@ -126,16 +126,6 @@ internal fun validName(name: String): String {
     return name
 }
 
-/**
- * Resolve a stored connection by id, or (for SSH) by its readable
- * `user@host` authority (with `:port` when it is not 22). Ids are kept as a fallback so older links and
- * terminal session targets keep working.
- */
-internal fun resolveRemoteReference(kind: RemoteKind, reference: String): RemoteLocation? {
-    val locations = RemoteLocationStore.all().filter { it.kind == kind }
-    return locations.firstOrNull { it.id == reference }
-        ?: locations.firstOrNull { it.pathAuthority == reference }
-}
 internal fun parentPath(path: String): String = path.substringBeforeLast('/').ifEmpty { "/" }
 internal fun mutablePath(path: String): String = normalizeRemotePath(path).also {
     require(it != "/") { "Cannot modify a remote filesystem root" }

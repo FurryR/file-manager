@@ -3,7 +3,6 @@ package io.furryr.file.provider
 import io.furryr.file.core.*
 
 import io.furryr.file.provider.model.FtpServer
-import android.content.Context
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
@@ -26,14 +25,12 @@ import java.io.InputStream
  *
  * Maps `ftp://<host>/<path>` URIs to remote paths on a registered server.
  * The host segment is used as the routing key — the server connection
- * (port, credentials) is stored in [FtpDatabase] keyed by host.
+ * (port, credentials) is supplied by the app through [FtpServerSource].
  * `ftp:///` lists all registered servers.
  *
  * ## Usage
  * ```kotlin
- * val db = FtpProvider.getDatabase()
- * db.insert(host = "192.168.1.1", name = "NAS", port = 21,
- *           username = "user", password = "pass")
+ * // The app registers servers in its own store and passes the source to init().
  * // Then access files via: ftp://192.168.1.1/srv/ftp/file.txt
  * ```
  */
@@ -51,18 +48,14 @@ object FtpProvider : FileProvider {
     private const val TIMEOUT_MS = 30_000
     private const val COPY_BUFFER_SIZE = 256 * 1024
 
-    private lateinit var db: FtpDatabase
-    private lateinit var appContext: Context
+    private lateinit var servers: FtpServerSource
 
     private val connLock = Any()
     private val clients = mutableMapOf<String, FTPClient>()
 
-    fun init(context: Context) {
-        appContext = context.applicationContext
-        db = FtpDatabase(appContext)
+    fun init(servers: FtpServerSource) {
+        this.servers = servers
     }
-
-    fun getDatabase(): FtpDatabase = db
 
     override fun isAvailable(): Boolean = true
 
@@ -82,7 +75,7 @@ object FtpProvider : FileProvider {
 
     override suspend fun list(path: String): Result<List<FileEntry>> = runCatching {
         if (path == "/") {
-            return@runCatching db.getAll().map { server ->
+            return@runCatching servers.ftpServers().map { server ->
                 FileEntry(
                     name = server.name,
                     path = "ftp://${server.host}/",
@@ -262,7 +255,7 @@ object FtpProvider : FileProvider {
         val slashIdx = trimmed.indexOf('/')
         val host = if (slashIdx >= 0) trimmed.substring(0, slashIdx) else trimmed
         val remotePath = if (slashIdx >= 0) trimmed.substring(slashIdx) else "/"
-        val server = db.findByHost(host)
+        val server = servers.ftpServer(host)
             ?: throw IllegalStateException("FTP server '$host' not registered")
         return server to remotePath
     }

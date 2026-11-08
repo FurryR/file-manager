@@ -35,7 +35,7 @@ object SAFProvider : FileProvider {
         ProviderFeature.RENAME, ProviderFeature.STREAM_COPY,
     )
 
-    private lateinit var db: SafDatabase
+    private lateinit var locations: SafLocationSource
 
     override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
         if (path.trim('/').isEmpty()) return DirectoryCapabilities()
@@ -43,12 +43,10 @@ object SAFProvider : FileProvider {
     }
         private lateinit var appContext: Context
 
-            fun init(context: Context) {
+            fun init(context: Context, locations: SafLocationSource) {
                 appContext = context.applicationContext
-                db = SafDatabase(appContext)
+                this.locations = locations
             }
-
-            fun getDatabase(): SafDatabase = db
 
             override fun isAvailable(): Boolean = true
             override suspend fun connect(): Result<Unit> = Result.success(Unit)
@@ -57,7 +55,7 @@ object SAFProvider : FileProvider {
             override suspend fun list(path: String): Result<List<FileEntry>> = runCatching {
                 // saf:/// root → list all locations by their hex ID
                 if (path == "/") {
-                    return@runCatching db.getAll().map { loc ->
+                    return@runCatching locations.safLocations().map { loc ->
                         FileEntry(
                             name = loc.hexId,
                             path = "saf://${loc.hexId}/",
@@ -277,7 +275,7 @@ object SAFProvider : FileProvider {
                         val slashIdx = trimmed.indexOf('/')
                         val hexId = if (slashIdx >= 0) trimmed.substring(0, slashIdx) else trimmed
                         val relPath = if (slashIdx >= 0) trimmed.substring(slashIdx + 1) else ""
-                        val loc = db.findByHexId(hexId)
+                        val loc = locations.safLocation(hexId)
                         ?: throw IllegalStateException("SAF location $hexId not found")
                         return ResolvedLoc(loc, relPath)
                 }

@@ -68,6 +68,7 @@ import io.furryr.file.AppLocale
 import io.furryr.file.agent.SessionManager
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.pulse.PulseManager
+import io.furryr.file.settings.PulseSettings
 import io.furryr.file.ui.theme.FileManagerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -136,9 +137,9 @@ private fun SettingsMainPage(
     var dockerHubUrl by remember { mutableStateOf(prefs.getString("docker_hub_url", "https://registry-1.docker.io") ?: "https://registry-1.docker.io") }
     var showDockerHubKeyDialog by remember { mutableStateOf(false) }
     var dockerHubKey by remember { mutableStateOf(prefs.getString("docker_hub_key", "") ?: "") }
-    var pulseEnabled by remember { mutableStateOf(PulseManager.isEnabled(context)) }
-    var pulseMicEnabled by remember { mutableStateOf(PulseManager.isMicEnabled(context)) }
-    var pulseBufferMs by remember { mutableStateOf(PulseManager.bufferMs(context)) }
+    var pulseEnabled by remember { mutableStateOf(PulseSettings.isEnabled(context)) }
+    var pulseMicEnabled by remember { mutableStateOf(PulseSettings.isMicEnabled(context)) }
+    var pulseBufferMs by remember { mutableStateOf(PulseSettings.bufferMs(context)) }
     var showPulseBufferDialog by remember { mutableStateOf(false) }
     var terminalFont by remember { mutableStateOf(prefs.getString("terminal_font", "") ?: "") }
     var showTerminalFontSizeDialog by remember { mutableStateOf(false) }
@@ -290,7 +291,7 @@ private fun SettingsMainPage(
                 checked = pulseEnabled,
                 onCheckedChange = { enabled ->
                     pulseEnabled = enabled
-                    PulseManager.setEnabled(context, enabled)
+                    PulseSettings.setEnabled(context, enabled)
                 },
             )
             SettingsDivider()
@@ -309,7 +310,7 @@ private fun SettingsMainPage(
                             arrayOf(android.Manifest.permission.RECORD_AUDIO), 200
                         )
                     }
-                    PulseManager.setMicEnabled(context, enabled)
+                    PulseSettings.setMicEnabled(context, enabled)
                 },
             )
             SettingsDivider()
@@ -640,7 +641,7 @@ private fun SettingsMainPage(
                 pulseBufferMs = text.trim().toIntOrNull()
                     ?.coerceIn(PulseManager.MIN_BUFFER_MS, PulseManager.MAX_BUFFER_MS)
                     ?: pulseBufferMs
-                PulseManager.setBufferMs(context, pulseBufferMs)
+                PulseSettings.setBufferMs(context, pulseBufferMs)
                 showPulseBufferDialog = false
             },
         )

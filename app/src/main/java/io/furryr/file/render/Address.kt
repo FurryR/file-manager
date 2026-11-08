@@ -10,9 +10,10 @@ data class AddressCrumb(
 )
 
 /**
- * Address-bar projection of the navigator. There is intentionally no text
- * parser and no synthetic URI here: entering a container is represented by a
- * deeper ancestry, and editing the address bar only accepts a real Vfs path.
+ * Address-bar projection of the navigator. There is intentionally no synthetic
+ * URI here: entering a container is represented by a deeper ancestry. Typed
+ * addresses are parsed by [LocationAddress], which resolves a plain Vfs path by
+ * descending through registered openers.
  */
 fun Navigator.address(): List<AddressCrumb> =
     ancestry.map { AddressCrumb(label = it.name, node = it) }

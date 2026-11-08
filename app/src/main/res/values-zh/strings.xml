@@ -5,6 +5,15 @@
     <string name="drawer_title">文件</string>
     <string name="nav_home">内部存储</string>
     <string name="nav_root">根目录</string>
+    <string name="home_title">首页</string>
+    <string name="home_empty">暂无内容</string>
+    <string name="home_recent_files">最近文件</string>
+    <string name="home_recent_locations">最近位置</string>
+    <string name="home_bookmarks">书签</string>
+    <string name="home_clear">清除</string>
+    <string name="bookmark_add">添加书签</string>
+    <string name="bookmark_remove">移除书签</string>
+    <string name="toast_location_missing">位置已失效</string>
     <string name="nav_settings">设置</string>
     <string name="settings">设置</string>
     <string name="settings_other">其他</string>
@@ -104,6 +113,10 @@
     <string name="operation_notification_channel_name">操作进度</string>
     <string name="copying_notification_text">正在从 %1$s 复制文件</string>
     <string name="moving_notification_text">正在从 %1$s 移动文件</string>
+
+    <string name="web_transfer_channel_name">下载</string>
+    <string name="web_download_title">正在下载文件</string>
+    <string name="web_download_on_demand_title">正在按需下载文件</string>
     <string name="drawer_group_local">本地</string>
     <string name="drawer_group_network">网络</string>
     <string name="drawer_group_container">容器</string>

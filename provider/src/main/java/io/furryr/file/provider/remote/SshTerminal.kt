@@ -1,6 +1,7 @@
 package io.furryr.file.provider.remote
 
 import com.jcraft.jsch.ChannelShell
+import io.furryr.file.provider.RemoteLocationSource
 import java.io.Closeable
 import java.io.InputStream
 import java.io.OutputStream
@@ -87,9 +88,19 @@ class SshShell internal constructor(
 }
 
 object SshTerminals {
-    fun find(id: String): RemoteLocation =
-        (resolveRemoteReference(RemoteKind.SSH, id) ?: error("Remote connection no longer exists; edit the location"))
-            .also { require(it.kind == RemoteKind.SSH) { "Remote connection is not SSH" } }
+    private lateinit var locations: RemoteLocationSource
+
+    /** App supplies the connection records; the provider never reads a store. */
+    fun configure(locations: RemoteLocationSource) {
+        this.locations = locations
+    }
+
+    fun find(id: String): RemoteLocation {
+        val sshLocations = locations.remoteLocations().filter { it.kind == RemoteKind.SSH }
+        return (sshLocations.firstOrNull { it.id == id }
+            ?: sshLocations.firstOrNull { it.pathAuthority == id }
+            ?: error("Remote connection no longer exists; edit the location"))
+    }
 
     fun open(location: RemoteLocation, startPath: String?, rows: Int, cols: Int): SshShell {
         require(location.kind == RemoteKind.SSH) { "Remote connection is not SSH" }

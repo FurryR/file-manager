@@ -62,7 +62,7 @@ object ProotRunner {
         (listOfNotNull(
             resolverMount(context),
             hubProfileMount(context),
-            if (PulseManager.isEnabled(context)) pulseMount(context) else null,
+            if (PulseManager.isEnabled()) pulseMount(context) else null,
         ) + waylandMounts(context) + container.bindMounts)
             .filter { File(it.srcAndroidPath).exists() }
             .map { it.srcAndroidPath to it.dstContainerPath }
@@ -153,7 +153,7 @@ object ProotRunner {
         listOfNotNull(
             BindMount(tempSubdir(context, container, "guest").absolutePath, "/tmp"),
             BindMount(tempSubdir(context, container, "run").absolutePath, "/run"),
-            if (PulseManager.isEnabled(context)) pulseMount(context) else null,
+            if (PulseManager.isEnabled()) pulseMount(context) else null,
             resolverMount(context),
             hubProfileMount(context),
         ) + waylandMounts(context)

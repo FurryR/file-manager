@@ -3,7 +3,6 @@ package io.furryr.file.provider
 import io.furryr.file.core.*
 
 import io.furryr.file.provider.model.SftpServer
-import android.content.Context
 import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
@@ -28,8 +27,8 @@ import java.util.Vector
  *
  * Maps `sftp://<host>/<path>` URIs to remote paths on a registered server,
  * mirroring [FtpProvider]. Connection parameters (port, credentials) are
- * stored in [SftpDatabase] keyed by host. `sftp:///` lists all registered
- * servers.
+ * supplied by the app through [SftpServerSource]. `sftp:///` lists all
+ * registered servers.
  *
  * Transport is JSch (com.github.mwiede:jsch). A [Session] is cached per host;
  * each operation opens a fresh [ChannelSftp] on that session, so concurrent
@@ -49,19 +48,15 @@ object SftpProvider : FileProvider {
     private const val TIMEOUT_MS = 30_000
     private const val COPY_BUFFER_SIZE = 256 * 1024
 
-    private lateinit var db: SftpDatabase
-    private lateinit var appContext: Context
+    private lateinit var servers: SftpServerSource
 
     private val jsch = JSch()
     private val connLock = Any()
     private val sessions = mutableMapOf<String, Session>()
 
-    fun init(context: Context) {
-        appContext = context.applicationContext
-        db = SftpDatabase(appContext)
+    fun init(servers: SftpServerSource) {
+        this.servers = servers
     }
-
-    fun getDatabase(): SftpDatabase = db
 
     override fun isAvailable(): Boolean = true
 
@@ -81,7 +76,7 @@ object SftpProvider : FileProvider {
 
     override suspend fun list(path: String): Result<List<FileEntry>> = runCatching {
         if (path == "/") {
-            return@runCatching db.getAll().map { server ->
+            return@runCatching servers.sftpServers().map { server ->
                 FileEntry(
                     name = server.name,
                     path = "sftp://${server.host}/",
@@ -280,7 +275,7 @@ object SftpProvider : FileProvider {
         val slashIdx = trimmed.indexOf('/')
         val host = if (slashIdx >= 0) trimmed.substring(0, slashIdx) else trimmed
         val remotePath = if (slashIdx >= 0) trimmed.substring(slashIdx) else "/"
-        val server = db.findByHost(host)
+        val server = servers.sftpServer(host)
             ?: throw IllegalStateException("SFTP server '$host' not registered")
         return server to remotePath
     }

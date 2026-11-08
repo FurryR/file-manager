@@ -8,7 +8,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import io.furryr.file.provider.LocationsRepository
+import io.furryr.file.store.LocationsRepository
 import io.furryr.file.provider.model.FtpServer
 import io.furryr.file.provider.model.LocalLocation
 import io.furryr.file.provider.model.SafLocation

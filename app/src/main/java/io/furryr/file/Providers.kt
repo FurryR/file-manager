@@ -10,22 +10,26 @@ import io.furryr.file.container.ContainerRuntime
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.HubActions
 import io.furryr.file.daemon.HubLocation
+import io.furryr.file.home.HomeStore
 import io.furryr.file.provider.LocalProvider
-import io.furryr.file.provider.LocationsRepository
 import io.furryr.file.provider.DocumentFileProvider
 import io.furryr.file.provider.FtpProvider
-import io.furryr.file.provider.LocalLocationStore
-import io.furryr.file.provider.WebLocationStore
 import io.furryr.file.provider.SAFProvider
 import io.furryr.file.provider.SftpProvider
 import io.furryr.file.core.Vfs
 import io.furryr.file.provider.remote.RemoteProviders
-import io.furryr.file.render.ArchiveOpener
-import io.furryr.file.render.DefaultNodeService
+import io.furryr.file.provider.remote.SshTerminals
+import io.furryr.file.opener.ArchiveOpener
 import io.furryr.file.render.DirectoryRendererFactory
-import io.furryr.file.render.Openers
+import io.furryr.file.opener.Openers
 import io.furryr.file.render.Renderers
 import io.furryr.file.render.WebRendererFactory
+import io.furryr.file.render.WebTransfers
+import io.furryr.file.settings.PulseSettings
+import io.furryr.file.store.LocalLocationStore
+import io.furryr.file.store.LocationStores
+import io.furryr.file.store.LocationsRepository
+import io.furryr.file.store.WebLocationStore
 
 private var runtimeListenerInstalled = false
 private var fileProvidersInstalled = false
@@ -43,9 +47,13 @@ fun installFileProviders(context: Context) {
     val prefs = appContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
     DaemonManager.init(appContext)
+    LocationStores.init(appContext)
     LocalLocationStore.init(appContext)
     WebLocationStore.init(appContext)
+    HomeStore.init(appContext)
+    WebTransfers.init(appContext)
     AgentSettings.install(appContext)
+    PulseSettings.install(appContext)
     DaemonManager.configure(
         rootEnabled = prefs.getBoolean("root_enabled", false),
         shellEnabled = prefs.getBoolean("shell_enabled", false),
@@ -71,13 +79,13 @@ fun installFileProviders(context: Context) {
     Vfs.register(local)
     ContainerProvider.init(appContext)
     Vfs.register(ContainerProvider)
-    DocumentFileProvider.init(appContext)
+    DocumentFileProvider.init(appContext, LocationStores)
     Vfs.register("document", DocumentFileProvider)
-    SAFProvider.init(appContext)
+    SAFProvider.init(appContext, LocationStores)
     Vfs.register("saf", SAFProvider)
-    FtpProvider.init(appContext)
+    FtpProvider.init(LocationStores)
     Vfs.register("ftp", FtpProvider)
-    SftpProvider.init(appContext)
+    SftpProvider.init(LocationStores)
     Vfs.register("sftp", SftpProvider)
     HereNavigation.install(appContext)
     HubActions.locationTargets = {
@@ -85,15 +93,16 @@ fun installFileProviders(context: Context) {
             .filter { it.kind != "local" }
             .map { HubLocation(kind = it.kind, label = it.title, root = it.root) }
     }
-    RemoteProviders.install(appContext)
-    RemoteProviders.providers(appContext).forEach {
+    RemoteProviders.providers(appContext.cacheDir, LocationStores).forEach {
         Vfs.register(it.scheme, it)
     }
+    SshTerminals.configure(LocationStores)
     // Container openers and renderers are Kotlin-side; they never touch a
     // daemon API. The list screen is the shared directory renderer.
-    Openers.register(100, ArchiveOpener(appContext))
+    Openers.register(100, ArchiveOpener(appContext.cacheDir))
     Renderers.register(10, DirectoryRendererFactory())
     Renderers.register(20, WebRendererFactory())
-    AgentEnvironment.nodeService = DefaultNodeService(appContext)
+    OpenRoutes.install()
+    AgentEnvironment.nodeService = DefaultNodeService()
     fileProvidersInstalled = true
 }

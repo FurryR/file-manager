@@ -11,6 +11,14 @@ import io.furryr.file.core.source.OpenMode
 interface NodeService {
     suspend fun resolve(ref: ViewRef): Result<VNode>
 
+    /**
+     * Resolve [path] from an already resolved [root], entering any intermediate
+     * file through the opener route. Callers that already hold the root (for
+     * example an archive detected by a path walk) use this to avoid a second
+     * provider stat.
+     */
+    suspend fun resolveFrom(root: VNode, path: List<String>): Result<VNode>
+
     suspend fun list(ref: ViewRef): Result<List<VNode>> = runCatching {
         val folder = resolve(ref).getOrThrow() as? VFolder
             ?: error("not a folder: $ref")

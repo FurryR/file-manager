@@ -80,7 +80,8 @@ fun TitleBlock(
     fun submit() {
         val target = field.text.trim()
         editing = false
-        if (target.isNotEmpty() && target != displayPath) onNavigate(target)
+        // An empty submission is meaningful: it returns to the home page.
+        if (target != displayPath) onNavigate(target)
     }
 
     BackHandler(enabled = editing) { editing = false }

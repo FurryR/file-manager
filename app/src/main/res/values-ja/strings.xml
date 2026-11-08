@@ -5,6 +5,15 @@
     <string name="drawer_title">File</string>
     <string name="nav_home">内部ストレージ</string>
     <string name="nav_root">ルート /</string>
+    <string name="home_title">ホーム</string>
+    <string name="home_empty">まだ何もありません</string>
+    <string name="home_recent_files">最近のファイル</string>
+    <string name="home_recent_locations">最近の場所</string>
+    <string name="home_bookmarks">ブックマーク</string>
+    <string name="home_clear">クリア</string>
+    <string name="bookmark_add">ブックマークに追加</string>
+    <string name="bookmark_remove">ブックマークを削除</string>
+    <string name="toast_location_missing">場所は利用できません</string>
     <string name="nav_settings">設定</string>
     <string name="settings">設定</string>
     <string name="settings_other">その他</string>
@@ -104,6 +113,10 @@
     <string name="operation_notification_channel_name">操作の進行状況</string>
     <string name="copying_notification_text">%1$s からファイルをコピー中</string>
     <string name="moving_notification_text">%1$s からファイルを移動中</string>
+
+    <string name="web_transfer_channel_name">ダウンロード</string>
+    <string name="web_download_title">ファイルをダウンロード中</string>
+    <string name="web_download_on_demand_title">ファイルをオンデマンドでダウンロード中</string>
 
     <!-- Drawer groups -->
     <string name="drawer_group_local">ローカル</string>

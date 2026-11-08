@@ -1,6 +1,6 @@
 package io.furryr.file.provider.remote
 
-import android.content.Context
+import io.furryr.file.provider.RemoteLocationSource
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
@@ -25,22 +25,26 @@ import java.io.InputStream
 import java.util.concurrent.atomic.AtomicLong
 
 object RemoteProviders {
-    fun install(context: Context) {
-        RemoteLocationStore.init(context.applicationContext)
-    }
-
-    fun providers(context: Context): List<FileProvider> {
-        val appContext = context.applicationContext
-        return RemoteKind.entries.map { kind -> RemoteProvider(appContext, kind) }
-    }
+    fun providers(cacheDir: File, locations: RemoteLocationSource): List<FileProvider> =
+        RemoteKind.entries.map { kind -> RemoteProvider(cacheDir, kind, locations) }
 
     suspend fun verify(location: RemoteLocation): Result<Unit> = runInterruptible(Dispatchers.IO) {
         runCatching { location.validate(); backend(location).list(normalizeRemotePath(location.basePath)); Unit }
     }
+
+    /** Drop live SSH resources for a connection the app removed or edited. */
+    fun forget(id: String) {
+        SshControls.close(id)
+        SshConnections.disconnect(id)
+    }
 }
 
 /** Both remote protocols share complete file-source and cross-server copy semantics. */
-private class RemoteProvider(private val context: Context, private val kind: RemoteKind) : FileProvider {
+private class RemoteProvider(
+    private val cacheDir: File,
+    private val kind: RemoteKind,
+    private val locations: RemoteLocationSource,
+) : FileProvider {
     override val scheme get() = kind.scheme
     override val authority: String? = null
     override val label get() = if (kind == RemoteKind.ALIST) "AList" else "SSH commands"
@@ -56,7 +60,7 @@ private class RemoteProvider(private val context: Context, private val kind: Rem
     }
 
     override suspend fun list(path: String): Result<List<FileEntry>> = io {
-        if (path == "/") RemoteLocationStore.all().filter { it.kind == kind }.map {
+        if (path == "/") locations.remoteLocations().filter { it.kind == kind }.map {
             // The connection list shows the same address the paths use, so the
             // folder name matches what the agent and the path bar display.
             val label = if (kind == RemoteKind.SSH) it.pathAuthority else it.name
@@ -193,14 +197,15 @@ private class RemoteProvider(private val context: Context, private val kind: Rem
         } finally { staged.delete() }
     }.flowOn(Dispatchers.IO)
 
-    private fun newCache(): File = File.createTempFile("remote-", ".stage", context.cacheDir)
+    private fun newCache(): File = File.createTempFile("remote-", ".stage", cacheDir)
     private fun resolve(path: String): Pair<RemoteLocation, String> {
         require(path != "/") { "Select a remote connection first" }
         val inner = path.trimStart('/')
         val authority = inner.substringBefore('/')
-        val location = resolveRemoteReference(kind, authority)
+        val candidates = locations.remoteLocations().filter { it.kind == kind }
+        val location = candidates.firstOrNull { it.id == authority }
+            ?: candidates.firstOrNull { it.pathAuthority == authority }
             ?: error("Remote connection $authority no longer exists; edit the location")
-        require(location.kind == kind) { "Remote protocol does not match this connection" }
         return location to normalizeRemotePath(if ('/' in inner) "/" + inner.substringAfter('/') else "/")
     }
     private suspend fun <T> io(block: () -> T): Result<T> = runInterruptible(Dispatchers.IO) { runCatching(block) }

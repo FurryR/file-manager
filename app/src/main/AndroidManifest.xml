@@ -98,6 +98,11 @@
             android:foregroundServiceType="specialUse" />
 
         <service
+            android:name=".render.WebTransferService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse" />
+
+        <service
             android:name=".pulse.PulseService"
             android:exported="false"
             android:foregroundServiceType="microphone"

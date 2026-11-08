@@ -12,6 +12,8 @@ platform services and calls the library.
 | `agent/` | Session/PTY bridge, terminal, container wizard, settings, path utils |
 | `forward/` | `ForwardFileProvider` + per-process share-token signing |
 | `model/` | `Models.kt`, `LocationAddress.kt`, `ErrorState.kt` |
+| `settings/` | `PulseSettings.kt` — app-owned PulseAudio preference store |
+| `store/` | Location stores + `LocationStores` + `LocationsRepository` (all persistence) |
 | `ui/components/` | `BottomToolbar.kt`, `TopBarContent.kt`, `FileDrawer.kt`, `Dialogs.kt` |
 | `ui/screens/` | `FileListScreen.kt`, `SettingsActivity.kt`, `LicensesScreen.kt` |
 | `ui/theme/` | `FileManagerTheme.kt` (Material3 dark/light), `Color.kt` (palettes + AMOLED canvas), `PaletteStore.kt` |
@@ -20,7 +22,9 @@ platform services and calls the library.
 > The VFS abstraction lives in `:core`; protocol providers (Local/FTP/SFTP/
 > SAF/remote) live in `:provider`; containers and the single `ContainerProvider`
 > live in `:container`; daemon IPC lives in `:daemon`; the hub lives in `:hub`.
-> `Providers.kt` only wires platform services.
+> `Providers.kt` only wires platform services. All location persistence
+> (SQLite, SharedPreferences, encrypted files) lives in `store/` and is passed
+> to providers through the `LocationSources.kt` interfaces.
 
 ## WHERE TO LOOK
 
@@ -35,6 +39,7 @@ platform services and calls the library.
 - **Terminal panel**: `TerminalSheet.kt` — bottom sheet with terminals; `RuntimeForegroundService.kt` keeps sessions and container daemons alive
 - **Exec/PTY**: `:daemon/process/ExecService.kt` — `CommandSpec` → `ProcessChannel` (one path for terminal + command exec)
 - **Native daemon entry**: `:daemon/DaemonManager.kt` — starts `libfiledaemon.so` from `nativeLibraryDir`
+- **Add a location store**: implement a `LocationSources.kt` interface in `store/`, wire it through `LocationStores.init` and the matching provider `init()`
 
 ## CONVENTIONS
 

@@ -73,6 +73,7 @@ import kotlinx.coroutines.withContext
 import android.util.Log
 import android.content.ClipData
 import android.view.View
+import io.furryr.file.forward.ForwardFacts
 import io.furryr.file.forward.ForwardFileProvider
 import androidx.compose.foundation.draganddrop.dragAndDropSource
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -121,6 +122,9 @@ fun FileListScreen(
     onDirectoryNodeClick: ((VFolder, FileEntry) -> Unit)? = null,
     onFileNodeClick: ((VFile, FileEntry) -> Unit)? = null,
     onLongPress: (FileEntry) -> Unit,
+    /** A file open (archive indexing, remote probe) is in flight. */
+    opening: Boolean = false,
+    onCancelOpening: () -> Unit = {},
     selectionMode: Boolean = false,
     selectedPaths: Set<String> = emptySet(),
     onToggleSelection: (FileEntry) -> Unit = {},
@@ -134,10 +138,14 @@ fun FileListScreen(
     var isRefreshing by remember { mutableStateOf(false) }
     var showSpinner by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
+    // The same overlay covers a slow file open (zip index, remote probe),
+    // after the same 300 ms grace period as a directory listing.
+    var showOpeningSpinner by remember { mutableStateOf(false) }
     var loadedPath by remember { mutableStateOf<String?>(null) }
     var loadedCapabilities by remember { mutableStateOf(DirectoryCapabilities()) }
+    val spinnerVisible = showSpinner || showOpeningSpinner
     val loadingScrimAlpha by animateFloatAsState(
-        targetValue = if (showSpinner) 0.32f else 0f,
+        targetValue = if (spinnerVisible) 0.32f else 0f,
         animationSpec = tween(durationMillis = 150),
         label = "loadingScrimAlpha"
     )
@@ -151,6 +159,7 @@ fun FileListScreen(
     val currentOnCapabilitiesChange by rememberUpdatedState(onCapabilitiesChange)
     val currentOnNavigationLoaded by rememberUpdatedState(onNavigationLoaded)
     val currentOnNavigationCancelled by rememberUpdatedState(onNavigationCancelled)
+    val currentOnCancelOpening by rememberUpdatedState(onCancelOpening)
     val currentOnEntriesChange by rememberUpdatedState(onEntriesChange)
     val listState = rememberLazyListState()
     val filteredEntries = remember(entries, filterText) {
@@ -278,6 +287,15 @@ fun FileListScreen(
         isRefreshing = false
         currentOnCapabilitiesChange(loadedCapabilities)
         currentOnNavigationCancelled()
+    }
+
+    LaunchedEffect(opening) {
+        if (!opening) {
+            showOpeningSpinner = false
+            return@LaunchedEffect
+        }
+        delay(300)
+        showOpeningSpinner = true
     }
 
     LaunchedEffect(folderOverride, path, refreshToken, animationToken, sortMode, sortReverse) {
@@ -410,12 +428,12 @@ fun FileListScreen(
                 }
             }
         }
-        if (isLoading) {
+        if (isLoading || opening) {
             val scrimColor = MaterialTheme.colorScheme.scrim
             Box(
                 Modifier.fillMaxSize()
                     .drawBehind {
-                        if (showSpinner) drawRect(scrimColor.copy(alpha = loadingScrimAlpha))
+                        if (spinnerVisible) drawRect(scrimColor.copy(alpha = loadingScrimAlpha))
                     }
                     .pointerInput(Unit) {
                         awaitPointerEventScope {
@@ -426,7 +444,7 @@ fun FileListScreen(
                     }
             )
         }
-        if (showSpinner) {
+        if (spinnerVisible) {
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier.fillMaxSize()
@@ -434,7 +452,10 @@ fun FileListScreen(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(modifier = Modifier.size(36.dp))
                     Spacer(Modifier.padding(vertical = 4.dp))
-                    TextButton(onClick = ::cancelLoading) {
+                    TextButton(onClick = {
+                        if (opening) currentOnCancelOpening()
+                        if (isLoading) cancelLoading()
+                    }) {
                         Text(stringResource(R.string.cancel))
                     }
                 }
@@ -584,7 +605,10 @@ private fun FileRow(
                             ClipData.newUri(
                                 context.contentResolver,
                                 entry.name,
-                                ForwardFileProvider.buildUri(entry.path),
+                                ForwardFileProvider.buildUri(
+                                    entry.path,
+                                    facts = ForwardFacts(entry.name, entry.size),
+                                ),
                             )
                         }
                         startTransfer(DragAndDropTransferData(

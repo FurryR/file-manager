@@ -1,38 +1,33 @@
-package io.furryr.file.provider
+package io.furryr.file.store
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.net.Uri
-import io.furryr.file.provider.model.WebLocation
+import io.furryr.file.provider.model.LocalLocation
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
-/**
- * Persists web pages pinned in the drawer's network group. These are links, not
- * filesystem locations: they open in the web renderer instead of a provider.
- */
-object WebLocationStore {
+/** Persists user-pinned local filesystem locations shown in the drawer. */
+object LocalLocationStore {
     private const val KEY = "items"
-    private val schemes = setOf("http", "https")
     private lateinit var prefs: SharedPreferences
 
     @Synchronized
     fun init(context: Context) {
-        prefs = context.applicationContext.getSharedPreferences("web_locations", Context.MODE_PRIVATE)
+        prefs = context.applicationContext.getSharedPreferences("local_locations", Context.MODE_PRIVATE)
     }
 
     @Synchronized
-    fun all(): List<WebLocation> {
+    fun all(): List<LocalLocation> {
         val raw = prefs.getString(KEY, null) ?: return emptyList()
         return runCatching {
             val records = JSONArray(raw)
             (0 until records.length()).map { index ->
                 records.getJSONObject(index).let { row ->
-                    WebLocation(
+                    LocalLocation(
                         id = row.getString("id"),
                         name = row.getString("name"),
-                        url = row.getString("url"),
+                        path = row.getString("path"),
                         sortOrder = row.optInt("sortOrder", index),
                     )
                 }
@@ -41,15 +36,12 @@ object WebLocationStore {
     }
 
     @Synchronized
-    fun add(url: String, name: String = ""): String {
-        val normalized = normalize(url)
+    fun add(path: String, name: String = ""): String {
+        require(path.startsWith('/')) { "A local location must use an absolute path" }
         val existing = all()
-        existing.firstOrNull { it.url == normalized }?.let { return it.id }
+        existing.firstOrNull { it.path == path }?.let { return it.id }
         val id = UUID.randomUUID().toString()
-        val host = Uri.parse(normalized).host.orEmpty()
-        val base = name.trim().ifBlank {
-            host.ifBlank { normalized.trimEnd('/').substringAfterLast('/').ifBlank { normalized } }
-        }
+        val base = name.trim().ifBlank { path.trimEnd('/').substringAfterLast('/').ifBlank { path } }
         val names = existing.map { it.name }.toSet()
         var unique = base
         var index = 1
@@ -57,7 +49,7 @@ object WebLocationStore {
             unique = "$base ($index)"
             index++
         }
-        write(existing + WebLocation(id, unique, normalized, (existing.maxOfOrNull { it.sortOrder } ?: -1) + 1))
+        write(existing + LocalLocation(id, unique, path, (existing.maxOfOrNull { it.sortOrder } ?: -1) + 1))
         return id
     }
 
@@ -81,29 +73,19 @@ object WebLocationStore {
         write(ordered.mapIndexed { index, item -> item.copy(sortOrder = index) })
     }
 
-    /** Validate and trim a web address; only explicit http/https URLs are accepted. */
-    fun normalize(url: String): String {
-        val trimmed = url.trim()
-        val uri = Uri.parse(trimmed)
-        require(uri.scheme?.lowercase() in schemes && !uri.host.isNullOrBlank()) {
-            "A web location needs an http:// or https:// URL"
-        }
-        return trimmed
-    }
-
-    private fun write(items: List<WebLocation>) {
+    private fun write(items: List<LocalLocation>) {
         val records = JSONArray()
         items.forEach { item ->
             records.put(
                 JSONObject()
                     .put("id", item.id)
                     .put("name", item.name)
-                    .put("url", item.url)
+                    .put("path", item.path)
                     .put("sortOrder", item.sortOrder),
             )
         }
         check(prefs.edit().putString(KEY, records.toString()).commit()) {
-            "Could not save web locations"
+            "Could not save local locations"
         }
     }
 }

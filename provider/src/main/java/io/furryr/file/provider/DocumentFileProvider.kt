@@ -4,7 +4,6 @@ import io.furryr.file.core.*
 
 import android.content.Context
 import android.net.Uri
-import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.source.FileSource
@@ -22,26 +21,22 @@ import java.io.FileNotFoundException
  * FileProvider backed by Android's Storage Access Framework (SAF).
  *
  * Maps `document://<hex-id>/<path>` URIs to content URIs obtained via
- * `ACTION_OPEN_DOCUMENT_TREE`. The hex ID (8 hex chars) is a shorthand
- * for a persisted tree URI stored in SharedPreferences.
+ * `ACTION_OPEN_DOCUMENT_TREE`. The hex ID (8 hex chars) is a shorthand for a
+ * persisted tree URI; the app owns that mapping and supplies it through
+ * [DocumentTreeSource].
  *
  * ## Usage
  * ```kotlin
- * // Register after user picks a directory
- * val treeUri = intent.data  // from ACTION_OPEN_DOCUMENT_TREE
- * val id = DocumentFileProvider.registerTree(context, treeUri)
- * // → "a1b2c3d4"
- *
- * // Then access files via:
+ * // The app registers the picked directory in its own store, then passes the
+ * // source to init(). Access files via:
  * // document://a1b2c3d4/Download/file.txt
  * ```
  */
 object DocumentFileProvider : FileProvider {
-    private const val TAG = "DocumentFileProvider"
-    private const val PREFS_NAME = "document_trees"
     private const val SCHEME = "document"
 
     private lateinit var appContext: Context
+    private lateinit var trees: DocumentTreeSource
 
     override val scheme: String get() = SCHEME
     override val authority: String? get() = null
@@ -53,50 +48,14 @@ object DocumentFileProvider : FileProvider {
         ProviderFeature.STREAM_COPY,
     )
 
-    fun init(context: Context) {
+    fun init(context: Context, trees: DocumentTreeSource) {
         appContext = context.applicationContext
+        this.trees = trees
     }
 
     override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
         if (path.trim('/').isEmpty()) return DirectoryCapabilities()
         return super<FileProvider>.directoryCapabilities(path)
-    }
-
-    /**
-     * Register a tree URI obtained from [android.content.Intent.ACTION_OPEN_DOCUMENT_TREE].
-     * Persists the mapping and returns the hex ID.
-     */
-    fun registerTree(treeUri: Uri): String {
-        val id = generateId()
-        val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit().putString(id, treeUri.toString()).apply()
-        Log.i(TAG, "Registered document tree $id → $treeUri")
-        return id
-    }
-
-    /**
-     * List all registered document tree IDs with their URIs.
-     */
-    fun listTrees(): Map<String, String> {
-        val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.all.mapValues { it.value.toString() }
-    }
-
-    /**
-     * Remove a registered tree by ID.
-     */
-    fun unregisterTree(id: String) {
-        val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit().remove(id).apply()
-    }
-
-    private fun generateId(): String {
-        val chars = "0123456789abcdef"
-        val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        while (true) {
-            val id = (1..8).map { chars.random() }.joinToString("")
-            if (!prefs.contains(id)) return id
-        }
     }
 
     // ── FileProvider implementation ─────────────────────────────────
@@ -225,8 +184,7 @@ object DocumentFileProvider : FileProvider {
         val id = parts[0]
         val relativePath = if (parts.size > 1) "/${parts[1]}" else "/"
 
-        val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val treeUriStr = prefs.getString(id, null)
+        val treeUriStr = trees.documentTree(id)
             ?: throw IllegalArgumentException("Unknown document tree ID: $id")
         return Uri.parse(treeUriStr) to relativePath
     }

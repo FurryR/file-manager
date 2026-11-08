@@ -63,16 +63,24 @@ interface VFolder : VNode {
  */
 sealed interface NodeRef {
     data class Vfs(val uri: String) : NodeRef
+
+    /**
+     * A resource addressed outside Vfs. Remote files (HTTP(S)) live here, so a
+     * view over one — an archive whose backing file is a URL — still has a
+     * stable root instead of a provider-invented URI.
+     */
+    data class Url(val url: String) : NodeRef
 }
 
 /**
  * Flattened view identity.
  *
- * A File that offers a Folder view (zip, tar, ...) is represented by
- * [ViewRef.Node] with [ViewRef.Node.viewId] = "archive" and a flat inner
- * [ViewRef.Node.path]. There is no recursive Nested type: a zip inside a zip
- * is just a longer path, and the resolver enters intermediate archive files
- * automatically when more segments follow.
+ * A file that offers a folder view (a container, a virtual document, ...) is
+ * represented by [ViewRef.Node] with the opener's id in [ViewRef.Node.viewId]
+ * and a flat inner [ViewRef.Node.path]. There is no recursive Nested type: a
+ * container inside a container is just a longer path, and the resolver enters
+ * intermediate files automatically when more segments follow. The view id is
+ * chosen by the opener registry, so core never enumerates concrete formats.
  */
 sealed interface ViewRef {
     data class Node(
@@ -88,9 +96,4 @@ sealed interface ViewRef {
     data class Session(val id: String, val kind: String) : ViewRef
 }
 
-/** Append a container-relative path to an existing view reference. */
-fun ViewRef.Node.archivePath(extra: List<String>): ViewRef.Node =
-    copy(viewId = "archive", path = path + extra)
 
-/** True when this reference points at an archive/container view. */
-val ViewRef.Node.isArchive: Boolean get() = viewId == "archive"

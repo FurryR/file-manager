@@ -1,35 +1,30 @@
-package io.furryr.file.provider
+package io.furryr.file.store
 
 import android.content.Context
 import io.furryr.file.core.FileProvider
 import io.furryr.file.core.LocationActions
 import io.furryr.file.core.LocationEntry
-import io.furryr.file.core.Vfs
-
 import io.furryr.file.provider.FtpProvider
-import io.furryr.file.provider.model.FtpServer
 import io.furryr.file.provider.SAFProvider
-import io.furryr.file.provider.model.SafLocation
 import io.furryr.file.provider.SftpProvider
+import io.furryr.file.provider.model.FtpServer
+import io.furryr.file.provider.model.LocalLocation
+import io.furryr.file.provider.model.SafLocation
 import io.furryr.file.provider.model.SftpServer
+import io.furryr.file.provider.model.WebLocation
 import io.furryr.file.provider.remote.RemoteKind
 import io.furryr.file.provider.remote.RemoteLocation
-import io.furryr.file.provider.remote.RemoteLocationStore
 import io.furryr.file.provider.remote.RemoteProviders
-import io.furryr.file.provider.remote.SshConnections
-import io.furryr.file.provider.remote.SshControls
-import io.furryr.file.provider.model.LocalLocation
-import io.furryr.file.provider.model.WebLocation
 
 /**
  * App-facing facade over the provider location stores (SAF trees, FTP/SFTP
  * servers, encrypted AList/SSH connections), so the UI layer never touches
  * provider singletons or their stores directly.
  *
- * Requires [Vfs] providers to have been installed by the app.
+ * Requires [LocationStores] and [Vfs][io.furryr.file.core.Vfs] providers to
+ * have been installed by the app.
  */
 object LocationsRepository {
-
 
     /** Unified gallery entries; actions are implemented by this library. */
     fun locations(context: Context, localProvider: FileProvider): List<LocationEntry> {
@@ -109,7 +104,7 @@ object LocationsRepository {
             )
         }
 
-        val remoteProviders = RemoteProviders.providers(context)
+        val remoteProviders = RemoteProviders.providers(context.cacheDir, LocationStores)
         remoteLocations().forEach { location ->
             val provider = remoteProviders.firstOrNull { it.scheme == location.kind.scheme }
                 ?: return@forEach
@@ -136,15 +131,15 @@ object LocationsRepository {
 
     // ── SAF ─────────────────────────────────────────────────────────
 
-    fun safLocations(): List<SafLocation> = SAFProvider.getDatabase().getAll()
+    fun safLocations(): List<SafLocation> = LocationStores.safLocations()
 
-    fun insertSaf(treeUri: String): String = SAFProvider.getDatabase().insert(treeUri)
+    fun insertSaf(treeUri: String): String = LocationStores.saf.insert(treeUri)
 
-    fun renameSaf(hexId: String, name: String) = SAFProvider.getDatabase().rename(hexId, name)
+    fun renameSaf(hexId: String, name: String) = LocationStores.saf.rename(hexId, name)
 
-    fun deleteSaf(hexId: String) = SAFProvider.getDatabase().delete(hexId)
+    fun deleteSaf(hexId: String) = LocationStores.saf.delete(hexId)
 
-    fun reorderSaf(hexIds: List<String>) = SAFProvider.getDatabase().reorder(hexIds)
+    fun reorderSaf(hexIds: List<String>) = LocationStores.saf.reorder(hexIds)
 
     // ── Local paths ─────────────────────────────────────────────────
 
@@ -172,33 +167,33 @@ object LocationsRepository {
 
     // ── FTP ─────────────────────────────────────────────────────────
 
-    fun ftpServers(): List<FtpServer> = FtpProvider.getDatabase().getAll()
+    fun ftpServers(): List<FtpServer> = LocationStores.ftpServers()
 
     fun insertFtp(host: String, name: String, port: Int, username: String, password: String) =
-        FtpProvider.getDatabase().insert(host, name, port, username, password)
+        LocationStores.ftp.insert(host, name, port, username, password)
 
     fun updateFtp(
         host: String, newHost: String, name: String, port: Int, username: String, password: String,
-    ) = FtpProvider.getDatabase().update(host, newHost, name, port, username, password)
+    ) = LocationStores.ftp.update(host, newHost, name, port, username, password)
 
-    fun deleteFtp(host: String) = FtpProvider.getDatabase().delete(host)
+    fun deleteFtp(host: String) = LocationStores.ftp.delete(host)
 
-    fun reorderFtp(hosts: List<String>) = FtpProvider.getDatabase().reorder(hosts)
+    fun reorderFtp(hosts: List<String>) = LocationStores.ftp.reorder(hosts)
 
     // ── SFTP ────────────────────────────────────────────────────────
 
-    fun sftpServers(): List<SftpServer> = SftpProvider.getDatabase().getAll()
+    fun sftpServers(): List<SftpServer> = LocationStores.sftpServers()
 
     fun insertSftp(host: String, name: String, port: Int, username: String, password: String) =
-        SftpProvider.getDatabase().insert(host, name, port, username, password)
+        LocationStores.sftp.insert(host, name, port, username, password)
 
     fun updateSftp(
         host: String, newHost: String, name: String, port: Int, username: String, password: String,
-    ) = SftpProvider.getDatabase().update(host, newHost, name, port, username, password)
+    ) = LocationStores.sftp.update(host, newHost, name, port, username, password)
 
-    fun deleteSftp(host: String) = SftpProvider.getDatabase().delete(host)
+    fun deleteSftp(host: String) = LocationStores.sftp.delete(host)
 
-    fun reorderSftp(hosts: List<String>) = SftpProvider.getDatabase().reorder(hosts)
+    fun reorderSftp(hosts: List<String>) = LocationStores.sftp.reorder(hosts)
 
     // ── Encrypted remote connections (AList / SSH) ──────────────────
 
@@ -207,16 +202,12 @@ object LocationsRepository {
     fun insertRemote(location: RemoteLocation) = RemoteLocationStore.put(location)
 
     fun updateRemote(location: RemoteLocation) {
-        if (location.kind == RemoteKind.SSH) {
-            SshControls.close(location.id)
-            SshConnections.disconnect(location.id)
-        }
+        if (location.kind == RemoteKind.SSH) RemoteProviders.forget(location.id)
         RemoteLocationStore.put(location)
     }
 
     fun deleteRemote(id: String) {
-        SshControls.close(id)
-        SshConnections.disconnect(id)
+        RemoteProviders.forget(id)
         RemoteLocationStore.remove(id)
     }
 

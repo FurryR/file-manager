@@ -1,0 +1,54 @@
+{
+  "name": "File Manager python",
+  "scopeName": "source.fm-python",
+  "patterns": [
+    {
+      "name": "comment.line.number-sign",
+      "match": "#.*$"
+    },
+    {
+      "name": "string.quoted.multi",
+      "begin": "\\\"\\\"\\\"",
+      "end": "\\\"\\\"\\\""
+    },
+    {
+      "name": "string.quoted.multi",
+      "begin": "'''",
+      "end": "'''"
+    },
+    {
+      "name": "constant.numeric",
+      "match": "\\b(?:0[xX][0-9a-fA-F]+|\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)\\b"
+    },
+    {
+      "name": "string.quoted.double",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "string.quoted.single",
+      "begin": "'",
+      "end": "'",
+      "patterns": [
+        {
+          "name": "constant.character.escape",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "keyword.control",
+      "match": "\\b(?:abstract|as|async|await|break|case|catch|class|const|continue|data|default|def|defer|delete|do|else|enum|export|extends|extern|false|final|finally|fn|for|from|fun|function|if|impl|import|in|interface|is|lambda|let|match|mod|mut|namespace|new|None|null|nullptr|object|package|pass|private|protected|pub|public|raise|return|self|static|struct|super|switch|this|throw|trait|true|try|type|typedef|typeof|use|val|var|virtual|void|when|where|while|with|yield|and|or|not|True|False|elif|except|assert|global|nonlocal|del)\\b"
+    },
+    {
+      "name": "entity.name.function",
+      "match": "\\b[A-Za-z_]\\w*(?=\\s*\\()"
+    }
+  ]
+}

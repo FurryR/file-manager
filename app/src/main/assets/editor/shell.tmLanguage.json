@@ -1,0 +1,44 @@
+{
+  "name": "File Manager shell",
+  "scopeName": "source.fm-shell",
+  "patterns": [
+    {
+      "name": "comment.line.number-sign",
+      "match": "#.*$"
+    },
+    {
+      "name": "constant.numeric",
+      "match": "\\b(?:0[xX][0-9a-fA-F]+|\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)\\b"
+    },
+    {
+      "name": "string.quoted.double",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "string.quoted.single",
+      "begin": "'",
+      "end": "'",
+      "patterns": [
+        {
+          "name": "constant.character.escape",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "variable.other",
+      "match": "\\$(?:[A-Za-z_]\\w*|\\{[^}]*\\}|[0-9?#@!*$-])"
+    },
+    {
+      "name": "keyword.control",
+      "match": "\\b(?:if|then|else|elif|fi|case|esac|do|done|for|in|while|until|function|select|export|local|readonly|return|exit)\\b"
+    }
+  ]
+}

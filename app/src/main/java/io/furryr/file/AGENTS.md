@@ -18,6 +18,7 @@ platform services and calls the library.
 | `ui/screens/` | `FileListScreen.kt`, `SettingsActivity.kt`, `LicensesScreen.kt` |
 | `ui/theme/` | `FileManagerTheme.kt` (Material3 dark/light), `Color.kt` (palettes + AMOLED canvas), `PaletteStore.kt` |
 | `ui/util/` | `Formatters.kt`, `FileIcons.kt`, `FileOpen.kt`, `OperationNotification.kt` |
+| `editor/` | Tab-owned Sora text editor, text codec, TextMate grammars and container LSP |
 
 > The VFS abstraction lives in `:core`; protocol providers (Local/FTP/SFTP/
 > SAF/remote) live in `:provider`; containers and the single `ContainerProvider`

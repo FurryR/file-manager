@@ -4,6 +4,7 @@ import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.VFile
 import io.furryr.file.core.VFolder
 import io.furryr.file.core.ViewRef
+import io.furryr.file.editor.EditorRendererSession
 import io.furryr.file.opener.OpenRequest
 import io.furryr.file.opener.OpenRoute
 import io.furryr.file.opener.OpenRouter
@@ -27,6 +28,7 @@ sealed interface AppOpenOutcome {
     data class Folder(val node: VFolder) : AppOpenOutcome
     data class Url(val url: String) : AppOpenOutcome
     data class Web(val session: WebRendererSession) : AppOpenOutcome
+    data class Editor(val session: EditorRendererSession) : AppOpenOutcome
     data class External(val remote: Boolean) : AppOpenOutcome
     data class Failure(val message: String?) : AppOpenOutcome
 }
@@ -106,7 +108,8 @@ private class RendererRoute : OpenRoute<OpenRouteContext, AppOpenOutcome> {
         val factory = Renderers.resolve(target) ?: return null
         val session = factory.create(target, request.context.host).getOrNull() ?: return null
         if (session is WebRendererSession) return AppOpenOutcome.Web(session)
-        // A non-web renderer must not silently swallow the open; let the
+        if (session is EditorRendererSession) return AppOpenOutcome.Editor(session)
+        // An unhandled renderer must not silently swallow the open; let the
         // platform viewer take it.
         session.close()
         return null

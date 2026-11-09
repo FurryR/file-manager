@@ -7,6 +7,7 @@
     <string name="nav_root">ルート /</string>
     <string name="home_title">ホーム</string>
     <string name="home_empty">まだ何もありません</string>
+    <string name="home_no_matches">一致する項目はありません</string>
     <string name="home_recent_files">最近のファイル</string>
     <string name="home_recent_locations">最近の場所</string>
     <string name="home_bookmarks">ブックマーク</string>
@@ -97,6 +98,7 @@
     <string name="toast_deleted">%1$s を削除しました</string>
     <string name="session_manager">セッション</string>
     <string name="history_title">履歴</string>
+    <string name="history_empty">(空)</string>
     <string name="done">完了</string>
     <string name="toast_deleted_count">%1$d 件を削除しました</string>
     <string name="toast_renamed">%1$s に名前を変更しました</string>
@@ -202,6 +204,11 @@
     <string name="settings_pulse_mic_desc">有効な間、コンテナがこのデバイスのマイクから録音できるようにします。</string>
     <string name="settings_pulse_buffer">オーディオバッファー</string>
     <string name="settings_pulse_buffer_desc">シンクの遅延 (ミリ秒、10〜1000)。低いほど反応が速く、低すぎると音が途切れます。</string>
+    <string name="settings_editor">エディター</string>
+    <string name="settings_editor_font">フォント</string>
+    <string name="settings_editor_font_desc">既定では等幅フォント (TTF/OTF)</string>
+    <string name="settings_editor_font_size">既定のフォントサイズ</string>
+    <string name="settings_editor_font_size_desc">エディターの既定の文字サイズ</string>
     <string name="settings_terminal">ターミナル</string>
     <string name="settings_terminal_desc">フォントと表示の設定</string>
     <string name="settings_terminal_font">フォント</string>

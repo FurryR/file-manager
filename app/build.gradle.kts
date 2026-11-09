@@ -47,6 +47,7 @@ android {
     }
 
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -82,6 +83,9 @@ androidComponents {
 }
 
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+    implementation("io.github.Rosemoe.sora-editor:editor:0.23.5")
+    implementation("io.github.Rosemoe.sora-editor:language-textmate:0.23.5")
     implementation(project(":agent"))
     implementation(project(":container"))
     implementation(project(":core"))

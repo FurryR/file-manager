@@ -69,22 +69,29 @@ fun DaemonConnection.signalPty(ptyId: Long, signal: Int): Result<Unit> = runCatc
 
 // ── Non-PTY exec ──────────────────────────────────────────────────
 
-/** Spawn a pipe-mode command; stdout/stderr descriptors stay owned by the caller. */
+/**
+ * Spawn a pipe-mode command; stdout/stderr descriptors stay owned by the
+ * caller. With [stdin] set, a third descriptor is the write end of the child's
+ * stdin pipe (for bidirectional protocols such as LSP).
+ */
 fun DaemonConnection.spawnExec(
     command: String,
     args: List<String> = emptyList(),
     cwd: String? = null,
     env: Map<String, String> = emptyMap(),
+    stdin: Boolean = false,
 ): Result<ExecStreamFd> = runCatching {
     val execReq = io.furryr.file.proto.ExecRequest.newBuilder()
         .setCommand(command).addAllArgs(args).putAllEnv(env).setPipes(true)
+        .setPipeStdin(stdin)
     if (cwd != null) execReq.cwd = cwd
     val resp = request(Request.newBuilder().setExec(execReq).build())
     val fds = resp.fds
-    if (fds.size != 2) {
+    val expected = if (stdin) 3 else 2
+    if (fds.size != expected) {
         fds.forEach { runCatching { Os.close(it) } }
         throw IllegalStateException(
-            "daemon returned ${fds.size} exec descriptors, expected stdout and stderr",
+            "daemon returned ${fds.size} exec descriptors, expected ${if (stdin) "stdout, stderr and stdin" else "stdout and stderr"}",
         )
     }
     val stream = resp.response.execStream
@@ -93,6 +100,7 @@ fun DaemonConnection.spawnExec(
         childPid = stream.childPid.toInt(),
         stdout = fds[0],
         stderr = fds[1],
+        stdin = fds.getOrNull(2),
     )
 }
 

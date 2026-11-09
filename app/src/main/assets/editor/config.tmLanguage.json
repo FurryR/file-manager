@@ -1,0 +1,48 @@
+{
+  "name": "File Manager config",
+  "scopeName": "source.fm-config",
+  "patterns": [
+    {
+      "name": "comment.line",
+      "match": "(?:#|//|;).*$"
+    },
+    {
+      "name": "constant.numeric",
+      "match": "\\b(?:0[xX][0-9a-fA-F]+|\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)\\b"
+    },
+    {
+      "name": "string.quoted.double",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "string.quoted.single",
+      "begin": "'",
+      "end": "'",
+      "patterns": [
+        {
+          "name": "constant.character.escape",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "constant.language",
+      "match": "\\b(?:true|false|null|yes|no|on|off)\\b"
+    },
+    {
+      "name": "entity.name.tag",
+      "match": "^\\s*[\\w.-]+(?=\\s*[:=])"
+    },
+    {
+      "name": "entity.name.section",
+      "match": "^\\s*\\[.*\\]\\s*$"
+    }
+  ]
+}

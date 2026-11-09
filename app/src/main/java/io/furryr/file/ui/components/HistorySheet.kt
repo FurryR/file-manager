@@ -74,7 +74,7 @@ fun HistorySheet(
     dragPx: Float,
     stops: List<HistoryStop>,
     bottomInset: Dp,
-    onSelect: (Int) -> Unit,
+    onSelect: (HistoryStop) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var panelHeightPx by remember { mutableFloatStateOf(0f) }
@@ -155,42 +155,50 @@ fun HistorySheet(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 8.dp),
                     )
-                    LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp)) {
-                        itemsIndexed(stops) { index, stop ->
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onSelect(index) }
-                                    .padding(horizontal = 20.dp, vertical = 12.dp),
-                            ) {
-                                Icon(
-                                    imageVector = when {
-                                        stop.current -> Icons.Default.Check
-                                        stop.isWeb -> Icons.Default.Language
-                                        else -> Icons.Default.Folder
-                                    },
-                                    contentDescription = null,
-                                    tint = if (stop.current) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                Spacer(Modifier.width(14.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = stop.label,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        color = if (stop.current) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.onSurface,
+                    if (stops.isEmpty()) {
+                        Text(
+                            text = stringResource(R.string.history_empty),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+                        )
+                    } else {
+                        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp)) {
+                            itemsIndexed(stops) { _, stop ->
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onSelect(stop) }
+                                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = when {
+                                            stop.current -> Icons.Default.Check
+                                            stop.isWeb -> Icons.Default.Language
+                                            else -> Icons.Default.Folder
+                                        },
+                                        contentDescription = null,
+                                        tint = if (stop.current) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
-                                    if (stop.detail.isNotEmpty() && stop.detail != stop.label) {
+                                    Spacer(Modifier.width(14.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            text = stop.detail,
+                                            text = stop.label,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            color = if (stop.current) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.onSurface,
                                         )
+                                        if (stop.detail.isNotEmpty()) {
+                                            Text(
+                                                text = stop.detail,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
                                     }
                                 }
                             }

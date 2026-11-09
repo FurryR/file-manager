@@ -120,10 +120,13 @@ pub async fn handle_streaming(
             cwd,
             env,
             pipes,
+            pipe_stdin,
         })) => {
             close_unexpected_fd(attached_fd);
             if pipes {
-                let outbound = run_exec_stream(req_id, command, args, cwd, env, execs).await;
+                let outbound = run_exec_stream(
+                    req_id, command, args, cwd, env, pipe_stdin, execs,
+                ).await;
                 let _ = tx.send(outbound);
             } else {
                 let resp = run_exec(req_id, command, args, cwd, env).await;

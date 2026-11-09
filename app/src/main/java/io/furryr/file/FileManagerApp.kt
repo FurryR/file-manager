@@ -11,6 +11,8 @@ import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.ContentTypes
 import io.furryr.file.core.Path
 import io.furryr.file.core.ViewRef
+import io.furryr.file.editor.EditorContent
+import io.furryr.file.editor.EditorRendererSession
 
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonStatus
@@ -27,6 +29,8 @@ import io.furryr.file.core.Folder
 import io.furryr.file.core.VFolder
 import io.furryr.file.core.VFile
 import io.furryr.file.core.Vfs
+import io.furryr.file.render.DirectoryRenderer
+import io.furryr.file.render.HomeRenderer
 import io.furryr.file.render.LocationAddress
 import io.furryr.file.render.RenderCapabilities
 import io.furryr.file.render.RenderHost
@@ -69,13 +73,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
-import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
@@ -158,6 +159,19 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * One leave confirmation for every renderer. The editor supplies [onSave];
+ * a WebView beforeunload prompt only supplies [onLeave].
+ */
+private data class LeavePrompt(
+    val ownerTabId: String,
+    val message: String? = null,
+    val canSave: Boolean = false,
+    val onSave: (suspend () -> Result<Unit>)? = null,
+    val onLeave: () -> Unit,
+    val onCancel: () -> Unit = {},
+)
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun FileManagerApp(
@@ -205,10 +219,16 @@ fun FileManagerApp(
     var nodeOpenJob by remember { mutableStateOf<Job?>(null) }
     var nodeOpenGeneration by remember { mutableIntStateOf(0) }
     var showTerminalSheet by remember { mutableStateOf(false) }
+    // Existing terminals stay reachable from a tab that cannot create a new
+    // one (web pages, editors, archives); only the create action is disabled.
+    var hasTerminalSessions by remember { mutableStateOf(SessionManager.getAllSessions().isNotEmpty()) }
     var terminalDropAccepted by remember { mutableStateOf(false) }
     var terminalDragGeneration by remember { mutableIntStateOf(0) }
     var showSessionManager by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
+    // A `here` request that arrived while an editor held unsaved changes waits
+    // for the exit dialog instead of silently discarding the buffer.
+    var pendingHereRequest by remember { mutableStateOf<HereNavigation.Request?>(null) }
     // Pixels of history panel revealed by an in-flight drag from the toolbar.
     var historyDragPx by remember { mutableFloatStateOf(0f) }
     // How far the bar must be pulled before the panel stays open.
@@ -219,6 +239,14 @@ fun FileManagerApp(
     // One live renderer session per tab, keyed by FileTab.id. Switching tabs
     // keeps the WebView (and its own back/forward history) alive.
     val webSessions = remember { mutableStateMapOf<String, WebRendererSession>() }
+    // Text editors are tab-owned too: switching tabs keeps the Sora buffer,
+    // undo history and LSP session alive until the tab closes.
+    val editorSessions = remember { mutableStateMapOf<String, EditorRendererSession>() }
+    // One shared leave-confirmation dialog for every renderer. The editor
+    // offers Save/Discard/Cancel; a WebView beforeunload prompt offers
+    // Leave/Cancel because the page owns its own storage.
+    var leavePrompt by remember { mutableStateOf<LeavePrompt?>(null) }
+    var leaveSaving by remember { mutableStateOf(false) }
     // Bumped whenever the home store changes, so the home screen re-reads it.
     var homeVersion by remember { mutableIntStateOf(0) }
     LaunchedEffect(terminalOpenRequest) {
@@ -230,6 +258,13 @@ fun FileManagerApp(
     // underneath it would only be dead weight; collapse it when the terminal opens.
     LaunchedEffect(showTerminalSheet) {
         if (showTerminalSheet) showHistory = false
+    }
+    DisposableEffect(Unit) {
+        val listener: () -> Unit = {
+            hasTerminalSessions = SessionManager.getAllSessions().isNotEmpty()
+        }
+        SessionManager.addSessionChangeListener(listener)
+        onDispose { SessionManager.removeSessionChangeListener(listener) }
     }
     var containerRefreshKey by remember { mutableIntStateOf(0) }
     var drawerSortMode by remember { mutableStateOf(false) }
@@ -349,15 +384,93 @@ fun FileManagerApp(
         if (index >= 0) tabs[index] = transform(tabs[index])
     }
 
+    /** Forget a prompt whose owner is leaving; its session cancels the rest. */
+    fun clearLeavePrompt(id: String) {
+        if (leavePrompt?.ownerTabId == id) {
+            leavePrompt = null
+            leaveSaving = false
+        }
+    }
+
     fun closeWeb(id: String) {
-        webSessions.remove(id)?.close()
-        updateTab(id) { it.copy(webUrl = null, webTitle = null) }
+        clearLeavePrompt(id)
+        val session = webSessions.remove(id)
+        // A renderer without its own close hook still closes through the
+        // default implementation.
+        session?.requestClose {
+            updateTab(id) { it.copy(webUrl = null, webTitle = null) }
+        } ?: run {
+            updateTab(id) { it.copy(webUrl = null, webTitle = null) }
+        }
     }
 
     fun showWeb(id: String, session: WebRendererSession, url: String) {
+        clearLeavePrompt(id)
         webSessions.remove(id)?.close()
         webSessions[id] = session
         updateTab(id) { it.copy(webUrl = url, webTitle = null) }
+    }
+
+    fun closeEditor(id: String) {
+        clearLeavePrompt(id)
+        editorSessions.remove(id)?.close()
+    }
+
+    fun showEditor(id: String, session: EditorRendererSession) {
+        closeEditor(id)
+        webSessions.remove(id)?.close()
+        editorSessions[id] = session
+        updateTab(id) { it.copy(webUrl = null, webTitle = session.title) }
+    }
+
+    /** Replace any pending prompt, cancelling the previous owner cleanly. */
+    fun requestLeave(prompt: LeavePrompt) {
+        val previous = leavePrompt
+        leavePrompt = null
+        leaveSaving = false
+        previous?.onCancel?.invoke()
+        leavePrompt = prompt
+    }
+
+    /**
+     * Run [action] after the tab's editor lets go. A clean editor is closed
+     * synchronously; a dirty one sets the shared leave prompt and reruns the
+     * same navigation only after the user chooses Save or Discard.
+     */
+    fun guardEditor(id: String, action: () -> Unit): Boolean {
+        val session = editorSessions[id] ?: return false
+        // A hidden tab has no visible dialog host. Its navigation is not
+        // user-driven, so release the buffer before switching that tab.
+        if (id != currentTab().id) {
+            editorSessions.remove(id)?.close()
+            updateTab(id) { it.copy(webTitle = null) }
+            action()
+            return true
+        }
+        if (session.saving) {
+            session.error = context.getString(R.string.editor_saving_wait)
+            return true
+        }
+        if (session.canClose()) {
+            closeEditor(id)
+            updateTab(id) { it.copy(webTitle = null) }
+            action()
+            return true
+        }
+        requestLeave(
+            LeavePrompt(
+                ownerTabId = id,
+                message = null,
+                canSave = session.capabilities.canSave,
+                onSave = { session.save() },
+                onLeave = {
+                    closeEditor(id)
+                    updateTab(id) { it.copy(webTitle = null) }
+                    action()
+                },
+            )
+        )
+        return true
     }
 
     fun currentWebUrl(tab: FileTab): String? =
@@ -376,6 +489,7 @@ fun FileManagerApp(
     }
 
     fun navigateTo(path: String, tabId: String = currentTab().id, record: Boolean = true) {
+        if (guardEditor(tabId) { navigateTo(path, tabId, record) }) return
         val tab = tabs.firstOrNull { it.id == tabId } ?: return
         if (path == tab.path || pendingNavigations[tab.id] != null) return
         if (record && !isHomePath(path)) {
@@ -406,6 +520,7 @@ fun FileManagerApp(
     }
 
     fun navigateToFolder(folder: VFolder, tabId: String = currentTab().id) {
+        if (guardEditor(tabId) { navigateToFolder(folder, tabId) }) return
         val tab = tabs.firstOrNull { it.id == tabId } ?: return
         if (pendingNavigations[tab.id] != null) return
         if (folder is Folder) {
@@ -466,6 +581,7 @@ fun FileManagerApp(
             is AppOpenOutcome.Folder -> navigateToFolder(outcome.node, tabId)
             is AppOpenOutcome.Url -> openUrlRef?.invoke(outcome.url, true, tabId)
             is AppOpenOutcome.Web -> showWeb(tabId, outcome.session, address)
+            is AppOpenOutcome.Editor -> showEditor(tabId, outcome.session)
             is AppOpenOutcome.External -> if (outcome.remote) openRemoteFile(
                 context,
                 address,
@@ -500,12 +616,19 @@ fun FileManagerApp(
 
             override fun navigate(node: io.furryr.file.core.VNode, rendererId: String?) {
                 if (node is VFolder) {
+                    clearLeavePrompt(id)
                     webSessions.remove(id)?.close()
                     navigateToFolder(node, id)
                 }
             }
 
             override fun updateTitle(title: String?) {
+                // The editor owns the tab title while it is open; a dirty
+                // buffer prefixes the file name with a bullet.
+                if (editorSessions.containsKey(id)) {
+                    updateTab(id) { it.copy(webTitle = title) }
+                    return
+                }
                 // A late title from a page whose tab already left the web view
                 // must not rename the directory tab.
                 val session = webSessions[id] ?: return
@@ -518,6 +641,41 @@ fun FileManagerApp(
             }
 
             override fun updateCapabilities(capabilities: RenderCapabilities) = Unit
+
+            override fun refresh() {
+                refreshTrigger++
+                animationTrigger++
+            }
+
+            override fun toggleFilter() {
+                searchMode = !searchMode
+                if (!searchMode) filterText = ""
+            }
+
+            override fun openSort() {
+                showSortDialog = true
+            }
+
+            override fun confirmLeave(
+                message: String?,
+                onLeave: () -> Unit,
+                onCancel: () -> Unit,
+            ) {
+                // A background tab has no visible dialog host; its page must
+                // not block navigation that never reaches the user.
+                if (id != currentTab().id) {
+                    onLeave()
+                    return
+                }
+                requestLeave(
+                    LeavePrompt(
+                        ownerTabId = id,
+                        message = message,
+                        onLeave = onLeave,
+                        onCancel = onCancel,
+                    )
+                )
+            }
 
             override fun openFile(file: VFile, content: ContentInfo?) {
                 val address = (file.ref() as? ViewRef.Url)?.url ?: file.name
@@ -593,6 +751,7 @@ fun FileManagerApp(
 
     fun currentBookmarkEntry(): HomeEntry? {
         val tab = currentTab()
+        if (editorSessions.containsKey(tab.id)) return null
         val pending = pendingOf(tab.id)
         val path = pending?.path ?: tab.path
         // A page is bookmarkable even when it was opened from home; only the
@@ -617,6 +776,7 @@ fun FileManagerApp(
     // Inline path submit: directories navigate, files open their parent with the
     // entry selected, matching the old jump dialog behaviour.
     fun openUrl(url: String, recordHistory: Boolean = true, tabId: String = currentTab().id) {
+        if (guardEditor(tabId) { openUrl(url, recordHistory, tabId) }) return
         if (tabs.none { it.id == tabId }) return
         recordHome(
             HomeEntryKind.WEB,
@@ -629,7 +789,8 @@ fun FileManagerApp(
         val existing = webSessions[tabId]
         if (existing != null && existing.document == null) {
             existing.load(url)
-            updateTab(tabId) { it.copy(webUrl = url, webTitle = null) }
+            // Keep the previous page title until the new page reports one.
+            updateTab(tabId) { it.copy(webUrl = url) }
             return
         }
         if (recordHistory) updateTab(tabId) { recordCurrentHistory(it) }
@@ -684,6 +845,7 @@ fun FileManagerApp(
 
     /** Show the home page, even when a page opened from home is still active. */
     fun goHome() {
+        if (guardEditor(currentTab().id) { goHome() }) return
         val tab = currentTab()
         if (!isHomePath(tab.path)) {
             // Empty-address navigation supersedes a load still in flight.
@@ -699,6 +861,7 @@ fun FileManagerApp(
     }
 
     fun jumpTo(raw: String) {
+        if (guardEditor(currentTab().id) { jumpTo(raw) }) return
         val input = raw.trim()
         // An empty address is the way back to the home page.
         if (input.isEmpty()) {
@@ -797,6 +960,12 @@ fun FileManagerApp(
 
     fun goBack() {
         val tab = currentTab()
+        // The editor is an overlay over the tab's directory/home, not a
+        // history entry: Back dismisses it and reveals that view.
+        if (editorSessions.containsKey(tab.id)) {
+            guardEditor(tab.id) {}
+            return
+        }
         val session = webSessions[tab.id]
         if (session != null) {
             if (session.onBack()) return
@@ -863,6 +1032,7 @@ fun FileManagerApp(
     }
 
     fun goForward() {
+        if (guardEditor(currentTab().id) { goForward() }) return
         val tab = currentTab()
         val session = webSessions[tab.id]
         if (session != null) {
@@ -979,6 +1149,7 @@ fun FileManagerApp(
     }
 
     fun jumpToHistory(index: Int) {
+        if (guardEditor(currentTab().id) { jumpToHistory(index) }) return
         val stops = historyStops()
         if (index !in stops.indices) return
         val tab = currentTab()
@@ -992,6 +1163,7 @@ fun FileManagerApp(
             return
         }
         val target = stops[index]
+        clearLeavePrompt(tab.id)
         webSessions.remove(tab.id)?.close()
         // Page entries only exist while their session does, so the tab stacks
         // are rebuilt from the locations that surround them.
@@ -1019,6 +1191,16 @@ fun FileManagerApp(
     }
 
     fun goParent() {
+        val editingTab = currentTab()
+        val editor = editorSessions[editingTab.id]
+        if (editor != null) {
+            // Up means the folder that owns the edited file, not the folder
+            // the tab happened to show before the file was opened.
+            val parent = editor.parentFolder ?: return
+            if (guardEditor(editingTab.id) { navigateToFolder(parent, editingTab.id) }) return
+        } else if (guardEditor(editingTab.id) { goParent() }) {
+            return
+        }
         val tab = currentTab()
         val pending = pendingOf(tab.id)
         val activePath = pending?.path ?: tab.path
@@ -1051,6 +1233,8 @@ fun FileManagerApp(
     fun refreshActive() {
         val session = webSessions[currentTab().id]
         if (session?.refresh() == true) return
+        val editor = editorSessions[currentTab().id]
+        if (editor?.refresh() == true) return
         refreshFileList(animate = true)
     }
 
@@ -1060,6 +1244,16 @@ fun FileManagerApp(
         val pending = pendingOf(tab.id)
         val activePath = pending?.path ?: tab.path
         val folder = pending?.folder ?: tab.folder
+        val editor = editorSessions[tab.id]
+        if (editor != null) {
+            // The editor is a file view: its own parent folder and terminal
+            // support come from the session; tab history stays available.
+            return editor.capabilities.copy(
+                // Back dismisses the editor overlay before touching history.
+                canGoBack = true,
+                canGoForward = tab.forwardStack.isNotEmpty(),
+            )
+        }
         val session = webSessions[tab.id]
         if (session != null) {
             // A page opened from home has no parent directory; the home page
@@ -1096,6 +1290,7 @@ fun FileManagerApp(
 
     val handleHereRequest by rememberUpdatedState(newValue = { request: HereNavigation.Request ->
         val tab = currentTab()
+        clearLeavePrompt(tab.id)
         webSessions.remove(tab.id)?.close()
         // A here request supersedes an in-flight navigation in the current tab.
         pendingNavigations.remove(tab.id)
@@ -1125,14 +1320,25 @@ fun FileManagerApp(
         refreshFileList()
         highlightRefreshToken = refreshTrigger
     })
+    fun dispatchHere(request: HereNavigation.Request) {
+        val id = currentTab().id
+        if (guardEditor(id) { pendingHereRequest = request }) return
+        handleHereRequest(request)
+    }
+    LaunchedEffect(pendingHereRequest) {
+        pendingHereRequest?.let {
+            pendingHereRequest = null
+            handleHereRequest(it)
+        }
+    }
     val activityLifecycle = (context as? LifecycleOwner)?.lifecycle
     LaunchedEffect(activityLifecycle) {
         if (activityLifecycle != null) {
             activityLifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                HereNavigation.requests.collect { handleHereRequest(it) }
+                HereNavigation.requests.collect { dispatchHere(it) }
             }
         } else {
-            HereNavigation.requests.collect { handleHereRequest(it) }
+            HereNavigation.requests.collect { dispatchHere(it) }
         }
     }
 
@@ -1141,10 +1347,13 @@ fun FileManagerApp(
         onDispose {
             webSessions.values.forEach { it.close() }
             webSessions.clear()
+            editorSessions.values.forEach { it.close() }
+            editorSessions.clear()
         }
     }
 
     val activeWeb = webSessions[currentTab().id]
+    val activeEditor = editorSessions[currentTab().id]
     // Block reads of remote HTTP(S) handles (archive index, proxy descriptor)
     // publish their progress here; the top strip below mirrors page loading.
     val remoteTransfers by WebTransfers.progress.collectAsState()
@@ -1167,12 +1376,21 @@ fun FileManagerApp(
         }
     }
 
-    fun closeTab(index: Int) {
+    fun closeTabNow(index: Int) {
         if (tabs.size <= 1) return
         val closing = tabs.removeAt(index)
+        clearLeavePrompt(closing.id)
         webSessions.remove(closing.id)?.close()
+        editorSessions.remove(closing.id)?.close()
         pendingNavigations.remove(closing.id)
         selectedTabIndex = selectedTabIndex.coerceAtMost(tabs.lastIndex)
+    }
+
+    fun closeTab(index: Int) {
+        if (tabs.size <= 1) return
+        // guardEditor returns false when the tab has no editor; the close must
+        // still run in that case (web pages, home, plain directories).
+        if (!guardEditor(tabs[index].id) { closeTabNow(index) }) closeTabNow(index)
     }
 
     fun moveTab(from: Int, to: Int) {
@@ -1209,7 +1427,9 @@ fun FileManagerApp(
         if (matches.isEmpty()) return
         matches.sortedDescending().forEach {
             val removed = tabs.removeAt(it)
+            clearLeavePrompt(removed.id)
             webSessions.remove(removed.id)?.close()
+            editorSessions.remove(removed.id)?.close()
             pendingNavigations.remove(removed.id)
         }
         if (tabs.isEmpty()) {
@@ -1416,6 +1636,10 @@ fun FileManagerApp(
             clearSelection()
         } else if (drawerState.isOpen) {
             scope.launch { drawerState.close() }
+        } else if (activeEditor != null) {
+            // Back closes the editor overlay; the directory/home behind it
+            // remains exactly where it was.
+            goBack()
         } else if (activeWeb != null) {
             // A page's own back list wins over directory navigation: the
             // gesture must retrace the pages the user visited, not climb out of
@@ -1447,10 +1671,11 @@ fun FileManagerApp(
 
     ModalNavigationDrawer(
         drawerState = drawerState,
-        // A WebView consumes horizontal scrolling itself, so the open-from-edge
-        // gesture stays off there. An already open drawer keeps the gesture so
-        // it can still be swiped shut.
-        gesturesEnabled = activeWeb == null || drawerState.isOpen,
+        // A WebView consumes horizontal scrolling itself, and the editor uses
+        // horizontal gestures for selection, so the open-from-edge gesture
+        // stays off for both. An already open drawer keeps the gesture so it
+        // can still be swiped shut.
+        gesturesEnabled = (activeWeb == null && activeEditor == null) || drawerState.isOpen,
         drawerContent = {
             FileDrawer(
                 darkTheme = darkTheme,
@@ -1907,6 +2132,8 @@ fun FileManagerApp(
                 },
             topBar = {
                 val caps = currentCapabilities()
+                val menuHost = renderHostFor(currentTab().id)
+                val menuPath = pendingOf(currentTab().id)?.path ?: currentTab().path
                 val webLoading = activeWeb?.loading == true
                 val webProgress = (activeWeb?.progress ?: 0) / 100f
                 // Idle handles stay registered until they close, so track the
@@ -1999,26 +2226,38 @@ fun FileManagerApp(
                                 val titlePending = pendingOf(titleTab.id)
                                 val titleFolder = titlePending?.folder ?: titleTab.folder
                                 val titleWeb = webSessions[titleTab.id]
-                                val titleHome = titleWeb == null &&
+                                val titleEditor = editorSessions[titleTab.id]
+                                val titleHome = titleWeb == null && titleEditor == null &&
                                     isHomePath(titlePending?.path ?: titleTab.path)
-                                val titleDisplay = if (titleHome) stringResource(R.string.home_title)
-                                    else titleWeb?.address
+                                // Renderers own their path bar: a page shows
+                                // its title over the URL, Home shows its name
+                                // but edits an empty address, and the editor
+                                // shows its file plus encoding/cursor facts.
+                                val rendererPath = when {
+                                    titleEditor != null -> titleEditor.pathBar(context)
+                                    titleWeb != null -> titleWeb.pathBar(context)
+                                    titleHome -> HomeRenderer.pathBar(context)
+                                    else -> null
+                                }
+                                val titleDisplay = rendererPath?.title
                                     ?: titleFolder?.let { folderLabel(it) }
                                     ?: titleTab.path
                                 // Any location that round-trips through the
                                 // opener route is editable; a view without an
                                 // address stays a read-only breadcrumb.
-                                val titleEditable = titleWeb != null || titleFolder == null ||
+                                val titleEditable = rendererPath?.editable ?: (titleFolder == null ||
                                     runCatching {
                                         LocationAddress.format(titleFolder!!.ref())
-                                    }.getOrNull() != null
+                                    }.getOrNull() != null)
                                 TitleBlock(
                                     path = titlePending?.path ?: titleTab.path,
-                                    info = if (titleWeb == null && !titleHome) currentInfo else DirectoryStats(),
+                                    info = if (titleWeb == null && titleEditor == null && !titleHome) currentInfo else DirectoryStats(),
                                     onNavigate = { jumpTo(it) },
                                     onBounds = { titleBounds = it },
                                     displayPath = titleDisplay,
+                                    editText = rendererPath?.editText ?: titleDisplay,
                                     editable = titleEditable,
+                                    detail = rendererPath?.caption,
                                 )
                             }
                         },
@@ -2028,6 +2267,12 @@ fun FileManagerApp(
                             }
                         },
                         actions = {
+                            val menuItems = when {
+                                activeEditor != null -> activeEditor.menuItems(context)
+                                activeWeb != null -> activeWeb.menuItems(context)
+                                isHomePath(menuPath) -> HomeRenderer.menuItems(context, menuHost)
+                                else -> DirectoryRenderer.menuItems(context, menuHost, caps.canRefresh)
+                            }
                             Box {
                                 IconButton(onClick = { showMoreMenu = true }) {
                                     Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.cd_more))
@@ -2036,57 +2281,46 @@ fun FileManagerApp(
                                     expanded = showMoreMenu,
                                     onDismissRequest = { showMoreMenu = false }
                                 ) {
-                                    DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.refresh)) },
-                                        leadingIcon = { Icon(Icons.Default.Refresh, null) },
-                                        enabled = caps.canRefresh,
-                                        onClick = {
-                                            refreshActive()
-                                            showMoreMenu = false
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.filter_title)) },
-                                        leadingIcon = { Icon(Icons.Default.FilterAlt, null) },
-                                        onClick = {
-                                            searchMode = !searchMode
-                                            if (!searchMode) filterText = ""
-                                            showMoreMenu = false
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text(stringResource(R.string.sort_title)) },
-                                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
-                                        onClick = {
-                                            showSortDialog = true
-                                            showMoreMenu = false
-                                        }
-                                    )
+                                    menuItems.forEach { item ->
+                                        DropdownMenuItem(
+                                            text = { Text(item.title) },
+                                            leadingIcon = item.icon?.let { icon ->
+                                                { Icon(icon, null) }
+                                            },
+                                            onClick = {
+                                                item.onClick()
+                                                showMoreMenu = false
+                                            },
+                                        )
+                                    }
                                     val bookmarkEntry = currentBookmarkEntry()
-                                    val bookmarked = bookmarkEntry != null &&
-                                        HomeStore.isBookmarked(bookmarkEntry.kind, bookmarkEntry.location)
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text(
-                                                stringResource(
-                                                    if (bookmarked) R.string.bookmark_remove
-                                                    else R.string.bookmark_add,
+                                    if (bookmarkEntry != null) {
+                                        val bookmarked = HomeStore.isBookmarked(
+                                            bookmarkEntry.kind,
+                                            bookmarkEntry.location,
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    stringResource(
+                                                        if (bookmarked) R.string.bookmark_remove
+                                                        else R.string.bookmark_add,
+                                                    )
                                                 )
-                                            )
-                                        },
-                                        leadingIcon = {
-                                            Icon(
-                                                if (bookmarked) Icons.Default.Star
-                                                else Icons.Default.StarBorder,
-                                                null,
-                                            )
-                                        },
-                                        enabled = bookmarkEntry != null,
-                                        onClick = {
-                                            toggleCurrentBookmark()
-                                            showMoreMenu = false
-                                        }
-                                    )
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    if (bookmarked) Icons.Default.Star
+                                                    else Icons.Default.StarBorder,
+                                                    null,
+                                                )
+                                            },
+                                            onClick = {
+                                                toggleCurrentBookmark()
+                                                showMoreMenu = false
+                                            }
+                                        )
+                                    }
                                     DropdownMenuItem(
                                         text = { Text(stringResource(R.string.settings)) },
                                         leadingIcon = { Icon(Icons.Default.Settings, null) },
@@ -2099,7 +2333,9 @@ fun FileManagerApp(
                                         text = { Text(stringResource(R.string.exit)) },
                                         leadingIcon = { Icon(Icons.AutoMirrored.Filled.ExitToApp, null) },
                                         onClick = {
-                                            (context as? Activity)?.finish()
+                                            val activity = context as? Activity
+                                            val finish: () -> Unit = { activity?.finish() }
+                                            if (!guardEditor(currentTab().id, finish)) finish()
                                             showMoreMenu = false
                                         }
                                     )
@@ -2112,6 +2348,7 @@ fun FileManagerApp(
             bottomBar = {
                 val toolTab = currentTab()
                 val toolWeb = webSessions[toolTab.id]
+                val toolEditor = editorSessions[toolTab.id]
                 val caps = currentCapabilities()
                 BottomToolbar(
                     modifier = Modifier.onGloballyPositioned {
@@ -2125,16 +2362,17 @@ fun FileManagerApp(
                     onCreateFile = { if (caps.canCreate) showCreateDialog = true },
                     canCreate = caps.canCreate,
                     onTerminal = {
-                        if (caps.canTerminal) {
+                        if (caps.canTerminal || hasTerminalSessions) {
                             showTerminalSheet = true
                         }
                     },
-                    canOpenTerminal = caps.canTerminal,
+                    canOpenTerminal = caps.canTerminal || hasTerminalSessions,
                     onParent = ::goParent,
                     copyMoveActive = copyMoveState != null,
                     onCopyMoveConfirm = { showCopyMovePlaceDialog = true },
                     onCopyMoveCancel = ::cancelCopyMove,
-                    selectionMode = toolWeb == null && toolTab.selectedPaths.isNotEmpty(),
+                    selectionMode = toolWeb == null && toolEditor == null &&
+                        toolTab.selectedPaths.isNotEmpty(),
                     onSelectAll = {
                         replaceCurrent(currentTab().copy(selectedPaths = currentEntries.map { it.path }.toSet()))
                     },
@@ -2234,6 +2472,11 @@ fun FileManagerApp(
                     // A page owns the tab even when it was opened from home;
                     // home stays behind it as the back-stack entry.
                     activeWeb != null -> WebContent(activeWeb, Modifier.fillMaxSize())
+                    activeEditor != null -> EditorContent(
+                        activeEditor,
+                        darkTheme = darkTheme,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                     isHomePath(activePath) -> HomeScreen(
                         recent = homeRecent,
                         bookmarks = homeBookmarks,
@@ -2255,6 +2498,7 @@ fun FileManagerApp(
                             HomeStore.clearBookmarks()
                             homeVersion++
                         },
+                        filter = if (searchMode) filterText else "",
                         opening = nodeOpeningTab == tab.id,
                         onCancelOpening = ::cancelNodeOpening,
                         modifier = Modifier.fillMaxSize(),
@@ -2545,25 +2789,159 @@ fun FileManagerApp(
         )
     }
 
+    val allHistory = historyStops()
+    // Home is a landing marker, not a navigation stop: hide it from the
+    // sheet, but keep the full list for index-based history navigation.
+    val visibleHistory = allHistory.filterNot { isHomePath(it.path) }
     HistorySheet(
         visible = showHistory,
         dragPx = historyDragPx,
-        stops = historyStops(),
+        stops = visibleHistory,
         bottomInset = with(LocalDensity.current) { bottomBarHeightPx.toDp() },
-        onSelect = {
-            jumpToHistory(it)
+        onSelect = { stop ->
+            val index = allHistory.indexOfFirst { it === stop }
+            if (index >= 0) jumpToHistory(index)
             showHistory = false
         },
         onDismiss = { showHistory = false },
     )
 
+    val terminalCanCreate = currentCapabilities().canTerminal
     TerminalSheet(
         visible = showTerminalSheet,
         onDismiss = { showTerminalSheet = false },
         onShow = { showTerminalSheet = true },
         onDropAccepted = { terminalDropAccepted = true },
-        currentPath = currentTab().path
+        canCreateTerminal = terminalCanCreate,
+        // The editor opened in this tab asks for a shell in the folder that
+        // owns the file; the directory behind it is only the fallback.
+        currentPath = activeEditor
+            ?.takeIf { it.capabilities.canTerminal }
+            ?.parentAddress
+            ?: currentTab().path
     )
+
+    val conflictEditor = activeEditor?.takeIf { it.conflict }
+    if (leavePrompt != null && conflictEditor == null) {
+        val prompt = leavePrompt!!
+        val save = prompt.onSave
+        val canSave = prompt.canSave && save != null
+        AlertDialog(
+            onDismissRequest = {
+                if (!leaveSaving) {
+                    leavePrompt = null
+                    prompt.onCancel()
+                }
+            },
+            title = { Text(stringResource(R.string.editor_unsaved)) },
+            text = {
+                Text(
+                    prompt.message?.takeIf { it.isNotBlank() }
+                        ?: stringResource(
+                            if (canSave) R.string.editor_unsaved_message
+                            else R.string.editor_leave_message
+                        )
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !leaveSaving,
+                    onClick = {
+                        if (save == null || !canSave) {
+                            leavePrompt = null
+                            prompt.onLeave()
+                        } else {
+                            scope.launch {
+                                leaveSaving = true
+                                val result = try {
+                                    save()
+                                } catch (failure: CancellationException) {
+                                    throw failure
+                                } catch (failure: Exception) {
+                                    Result.failure(failure)
+                                }
+                                leaveSaving = false
+                                if (result.isSuccess) {
+                                    if (leavePrompt === prompt) leavePrompt = null
+                                    prompt.onLeave()
+                                } else {
+                                    // A conflict keeps the leave action pending
+                                    // until the user overwrites or dismisses it.
+                                    val editor = editorSessions[prompt.ownerTabId]
+                                    if (editor?.conflict != true) {
+                                        if (leavePrompt === prompt) leavePrompt = null
+                                        prompt.onCancel()
+                                    }
+                                }
+                            }
+                        }
+                    },
+                ) {
+                    Text(stringResource(if (canSave) R.string.editor_save else R.string.editor_leave))
+                }
+            },
+            dismissButton = {
+                if (canSave) {
+                    Row {
+                        TextButton(
+                            enabled = !leaveSaving,
+                            onClick = {
+                                leavePrompt = null
+                                prompt.onCancel()
+                            },
+                        ) { Text(stringResource(R.string.cancel)) }
+                        TextButton(
+                            enabled = !leaveSaving,
+                            onClick = {
+                                leavePrompt = null
+                                prompt.onLeave()
+                            },
+                        ) { Text(stringResource(R.string.editor_discard)) }
+                    }
+                } else {
+                    TextButton(
+                        onClick = {
+                            leavePrompt = null
+                            prompt.onCancel()
+                        },
+                    ) { Text(stringResource(R.string.cancel)) }
+                }
+            },
+        )
+    }
+    if (conflictEditor != null) {
+        val dismissConflict: () -> Unit = {
+            conflictEditor.dismissConflict()
+            leavePrompt?.let { prompt ->
+                leavePrompt = null
+                prompt.onCancel()
+            }
+        }
+        AlertDialog(
+            onDismissRequest = dismissConflict,
+            title = { Text(stringResource(R.string.editor_conflict)) },
+            text = { Text(stringResource(R.string.editor_conflict_message)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        conflictEditor.overwrite { success ->
+                            if (success) {
+                                conflictEditor.dismissConflict()
+                                val prompt = leavePrompt
+                                if (prompt != null) {
+                                    leavePrompt = null
+                                    prompt.onLeave()
+                                }
+                            }
+                        }
+                    },
+                ) { Text(stringResource(R.string.editor_overwrite)) }
+            },
+            dismissButton = {
+                TextButton(onClick = dismissConflict) { Text(stringResource(R.string.cancel)) }
+            },
+        )
+    }
 
     if (showSortDialog) {
         SortDialog(

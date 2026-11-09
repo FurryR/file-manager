@@ -189,8 +189,8 @@ file-manager/
   the breadcrumb projection.
 - **Renderers/Openers.** `app/.../render/Renderer.kt` defines
   `RenderTarget` (`Node`/`Url`), `RendererFactory`/`RendererSession`,
-  `RenderHost` and `Renderers`. Only Directory and Web renderers are
-  registered. `opener/.../Opener.kt` defines the format-agnostic `Opener`/
+  `RenderHost` and `Renderers`. Directory, Web and the tab-owned Sora text
+  editor are registered. `opener/.../Opener.kt` defines the format-agnostic `Opener`/
   `Openers` route. `DirectorySession` is the shared directory controller;
   `FileListScreen` is still its transitional view. `ArchiveOpener` turns a zip
   file into an `ArchiveFolder`; it draws nothing.
@@ -226,7 +226,7 @@ file-manager/
 | Node service | `app/.../DefaultNodeService.kt` | Resolves `ViewRef`, auto-enters intermediate files via `Openers.openFolder` |
 | Open-with table | `opener/.../OpenRouter.kt` + `app/.../OpenRoutes.kt` | Generic `OpenRouter<C, R>` in `:opener`; app registers web-page/opener/renderer/external order |
 | Archive view | `opener/.../ArchiveFolder.kt` + `opener/.../ZipArchiveSource.kt` | Opener-owned view; core knows only `VFile`/`VFolder` |
-| Renderers | `app/.../render/Renderer.kt` | `RenderTarget`, `Renderers`, `RenderHost` (Directory + Web only) |
+| Renderers | `app/.../render/Renderer.kt` | `RenderTarget`, `Renderers`, `RenderHost` (Directory + Web + Editor) |
 | Openers route | `opener/.../Opener.kt` | Format-agnostic SPI + priority registry; archive implementation lives beside it |
 | HTML/WebView | `app/.../render/WebRenderer.kt` | `DocumentView`, `HtmlDocument`, `WebContent` |
 | Agent archive tools | `agent/.../AgentTools.kt` | `archive_list`/`archive_read`/`archive_copy` via `NodeService` |
@@ -506,8 +506,10 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   `/sys/fs/cgroup` — that breaks the init systems that need it and buys nothing
   against a root that is already our peer. A real boundary needs a PID namespace,
   which these kernels do not have.
-  proot containers are out of scope: they are not root, their processes cannot
-  escape, and they own no group.
+  proot containers cannot create real cgroups, so they use PRoot's `--cgroup`
+  emulation: the same daemon code owns a synthetic v2 hierarchy backed by
+  ppid/session data, which also ends the container on shutdown even though the
+  processes are not root. Resource limits are unavailable in that hierarchy.
 - Client entry points live in `:daemon` (`DaemonManager.fileService/execService`).
 - **Terminal IME tap race (upstream-worthy)** — Termux's
   `TerminalView.onSingleTapUp()` calls `requestFocus()` on the terminal view, then

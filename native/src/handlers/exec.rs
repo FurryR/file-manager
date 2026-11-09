@@ -59,8 +59,22 @@ impl Drop for ReapGuard {
 }
 
 /// Take over both output pipes of `child` so they can be drained separately
-/// from the exit status of the child.
-fn take_pipes(child: &mut Child) -> io::Result<(OwnedFd, OwnedFd)> {
+/// from the exit status of the child. When `want_stdin` is set, the write end
+/// of the child's stdin pipe is returned too, for a bidirectional client.
+fn take_pipes(
+    child: &mut Child,
+    want_stdin: bool,
+) -> io::Result<(Option<OwnedFd>, OwnedFd, OwnedFd)> {
+    let stdin = if want_stdin {
+        Some(
+            child
+                .stdin
+                .take()
+                .ok_or_else(|| io::Error::other("child stdin was not piped"))?,
+        )
+    } else {
+        None
+    };
     let stdout = child
         .stdout
         .take()
@@ -70,6 +84,7 @@ fn take_pipes(child: &mut Child) -> io::Result<(OwnedFd, OwnedFd)> {
         .take()
         .ok_or_else(|| io::Error::other("child stderr was not piped"))?;
     Ok((
+        stdin.map(|fd| unsafe { OwnedFd::from_raw_fd(fd.into_raw_fd()) }),
         unsafe { OwnedFd::from_raw_fd(stdout.into_raw_fd()) },
         unsafe { OwnedFd::from_raw_fd(stderr.into_raw_fd()) },
     ))
@@ -180,13 +195,14 @@ pub(super) async fn run_exec_stream(
     args: Vec<String>,
     cwd: String,
     env: HashMap<String, String>,
+    pipe_stdin: bool,
     execs: &Arc<Mutex<ExecManager>>,
 ) -> OutboundResponse {
     let mut cmd = Command::new(&command);
     cmd.args(&args)
         .envs(&env)
         .process_group(0)
-        .stdin(Stdio::null())
+        .stdin(if pipe_stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if !cwd.is_empty() {
@@ -224,7 +240,7 @@ pub(super) async fn run_exec_stream(
     let pid = child.id();
     let exit = crate::reaper::track(pid);
     let guard = ReapGuard::new(pid, exit.clone());
-    let (stdout, stderr) = match take_pipes(&mut child) {
+    let (stdin, stdout, stderr) = match take_pipes(&mut child, pipe_stdin) {
         Ok(pipes) => pipes,
         Err(error) => {
             return OutboundResponse::plain(error_response(req_id, error));
@@ -234,6 +250,8 @@ pub(super) async fn run_exec_stream(
     drop(child);
     let exec_id = execs.lock().await.insert(pid, exit);
     guard.disarm();
+    let mut fds = vec![stdout, stderr];
+    fds.extend(stdin);
     OutboundResponse::with_fds(
         Response {
             id: req_id,
@@ -244,7 +262,7 @@ pub(super) async fn run_exec_stream(
             }),
             ..Response::default()
         },
-        vec![stdout, stderr],
+        fds,
     )
 }
 
@@ -297,7 +315,7 @@ pub(super) async fn run_exec(
     let pid = child.id();
     let mut exit = crate::reaper::track(pid);
     let guard = ReapGuard::new(pid, exit.clone());
-    let (stdout, stderr) = match take_pipes(&mut child) {
+    let (_, stdout, stderr) = match take_pipes(&mut child, false) {
         Ok(pipes) => pipes,
         Err(error) => {
             return error_response(req_id, error);

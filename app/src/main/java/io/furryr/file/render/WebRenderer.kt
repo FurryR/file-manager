@@ -10,12 +10,15 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ProgressBar
+import android.webkit.JsResult
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -28,6 +31,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.viewinterop.AndroidView
+import io.furryr.file.R
 import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.ContentTypes
 import io.furryr.file.core.VFile
@@ -68,6 +72,10 @@ class WebRendererSession(
     var address by mutableStateOf(initialUrlArg ?: document?.file?.name.orEmpty())
         internal set
 
+    /** Last page title; cleared as soon as a new document starts loading. */
+    var pageTitle by mutableStateOf<String?>(null)
+        private set
+
     /** 0..100, drives the slim progress bar above the page. */
     var progress by mutableIntStateOf(0)
         internal set
@@ -87,6 +95,9 @@ class WebRendererSession(
 
     private var webView: WebView? = null
     private var darkTheme = true
+    private var closing = false
+    /** A page's beforeunload prompt waiting for the shared leave dialog. */
+    private var pendingUnload: JsResult? = null
     /** URLs this session already decided to load itself. */
     private val approvedNavigations = mutableSetOf<String>()
 
@@ -102,8 +113,12 @@ class WebRendererSession(
 
     /** Navigate an existing URL session without rebuilding its WebView. */
     fun load(url: String) {
+        pendingUnload?.cancel()
+        pendingUnload = null
         initialUrl = url
         address = url
+        // Keep the old title until the new document reports one; a navigation
+        // should not blank the path bar while the page is still loading.
         loading = true
         progress = 0
         contentVisible = false
@@ -139,6 +154,10 @@ class WebRendererSession(
     }
 
     override fun close() {
+        if (closing) return
+        closing = true
+        pendingUnload?.cancel()
+        pendingUnload = null
         val view = webView ?: return
         webView = null
         canGoBack = false
@@ -149,6 +168,23 @@ class WebRendererSession(
         view.stopLoading()
         view.loadUrl("about:blank")
         view.destroy()
+    }
+
+    override fun menuItems(context: Context): List<RendererMenuItem> = listOf(
+        RendererMenuItem(
+            title = context.getString(R.string.refresh),
+            icon = Icons.Default.Refresh,
+        ) { refresh() },
+    )
+
+    override fun pathBar(context: Context): RendererPath {
+        val title = pageTitle?.takeIf { it.isNotBlank() }
+            ?: address.substringAfter("://").substringBefore('/').ifBlank { address }
+        return RendererPath(
+            title = title,
+            caption = address,
+            editText = address,
+        )
     }
 
     internal fun ensureView(context: Context): WebView {
@@ -301,7 +337,48 @@ class WebRendererSession(
                     // Some pages report the URL as the title; keep the address
                     // fallback in the tab instead of duplicating it.
                     val clean = title?.takeIf { it.isNotBlank() && it != view?.url }
+                    pageTitle = clean
                     host.updateTitle(clean)
+                }
+
+                override fun onJsBeforeUnload(
+                    view: WebView?,
+                    url: String?,
+                    message: String?,
+                    result: JsResult?,
+                ): Boolean {
+                    val target = result ?: return false
+                    if (closing) {
+                        target.cancel()
+                        return true
+                    }
+                    // A page without a real beforeunload prompt must keep the
+                    // normal close path; waiting for our dialog here strands
+                    // navigations that never registered the hook.
+                    if (message == null) {
+                        target.confirm()
+                        return true
+                    }
+                    // The page is asking to leave; use the same tab-level
+                    // dialog as the editor instead of WebView's default one.
+                    pendingUnload?.cancel()
+                    pendingUnload = target
+                    host.confirmLeave(
+                        message = message,
+                        onLeave = {
+                            if (pendingUnload === target) {
+                                pendingUnload = null
+                                target.confirm()
+                            }
+                        },
+                        onCancel = {
+                            if (pendingUnload === target) {
+                                pendingUnload = null
+                                target.cancel()
+                            }
+                        },
+                    )
+                    return true
                 }
             }
             webView = this
@@ -385,8 +462,8 @@ class WebRendererSession(
         val next = displayAddress(url)
         if (next == address) return
         address = next
-        // The old page's title must not label the new page while it loads.
-        host.updateTitle(null)
+        // Keep the previous title while the new document loads. The title is
+        // replaced by onReceivedTitle, so the path bar never flashes blank.
     }
 
     private fun stripFragment(url: String): String = url.substringBefore('#')

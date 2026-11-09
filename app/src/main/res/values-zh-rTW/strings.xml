@@ -7,6 +7,7 @@
     <string name="nav_root">根目錄</string>
     <string name="home_title">首頁</string>
     <string name="home_empty">暫無內容</string>
+    <string name="home_no_matches">沒有符合的項目</string>
     <string name="home_recent_files">最近檔案</string>
     <string name="home_recent_locations">最近位置</string>
     <string name="home_bookmarks">書籤</string>
@@ -97,6 +98,7 @@
     <string name="toast_deleted">已刪除 %1$s</string>
     <string name="session_manager">工作階段</string>
     <string name="history_title">歷史記錄</string>
+    <string name="history_empty">（空）</string>
     <string name="done">完成</string>
     <string name="toast_deleted_count">已刪除 %1$d 項</string>
     <string name="toast_renamed">已重新命名為 %1$s</string>
@@ -202,6 +204,11 @@
     <string name="settings_pulse_mic_desc">啟用時允許容器使用本機麥克風錄音。</string>
     <string name="settings_pulse_buffer">音訊緩衝區</string>
     <string name="settings_pulse_buffer_desc">輸出延遲（毫秒，10–1000）。數值越小反應越快，過小容易斷音。</string>
+    <string name="settings_editor">編輯</string>
+    <string name="settings_editor_font">字型</string>
+    <string name="settings_editor_font_desc">預設使用等寬字型（TTF/OTF）</string>
+    <string name="settings_editor_font_size">預設字型大小</string>
+    <string name="settings_editor_font_size_desc">編輯器預設文字大小</string>
     <string name="settings_terminal">終端機</string>
     <string name="settings_terminal_desc">字型與顯示設定</string>
     <string name="settings_terminal_font">字型</string>

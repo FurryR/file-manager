@@ -62,20 +62,31 @@ fun HomeScreen(
     onClearBookmarks: () -> Unit,
     opening: Boolean = false,
     onCancelOpening: () -> Unit = {},
+    filter: String = "",
     modifier: Modifier = Modifier,
 ) {
+    val query = filter.trim()
+    fun matches(entry: HomeEntry): Boolean =
+        query.isEmpty() ||
+            entry.title.contains(query, ignoreCase = true) ||
+            entry.detail.contains(query, ignoreCase = true) ||
+            entry.location.contains(query, ignoreCase = true)
+    val visibleBookmarks = bookmarks.filter(::matches)
     val bookmarked = bookmarks.map { it.key }.toSet()
-    val recentFiles = recent.filter { it.kind == HomeEntryKind.FILE }
-    val recentLocations = recent.filter { it.kind != HomeEntryKind.FILE }
+    val recentFiles = recent.filter { it.kind == HomeEntryKind.FILE && matches(it) }
+    val recentLocations = recent.filter { it.kind != HomeEntryKind.FILE && matches(it) }
+    val empty = visibleBookmarks.isEmpty() && recentFiles.isEmpty() && recentLocations.isEmpty()
 
     Box(modifier = modifier.fillMaxSize()) {
-        if (recent.isEmpty() && bookmarks.isEmpty()) {
+        if (empty) {
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = stringResource(R.string.home_empty),
+                    text = stringResource(
+                        if (query.isEmpty()) R.string.home_empty else R.string.home_no_matches,
+                    ),
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -86,7 +97,7 @@ fun HomeScreen(
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                if (bookmarks.isNotEmpty()) {
+                if (visibleBookmarks.isNotEmpty()) {
                     item(key = "bookmarks_header") {
                         SectionHeader(
                             title = stringResource(R.string.home_bookmarks),
@@ -94,7 +105,7 @@ fun HomeScreen(
                             onAction = onClearBookmarks,
                         )
                     }
-                    items(bookmarks, key = { "bookmark:${it.key}" }) { entry ->
+                    items(visibleBookmarks, key = { "bookmark:${it.key}" }) { entry ->
                         SwipeableHomeRow(
                             entry = entry,
                             bookmarked = true,

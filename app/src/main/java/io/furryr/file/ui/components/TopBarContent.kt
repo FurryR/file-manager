@@ -60,13 +60,17 @@ fun TitleBlock(
     onBounds: (Rect?) -> Unit = {},
     /** Human-readable address; may differ from the editable Vfs path. */
     displayPath: String = path,
+    /** What a tap puts in the field; a title is not necessarily an address. */
+    editText: String = displayPath,
     /** Container views show a breadcrumb but do not parse it as a path. */
     editable: Boolean = true,
+    /** Replaces the directory summary line, e.g. an editor's encoding/cursor. */
+    detail: String? = null,
 ) {
-    val summary = info.summary(LocalContext.current)
-    var editing by rememberSaveable(path, displayPath) { mutableStateOf(false) }
-    var field by rememberSaveable(path, displayPath, stateSaver = TextFieldValue.Saver) {
-        mutableStateOf(TextFieldValue(displayPath))
+    val summary = detail ?: info.summary(LocalContext.current)
+    var editing by rememberSaveable(path, displayPath, editText) { mutableStateOf(false) }
+    var field by rememberSaveable(path, displayPath, editText, stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(editText))
     }
     // Only a focus loss after this edit actually took focus may cancel the
     // edit; otherwise the first unfocused callback would close it instantly.
@@ -81,7 +85,7 @@ fun TitleBlock(
         val target = field.text.trim()
         editing = false
         // An empty submission is meaningful: it returns to the home page.
-        if (target != displayPath) onNavigate(target)
+        if (target != editText) onNavigate(target)
     }
 
     BackHandler(enabled = editing) { editing = false }
@@ -103,7 +107,7 @@ fun TitleBlock(
             .fillMaxHeight()
             .onGloballyPositioned { onBounds(it.boundsInWindow()) }
             .clickable(enabled = !editing && editable) {
-                field = TextFieldValue(displayPath, selection = TextRange(0, displayPath.length))
+                field = TextFieldValue(editText, selection = TextRange(0, editText.length))
                 focusedOnce = false
                 editing = true
             }

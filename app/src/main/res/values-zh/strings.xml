@@ -7,6 +7,7 @@
     <string name="nav_root">根目录</string>
     <string name="home_title">首页</string>
     <string name="home_empty">暂无内容</string>
+    <string name="home_no_matches">没有匹配的项目</string>
     <string name="home_recent_files">最近文件</string>
     <string name="home_recent_locations">最近位置</string>
     <string name="home_bookmarks">书签</string>
@@ -97,6 +98,7 @@
     <string name="toast_deleted">已删除 %1$s</string>
     <string name="session_manager">会话</string>
     <string name="history_title">历史记录</string>
+    <string name="history_empty">（空）</string>
     <string name="done">完成</string>
     <string name="toast_deleted_count">已删除 %1$d 项</string>
     <string name="toast_renamed">已重命名为 %1$s</string>
@@ -200,6 +202,11 @@
     <string name="settings_pulse_mic_desc">允许容器在启用时使用本机麦克风录音。</string>
     <string name="settings_pulse_buffer">音频缓冲</string>
     <string name="settings_pulse_buffer_desc">输出延迟（毫秒，10–1000）。越小响应越快，过小易断音。</string>
+    <string name="settings_editor">编辑</string>
+    <string name="settings_editor_font">字体</string>
+    <string name="settings_editor_font_desc">默认使用等宽字体（TTF/OTF）</string>
+    <string name="settings_editor_font_size">默认字体大小</string>
+    <string name="settings_editor_font_size_desc">编辑器默认文字大小</string>
     <string name="settings_terminal">终端</string>
     <string name="settings_terminal_desc">字体和显示设置</string>
     <string name="settings_terminal_font">字体</string>

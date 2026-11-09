@@ -1,0 +1,66 @@
+{
+  "name": "File Manager Light",
+  "settings": [
+    {
+      "settings": {
+        "foreground": "#1C1E21",
+        "background": "#FBFCFE"
+      }
+    },
+    {
+      "scope": "comment",
+      "settings": {
+        "foreground": "#6A737D",
+        "fontStyle": "italic"
+      }
+    },
+    {
+      "scope": "keyword,storage",
+      "settings": {
+        "foreground": "#8B3FA8"
+      }
+    },
+    {
+      "scope": "string,markup.raw",
+      "settings": {
+        "foreground": "#1B7F3B"
+      }
+    },
+    {
+      "scope": "constant",
+      "settings": {
+        "foreground": "#A35A00"
+      }
+    },
+    {
+      "scope": "entity.name.function",
+      "settings": {
+        "foreground": "#1B5FAA"
+      }
+    },
+    {
+      "scope": "entity.name.tag,entity.name.section,markup.heading",
+      "settings": {
+        "foreground": "#00777A"
+      }
+    },
+    {
+      "scope": "entity.other.attribute-name,variable",
+      "settings": {
+        "foreground": "#B23A3A"
+      }
+    },
+    {
+      "scope": "markup.bold",
+      "settings": {
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "scope": "markup.italic",
+      "settings": {
+        "fontStyle": "italic"
+      }
+    }
+  ]
+}

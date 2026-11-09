@@ -20,6 +20,7 @@ import io.furryr.file.core.Vfs
 import io.furryr.file.provider.remote.RemoteProviders
 import io.furryr.file.provider.remote.SshTerminals
 import io.furryr.file.opener.ArchiveOpener
+import io.furryr.file.editor.EditorRendererFactory
 import io.furryr.file.render.DirectoryRendererFactory
 import io.furryr.file.opener.Openers
 import io.furryr.file.render.Renderers
@@ -101,6 +102,7 @@ fun installFileProviders(context: Context) {
     // daemon API. The list screen is the shared directory renderer.
     Openers.register(100, ArchiveOpener(appContext.cacheDir))
     Renderers.register(10, DirectoryRendererFactory())
+    Renderers.register(15, EditorRendererFactory())
     Renderers.register(20, WebRendererFactory())
     OpenRoutes.install()
     AgentEnvironment.nodeService = DefaultNodeService()

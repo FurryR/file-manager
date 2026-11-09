@@ -155,9 +155,13 @@ message ExecRequest {
   string cwd = 3;
   map<string, string> env = 4;
   bool pipes = 5;
+  // Pipe the child's stdin back to the caller as a third descriptor. Used by
+  // bidirectional clients such as the language server transport.
+  bool pipe_stdin = 6;
 }
 
-// Pipe-mode exec: stdout and stderr ride the response as two SCM_RIGHTS fds.
+// Pipe-mode exec: stdout and stderr (then stdin when requested) ride the
+// response as SCM_RIGHTS fds.
 message ExecStreamResponse {
   uint64 exec_id = 1;
   uint32 child_pid = 2;

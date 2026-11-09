@@ -118,6 +118,7 @@ internal fun ContentWithDrawer(
     tabs: List<TerminalTab>,
     activeTabIndex: Int,
     enabled: Boolean,
+    canCreateTerminal: Boolean,
     onSwitchTab: (Int) -> Unit,
     onCloseTab: (TerminalTab) -> Unit,
     onDismissDrawer: () -> Unit,
@@ -170,6 +171,7 @@ internal fun ContentWithDrawer(
                         }
                         TextButton(
                             onClick = onNewTab,
+                            enabled = canCreateTerminal,
                             modifier = Modifier.padding(top = 8.dp),
                         ) {
                             Text(stringResource(R.string.drawer_new_terminal))
@@ -203,6 +205,7 @@ internal fun ContentWithDrawer(
                 DrawerContent(
                     tabs = tabs,
                     activeTabIndex = activeTabIndex,
+                    canCreateTerminal = canCreateTerminal,
                     onSwitchTab = onSwitchTab,
                     onCloseTab = onCloseTab,
                     onNewTab = onNewTab,
@@ -218,6 +221,7 @@ internal fun ContentWithDrawer(
 internal fun DrawerContent(
     tabs: List<TerminalTab>,
     activeTabIndex: Int,
+    canCreateTerminal: Boolean,
     onSwitchTab: (Int) -> Unit,
     onCloseTab: (TerminalTab) -> Unit,
     onNewTab: () -> Unit,
@@ -266,6 +270,7 @@ internal fun DrawerContent(
         }
         Button(
             onClick = onNewTab,
+            enabled = canCreateTerminal,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
         ) {

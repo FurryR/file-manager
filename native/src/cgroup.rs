@@ -14,8 +14,11 @@
 //! rest of their life. Every path here is therefore opened *before* the chroot
 //! and used afterwards through `openat`/`unlinkat` relative to the saved fds.
 //!
-//! proot containers are out of scope: they are not root and their processes
-//! cannot escape the app in the first place.
+//! proot containers use PRoot's `--cgroup` emulation: the same paths and
+//! writes below land in a private cgroup v2 hierarchy backed by ppid/session
+//! data instead of a real kernel cgroup.  The emulation implements the
+//! non-resource files (`cgroup.procs`, `cgroup.kill`, `freeze`, `events`,
+//! controllers) but not resource limits, which remain unavailable rootless.
 //!
 //! Kernel coverage (the daemon supports minSdk 26):
 //! - Android 13+ / kernel 5.14+: `cgroup.kill`, one write, O(1).

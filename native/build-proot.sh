@@ -49,7 +49,7 @@ fi
 echo "NDK toolchain: $CC"
 
 # --- Clone sources ---
-echo "==> Cloning sources"
+echo "==> Preparing sources"
 
 PROOT_SRC="$WORK_DIR/proot"
 TALLOC_SRC="$WORK_DIR/talloc"
@@ -58,10 +58,33 @@ mkdir -p "$BUILD_DIR"
 OBJ_DIR="$BUILD_DIR/obj"
 mkdir -p "$OBJ_DIR"
 
-if ! git clone --depth 1 --branch v5.1.107.79 https://github.com/termux/proot.git "$PROOT_SRC" 2>/dev/null; then
+PROOT_TAG="v5.1.107.79"
+PATCH_DIR="$NATIVE_DIR/patches/proot"
+
+if ! git clone --depth 1 --branch "$PROOT_TAG" \
+    https://gh-proxy.com/https://github.com/termux/proot.git \
+    "$PROOT_SRC" 2>/dev/null; then
   echo "Failed to clone proot" >&2
   exit 1
 fi
+
+# Every patch is required: an unpatched proot has no `--cgroup` emulation and
+# the daemon would silently fall back to weaker container-lifetime guarantees.
+# A missing or failed patch therefore fails the build.
+shopt -s nullglob
+patches=("$PATCH_DIR"/*.patch)
+shopt -u nullglob
+if (( ${#patches[@]} == 0 )); then
+  echo "No proot patches found in $PATCH_DIR" >&2
+  exit 1
+fi
+for patch in "${patches[@]}"; do
+  echo "==> Applying $(basename "$patch")"
+  if ! git -C "$PROOT_SRC" apply --whitespace=nowarn "$patch"; then
+    echo "Failed to apply $patch" >&2
+    exit 1
+  fi
+done
 
 # Download talloc
 TALLOC_VER="2.4.3"

@@ -1,0 +1,4887 @@
+From e21b614de9f20ed47e7f53a7fda6f162365e46b5 Mon Sep 17 00:00:00 2001
+From: export <export@local>
+Date: Mon, 9 Nov 2026 23:15:12 +0800
+Subject: [PATCH] proot: cgroup v2 emulation extension
+
+---
+ README.md                                 |   41 +
+ src/GNUmakefile                           |   13 +-
+ src/cli/proot.c                           |   31 +
+ src/cli/proot.h                           |   13 +
+ src/compat.h                              |    8 +-
+ src/extension/ashmem_memfd/ashmem_memfd.c |    1 +
+ src/extension/cgroup/cgroup.c             | 3018 +++++++++++++++++++++
+ src/extension/cgroup/cgroup.h             |   35 +
+ src/extension/extension.h                 |    1 +
+ src/extension/mountinfo/mountinfo.c       |    6 +-
+ src/linux/ashmem.h                        |   25 +
+ src/tracee/event.c                        |   18 +-
+ src/tracee/tracee.h                       |    4 +
+ tests/cgroup/.gitignore                   |    1 +
+ tests/cgroup/README.md                    |   36 +
+ tests/cgroup/cgroup_test.c                | 1346 +++++++++
+ tests/cgroup/run.sh                       |   56 +
+ 17 files changed, 4643 insertions(+), 10 deletions(-)
+ create mode 100644 src/extension/cgroup/cgroup.c
+ create mode 100644 src/extension/cgroup/cgroup.h
+ create mode 100644 src/linux/ashmem.h
+ create mode 100644 tests/cgroup/.gitignore
+ create mode 100644 tests/cgroup/README.md
+ create mode 100644 tests/cgroup/cgroup_test.c
+ create mode 100755 tests/cgroup/run.sh
+
+diff --git a/README.md b/README.md
+index 17f9658..01d9ae4 100644
+--- a/README.md
++++ b/README.md
+@@ -3,3 +3,44 @@ proot
+ [![Travis build status](https://travis-ci.org/termux/proot.svg?branch=master)](https://travis-ci.org/termux/proot)
+ 
+ This is a copy of [the PRoot project](https://github.com/proot-me/PRoot/) with patches applied to work better under [Termux](https://termux.com).
++
++Cgroup v2 emulation
++-------------------
++
++`--cgroup` presents `/sys/fs/cgroup` as a private cgroup v2 hierarchy even
++when the app UID cannot create real cgroups:
++
++```sh
++proot --cgroup -0 -r rootfs -w / /bin/sh
++```
++
++The emulation covers the non-resource parts of cgroup v2 that a service
++manager needs:
++
++* hierarchical directories (`mkdir`, `rmdir`, nested groups, rename);
++* `cgroup.procs` and `cgroup.threads` read/write, fork inheritance and
++  per-process migration (including whole-thread-group moves);
++* `cgroup.kill` (recursive), `cgroup.freeze` (real stop/resume through
++  PRoot's ptrace event loop), `cgroup.events` with inotify updates;
++* `cgroup.controllers`, `cgroup.subtree_control` delegation bookkeeping,
++  `cgroup.stat`, `cgroup.type`, `cgroup.max.depth`,
++  `cgroup.max.descendants`, `cgroup.pressure`;
++* `/proc/<pid>/cgroup`, `/proc/cgroups`, a cgroup2 `statfs` magic and a
++  synthetic mountinfo entry, including extra `mount -t cgroup2` targets.
++
++Membership is derived from unprivileged data: `/proc/<pid>/stat` (`ppid`,
++`pgrp`, session, `starttime`) plus PRoot's fork/clone/exit events.  When a
++process is reparented or calls `setsid`, its session/process-group anchor
++keeps it in the right virtual group.
++
++Resource controllers (`memory.max`, `cpu.max`, `pids.max`, I/O weights,
++...) are intentionally **not** implemented: a rootless process cannot
++enforce them, and exposing fake limits is worse than reporting them as
++unavailable.  `cgroup.controllers` reports the available controller names,
++but their resource files do not exist.
++
++Run the behaviour suite with:
++
++```sh
++bash tests/cgroup/run.sh
++```
+diff --git a/src/GNUmakefile b/src/GNUmakefile
+index cb0f14b..47ae0e5 100644
+--- a/src/GNUmakefile
++++ b/src/GNUmakefile
+@@ -59,6 +59,7 @@ OBJECTS += \
+ 	ptrace/user.o		\
+ 	ptrace/wait.o		\
+ 	extension/extension.o	\
++	extension/cgroup/cgroup.o \
+ 	extension/ashmem_memfd/ashmem_memfd.o \
+ 	extension/kompat/kompat.o \
+ 	extension/fake_id0/chown.o \
+@@ -203,6 +204,16 @@ cli/%-licenses.o: licenses cli/cli.o
+ ######################################################################
+ # Build rules for the loader
+ 
++# GNU ld places .rodata far from a high -Ttext and overflows PC-relative
++# relocations; lld does not have that problem.  Keep the upstream segment
++# layout on Android/lld, and use the non-PIE/flat-segment layout on GNU ld.
++LOADER_LD_KIND := $(shell $(LD) -Wl,--version 2>/dev/null | head -n 1 | grep -q 'GNU ld' && echo gnu || echo lld)
++ifeq ($(LOADER_LD_KIND),gnu)
++LOADER_LDFLAGS_EXTRA := -no-pie -Wl,--no-rosegment
++else
++LOADER_LDFLAGS_EXTRA := -Wl,--rosegment
++endif
++
+ define build_loader
+ LOADER$1_OBJECTS = loader/loader$1.o loader/assembly$1.o
+ 
+@@ -210,7 +221,7 @@ $(eval $(call define_from_arch.h,$1,LOADER_ARCH_CFLAGS))
+ $(eval $(call define_from_arch.h,$1,LOADER_ADDRESS))
+ 
+ LOADER_CFLAGS$1  += -fPIC -ffreestanding $(LOADER_ARCH_CFLAGS$1)
+-LOADER_LDFLAGS$1 += -static -nostdlib -Wl$(BUILD_ID_NONE),-Ttext=$(LOADER_ADDRESS$1),--rosegment,-z,noexecstack
++LOADER_LDFLAGS$1 += -static -nostdlib $(LOADER_LDFLAGS_EXTRA) -Wl$(BUILD_ID_NONE),-Ttext=$(LOADER_ADDRESS$1),-z,noexecstack
+ 
+ loader/loader$1.o: loader/loader.c
+ 	@mkdir -p $$(dir $$@)
+diff --git a/src/cli/proot.c b/src/cli/proot.c
+index 29365e8..64c3c60 100644
+--- a/src/cli/proot.c
++++ b/src/cli/proot.c
+@@ -27,6 +27,7 @@
+ 
+ #include "cli/cli.h"
+ #include "cli/note.h"
++#include "extension/cgroup/cgroup.h"
+ #include "extension/extension.h"
+ #include "extension/sysvipc/sysvipc.h"
+ #include "path/binding.h"
+@@ -317,6 +318,36 @@ static int handle_option_sysvipc(Tracee *tracee, const Cli *cli UNUSED, const ch
+ 	return 0;
+ }
+ 
++static int handle_option_cgroup(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
++{
++	Extension *extension;
++	Extension *last = NULL;
++	int status;
++
++	/* Initialize the cgroup v2 emulation.  */
++	status = initialize_extension(tracee, cgroup_callback, NULL);
++	if (status < 0) {
++		note(tracee, WARNING, INTERNAL, "cgroup emulation not initialized");
++		return 0;
++	}
++
++	/* Run this extension last so its path rules and its error results
++	 * win over helpers such as fake_id0 (which otherwise turns mknod
++	 * inside cgroupfs into a fake success).  */
++	extension = get_extension(tracee, cgroup_callback);
++	if (extension == NULL)
++		return 0;
++	LIST_FOREACH(last, tracee->extensions, link) {
++		if (LIST_NEXT(last, link) == NULL)
++			break;
++	}
++	if (last != NULL && last != extension) {
++		LIST_REMOVE(extension, link);
++		LIST_INSERT_AFTER(last, extension, link);
++	}
++	return 0;
++}
++
+ static int handle_option_L(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+ {
+         (void) initialize_extension(tracee, fix_symlink_size_callback, NULL);
+diff --git a/src/cli/proot.h b/src/cli/proot.h
+index 3f61931..5584e28 100644
+--- a/src/cli/proot.h
++++ b/src/cli/proot.h
+@@ -63,6 +63,7 @@ static int handle_option_S(Tracee *tracee, const Cli *cli, const char *value);
+ static int handle_option_link2symlink(Tracee *tracee, const Cli *cli, const char *value);
+ static int handle_option_ashmem_memfd(Tracee *tracee, const Cli *cli, const char *value);
+ static int handle_option_sysvipc(Tracee *tracee, const Cli *cli, const char *value);
++static int handle_option_cgroup(Tracee *tracee, const Cli *cli, const char *value);
+ static int handle_option_kill_on_exit(Tracee *tracee, const Cli *cli, const char *value);
+ static int handle_option_L(Tracee *tracee, const Cli *cli, const char *value);
+ static int handle_option_H(Tracee *tracee, const Cli *cli, const char *value);
+@@ -251,6 +252,18 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
+ 	  .detail = "\tHandles System V IPC syscalls (shmget, semget, msgget, etc.)\n\
+ \tsyscalls inside proot. IPC is handled inside proot and launching 2 proot instances\n\
+ \twill lead to 2 different IPC Namespaces",
++	},
++	{ .class = "Extension options",
++	  .arguments = {
++		{ .name = "--cgroup", .separator = '\0', .value = NULL },
++		{ .name = NULL, .separator = '\0', .value = NULL } },
++	  .handler = handle_option_cgroup,
++	  .description = "Emulate an unprivileged cgroup v2 hierarchy",
++	  .detail = "\tPresent /sys/fs/cgroup as a private cgroup2 hierarchy.  Process\n\
++\tmembership is tracked through ppid/session/process-group data and\n\
++\tPRoot's own fork/exit events; cgroup.kill, cgroup.freeze,\n\
++\tcgroup.events and the cgroup directory lifecycle are supported.\n\
++\tResource controllers are not enforced.",
+ 	},
+ 	{ .class = "Extension options",
+ 	  .arguments = {
+diff --git a/src/compat.h b/src/compat.h
+index 53300b8..07ed6ee 100644
+--- a/src/compat.h
++++ b/src/compat.h
+@@ -261,8 +261,12 @@
+ #    ifndef NT_ARM_SYSTEM_CALL
+ #        define NT_ARM_SYSTEM_CALL		0x404
+ #    endif
+-#    ifndef SYS_SECCOMP
+-#        define SYS_SECCOMP 1
++	    /* glibc exposes SYS_SECCOMP as an enum, not a macro, so it
++	     * cannot be tested with #ifndef.  Keep a private name.  */
++#    ifdef SYS_SECCOMP
++#        define PROOT_SYS_SECCOMP SYS_SECCOMP
++#    else
++#        define PROOT_SYS_SECCOMP 1
+ #    endif
+ 
+ /* openat2(2) "how" argument.  Mirrors struct open_how from
+diff --git a/src/extension/ashmem_memfd/ashmem_memfd.c b/src/extension/ashmem_memfd/ashmem_memfd.c
+index df3f3b5..59c169f 100644
+--- a/src/extension/ashmem_memfd/ashmem_memfd.c
++++ b/src/extension/ashmem_memfd/ashmem_memfd.c
+@@ -1,5 +1,6 @@
+ #include <stdlib.h>
+ #include <signal.h>
++#include <string.h>
+ #include <unistd.h>
+ #include <sys/syscall.h>  /* __NR_memfd_create,  */
+ #include <linux/ashmem.h> /* ASHMEM_GET_SIZE,  */
+diff --git a/src/extension/cgroup/cgroup.c b/src/extension/cgroup/cgroup.c
+new file mode 100644
+index 0000000..29c4415
+--- /dev/null
++++ b/src/extension/cgroup/cgroup.c
+@@ -0,0 +1,3018 @@
++/* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
++ *
++ * This file is part of PRoot.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++/*
++ * cgroup v2 emulation for unprivileged PRoot.
++ *
++ * A container often wants a cgroup hierarchy even though the kernel (or
++ * Android) does not let its owner create one.  This extension presents
++ * /sys/fs/cgroup as a private cgroup2 hierarchy backed by a PRoot temp
++ * directory.  Membership is tracked with the same information an
++ * unprivileged process can read without cgroupfs: /proc/<pid>/stat
++ * (ppid, pgrp, session and starttime) plus the tracee events PRoot already
++ * receives for fork/clone/exit.  Every file operation that matters to a
++ * service manager is implemented:
++ *
++ *   cgroup.procs / cgroup.threads   read, migrate, inherit on fork
++ *   cgroup.kill                     kill the whole subtree
++ *   cgroup.freeze                   SIGSTOP/SIGCONT the subtree
++ *   cgroup.events                   populated/frozen, inotify-friendly
++ *   cgroup.controllers/subtree_control  delegation bookkeeping
++ *   cgroup.stat, cgroup.type, cgroup.max.*, cgroup.pressure
++ *
++ * Resource controllers are intentionally not implemented: there is no
++ * unprivileged way to enforce memory/CPU/IO limits, and pretending to
++ * enforce them is worse than reporting an empty controller set.  The
++ * hierarchy, lifecycle and delegation parts are complete.
++ */
++
++#include <sched.h>
++#include <sys/queue.h>
++#include <sys/stat.h>
++#include <sys/syscall.h>
++#include <sys/sysmacros.h>
++#include <sys/types.h>
++#include <sys/uio.h>
++#include <sys/wait.h>
++
++#include <dirent.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <limits.h>
++#include <linux/fs.h>
++#include <signal.h>
++#include <stdarg.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include <talloc.h>
++
++#include "cli/note.h"
++#include "extension/cgroup/cgroup.h"
++#include "extension/extension.h"
++#include "path/path.h"
++#include "path/temp.h"
++#include "syscall/sysnum.h"
++#include "tracee/event.h"
++#include "tracee/mem.h"
++#include "tracee/reg.h"
++#include "tracee/tracee.h"
++
++#define CGROUP2_SUPER_MAGIC 0x63677270
++
++#ifndef RENAME_NOREPLACE
++#define RENAME_NOREPLACE (1 << 0)
++#endif
++
++#ifndef SYS_tgkill
++#define SYS_tgkill __NR_tgkill
++#endif
++
++/* The guest path used when no explicit cgroup2 mount has been seen.  */
++#define DEFAULT_GUEST_ROOT "/sys/fs/cgroup"
++
++/* A finite bound for the freeze/kill loops.  */
++#define KILL_ROUNDS 200
++
++enum CgroupFile {
++	CG_NONE = 0,
++	CG_PROCS,
++	CG_THREADS,
++	CG_KILL,
++	CG_FREEZE,
++	CG_EVENTS,
++	CG_CONTROLLERS,
++	CG_SUBTREE_CONTROL,
++	CG_STAT,
++	CG_MAX_DEPTH,
++	CG_MAX_DESCENDANTS,
++	CG_TYPE,
++	CG_PRESSURE,
++	CG_AVAILABLE,
++};
++
++/* Controllers this hierarchy reports.  No resource files are created.  */
++enum {
++	CG_CPU		= 1 << 0,
++	CG_CPUSET	= 1 << 1,
++	CG_IO		= 1 << 2,
++	CG_MEMORY	= 1 << 3,
++	CG_HUGETLB	= 1 << 4,
++	CG_PIDS		= 1 << 5,
++	CG_RDMA		= 1 << 6,
++	CG_MISC		= 1 << 7,
++	CG_ALL_CONTROLLERS = CG_CPU | CG_CPUSET | CG_IO | CG_MEMORY
++			   | CG_HUGETLB | CG_PIDS | CG_RDMA | CG_MISC,
++};
++
++static const struct {
++	const char *name;
++	unsigned int bit;
++} controllers[] = {
++	{ "cpu",	CG_CPU },
++	{ "cpuset",	CG_CPUSET },
++	{ "io",		CG_IO },
++	{ "memory",	CG_MEMORY },
++	{ "hugetlb",	CG_HUGETLB },
++	{ "pids",	CG_PIDS },
++	{ "rdma",	CG_RDMA },
++	{ "misc",	CG_MISC },
++};
++
++struct CgroupGroup {
++	LIST_ENTRY(CgroupGroup) link;
++	char *path;
++	bool frozen;
++	bool threaded;
++	unsigned int max_depth;
++	unsigned int max_descendants;
++	unsigned int subtree_control;
++};
++
++struct CgroupProc {
++	LIST_ENTRY(CgroupProc) link;
++	pid_t pid;
++	pid_t tgid;
++	bool thread;
++	unsigned long long starttime;
++	pid_t ppid;
++	pid_t pgrp;
++	pid_t sid;
++	char *path;
++};
++
++struct CgroupAlias {
++	LIST_ENTRY(CgroupAlias) link;
++	char *path;
++	char *host_root;
++	bool permanent;
++	bool cgroup2;
++};
++
++struct CgroupConfig {
++	char *root;
++	char *freezer_root;
++	pid_t root_pid;
++	LIST_HEAD(, CgroupGroup) groups;
++	LIST_HEAD(, CgroupProc) procs;
++	LIST_HEAD(, CgroupAlias) aliases;
++};
++
++struct ProcStat {
++	char state;
++	pid_t ppid;
++	pid_t pgrp;
++	pid_t sid;
++	unsigned long long starttime;
++};
++
++struct Buffer {
++	char *data;
++	size_t len;
++	size_t capacity;
++	bool failed;
++};
++
++struct PidList {
++	pid_t *pids;
++	size_t count;
++	size_t capacity;
++};
++
++static FilteredSysnum filtered_sysnums[] = {
++	{ PR_write,		0 },
++	{ PR_pwrite64,		0 },
++	{ PR_writev,		0 },
++	{ PR_pwritev,		0 },
++	{ PR_pwritev2,		0 },
++	{ PR_mkdir,		0 },
++	{ PR_mkdirat,		0 },
++	{ PR_rmdir,		0 },
++	{ PR_unlink,		0 },
++	{ PR_unlinkat,		0 },
++	{ PR_rename,		0 },
++	{ PR_renameat,		0 },
++	{ PR_renameat2,		0 },
++	{ PR_mount,		0 },
++	{ PR_umount,		0 },
++	{ PR_umount2,		0 },
++	{ PR_statfs,		FILTER_SYSEXIT },
++	{ PR_statfs64,		FILTER_SYSEXIT },
++	{ PR_fstatfs,		FILTER_SYSEXIT },
++	{ PR_fstatfs64,		FILTER_SYSEXIT },
++	FILTERED_SYSNUM_END,
++};
++
++/* ------------------------------------------------------------------ */
++/* Small buffers                                                      */
++/* ------------------------------------------------------------------ */
++
++static void buffer_init(struct Buffer *buffer)
++{
++	buffer->data = NULL;
++	buffer->len = 0;
++	buffer->capacity = 0;
++	buffer->failed = false;
++}
++
++static void buffer_free(struct Buffer *buffer)
++{
++	free(buffer->data);
++	buffer_init(buffer);
++}
++
++static void buffer_reserve(struct Buffer *buffer, size_t extra)
++{
++	size_t wanted;
++	char *data;
++
++	if (buffer->failed)
++		return;
++
++	wanted = buffer->len + extra + 1;
++	if (wanted <= buffer->capacity)
++		return;
++
++	if (buffer->capacity == 0)
++		buffer->capacity = 256;
++	while (buffer->capacity < wanted)
++		buffer->capacity *= 2;
++
++	data = realloc(buffer->data, buffer->capacity);
++	if (data == NULL) {
++		buffer->failed = true;
++		return;
++	}
++	buffer->data = data;
++}
++
++static void buffer_appendf(struct Buffer *buffer, const char *format, ...)
++{
++	va_list ap;
++	int length;
++	char *tmp;
++
++	va_start(ap, format);
++	length = vsnprintf(NULL, 0, format, ap);
++	va_end(ap);
++	if (length < 0) {
++		buffer->failed = true;
++		return;
++	}
++
++	buffer_reserve(buffer, (size_t) length);
++	if (buffer->failed)
++		return;
++
++	tmp = buffer->data + buffer->len;
++	va_start(ap, format);
++	vsnprintf(tmp, buffer->capacity - buffer->len, format, ap);
++	va_end(ap);
++	buffer->len += (size_t) length;
++}
++
++static int pid_list_add(struct PidList *list, pid_t pid)
++{
++	pid_t *pids;
++	size_t new_capacity;
++
++	if (list->count == list->capacity) {
++		new_capacity = list->capacity == 0 ? 16 : list->capacity * 2;
++		pids = realloc(list->pids, new_capacity * sizeof(*pids));
++		if (pids == NULL)
++			return -ENOMEM;
++		list->pids = pids;
++		list->capacity = new_capacity;
++	}
++	list->pids[list->count++] = pid;
++	return 0;
++}
++
++static void pid_list_free(struct PidList *list)
++{
++	free(list->pids);
++	list->pids = NULL;
++	list->count = 0;
++	list->capacity = 0;
++}
++
++static int pid_compare(const void *left, const void *right)
++{
++	pid_t a = *(const pid_t *) left;
++	pid_t b = *(const pid_t *) right;
++	return (a > b) - (a < b);
++}
++
++static void pid_list_sort_unique(struct PidList *list)
++{
++	size_t i, out;
++
++	if (list->count < 2)
++		return;
++	qsort(list->pids, list->count, sizeof(*list->pids), pid_compare);
++	out = 1;
++	for (i = 1; i < list->count; i++) {
++		if (list->pids[i] != list->pids[out - 1])
++			list->pids[out++] = list->pids[i];
++	}
++	list->count = out;
++}
++
++/* ------------------------------------------------------------------ */
++/* Path helpers                                                       */
++/* ------------------------------------------------------------------ */
++
++static bool path_within(const char *path, const char *prefix)
++{
++	size_t length;
++
++	if (strcmp(prefix, "/") == 0)
++		return path[0] == '/';
++
++	length = strlen(prefix);
++	if (strncmp(path, prefix, length) != 0)
++		return false;
++	return path[length] == '\0' || path[length] == '/';
++}
++
++static bool path_is_strict_descendant(const char *path, const char *prefix)
++{
++	return strcmp(path, prefix) != 0 && path_within(path, prefix);
++}
++
++static int normalize_path(const char *input, char output[PATH_MAX])
++{
++	char copy[PATH_MAX];
++	char *parts[PATH_MAX / 2];
++	size_t part_count = 0;
++	char *token;
++	char *save;
++	size_t length = 1;
++
++	if (input == NULL || input[0] != '/')
++		return -EINVAL;
++	if (strlen(input) >= sizeof(copy))
++		return -ENAMETOOLONG;
++	strcpy(copy, input);
++
++	for (token = strtok_r(copy, "/", &save);
++	     token != NULL;
++	     token = strtok_r(NULL, "/", &save)) {
++		if (strcmp(token, ".") == 0 || token[0] == '\0')
++			continue;
++		if (strcmp(token, "..") == 0) {
++			if (part_count > 0)
++				part_count--;
++			continue;
++		}
++		if (part_count >= sizeof(parts) / sizeof(parts[0]))
++			return -ENAMETOOLONG;
++		parts[part_count++] = token;
++	}
++
++	output[0] = '/';
++	output[1] = '\0';
++	for (size_t i = 0; i < part_count; i++) {
++		length += strlen(parts[i]) + (i == 0 ? 0 : 1);
++		if (length >= PATH_MAX)
++			return -ENAMETOOLONG;
++		if (i != 0)
++			strcat(output, "/");
++		strcat(output, parts[i]);
++	}
++	return 0;
++}
++
++static int join_guest_path(const char *base, const char *user,
++			char output[PATH_MAX])
++{
++	char joined[PATH_MAX];
++	char normalized[PATH_MAX];
++	int status;
++
++	if (user[0] == '/') {
++		if (strlen(user) >= sizeof(joined))
++			return -ENAMETOOLONG;
++		strcpy(joined, user);
++	}
++	else {
++		status = join_paths(2, joined, base, user);
++		if (status < 0)
++			return status;
++	}
++	status = normalize_path(joined, normalized);
++	if (status < 0)
++		return status;
++	strcpy(output, normalized);
++	return 0;
++}
++
++static int parent_path(const char *path, char output[PATH_MAX])
++{
++	char copy[PATH_MAX];
++	char *slash;
++
++	if (strcmp(path, "/") == 0)
++		return -1;
++	if (strlen(path) >= sizeof(copy))
++		return -ENAMETOOLONG;
++	strcpy(copy, path);
++	slash = strrchr(copy, '/');
++	if (slash == NULL)
++		return -EINVAL;
++	if (slash == copy) {
++		output[0] = '/';
++		output[1] = '\0';
++	}
++	else {
++		*slash = '\0';
++		strcpy(output, copy);
++	}
++	return 0;
++}
++
++static unsigned int path_depth(const char *path)
++{
++	unsigned int depth = 0;
++	const char *cursor;
++
++	if (strcmp(path, "/") == 0)
++		return 0;
++	for (cursor = path; *cursor != '\0'; cursor++) {
++		if (*cursor == '/')
++			depth++;
++	}
++	return depth;
++}
++
++static void path_basename(const char *path, char output[PATH_MAX])
++{
++	const char *slash = strrchr(path, '/');
++
++	if (slash == NULL)
++		strcpy(output, path);
++	else
++		strcpy(output, slash + 1);
++}
++
++static void path_dirname(const char *path, char output[PATH_MAX])
++{
++	char copy[PATH_MAX];
++	char *slash;
++
++	strcpy(copy, path);
++	slash = strrchr(copy, '/');
++	if (slash == NULL) {
++		strcpy(output, ".");
++		return;
++	}
++	if (slash == copy) {
++		output[0] = '/';
++		output[1] = '\0';
++		return;
++	}
++	*slash = '\0';
++	strcpy(output, copy);
++}
++
++static int host_path_in_root(const char *root, const char *path,
++			char output[PATH_MAX])
++{
++	int length;
++
++	if (strcmp(path, "/") == 0)
++		length = snprintf(output, PATH_MAX, "%s", root);
++	else
++		length = snprintf(output, PATH_MAX, "%s%s", root, path);
++	if (length < 0 || length >= PATH_MAX)
++		return -ENAMETOOLONG;
++	return 0;
++}
++
++static int group_host_path(struct CgroupConfig *config, const char *path,
++			char output[PATH_MAX])
++{
++	return host_path_in_root(config->root, path, output);
++}
++
++static bool host_to_group(struct CgroupConfig *config, const char *host,
++			char output[PATH_MAX])
++{
++	struct CgroupAlias *alias;
++
++	LIST_FOREACH(alias, &config->aliases, link) {
++		size_t length;
++
++		if (alias->host_root == NULL)
++			continue;
++		length = strlen(alias->host_root);
++		if (strcmp(host, alias->host_root) == 0) {
++			strcpy(output, "/");
++			return true;
++		}
++		if (strncmp(host, alias->host_root, length) != 0
++		    || host[length] != '/')
++			continue;
++		if (strlen(host + length) >= PATH_MAX)
++			return false;
++		strcpy(output, host + length);
++		return true;
++	}
++	return false;
++}
++
++static bool host_is_virtual(struct CgroupConfig *config, const char *host)
++{
++	char group[PATH_MAX];
++
++	return host_to_group(config, host, group);
++}
++
++static struct CgroupAlias *find_alias(struct CgroupConfig *config,
++				const char *guest)
++{
++	struct CgroupAlias *alias;
++	struct CgroupAlias *best = NULL;
++	size_t best_length = 0;
++
++	LIST_FOREACH(alias, &config->aliases, link) {
++		size_t length;
++
++		if (!path_within(guest, alias->path))
++			continue;
++		length = strlen(alias->path);
++		if (length >= best_length) {
++			best = alias;
++			best_length = length;
++		}
++	}
++	return best;
++}
++
++static int alias_add(struct CgroupConfig *config, const char *path,
++		bool permanent, bool cgroup2, const char *host_root)
++{
++	struct CgroupAlias *alias;
++	char normalized[PATH_MAX];
++
++	if (normalize_path(path, normalized) < 0)
++		return -EINVAL;
++
++	LIST_FOREACH(alias, &config->aliases, link) {
++		if (strcmp(alias->path, normalized) == 0) {
++			alias->permanent |= permanent;
++			alias->cgroup2 |= cgroup2;
++			return 0;
++		}
++	}
++
++	alias = talloc_zero(config, struct CgroupAlias);
++	if (alias == NULL)
++		return -ENOMEM;
++	alias->path = talloc_strdup(alias, normalized);
++	if (alias->path == NULL)
++		return -ENOMEM;
++	alias->host_root = talloc_strdup(alias,
++					host_root != NULL ? host_root : config->root);
++	if (alias->host_root == NULL)
++		return -ENOMEM;
++	alias->permanent = permanent;
++	alias->cgroup2 = cgroup2;
++	LIST_INSERT_HEAD(&config->aliases, alias, link);
++	return 0;
++}
++
++static int guest_to_host(struct CgroupConfig *config, const char *guest,
++			char host[PATH_MAX], char group[PATH_MAX])
++{
++	struct CgroupAlias *alias = find_alias(config, guest);
++	const char *suffix;
++
++	if (alias == NULL)
++		return -1;
++
++	suffix = guest + strlen(alias->path);
++	if (*suffix == '\0')
++		strcpy(group, "/");
++	else
++		strcpy(group, suffix);
++
++	return host_path_in_root(alias->host_root != NULL
++				 ? alias->host_root : config->root,
++				 group, host);
++}
++
++/* ------------------------------------------------------------------ */
++/* /proc/<pid>/stat information                                       */
++/* ------------------------------------------------------------------ */
++
++static int read_proc_stat(pid_t pid, struct ProcStat *stat)
++{
++	char path[64];
++	char buffer[1024];
++	char *paren;
++	char *cursor;
++	char *save;
++	char *token;
++	ssize_t length;
++	int fd;
++	int index;
++
++	snprintf(path, sizeof(path), "/proc/%d/stat", (int) pid);
++	fd = open(path, O_RDONLY | O_CLOEXEC);
++	if (fd < 0)
++		return -errno;
++	length = read(fd, buffer, sizeof(buffer) - 1);
++	close(fd);
++	if (length <= 0)
++		return length == 0 ? -ESRCH : -errno;
++	buffer[length] = '\0';
++
++	/* The comm field may contain spaces and parentheses.  */
++	paren = strrchr(buffer, ')');
++	if (paren == NULL)
++		return -EINVAL;
++	cursor = paren + 1;
++	while (*cursor == ' ')
++		cursor++;
++
++	token = strtok_r(cursor, " ", &save);
++	if (token == NULL)
++		return -EINVAL;
++	stat->state = token[0];
++
++	stat->ppid = 0;
++	stat->pgrp = 0;
++	stat->sid = 0;
++	stat->starttime = 0;
++
++	for (index = 1; index <= 19; index++) {
++		token = strtok_r(NULL, " ", &save);
++		if (token == NULL)
++			return -EINVAL;
++		switch (index) {
++		case 1:
++			stat->ppid = (pid_t) strtol(token, NULL, 10);
++			break;
++		case 2:
++			stat->pgrp = (pid_t) strtol(token, NULL, 10);
++			break;
++		case 3:
++			stat->sid = (pid_t) strtol(token, NULL, 10);
++			break;
++		case 19:
++			stat->starttime = strtoull(token, NULL, 10);
++			break;
++		default:
++			break;
++		}
++	}
++	return 0;
++}
++
++static pid_t proc_tgid(pid_t pid)
++{
++	char path[64];
++	char buffer[4096];
++	char *cursor;
++	ssize_t length;
++	int fd;
++	pid_t tgid = pid;
++
++	snprintf(path, sizeof(path), "/proc/%d/status", (int) pid);
++	fd = open(path, O_RDONLY | O_CLOEXEC);
++	if (fd < 0)
++		return pid;
++	length = read(fd, buffer, sizeof(buffer) - 1);
++	close(fd);
++	if (length <= 0)
++		return pid;
++	buffer[length] = '\0';
++
++	cursor = buffer;
++	while (cursor != NULL && *cursor != '\0') {
++		if (strncmp(cursor, "Tgid:", 5) == 0) {
++			tgid = (pid_t) strtol(cursor + 5, NULL, 10);
++			break;
++		}
++		cursor = strchr(cursor, '\n');
++		if (cursor != NULL)
++			cursor++;
++	}
++	return tgid;
++}
++
++/* ------------------------------------------------------------------ */
++/* Groups                                                             */
++/* ------------------------------------------------------------------ */
++
++static struct CgroupGroup *group_find(struct CgroupConfig *config,
++				const char *path)
++{
++	struct CgroupGroup *group;
++
++	LIST_FOREACH(group, &config->groups, link) {
++		if (strcmp(group->path, path) == 0)
++			return group;
++	}
++	return NULL;
++}
++
++static struct CgroupGroup *group_get(struct CgroupConfig *config,
++				const char *path)
++{
++	struct CgroupGroup *group = group_find(config, path);
++
++	if (group != NULL)
++		return group;
++
++	group = talloc_zero(config, struct CgroupGroup);
++	if (group == NULL)
++		return NULL;
++	group->path = talloc_strdup(group, path);
++	if (group->path == NULL)
++		return NULL;
++	group->max_depth = UINT_MAX;
++	group->max_descendants = UINT_MAX;
++	LIST_INSERT_HEAD(&config->groups, group, link);
++	return group;
++}
++
++static void group_drop(struct CgroupConfig *config UNUSED, struct CgroupGroup *group)
++{
++	LIST_REMOVE(group, link);
++	talloc_free(group);
++}
++
++static bool group_has_children(struct CgroupConfig *config, const char *path)
++{
++	struct CgroupGroup *group;
++
++	LIST_FOREACH(group, &config->groups, link) {
++		if (path_is_strict_descendant(group->path, path))
++			return true;
++	}
++	return false;
++}
++
++static unsigned int controllers_for_group(struct CgroupConfig *config,
++					struct CgroupGroup *group)
++{
++	char parent[PATH_MAX];
++	struct CgroupGroup *parent_group;
++
++	if (strcmp(group->path, "/") == 0)
++		return CG_ALL_CONTROLLERS;
++	if (parent_path(group->path, parent) < 0)
++		return 0;
++	parent_group = group_find(config, parent);
++	if (parent_group == NULL)
++		return 0;
++	return parent_group->subtree_control;
++}
++
++static void controllers_to_string(unsigned int mask, char output[256])
++{
++	size_t offset = 0;
++	size_t i;
++
++	output[0] = '\0';
++	for (i = 0; i < sizeof(controllers) / sizeof(controllers[0]); i++) {
++		int written;
++
++		if ((mask & controllers[i].bit) == 0)
++			continue;
++		written = snprintf(output + offset, 256 - offset, "%s%s",
++				offset == 0 ? "" : " ", controllers[i].name);
++		if (written < 0 || (size_t) written >= 256 - offset)
++			break;
++		offset += (size_t) written;
++	}
++}
++
++static int controller_bit(const char *name, unsigned int *bit)
++{
++	size_t i;
++
++	for (i = 0; i < sizeof(controllers) / sizeof(controllers[0]); i++) {
++		if (strcmp(controllers[i].name, name) == 0) {
++			*bit = controllers[i].bit;
++			return 0;
++		}
++	}
++	return -ENOENT;
++}
++
++/* ------------------------------------------------------------------ */
++/* Processes                                                          */
++/* ------------------------------------------------------------------ */
++
++static struct CgroupProc *proc_find(struct CgroupConfig *config, pid_t pid)
++{
++	struct CgroupProc *proc;
++
++	LIST_FOREACH(proc, &config->procs, link) {
++		if (proc->pid == pid)
++			return proc;
++	}
++	return NULL;
++}
++
++static bool proc_is_alive(struct CgroupProc *proc)
++{
++	struct ProcStat stat;
++
++	if (read_proc_stat(proc->pid, &stat) < 0)
++		return false;
++	if (stat.state == 'Z' || stat.state == 'X')
++		return false;
++	if (proc->starttime != 0 && stat.starttime != proc->starttime)
++		return false;
++	return true;
++}
++
++static struct CgroupProc *proc_get(struct CgroupConfig *config, pid_t pid)
++{
++	struct CgroupProc *proc = proc_find(config, pid);
++
++	if (proc != NULL)
++		return proc;
++	proc = talloc_zero(config, struct CgroupProc);
++	if (proc == NULL)
++		return NULL;
++	proc->pid = pid;
++	proc->tgid = pid;
++	LIST_INSERT_HEAD(&config->procs, proc, link);
++	return proc;
++}
++
++static void proc_drop(struct CgroupConfig *config UNUSED, struct CgroupProc *proc)
++{
++	LIST_REMOVE(proc, link);
++	talloc_free(proc);
++}
++
++static void events_content(struct CgroupConfig *config,
++			struct CgroupGroup *group, struct Buffer *buffer);
++
++static void write_file_at(const char *directory, const char *name,
++			const char *content, mode_t mode)
++{
++	char path[PATH_MAX];
++	int fd;
++
++	if (snprintf(path, PATH_MAX, "%s/%s", directory, name) >= PATH_MAX)
++		return;
++	/* Pseudo-files such as cgroup.events are read-only in the final
++	 * view; temporarily make them writable for the emulator itself.  */
++	(void) chmod(path, 0600);
++	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
++	if (fd < 0)
++		return;
++	if (content != NULL) {
++		size_t length = strlen(content);
++		ssize_t ignored = write(fd, content, length);
++		(void) ignored;
++	}
++	close(fd);
++	chmod(path, mode);
++}
++
++static void touch_events(struct CgroupConfig *config, const char *path)
++{
++	char current[PATH_MAX];
++	struct CgroupGroup *group;
++
++	if (path == NULL || path[0] != '/')
++		return;
++	strcpy(current, path);
++	while (true) {
++		struct Buffer buffer;
++
++		group = group_find(config, current);
++		if (group != NULL) {
++			char directory[PATH_MAX];
++
++			if (group_host_path(config, current, directory) == 0) {
++				buffer_init(&buffer);
++				events_content(config, group, &buffer);
++				if (!buffer.failed)
++					write_file_at(directory, "cgroup.events",
++						     buffer.data, 0444);
++				buffer_free(&buffer);
++			}
++		}
++		if (strcmp(current, "/") == 0)
++			break;
++		if (parent_path(current, current) < 0)
++			break;
++	}
++}
++
++static int proc_set(struct CgroupConfig *config, pid_t pid, const char *path,
++		bool thread, pid_t tgid)
++{
++	struct CgroupProc *proc;
++	struct ProcStat stat;
++	char old_path[PATH_MAX];
++	bool had_old = false;
++	int status;
++
++	proc = proc_find(config, pid);
++	if (proc != NULL) {
++		strcpy(old_path, proc->path != NULL ? proc->path : "/");
++		had_old = true;
++	}
++	else {
++		proc = proc_get(config, pid);
++		if (proc == NULL)
++			return -ENOMEM;
++	}
++
++	status = read_proc_stat(pid, &stat);
++	if (status == 0) {
++		proc->starttime = stat.starttime;
++		proc->ppid = stat.ppid;
++		proc->pgrp = stat.pgrp;
++		proc->sid = stat.sid;
++	}
++	else {
++		proc->starttime = 0;
++		proc->ppid = 0;
++		proc->pgrp = 0;
++		proc->sid = 0;
++	}
++
++	/* PRoot's clone event does not carry CLONE_THREAD, so ask /proc
++	 * whether this pid is a thread and which thread group owns it.  */
++	{
++		pid_t actual_tgid = proc_tgid(pid);
++		if (actual_tgid > 0 && actual_tgid != pid) {
++			thread = true;
++			tgid = actual_tgid;
++		}
++		else if (!thread) {
++			tgid = pid;
++		}
++	}
++
++	if (proc->path != NULL)
++		talloc_free(proc->path);
++	proc->path = talloc_strdup(proc, path);
++	if (proc->path == NULL)
++		return -ENOMEM;
++	proc->thread = thread;
++	proc->tgid = tgid;
++
++	if (had_old && strcmp(old_path, path) != 0)
++		touch_events(config, old_path);
++	touch_events(config, path);
++	return 0;
++}
++
++static bool ensure_self(Tracee *tracee, struct CgroupConfig *config)
++{
++	char path[PATH_MAX];
++	struct CgroupProc *proc;
++
++	/* The initial Tracee object still carries the tracer's pid while the
++	 * child is being launched; it is not part of the container.  */
++	if (tracee->pid <= 0 || tracee->pid == getpid())
++		return false;
++
++	if (config->root_pid == 0) {
++		config->root_pid = tracee->pid;
++		(void) proc_set(config, tracee->pid, "/", false, tracee->pid);
++		return true;
++	}
++
++	proc = proc_find(config, tracee->pid);
++	if (proc != NULL && proc_is_alive(proc))
++		return false;
++
++	/* The tracee is older than this PRoot launch (or a thread whose
++	 * inherit event was missed).  It still belongs to the container.  */
++	strcpy(path, "/");
++	(void) proc_set(config, tracee->pid, path, false, tracee->pid);
++	return true;
++}
++
++/*
++ * cgroup membership for @pid.  The tracee map is authoritative; the ppid
++ * walk and the session/process-group match are the unprivileged recovery
++ * path for a process whose fork event happened outside PRoot's view (or
++ * whose parent already exited).  Only tracees are considered, so host
++ * processes are never attributed to the container.
++ */
++static int proc_path(Tracee *tracee, struct CgroupConfig *config, pid_t pid,
++		char output[PATH_MAX])
++{
++	struct CgroupProc *proc;
++	struct ProcStat stat;
++	pid_t cursor;
++	int depth;
++
++	proc = proc_find(config, pid);
++	if (proc != NULL && proc->path != NULL) {
++		if (proc_is_alive(proc)) {
++			strcpy(output, proc->path);
++			return 0;
++		}
++		proc_drop(config, proc);
++	}
++
++	if (read_proc_stat(pid, &stat) < 0)
++		return -ESRCH;
++
++	if (pid == config->root_pid) {
++		strcpy(output, "/");
++		return 0;
++	}
++
++	cursor = stat.ppid;
++	for (depth = 0; cursor > 1 && depth < 4096; depth++) {
++		struct ProcStat parent_stat;
++
++		proc = proc_find(config, cursor);
++		if (proc != NULL && proc->path != NULL && proc_is_alive(proc)) {
++			strcpy(output, proc->path);
++			return 0;
++		}
++		if (read_proc_stat(cursor, &parent_stat) < 0)
++			break;
++		cursor = parent_stat.ppid;
++	}
++
++	if (get_tracee(tracee, pid, false) == NULL)
++		return -ESRCH;
++
++	/* An orphan reparented to a subreaper keeps its session or process
++	 * group even when its parent chain no longer reaches a tracee.  */
++	LIST_FOREACH(proc, &config->procs, link) {
++		if (proc->path == NULL || !proc_is_alive(proc))
++			continue;
++		if (proc->sid == stat.sid || proc->pgrp == stat.pgrp) {
++			strcpy(output, proc->path);
++			return 0;
++		}
++	}
++
++	strcpy(output, "/");
++	return 0;
++}
++
++static bool path_is_frozen(struct CgroupConfig *config, const char *path)
++{
++	char current[PATH_MAX];
++	struct CgroupGroup *group;
++
++	if (path == NULL)
++		return false;
++	strcpy(current, path);
++	while (true) {
++		group = group_find(config, current);
++		if (group != NULL && group->frozen)
++			return true;
++		if (strcmp(current, "/") == 0)
++			break;
++		if (parent_path(current, current) < 0)
++			break;
++	}
++	return false;
++}
++
++static void signal_proc(struct CgroupProc *proc, int signal)
++{
++	if (proc->thread)
++		(void) syscall(SYS_tgkill, proc->tgid, proc->pid, signal);
++	else
++		(void) kill(proc->pid, signal);
++}
++
++/*
++ * Mark the tracee stopped in PRoot's event loop before SIGSTOP arrives.
++ * SIGSTOP is not enough by itself: PRoot's tracer must leave the tracee
++ * in its ptrace-stop, otherwise it restarts it on the next loop turn.
++ */
++static void freeze_one(Tracee *context, struct CgroupProc *proc, bool freeze)
++{
++	Tracee *target = get_tracee(context, proc->pid, false);
++
++	if (target != NULL)
++		target->cgroup_frozen = freeze;
++
++	if (freeze) {
++		signal_proc(proc, SIGSTOP);
++		return;
++	}
++
++	if (target == NULL) {
++		signal_proc(proc, SIGCONT);
++		return;
++	}
++
++	if (!target->running) {
++		target->restart_how = PTRACE_SYSCALL;
++		(void) restart_tracee(target, SIGCONT);
++	}
++	else {
++		signal_proc(proc, SIGCONT);
++	}
++}
++
++static void signal_group(Tracee *context, struct CgroupConfig *config,
++			const char *path, bool freeze)
++{
++	struct CgroupProc *proc;
++
++	LIST_FOREACH(proc, &config->procs, link) {
++		if (proc->path == NULL || !path_within(proc->path, path))
++			continue;
++		if (!freeze && path_is_frozen(config, proc->path))
++			continue;
++		freeze_one(context, proc, freeze);
++	}
++}
++
++static void kill_group(struct CgroupConfig *config, const char *path)
++{
++	int round;
++
++	for (round = 0; round < KILL_ROUNDS; round++) {
++		struct CgroupProc *proc;
++		bool any = false;
++
++		LIST_FOREACH(proc, &config->procs, link) {
++			if (proc->path == NULL || !path_within(proc->path, path))
++				continue;
++			if (!proc_is_alive(proc))
++				continue;
++			any = true;
++			signal_proc(proc, SIGKILL);
++		}
++		if (!any)
++			return;
++		usleep(1000);
++	}
++}
++
++/* ------------------------------------------------------------------ */
++/* File contents                                                      */
++/* ------------------------------------------------------------------ */
++
++static enum CgroupFile file_kind(const char *name)
++{
++	if (strcmp(name, "cgroup.procs") == 0)
++		return CG_PROCS;
++	if (strcmp(name, "cgroup.threads") == 0)
++		return CG_THREADS;
++	if (strcmp(name, "cgroup.kill") == 0)
++		return CG_KILL;
++	if (strcmp(name, "cgroup.freeze") == 0)
++		return CG_FREEZE;
++	if (strcmp(name, "cgroup.events") == 0)
++		return CG_EVENTS;
++	if (strcmp(name, "cgroup.controllers") == 0)
++		return CG_CONTROLLERS;
++	if (strcmp(name, "cgroup.subtree_control") == 0)
++		return CG_SUBTREE_CONTROL;
++	if (strcmp(name, "cgroup.stat") == 0)
++		return CG_STAT;
++	if (strcmp(name, "cgroup.max.depth") == 0)
++		return CG_MAX_DEPTH;
++	if (strcmp(name, "cgroup.max.descendants") == 0)
++		return CG_MAX_DESCENDANTS;
++	if (strcmp(name, "cgroup.type") == 0)
++		return CG_TYPE;
++	if (strcmp(name, "cgroup.pressure") == 0)
++		return CG_PRESSURE;
++	if (strcmp(name, "cgroup.available") == 0)
++		return CG_AVAILABLE;
++	return CG_NONE;
++}
++
++static mode_t file_mode(enum CgroupFile kind)
++{
++	switch (kind) {
++	case CG_KILL:
++		return 0200;
++	case CG_EVENTS:
++	case CG_CONTROLLERS:
++	case CG_STAT:
++	case CG_PRESSURE:
++	case CG_AVAILABLE:
++		return 0444;
++	default:
++		return 0644;
++	}
++}
++
++static void collect_procs(struct CgroupConfig *config, const char *path,
++			bool threads, struct PidList *list)
++{
++	struct CgroupProc *proc;
++
++	/* Managed processes and threads are the authoritative set.  The
++	 * ppid/sid walk below only covers a tracee whose inherit event was
++	 * missed (for example a process PRoot started before attaching). */
++	LIST_FOREACH(proc, &config->procs, link) {
++		pid_t tgid;
++
++		if (proc->path == NULL || strcmp(proc->path, path) != 0)
++			continue;
++		if (!proc_is_alive(proc))
++			continue;
++		if (!threads && proc->thread)
++			continue;
++
++		if (!threads) {
++			(void) pid_list_add(list, proc->pid);
++			continue;
++		}
++
++		if (proc->thread) {
++			(void) pid_list_add(list, proc->pid);
++			continue;
++		}
++
++		/* A process member contributes all of its threads unless a
++		 * thread was explicitly moved to another cgroup.  */
++		{
++			char task_dir[64];
++			DIR *dir;
++			struct dirent *entry;
++
++			tgid = proc->pid;
++			snprintf(task_dir, sizeof(task_dir), "/proc/%d/task", (int) tgid);
++			dir = opendir(task_dir);
++			if (dir == NULL) {
++				(void) pid_list_add(list, tgid);
++				continue;
++			}
++			while ((entry = readdir(dir)) != NULL) {
++				char *end;
++				long tid;
++
++				if (entry->d_name[0] == '.')
++					continue;
++				errno = 0;
++				tid = strtol(entry->d_name, &end, 10);
++				if (errno != 0 || *end != '\0' || tid <= 0)
++					continue;
++				{
++					struct CgroupProc *thread = proc_find(config, (pid_t) tid);
++					if (thread != NULL && thread->thread
++					    && thread->path != NULL
++					    && strcmp(thread->path, path) != 0)
++						continue;
++				}
++				(void) pid_list_add(list, (pid_t) tid);
++			}
++			closedir(dir);
++		}
++	}
++
++	/* Include an explicitly moved thread whose owning process is in a
++	 * different cgroup.  */
++	if (threads) {
++		LIST_FOREACH(proc, &config->procs, link) {
++			if (proc->thread && proc->path != NULL
++			    && strcmp(proc->path, path) == 0
++			    && proc_is_alive(proc))
++				(void) pid_list_add(list, proc->pid);
++		}
++	}
++
++	pid_list_sort_unique(list);
++}
++
++static void procs_content(struct CgroupConfig *config, const char *path,
++			bool threads, struct Buffer *buffer)
++{
++	struct PidList list = { 0 };
++	size_t i;
++
++	collect_procs(config, path, threads, &list);
++	for (i = 0; i < list.count; i++)
++		buffer_appendf(buffer, "%d\n", (int) list.pids[i]);
++	pid_list_free(&list);
++}
++
++static bool group_is_populated(struct CgroupConfig *config, const char *path)
++{
++	struct CgroupProc *proc;
++
++	LIST_FOREACH(proc, &config->procs, link) {
++		if (proc->path == NULL || !path_within(proc->path, path))
++			continue;
++		if (proc_is_alive(proc))
++			return true;
++	}
++	return false;
++}
++
++static unsigned int group_descendants(struct CgroupConfig *config,
++				const char *path)
++{
++	struct CgroupGroup *group;
++	unsigned int count = 0;
++
++	LIST_FOREACH(group, &config->groups, link) {
++		if (path_is_strict_descendant(group->path, path))
++			count++;
++	}
++	return count;
++}
++
++static void events_content(struct CgroupConfig *config,
++			struct CgroupGroup *group, struct Buffer *buffer)
++{
++	buffer_appendf(buffer, "populated %d\n",
++		      group_is_populated(config, group->path) ? 1 : 0);
++	buffer_appendf(buffer, "frozen %d\n",
++		      path_is_frozen(config, group->path) ? 1 : 0);
++}
++
++static void group_file_content(struct CgroupConfig *config,
++			struct CgroupGroup *group, enum CgroupFile kind,
++			struct Buffer *buffer)
++{
++	char controllers_string[256];
++
++	switch (kind) {
++	case CG_PROCS:
++		procs_content(config, group->path, false, buffer);
++		break;
++	case CG_THREADS:
++		procs_content(config, group->path, true, buffer);
++		break;
++	case CG_FREEZE:
++		buffer_appendf(buffer, "%d\n", group->frozen ? 1 : 0);
++		break;
++	case CG_EVENTS:
++		events_content(config, group, buffer);
++		break;
++	case CG_CONTROLLERS:
++		controllers_to_string(controllers_for_group(config, group),
++				     controllers_string);
++		buffer_appendf(buffer, "%s\n", controllers_string);
++		break;
++	case CG_SUBTREE_CONTROL:
++		controllers_to_string(group->subtree_control, controllers_string);
++		buffer_appendf(buffer, "%s\n", controllers_string);
++		break;
++	case CG_STAT:
++		buffer_appendf(buffer, "nr_descendants %u\n",
++			      group_descendants(config, group->path));
++		buffer_appendf(buffer, "nr_dying_descendants 0\n");
++		break;
++	case CG_MAX_DEPTH:
++		if (group->max_depth == UINT_MAX)
++			buffer_appendf(buffer, "max\n");
++		else
++			buffer_appendf(buffer, "%u\n", group->max_depth);
++		break;
++	case CG_MAX_DESCENDANTS:
++		if (group->max_descendants == UINT_MAX)
++			buffer_appendf(buffer, "max\n");
++		else
++			buffer_appendf(buffer, "%u\n", group->max_descendants);
++		break;
++	case CG_TYPE:
++		buffer_appendf(buffer, "%s\n", group->threaded ? "threaded" : "domain");
++		break;
++	case CG_PRESSURE:
++		buffer_appendf(buffer, "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n");
++		buffer_appendf(buffer, "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n");
++		break;
++	case CG_AVAILABLE:
++		buffer_appendf(buffer, "1\n");
++		break;
++	case CG_KILL:
++	case CG_NONE:
++		break;
++	}
++}
++
++static void populate_group(struct CgroupConfig *config, const char *path)
++{
++	static const struct {
++		const char *name;
++		enum CgroupFile kind;
++	} files[] = {
++		{ "cgroup.procs",		CG_PROCS },
++		{ "cgroup.threads",		CG_THREADS },
++		{ "cgroup.kill",		CG_KILL },
++		{ "cgroup.freeze",		CG_FREEZE },
++		{ "cgroup.events",		CG_EVENTS },
++		{ "cgroup.controllers",		CG_CONTROLLERS },
++		{ "cgroup.subtree_control",	CG_SUBTREE_CONTROL },
++		{ "cgroup.stat",		CG_STAT },
++		{ "cgroup.max.depth",		CG_MAX_DEPTH },
++		{ "cgroup.max.descendants",	CG_MAX_DESCENDANTS },
++		{ "cgroup.type",		CG_TYPE },
++		{ "cgroup.pressure",		CG_PRESSURE },
++		{ "cgroup.available",		CG_AVAILABLE },
++	};
++	char directory[PATH_MAX];
++	size_t i;
++
++	if (group_host_path(config, path, directory) < 0)
++		return;
++
++	for (i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
++		char file[PATH_MAX];
++		int fd;
++
++		if (snprintf(file, PATH_MAX, "%s/%s", directory, files[i].name)
++		    >= PATH_MAX)
++			continue;
++		/* Create writable so touch_events() can seed the values;
++		 * the final mode is applied below.  */
++		fd = open(file, O_WRONLY | O_CREAT, 0600);
++		if (fd >= 0)
++			close(fd);
++	}
++
++	touch_events(config, path);
++
++	for (i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
++		char file[PATH_MAX];
++
++		if (snprintf(file, PATH_MAX, "%s/%s", directory, files[i].name)
++		    >= PATH_MAX)
++			continue;
++		chmod(file, file_mode(files[i].kind));
++	}
++}
++
++static bool open_is_readable(Tracee *tracee)
++{
++	word_t sysnum = get_sysnum(tracee, CURRENT);
++	word_t flags;
++
++	switch (sysnum) {
++	case PR_open:
++		flags = peek_reg(tracee, CURRENT, SYSARG_2);
++		break;
++	case PR_openat:
++		flags = peek_reg(tracee, CURRENT, SYSARG_3);
++		break;
++	case PR_creat:
++		return false;
++	default:
++		return true;
++	}
++
++	if ((flags & O_ACCMODE) == O_WRONLY)
++		return false;
++	if ((flags & O_PATH) != 0)
++		return false;
++	return true;
++}
++
++static bool open_creates(Tracee *tracee)
++{
++	word_t sysnum = get_sysnum(tracee, CURRENT);
++	word_t flags;
++
++	switch (sysnum) {
++	case PR_open:
++		flags = peek_reg(tracee, CURRENT, SYSARG_2);
++		break;
++	case PR_openat:
++		flags = peek_reg(tracee, CURRENT, SYSARG_3);
++		break;
++	case PR_creat:
++		return true;
++	default:
++		return false;
++	}
++	return (flags & O_CREAT) != 0;
++}
++
++static int check_growth_limits(struct CgroupConfig *config, const char *path)
++{
++	char ancestor[PATH_MAX];
++	struct CgroupGroup *group;
++	int depth = (int) path_depth(path);
++
++	strcpy(ancestor, path);
++	while (parent_path(ancestor, ancestor) == 0) {
++		group = group_find(config, ancestor);
++		if (group != NULL) {
++			if (group->max_depth != UINT_MAX
++			    && depth - (int) path_depth(ancestor)
++			       > (int) group->max_depth)
++				return -ENOENT;
++			if (group->max_descendants != UINT_MAX
++			    && group_descendants(config, ancestor)
++			       >= group->max_descendants)
++				return -ENOSPC;
++		}
++		if (strcmp(ancestor, "/") == 0)
++			break;
++	}
++	return 0;
++}
++
++static int prepare_virtual_path(Tracee *tracee, struct CgroupConfig *config,
++				const char *host)
++{
++	char name[PATH_MAX];
++	char directory[PATH_MAX];
++	char group_path[PATH_MAX];
++	struct CgroupGroup *group;
++	struct stat st;
++	enum CgroupFile kind;
++	bool readable;
++	int fd;
++
++	/* Only cgroupfs-created objects exist here; arbitrary inodes are
++	 * not allowed.  */
++	switch (get_sysnum(tracee, CURRENT)) {
++	case PR_mknod:
++	case PR_mknodat:
++	case PR_symlink:
++	case PR_symlinkat:
++	case PR_link:
++	case PR_linkat:
++		return -EPERM;
++	case PR_truncate:
++	case PR_truncate64:
++		return -EINVAL;
++	default:
++		break;
++	}
++
++	path_basename(host, name);
++	path_dirname(host, directory);
++	kind = file_kind(name);
++	readable = open_is_readable(tracee);
++
++	if (stat(host, &st) == 0) {
++		if (S_ISDIR(st.st_mode)) {
++			if (!host_to_group(config, host, group_path))
++				return 0;
++			(void) group_get(config, group_path);
++			return 0;
++		}
++		if (kind != CG_NONE) {
++			if (readable && kind != CG_KILL) {
++				struct Buffer buffer;
++
++				if (!host_to_group(config, directory, group_path))
++					return 0;
++				group = group_get(config, group_path);
++				if (group == NULL)
++					return -ENOMEM;
++				buffer_init(&buffer);
++				group_file_content(config, group, kind, &buffer);
++				if (!buffer.failed)
++					write_file_at(directory, name, buffer.data,
++						      file_mode(kind));
++				buffer_free(&buffer);
++			}
++			chmod(host, file_mode(kind));
++			return 0;
++		}
++		return 0;
++	}
++
++	if (kind != CG_NONE) {
++		struct Buffer buffer;
++
++		if (stat(directory, &st) < 0 || !S_ISDIR(st.st_mode))
++			return -ENOENT;
++		if (!host_to_group(config, directory, group_path))
++			return -EINVAL;
++		group = group_get(config, group_path);
++		if (group == NULL)
++			return -ENOMEM;
++
++		fd = open(host, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
++		if (fd < 0 && errno != EEXIST)
++			return -errno;
++		if (fd >= 0)
++			close(fd);
++
++		if (readable && kind != CG_KILL) {
++			buffer_init(&buffer);
++			group_file_content(config, group, kind, &buffer);
++			if (!buffer.failed)
++				write_file_at(directory, name, buffer.data,
++					      file_mode(kind));
++			buffer_free(&buffer);
++		}
++		chmod(host, file_mode(kind));
++		return 0;
++	}
++
++	/* cgroupfs is a pseudo-filesystem: arbitrary files and symlinks
++	 * cannot be created there.  */
++	if (open_creates(tracee))
++		return -EACCES;
++	return 0;
++}
++
++/* ------------------------------------------------------------------ */
++/* /proc synthesis                                                    */
++/* ------------------------------------------------------------------ */
++
++static int make_proc_cgroup(Tracee *tracee, struct CgroupConfig *config,
++			pid_t pid, char result[PATH_MAX])
++{
++	char path[PATH_MAX];
++	const char *temporary;
++	FILE *file;
++
++	if (pid <= 0)
++		return -ESRCH;
++	if (proc_path(tracee, config, pid, path) < 0)
++		return -ESRCH;
++
++	temporary = create_temp_file(tracee->ctx, "cgroup-proc");
++	if (temporary == NULL)
++		return -ENOMEM;
++	file = fopen(temporary, "w");
++	if (file == NULL)
++		return -ENOMEM;
++	fprintf(file, "0::%s\n", path);
++	fclose(file);
++	if (strlen(temporary) >= PATH_MAX)
++		return -ENAMETOOLONG;
++	strcpy(result, temporary);
++	return 1;
++}
++
++static int maybe_proc_file(Tracee *tracee, struct CgroupConfig *config,
++			char result[PATH_MAX], const char *user_path)
++{
++	char guest[PATH_MAX];
++	char *cursor;
++	int status;
++
++	if (result[0] == '/' && host_is_virtual(config, result))
++		return 0;
++
++	status = join_guest_path(result, user_path, guest);
++	if (status < 0)
++		return 0;
++
++	if (strcmp(guest, "/proc/cgroups") == 0) {
++		const char *temporary;
++		FILE *file;
++		size_t i;
++
++		if (!open_is_readable(tracee))
++			return -EACCES;
++		temporary = create_temp_file(tracee->ctx, "proc-cgroups");
++		if (temporary == NULL)
++			return -ENOMEM;
++		file = fopen(temporary, "w");
++		if (file == NULL)
++			return -ENOMEM;
++		fprintf(file, "#subsys_name\thierarchy\tnum_cgroups\tenabled\n");
++		for (i = 0; i < sizeof(controllers) / sizeof(controllers[0]); i++)
++			fprintf(file, "%s\t0\t1\t1\n", controllers[i].name);
++		fclose(file);
++		if (strlen(temporary) >= PATH_MAX)
++			return -ENAMETOOLONG;
++		strcpy(result, temporary);
++		return 1;
++	}
++
++	if (strcmp(guest, "/proc/self/cgroup") == 0
++	    || strcmp(guest, "/proc/thread-self/cgroup") == 0)
++		return make_proc_cgroup(tracee, config, tracee->pid, result);
++
++	if (strncmp(guest, "/proc/", 6) != 0)
++		return 0;
++
++	cursor = guest + 6;
++	if (strncmp(cursor, "self/", 5) == 0 || strncmp(cursor, "thread-self/", 12) == 0)
++		return 0;
++
++	{
++		char *end;
++		long pid;
++		long tid = 0;
++
++		errno = 0;
++		pid = strtol(cursor, &end, 10);
++		if (errno != 0 || end == cursor || pid <= 0 || pid > INT_MAX)
++			return 0;
++
++		if (strcmp(end, "/cgroup") == 0) {
++			if (!open_is_readable(tracee))
++				return -EACCES;
++			return make_proc_cgroup(tracee, config, (pid_t) pid, result);
++		}
++
++		if (strncmp(end, "/task/", 6) != 0)
++			return 0;
++		cursor = end + 6;
++		errno = 0;
++		tid = strtol(cursor, &end, 10);
++		if (errno != 0 || end == cursor || strcmp(end, "/cgroup") != 0)
++			return 0;
++		if (tid <= 0 || tid > INT_MAX)
++			return 0;
++		if (!open_is_readable(tracee))
++			return -EACCES;
++		return make_proc_cgroup(tracee, config, (pid_t) tid, result);
++	}
++}
++
++/* ------------------------------------------------------------------ */
++/* Path translation                                                   */
++/* ------------------------------------------------------------------ */
++
++static int handle_guest_path(Tracee *tracee, struct CgroupConfig *config,
++			char *result, const char *user_path)
++{
++	char guest[PATH_MAX];
++	char host[PATH_MAX];
++	char group[PATH_MAX];
++	int status;
++
++	(void) ensure_self(tracee, config);
++
++	status = maybe_proc_file(tracee, config, result, user_path);
++	if (status != 0)
++		return status;
++
++	if (result[0] == '/' && host_is_virtual(config, result)) {
++		char normalized[PATH_MAX];
++
++		if (user_path[0] == '/') {
++			if (strlen(user_path) >= sizeof(host))
++				return -ENAMETOOLONG;
++			strcpy(host, user_path);
++		}
++		else {
++			status = join_paths(2, host, result, user_path);
++			if (status < 0)
++				return status;
++		}
++		/* A relative ".." from a cgroup directory must not escape
++		 * the synthetic hierarchy.  */
++		status = normalize_path(host, normalized);
++		if (status < 0)
++			return -EACCES;
++		if (!host_is_virtual(config, normalized))
++			return -EACCES;
++		strcpy(host, normalized);
++	}
++	else {
++		status = join_guest_path(result, user_path, guest);
++		if (status < 0)
++			return 0;
++		if (find_alias(config, guest) == NULL)
++			return 0;
++		status = guest_to_host(config, guest, host, group);
++		if (status < 0)
++			return 0;
++	}
++
++	(void) group;
++	status = prepare_virtual_path(tracee, config, host);
++	if (status < 0)
++		return status;
++	if (strlen(host) >= PATH_MAX)
++		return -ENAMETOOLONG;
++	strcpy(result, host);
++	return 1;
++}
++
++/* ------------------------------------------------------------------ */
++/* Syscall handlers                                                   */
++/* ------------------------------------------------------------------ */
++
++static int resolve_host_path(Tracee *tracee, int dirfd, word_t path_argument,
++			char host[PATH_MAX], char guest[PATH_MAX])
++{
++	char user[PATH_MAX];
++	int status;
++
++	status = read_path(tracee, user, path_argument);
++	if (status < 0)
++		return status;
++	status = translate_path(tracee, host, dirfd, user, true);
++	if (status < 0)
++		return status;
++	if (guest != NULL) {
++		status = join_guest_path("/", user, guest);
++		if (status < 0)
++			return status;
++	}
++	return 0;
++}
++
++static int reject_syscall(Tracee *tracee, int error)
++{
++	poke_reg(tracee, SYSARG_RESULT, (word_t) error);
++	set_sysnum(tracee, PR_void);
++	return 1;
++}
++
++static int handle_mkdir(Tracee *tracee, struct CgroupConfig *config,
++			int dirfd, word_t path_argument)
++{
++	char host[PATH_MAX];
++	char group[PATH_MAX];
++	char parent[PATH_MAX];
++	char group_parent[PATH_MAX];
++	struct stat st;
++	int status;
++
++	status = resolve_host_path(tracee, dirfd, path_argument, host, NULL);
++	if (status < 0)
++		return status;
++	if (!host_to_group(config, host, group))
++		return 0;
++
++	if (strcmp(group, "/") == 0)
++		return -EEXIST;
++	if (stat(host, &st) == 0)
++		return -EEXIST;
++	if (stat(config->root, &st) < 0 || !S_ISDIR(st.st_mode))
++		return -ENOENT;
++	path_dirname(host, parent);
++	if (stat(parent, &st) < 0 || !S_ISDIR(st.st_mode))
++		return -ENOENT;
++
++	if (parent_path(group, group_parent) == 0
++	    && group_find(config, group_parent) == NULL)
++		return -ENOENT;
++	status = check_growth_limits(config, group);
++	if (status < 0)
++		return status;
++
++	status = mkdir(host, 0755);
++	if (status < 0)
++		return -errno;
++
++	(void) group_get(config, group);
++	populate_group(config, group);
++	touch_events(config, group_parent);
++	poke_reg(tracee, SYSARG_RESULT, 0);
++	set_sysnum(tracee, PR_void);
++	return 1;
++}
++
++static int remove_group_files(const char *host)
++{
++	DIR *dir;
++	struct dirent *entry;
++	int result = 0;
++
++	dir = opendir(host);
++	if (dir == NULL)
++		return -errno;
++
++	while ((entry = readdir(dir)) != NULL) {
++		char path[PATH_MAX];
++		struct stat st;
++
++		if (strcmp(entry->d_name, ".") == 0
++		    || strcmp(entry->d_name, "..") == 0)
++			continue;
++		if (snprintf(path, PATH_MAX, "%s/%s", host, entry->d_name)
++		    >= PATH_MAX) {
++			result = -ENAMETOOLONG;
++			break;
++		}
++		if (lstat(path, &st) < 0) {
++			result = -errno;
++			break;
++		}
++		if (S_ISDIR(st.st_mode)) {
++			result = -ENOTEMPTY;
++			break;
++		}
++		if (unlink(path) < 0) {
++			result = -errno;
++			break;
++		}
++	}
++	closedir(dir);
++	return result;
++}
++
++static bool group_has_members(struct CgroupConfig *config, const char *path)
++{
++	struct CgroupProc *proc;
++
++	LIST_FOREACH(proc, &config->procs, link) {
++		if (proc->path != NULL && strcmp(proc->path, path) == 0
++		    && proc_is_alive(proc))
++			return true;
++	}
++	return false;
++}
++
++static int handle_rmdir(Tracee *tracee, struct CgroupConfig *config,
++			int dirfd, word_t path_argument)
++{
++	char host[PATH_MAX];
++	char group[PATH_MAX];
++	char parent[PATH_MAX];
++	struct CgroupGroup *group_entry;
++	struct stat st;
++	int status;
++
++	status = resolve_host_path(tracee, dirfd, path_argument, host, NULL);
++	if (status < 0)
++		return status;
++	if (!host_to_group(config, host, group))
++		return 0;
++
++	if (strcmp(group, "/") == 0)
++		return -EBUSY;
++	group_entry = group_find(config, group);
++	if (group_entry == NULL)
++		return -ENOENT;
++	if (stat(host, &st) < 0)
++		return -errno;
++	if (!S_ISDIR(st.st_mode))
++		return -ENOTDIR;
++	if (group_has_children(config, group))
++		return -ENOTEMPTY;
++	if (group_has_members(config, group))
++		return -EBUSY;
++
++	status = remove_group_files(host);
++	if (status < 0)
++		return status;
++	status = rmdir(host);
++	if (status < 0)
++		return -errno;
++
++	touch_events(config, group);
++	if (parent_path(group, parent) == 0)
++		touch_events(config, parent);
++	group_drop(config, group_entry);
++	poke_reg(tracee, SYSARG_RESULT, 0);
++	set_sysnum(tracee, PR_void);
++	return 1;
++}
++
++static int handle_unlink(Tracee *tracee, struct CgroupConfig *config,
++			int dirfd, word_t path_argument, bool remove_dir)
++{
++	char host[PATH_MAX];
++	char group[PATH_MAX];
++	int status;
++
++	status = resolve_host_path(tracee, dirfd, path_argument, host, NULL);
++	if (status < 0)
++		return status;
++	if (!host_to_group(config, host, group))
++		return 0;
++	if (remove_dir)
++		return handle_rmdir(tracee, config, dirfd, path_argument);
++
++	/* cgroupfs pseudo-files cannot be unlinked.  */
++	return -EPERM;
++}
++
++static int handle_rename(Tracee *tracee, struct CgroupConfig *config,
++			int old_dirfd, word_t old_argument,
++			int new_dirfd, word_t new_argument)
++{
++	char old_host[PATH_MAX];
++	char new_host[PATH_MAX];
++	char old_group[PATH_MAX];
++	char new_group[PATH_MAX];
++	char parent[PATH_MAX];
++	struct CgroupGroup *group;
++	struct CgroupProc *proc;
++	struct stat st;
++	int status;
++
++	status = resolve_host_path(tracee, old_dirfd, old_argument, old_host, NULL);
++	if (status < 0)
++		return status;
++	status = resolve_host_path(tracee, new_dirfd, new_argument, new_host, NULL);
++	if (status < 0)
++		return status;
++
++	if (!host_to_group(config, old_host, old_group)
++	    && !host_to_group(config, new_host, new_group))
++		return 0;
++	if (!host_to_group(config, old_host, old_group)
++	    || !host_to_group(config, new_host, new_group))
++		return -EXDEV;
++	if (strcmp(old_group, "/") == 0)
++		return -EBUSY;
++
++	group = group_find(config, old_group);
++	if (group == NULL)
++		return -ENOENT;
++	if (stat(new_host, &st) == 0)
++		return -EEXIST;
++	path_dirname(new_host, parent);
++	if (stat(parent, &st) < 0 || !S_ISDIR(st.st_mode))
++		return -ENOENT;
++
++	status = rename(old_host, new_host);
++	if (status < 0)
++		return -errno;
++
++	/* Reparent the bookkeeping record, all descendant groups and every
++	 * process below the renamed cgroup.  */
++	{
++		struct CgroupGroup *other;
++		size_t old_length = strlen(old_group);
++
++		LIST_FOREACH(other, &config->groups, link) {
++			char updated[PATH_MAX];
++
++			if (other == group
++			    || !path_is_strict_descendant(other->path, old_group))
++				continue;
++			snprintf(updated, sizeof(updated), "%s%s", new_group,
++				 other->path + old_length);
++			talloc_free(other->path);
++			other->path = talloc_strdup(other, updated);
++			if (other->path == NULL)
++				return -ENOMEM;
++		}
++
++		talloc_free(group->path);
++		group->path = talloc_strdup(group, new_group);
++		if (group->path == NULL)
++			return -ENOMEM;
++
++		LIST_FOREACH(proc, &config->procs, link) {
++			char updated[PATH_MAX];
++
++			if (proc->path == NULL || !path_within(proc->path, old_group))
++				continue;
++			snprintf(updated, sizeof(updated), "%s%s", new_group,
++				 proc->path + old_length);
++			talloc_free(proc->path);
++			proc->path = talloc_strdup(proc, updated);
++			if (proc->path == NULL)
++				return -ENOMEM;
++		}
++	}
++
++	touch_events(config, old_group);
++	touch_events(config, new_group);
++	poke_reg(tracee, SYSARG_RESULT, 0);
++	set_sysnum(tracee, PR_void);
++	return 1;
++}
++
++static int parse_pid_list(const char *data, pid_t *pids, size_t capacity,
++			size_t *count)
++{
++	char copy[65536];
++	char *save;
++	char *token;
++	size_t found = 0;
++
++	if (strlen(data) >= sizeof(copy))
++		return -EINVAL;
++	strcpy(copy, data);
++
++	for (token = strtok_r(copy, " \t\r\n", &save);
++	     token != NULL;
++	     token = strtok_r(NULL, " \t\r\n", &save)) {
++		char *end;
++		long value;
++
++		errno = 0;
++		value = strtol(token, &end, 10);
++		if (errno != 0 || *end != '\0' || value <= 0
++		    || value > INT_MAX)
++			return -EINVAL;
++		if (found >= capacity)
++			return -E2BIG;
++		pids[found++] = (pid_t) value;
++	}
++	if (found == 0)
++		return -EINVAL;
++	*count = found;
++	return 0;
++}
++
++static int move_one(Tracee *tracee, struct CgroupConfig *config, pid_t pid,
++		const char *path, bool thread_file)
++{
++	pid_t tgid;
++	struct ProcStat stat;
++	struct CgroupProc *proc;
++	int status;
++
++	status = read_proc_stat(pid, &stat);
++	if (status < 0)
++		return -ESRCH;
++
++	tgid = proc_tgid(pid);
++	if (!thread_file || tgid == pid) {
++		struct CgroupProc *thread;
++		struct CgroupProc *next;
++
++		/* cgroup.procs migrates the whole thread group; update
++		 * threads before the leader so cgroup.threads is complete as
++		 * soon as cgroup.procs shows the process.  */
++		for (thread = LIST_FIRST(&config->procs);
++		     thread != NULL;
++		     thread = next) {
++			next = LIST_NEXT(thread, link);
++			if (thread->thread && thread->tgid == tgid)
++				(void) proc_set(config, thread->pid, path, true, tgid);
++		}
++		status = proc_set(config, tgid, path, false, tgid);
++		if (status < 0)
++			return status;
++	}
++	else {
++		status = proc_set(config, pid, path, true, tgid);
++		if (status < 0)
++			return status;
++	}
++
++	if (path_is_frozen(config, path)) {
++		proc = proc_find(config, thread_file ? pid : tgid);
++		if (proc != NULL)
++			freeze_one(tracee, proc, true);
++	}
++	return 0;
++}
++
++static int apply_procs_write(Tracee *tracee, struct CgroupConfig *config,
++			const char *group, bool threads,
++			const char *data, size_t length)
++{
++	pid_t pids[4096];
++	size_t count = 0;
++	size_t i;
++	int status;
++	char copy[65536];
++
++	if (length >= sizeof(copy))
++		return -EINVAL;
++	memcpy(copy, data, length);
++	copy[length] = '\0';
++	status = parse_pid_list(copy, pids, sizeof(pids) / sizeof(pids[0]),
++				&count);
++	if (status < 0)
++		return status;
++
++	for (i = 0; i < count; i++) {
++		status = move_one(tracee, config, pids[i], group, threads);
++		if (status < 0)
++			return status;
++	}
++	return 0;
++}
++
++static int apply_subtree_control(struct CgroupConfig *config,
++			struct CgroupGroup *group, const char *data,
++			size_t length)
++{
++	char copy[65536];
++	char *save;
++	char *token;
++	unsigned int mask = group->subtree_control;
++	unsigned int adding = 0;
++	unsigned int removing = 0;
++
++	if (length >= sizeof(copy))
++		return -EINVAL;
++	memcpy(copy, data, length);
++	copy[length] = '\0';
++
++	for (token = strtok_r(copy, " \t\r\n", &save);
++	     token != NULL;
++	     token = strtok_r(NULL, " \t\r\n", &save)) {
++		bool add;
++		unsigned int bit;
++		int status;
++
++		if (token[0] == '+')
++			add = true;
++		else if (token[0] == '-')
++			add = false;
++		else
++			return -EINVAL;
++		status = controller_bit(token + 1, &bit);
++		if (status < 0)
++			return status;
++		if ((controllers_for_group(config, group) & bit) == 0)
++			return -ENOENT;
++		if (add)
++			adding |= bit;
++		else
++			removing |= bit;
++	}
++
++	/* The root cgroup is exempt from the no-internal-process rule;
++	 * systemd enables controllers there while PID 1 is still a member.  */
++	if (adding != 0 && strcmp(group->path, "/") != 0
++	    && group_has_members(config, group->path))
++		return -EBUSY;
++	group->subtree_control = (mask | adding) & ~removing;
++	touch_events(config, group->path);
++	return 0;
++}
++
++static int apply_write(Tracee *tracee, struct CgroupConfig *config,
++			const char *group_path, const char *name,
++			const char *data, size_t length)
++{
++	struct CgroupGroup *group = group_find(config, group_path);
++	enum CgroupFile kind = file_kind(name);
++	char copy[65536];
++	int status;
++
++	if (group == NULL)
++		return -ENOENT;
++	if (kind == CG_NONE)
++		return -EPERM;
++
++	switch (kind) {
++	case CG_PROCS:
++		status = apply_procs_write(tracee, config, group_path, false,
++					   data, length);
++		break;
++	case CG_THREADS:
++		status = apply_procs_write(tracee, config, group_path, true,
++					   data, length);
++		break;
++	case CG_KILL:
++		if (length >= sizeof(copy))
++			return -EINVAL;
++		memcpy(copy, data, length);
++		copy[length] = '\0';
++		{
++			char *save;
++			char *token = strtok_r(copy, " \t\r\n", &save);
++			if (token == NULL || strcmp(token, "1") != 0
++			    || strtok_r(NULL, " \t\r\n", &save) != NULL)
++				return -EINVAL;
++		}
++		kill_group(config, group_path);
++		status = 0;
++		break;
++	case CG_FREEZE:
++		if (length >= sizeof(copy))
++			return -EINVAL;
++		memcpy(copy, data, length);
++		copy[length] = '\0';
++		{
++			char *save;
++			char *token = strtok_r(copy, " \t\r\n", &save);
++			if (token == NULL || strtok_r(NULL, " \t\r\n", &save) != NULL)
++				return -EINVAL;
++			if (strcmp(token, "1") == 0) {
++				group->frozen = true;
++				signal_group(tracee, config, group_path, true);
++			}
++			else if (strcmp(token, "0") == 0) {
++				group->frozen = false;
++				signal_group(tracee, config, group_path, false);
++			}
++			else {
++				return -EINVAL;
++			}
++		}
++		touch_events(config, group_path);
++		status = 0;
++		break;
++	case CG_SUBTREE_CONTROL:
++		status = apply_subtree_control(config, group, data, length);
++		break;
++	case CG_MAX_DEPTH:
++	case CG_MAX_DESCENDANTS: {
++		unsigned int value;
++		if (length >= sizeof(copy))
++			return -EINVAL;
++		memcpy(copy, data, length);
++		copy[length] = '\0';
++		{
++			char *save;
++			char *token = strtok_r(copy, " \t\r\n", &save);
++			if (token == NULL || strtok_r(NULL, " \t\r\n", &save) != NULL)
++				return -EINVAL;
++			if (strcmp(token, "max") == 0) {
++				value = UINT_MAX;
++			}
++			else {
++				char *end;
++				unsigned long parsed;
++				errno = 0;
++				parsed = strtoul(token, &end, 10);
++				if (errno != 0 || *end != '\0' || parsed > UINT_MAX)
++					return -EINVAL;
++				value = (unsigned int) parsed;
++			}
++		}
++		if (kind == CG_MAX_DEPTH) {
++			if (value != UINT_MAX && group_descendants(config, group->path) > 0) {
++				struct CgroupGroup *child;
++				unsigned int deepest = 0;
++
++				LIST_FOREACH(child, &config->groups, link) {
++					if (!path_is_strict_descendant(child->path,
++								       group->path))
++						continue;
++					if (path_depth(child->path)
++					    - path_depth(group->path) > deepest)
++						deepest = path_depth(child->path)
++							- path_depth(group->path);
++				}
++				if (deepest > value)
++					return -EBUSY;
++			}
++			group->max_depth = value;
++		}
++		else {
++			if (value != UINT_MAX
++			    && group_descendants(config, group->path) > value)
++				return -EBUSY;
++			group->max_descendants = value;
++		}
++		status = 0;
++		break;
++	}
++	case CG_TYPE: {
++		if (length >= sizeof(copy))
++			return -EINVAL;
++		memcpy(copy, data, length);
++		copy[length] = '\0';
++		{
++			char *save;
++			char *token = strtok_r(copy, " \t\r\n", &save);
++			if (token == NULL || strtok_r(NULL, " \t\r\n", &save) != NULL)
++				return -EINVAL;
++			if (strcmp(token, "domain") == 0)
++				group->threaded = false;
++			else if (strcmp(token, "threaded") == 0)
++				group->threaded = true;
++			else
++				return -EINVAL;
++		}
++		status = 0;
++		break;
++	}
++	default:
++		/* cgroup.events, cgroup.stat, cgroup.controllers and the
++		 * resource-free read-only files cannot be written.  */
++		status = -EPERM;
++		break;
++	}
++	return status;
++}
++
++static int read_fd_target(Tracee *tracee, int fd, char path[PATH_MAX])
++{
++	return readlink_proc_pid_fd(tracee->pid, fd, path);
++}
++
++static int read_write_data(Tracee *tracee, word_t address, size_t size,
++			char buffer[65536], size_t *length)
++{
++	if (size > 65535)
++		size = 65535;
++	if (read_data(tracee, buffer, address, size) < 0)
++		return -EFAULT;
++	buffer[size] = '\0';
++	*length = size;
++	return 0;
++}
++
++static int read_writev_data(Tracee *tracee, word_t iovec_address,
++			size_t count, char buffer[65536], size_t *length)
++{
++	struct iovec iovec[64];
++	size_t offset = 0;
++	size_t i;
++	int status;
++
++	if (count > sizeof(iovec) / sizeof(iovec[0]))
++		count = sizeof(iovec) / sizeof(iovec[0]);
++	status = read_data(tracee, iovec, iovec_address,
++			   count * sizeof(iovec[0]));
++	if (status < 0)
++		return -EFAULT;
++
++	for (i = 0; i < count && offset < 65535; i++) {
++		size_t chunk = iovec[i].iov_len;
++
++		if (chunk > 65535 - offset)
++			chunk = 65535 - offset;
++		if (chunk == 0)
++			continue;
++		status = read_data(tracee, buffer + offset, (word_t) iovec[i].iov_base,
++				   chunk);
++		if (status < 0)
++			return -EFAULT;
++		offset += chunk;
++	}
++	buffer[offset] = '\0';
++	*length = offset;
++	return 0;
++}
++
++static int handle_write(Tracee *tracee, struct CgroupConfig *config)
++{
++	word_t sysnum = get_sysnum(tracee, ORIGINAL);
++	int fd;
++	char path[PATH_MAX];
++	char directory[PATH_MAX];
++	char group[PATH_MAX];
++	char name[PATH_MAX];
++	char data[65536];
++	size_t length = 0;
++	int status;
++
++	switch (sysnum) {
++	case PR_write:
++	case PR_pwrite64:
++		fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
++		status = read_write_data(tracee,
++				peek_reg(tracee, CURRENT, SYSARG_2),
++				(size_t) peek_reg(tracee, CURRENT, SYSARG_3),
++				data, &length);
++		break;
++	case PR_writev:
++	case PR_pwritev:
++	case PR_pwritev2:
++		fd = (int) peek_reg(tracee, CURRENT, SYSARG_1);
++		status = read_writev_data(tracee,
++				peek_reg(tracee, CURRENT, SYSARG_2),
++				(size_t) peek_reg(tracee, CURRENT, SYSARG_3),
++				data, &length);
++		break;
++	default:
++		return 0;
++	}
++	if (status < 0)
++		return 0;
++
++	status = read_fd_target(tracee, fd, path);
++	if (status < 0)
++		return 0;
++	if (!host_is_virtual(config, path))
++		return 0;
++
++	path_dirname(path, directory);
++	path_basename(path, name);
++	if (!host_to_group(config, directory, group))
++		return 0;
++	return apply_write(tracee, config, group, name, data, length);
++}
++
++static int handle_mount(Tracee *tracee, struct CgroupConfig *config)
++{
++	char source[PATH_MAX];
++	char target[PATH_MAX];
++	char fstype[PATH_MAX];
++	char guest[PATH_MAX];
++	char cwd[PATH_MAX];
++	int status;
++
++	status = read_path(tracee, source, peek_reg(tracee, CURRENT, SYSARG_1));
++	if (status < 0)
++		return 0;
++	(void) source;
++	status = read_path(tracee, target, peek_reg(tracee, CURRENT, SYSARG_2));
++	if (status < 0)
++		return 0;
++	status = read_path(tracee, fstype, peek_reg(tracee, CURRENT, SYSARG_3));
++	if (status < 0)
++		return 0;
++
++	if (strcmp(fstype, "cgroup") == 0)
++		return -ENODEV;
++	if (strcmp(fstype, "cgroup2") != 0)
++		return 0;
++
++	if (target[0] == '/') {
++		strcpy(guest, target);
++	}
++	else {
++		if (getcwd2(tracee, cwd) < 0)
++			return -ENOENT;
++		status = join_guest_path(cwd, target, guest);
++		if (status < 0)
++			return status;
++	}
++	status = normalize_path(guest, guest);
++	if (status < 0)
++		return status;
++
++	status = alias_add(config, guest, false, true, NULL);
++	if (status < 0)
++		return status;
++	poke_reg(tracee, SYSARG_RESULT, 0);
++	set_sysnum(tracee, PR_void);
++	return 1;
++}
++
++static int handle_umount(Tracee *tracee, struct CgroupConfig *config)
++{
++	char target[PATH_MAX];
++	char guest[PATH_MAX];
++	char cwd[PATH_MAX];
++	struct CgroupAlias *alias;
++	int status;
++
++	status = read_path(tracee, target, peek_reg(tracee, CURRENT, SYSARG_1));
++	if (status < 0)
++		return 0;
++	if (target[0] == '/') {
++		strcpy(guest, target);
++	}
++	else {
++		if (getcwd2(tracee, cwd) < 0)
++			return 0;
++		if (join_guest_path(cwd, target, guest) < 0)
++			return 0;
++	}
++	if (normalize_path(guest, guest) < 0)
++		return 0;
++
++	LIST_FOREACH(alias, &config->aliases, link) {
++		if (strcmp(alias->path, guest) != 0)
++			continue;
++		if (!alias->permanent) {
++			LIST_REMOVE(alias, link);
++			talloc_free(alias);
++		}
++		poke_reg(tracee, SYSARG_RESULT, 0);
++		set_sysnum(tracee, PR_void);
++		return 1;
++	}
++	return 0;
++}
++
++/* ------------------------------------------------------------------ */
++/* statfs                                                             */
++/* ------------------------------------------------------------------ */
++
++static bool fd_is_virtual(Tracee *tracee, struct CgroupConfig *config, int fd)
++{
++	char path[PATH_MAX];
++
++	if (read_fd_target(tracee, fd, path) < 0)
++		return false;
++	return strncmp(path, config->root, strlen(config->root)) == 0
++	       && (path[strlen(config->root)] == '\0'
++		   || path[strlen(config->root)] == '/');
++}
++
++static void fake_statfs_magic(Tracee *tracee, word_t address)
++{
++	uint32_t magic = CGROUP2_SUPER_MAGIC;
++	(void) write_data(tracee, address, &magic, sizeof(magic));
++}
++
++static bool path_argument_is_virtual(Tracee *tracee, struct CgroupConfig *config,
++				word_t address)
++{
++	char path[PATH_MAX];
++	char host[PATH_MAX];
++	char group[PATH_MAX];
++
++	if (read_path(tracee, path, address) < 0)
++		return false;
++	if (strncmp(path, config->root, strlen(config->root)) == 0
++	    && (path[strlen(config->root)] == '\0'
++		|| path[strlen(config->root)] == '/'))
++		return true;
++	return path[0] == '/' && guest_to_host(config, path, host, group) == 0;
++}
++
++/*
++ * fake_id0 turns mknod/symlink/link into fake successes even when the
++ * cgroup path was rejected at syscall entry.  Re-assert the cgroupfs
++ * rule at exit so those pseudo-files cannot be created under --root-id.
++ */
++static int enforce_cgroup_exit(Tracee *tracee, struct CgroupConfig *config)
++{
++	word_t sysnum = get_sysnum(tracee, ORIGINAL);
++	bool virtual = false;
++	int error = -EPERM;
++
++	switch (sysnum) {
++	case PR_mknod:
++		virtual = path_argument_is_virtual(tracee, config,
++						   peek_reg(tracee, ORIGINAL, SYSARG_1));
++		break;
++	case PR_mknodat:
++		virtual = path_argument_is_virtual(tracee, config,
++						   peek_reg(tracee, ORIGINAL, SYSARG_2));
++		break;
++	case PR_symlink:
++		virtual = path_argument_is_virtual(tracee, config,
++						   peek_reg(tracee, ORIGINAL, SYSARG_2));
++		break;
++	case PR_symlinkat:
++		virtual = path_argument_is_virtual(tracee, config,
++						   peek_reg(tracee, ORIGINAL, SYSARG_3));
++		break;
++	case PR_link:
++		virtual = path_argument_is_virtual(tracee, config,
++						   peek_reg(tracee, ORIGINAL, SYSARG_2));
++		break;
++	case PR_linkat:
++		virtual = path_argument_is_virtual(tracee, config,
++						   peek_reg(tracee, ORIGINAL, SYSARG_4));
++		break;
++	case PR_truncate:
++	case PR_truncate64:
++		virtual = path_argument_is_virtual(tracee, config,
++						   peek_reg(tracee, ORIGINAL, SYSARG_1));
++		error = -EINVAL;
++		break;
++	default:
++		return 0;
++	}
++
++	if (virtual)
++		poke_reg(tracee, SYSARG_RESULT, (word_t) error);
++	return 0;
++}
++
++static int handle_statfs_exit(Tracee *tracee, struct CgroupConfig *config)
++{
++	word_t sysnum = get_sysnum(tracee, ORIGINAL);
++	word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
++	char path[PATH_MAX];
++	word_t buffer_address;
++
++	if ((int) result != 0)
++		return 0;
++
++	switch (sysnum) {
++	case PR_statfs:
++	case PR_statfs64:
++		if (read_path(tracee, path, peek_reg(tracee, MODIFIED, SYSARG_1)) < 0
++		    && read_path(tracee, path, peek_reg(tracee, ORIGINAL, SYSARG_1)) < 0)
++			return 0;
++		if (strncmp(path, config->root, strlen(config->root)) != 0
++		    || (path[strlen(config->root)] != '\0'
++			&& path[strlen(config->root)] != '/'))
++			return 0;
++		buffer_address = sysnum == PR_statfs64
++			? peek_reg(tracee, ORIGINAL, SYSARG_3)
++			: peek_reg(tracee, ORIGINAL, SYSARG_2);
++		fake_statfs_magic(tracee, buffer_address);
++		return 0;
++
++	case PR_fstatfs:
++	case PR_fstatfs64:
++		if (!fd_is_virtual(tracee, config,
++				   (int) peek_reg(tracee, CURRENT, SYSARG_1)))
++			return 0;
++		buffer_address = sysnum == PR_fstatfs64
++			? peek_reg(tracee, ORIGINAL, SYSARG_3)
++			: peek_reg(tracee, ORIGINAL, SYSARG_2);
++		fake_statfs_magic(tracee, buffer_address);
++		return 0;
++
++	default:
++		return 0;
++	}
++}
++
++/* ------------------------------------------------------------------ */
++/* Extension entry points                                             */
++/* ------------------------------------------------------------------ */
++
++static struct CgroupConfig *config_of(Extension *extension)
++{
++	return talloc_get_type_abort(extension->config, struct CgroupConfig);
++}
++
++int cgroup_callback(Extension *extension, ExtensionEvent event,
++		intptr_t data1, intptr_t data2)
++{
++	Tracee *tracee = TRACEE(extension);
++	struct CgroupConfig *config;
++
++	switch (event) {
++	case INITIALIZATION: {
++		const char *root;
++		const char *freezer_root;
++
++		config = talloc_zero(extension, struct CgroupConfig);
++		if (config == NULL)
++			return -ENOMEM;
++		LIST_INIT(&config->groups);
++		LIST_INIT(&config->procs);
++		LIST_INIT(&config->aliases);
++
++		root = create_temp_directory(extension, "proot-cgroup");
++		if (root == NULL)
++			return -ENOMEM;
++		config->root = talloc_strdup(config, root);
++		if (config->root == NULL)
++			return -ENOMEM;
++
++		/* cgroup v1's freezer path is kept empty: a proot daemon
++		 * sweeps /dev/freezer/ct for leftover chroot groups, and it
++		 * must never see or kill a real host v1 group.  */
++		freezer_root = create_temp_directory(extension,
++						    "proot-cgroup-freezer");
++		if (freezer_root == NULL)
++			return -ENOMEM;
++		config->freezer_root = talloc_strdup(config, freezer_root);
++		if (config->freezer_root == NULL)
++			return -ENOMEM;
++
++		extension->config = config;
++		extension->filtered_sysnums = filtered_sysnums;
++
++		(void) group_get(config, "/");
++		populate_group(config, "/");
++		if (alias_add(config, DEFAULT_GUEST_ROOT, true, true, NULL) < 0)
++			return -ENOMEM;
++		if (alias_add(config, "/dev/freezer", true, false,
++			      config->freezer_root) < 0)
++			return -ENOMEM;
++		return 0;
++	}
++
++	case INHERIT_PARENT:
++		/* Shared configuration, but tell the child's copy about its
++		 * process membership.  */
++		return 1;
++
++	case INHERIT_CHILD: {
++		Extension *parent = (Extension *) data1;
++		struct CgroupConfig *parent_config = config_of(parent);
++		char path[PATH_MAX];
++		struct CgroupProc *parent_proc;
++		Tracee *child = TRACEE(extension);
++		Tracee *parent_tracee = TRACEE(parent);
++		pid_t parent_pid = parent_tracee->pid;
++		pid_t tgid;
++
++		extension->config = talloc_reference(extension, parent_config);
++		if (extension->config == NULL)
++			return -ENOMEM;
++		config = parent_config;
++
++		parent_proc = proc_find(config, parent_pid);
++		if (parent_proc != NULL && parent_proc->path != NULL)
++			strcpy(path, parent_proc->path);
++		else
++			strcpy(path, "/");
++
++		tgid = (data2 & CLONE_THREAD) != 0
++			? (parent_proc != NULL ? parent_proc->tgid : parent_pid)
++			: child->pid;
++		(void) proc_set(config, child->pid, path,
++				(data2 & CLONE_THREAD) != 0, tgid);
++		if (path_is_frozen(config, path)) {
++			child->cgroup_frozen = true;
++			(void) kill(child->pid, SIGSTOP);
++		}
++		return 0;
++	}
++
++	case GUEST_PATH:
++		config = config_of(extension);
++		return handle_guest_path(tracee, config, (char *) data1,
++					 (const char *) data2);
++
++	case SYSCALL_ENTER_START: {
++		word_t sysnum;
++		int status;
++
++		config = config_of(extension);
++		(void) ensure_self(tracee, config);
++		sysnum = get_sysnum(tracee, ORIGINAL);
++		switch (sysnum) {
++		case PR_mkdir:
++			return handle_mkdir(tracee, config, AT_FDCWD,
++					    peek_reg(tracee, CURRENT, SYSARG_1));
++		case PR_mkdirat:
++			return handle_mkdir(tracee, config,
++					    (int) peek_reg(tracee, CURRENT, SYSARG_1),
++					    peek_reg(tracee, CURRENT, SYSARG_2));
++		case PR_rmdir:
++			return handle_rmdir(tracee, config, AT_FDCWD,
++					    peek_reg(tracee, CURRENT, SYSARG_1));
++		case PR_unlink:
++			return handle_unlink(tracee, config, AT_FDCWD,
++					     peek_reg(tracee, CURRENT, SYSARG_1), false);
++		case PR_unlinkat: {
++			word_t flags = peek_reg(tracee, CURRENT, SYSARG_3);
++			return handle_unlink(tracee, config,
++					     (int) peek_reg(tracee, CURRENT, SYSARG_1),
++					     peek_reg(tracee, CURRENT, SYSARG_2),
++					     (flags & AT_REMOVEDIR) != 0);
++		}
++		case PR_mknod:
++		case PR_mknodat: {
++			char host[PATH_MAX];
++			int dirfd = sysnum == PR_mknod
++				? AT_FDCWD
++				: (int) peek_reg(tracee, CURRENT, SYSARG_1);
++			word_t path = sysnum == PR_mknod
++				? peek_reg(tracee, CURRENT, SYSARG_1)
++				: peek_reg(tracee, CURRENT, SYSARG_2);
++			char group[PATH_MAX];
++
++			status = resolve_host_path(tracee, dirfd, path, host, NULL);
++			if (status < 0)
++				return reject_syscall(tracee, -EPERM);
++			if (host_to_group(config, host, group))
++				return reject_syscall(tracee, -EPERM);
++			return 0;
++		}
++		case PR_symlink:
++		case PR_symlinkat: {
++			char host[PATH_MAX];
++			char group[PATH_MAX];
++			int dirfd = sysnum == PR_symlink
++				? AT_FDCWD
++				: (int) peek_reg(tracee, CURRENT, SYSARG_2);
++			word_t path = sysnum == PR_symlink
++				? peek_reg(tracee, CURRENT, SYSARG_2)
++				: peek_reg(tracee, CURRENT, SYSARG_3);
++
++			status = resolve_host_path(tracee, dirfd, path, host, NULL);
++			if (status < 0)
++				return reject_syscall(tracee, -EPERM);
++			if (host_to_group(config, host, group))
++				return reject_syscall(tracee, -EPERM);
++			return 0;
++		}
++		case PR_link:
++		case PR_linkat: {
++			char host[PATH_MAX];
++			char group[PATH_MAX];
++			int old_dirfd = sysnum == PR_link
++				? AT_FDCWD
++				: (int) peek_reg(tracee, CURRENT, SYSARG_1);
++			int new_dirfd = sysnum == PR_link
++				? AT_FDCWD
++				: (int) peek_reg(tracee, CURRENT, SYSARG_3);
++			word_t old_path = sysnum == PR_link
++				? peek_reg(tracee, CURRENT, SYSARG_1)
++				: peek_reg(tracee, CURRENT, SYSARG_2);
++			word_t new_path = sysnum == PR_link
++				? peek_reg(tracee, CURRENT, SYSARG_2)
++				: peek_reg(tracee, CURRENT, SYSARG_4);
++
++			status = resolve_host_path(tracee, old_dirfd, old_path,
++						   host, NULL);
++			if (status < 0)
++				return reject_syscall(tracee, -EPERM);
++			if (host_to_group(config, host, group))
++				return reject_syscall(tracee, -EPERM);
++			status = resolve_host_path(tracee, new_dirfd, new_path,
++						   host, NULL);
++			if (status < 0)
++				return reject_syscall(tracee, -EPERM);
++			if (host_to_group(config, host, group))
++				return reject_syscall(tracee, -EPERM);
++			return 0;
++		}
++		case PR_truncate:
++		case PR_truncate64: {
++			char host[PATH_MAX];
++			char group[PATH_MAX];
++
++			status = resolve_host_path(tracee, AT_FDCWD,
++						   peek_reg(tracee, CURRENT, SYSARG_1),
++						   host, NULL);
++			if (status < 0)
++				return reject_syscall(tracee, -EINVAL);
++			if (host_to_group(config, host, group))
++				return reject_syscall(tracee, -EINVAL);
++			return 0;
++		}
++		case PR_rename:
++			return handle_rename(tracee, config, AT_FDCWD,
++					     peek_reg(tracee, CURRENT, SYSARG_1),
++					     AT_FDCWD,
++					     peek_reg(tracee, CURRENT, SYSARG_2));
++		case PR_renameat:
++			return handle_rename(tracee, config,
++					     (int) peek_reg(tracee, CURRENT, SYSARG_1),
++					     peek_reg(tracee, CURRENT, SYSARG_2),
++					     (int) peek_reg(tracee, CURRENT, SYSARG_3),
++					     peek_reg(tracee, CURRENT, SYSARG_4));
++		case PR_renameat2: {
++			word_t flags = peek_reg(tracee, CURRENT, SYSARG_5);
++			if ((flags & ~(word_t) RENAME_NOREPLACE) != 0)
++				return -EINVAL;
++			return handle_rename(tracee, config,
++					     (int) peek_reg(tracee, CURRENT, SYSARG_1),
++					     peek_reg(tracee, CURRENT, SYSARG_2),
++					     (int) peek_reg(tracee, CURRENT, SYSARG_3),
++					     peek_reg(tracee, CURRENT, SYSARG_4));
++		}
++		case PR_write:
++		case PR_pwrite64:
++		case PR_writev:
++		case PR_pwritev:
++		case PR_pwritev2:
++			status = handle_write(tracee, config);
++			return status;
++		case PR_mount:
++			return handle_mount(tracee, config);
++		case PR_umount:
++		case PR_umount2:
++			return handle_umount(tracee, config);
++		default:
++			return 0;
++		}
++	}
++
++	case SYSCALL_EXIT_END:
++		config = config_of(extension);
++		(void) enforce_cgroup_exit(tracee, config);
++		return handle_statfs_exit(tracee, config);
++
++	case NEW_STATUS: {
++		int status = (int) data1;
++
++		if (!WIFEXITED(status) && !WIFSIGNALED(status))
++			return 0;
++		config = config_of(extension);
++		{
++			struct CgroupProc *proc = proc_find(config, tracee->pid);
++			if (proc != NULL) {
++				char path[PATH_MAX];
++				if (proc->path != NULL)
++					strcpy(path, proc->path);
++				else
++					strcpy(path, "/");
++				proc_drop(config, proc);
++				touch_events(config, path);
++			}
++		}
++		return 0;
++	}
++
++	case PRINT_CONFIG: {
++		config = config_of(extension);
++		fprintf(stderr, "cgroup root = %s\n", config->root);
++		return 0;
++	}
++
++	case PRINT_USAGE:
++		fprintf(stderr, "--cgroup\tEmulate an unprivileged cgroup v2 hierarchy\n");
++		return 0;
++
++	case REMOVED:
++	default:
++		return 0;
++	}
++}
++
++bool cgroup_needs_mountinfo(Tracee *tracee)
++{
++	return get_extension(tracee, cgroup_callback) != NULL;
++}
++
++void cgroup_append_mountinfo(Tracee *tracee, FILE *fp)
++{
++	Extension *extension;
++	struct CgroupConfig *config;
++	struct CgroupAlias *alias;
++	int id = 1000000;
++
++	extension = get_extension(tracee, cgroup_callback);
++	if (extension == NULL)
++		return;
++	config = config_of(extension);
++
++	LIST_FOREACH(alias, &config->aliases, link) {
++		if (!alias->cgroup2)
++			continue;
++		fprintf(fp,
++			"%d 1 0:26 / %s rw,nosuid,nodev,noexec,relatime - cgroup2 cgroup2 rw\n",
++			id++, alias->path);
++	}
++}
+diff --git a/src/extension/cgroup/cgroup.h b/src/extension/cgroup/cgroup.h
+new file mode 100644
+index 0000000..bda6c73
+--- /dev/null
++++ b/src/extension/cgroup/cgroup.h
+@@ -0,0 +1,35 @@
++/* -*- c-set-style: "K&R"; c-basic-offset: 8 -*-
++ *
++ * This file is part of PRoot.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef CGROUP_H
++#define CGROUP_H
++
++#include <stdbool.h>
++#include <stdio.h>
++
++#include "extension/extension.h"
++
++/* --cgroup: a private cgroup v2 hierarchy backed by ppid/sid.  */
++extern int cgroup_callback(Extension *extension, ExtensionEvent event,
++			intptr_t data1, intptr_t data2);
++
++/* Append the synthetic cgroup2 mount entries for /proc/<pid>/mountinfo.  */
++extern bool cgroup_needs_mountinfo(Tracee *tracee);
++extern void cgroup_append_mountinfo(Tracee *tracee, FILE *fp);
++
++#endif /* CGROUP_H */
+diff --git a/src/extension/extension.h b/src/extension/extension.h
+index 24409b9..51c8af5 100644
+--- a/src/extension/extension.h
++++ b/src/extension/extension.h
+@@ -207,5 +207,6 @@ extern int link2symlink_callback(Extension *extension, ExtensionEvent event, int
+ extern int fix_symlink_size_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
+ extern int ashmem_memfd_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
+ extern int mountinfo_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
++extern int cgroup_callback(Extension *extension, ExtensionEvent event, intptr_t d1, intptr_t d2);
+ 
+ #endif /* EXTENSION_H */
+diff --git a/src/extension/mountinfo/mountinfo.c b/src/extension/mountinfo/mountinfo.c
+index 1abf273..0623a23 100644
+--- a/src/extension/mountinfo/mountinfo.c
++++ b/src/extension/mountinfo/mountinfo.c
+@@ -1,3 +1,4 @@
++#include "extension/cgroup/cgroup.h"
+ #include "extension/extension.h"
+ #include "path/path.h"           /* translate_path,  */
+ #include "path/binding.h"        /* Binding, bindings */
+@@ -86,7 +87,8 @@ static void mountinfo_check_open_path(Tracee *tracee, char path[PATH_MAX]) {
+ 			}
+ 		}
+ 
+-		if (!is_android_data && !has_extra_bindings)
++		if (!is_android_data && !has_extra_bindings
++		    && !cgroup_needs_mountinfo(target_tracee))
+ 			return;
+ 
+ 		/* Open real /proc/<PID>/mountinfo  */
+@@ -174,6 +176,8 @@ end_line_scan2: ;
+ 		 * helpers like bubblewrap find the mounts they think
+ 		 * they just created.  */
+ 		append_runtime_binding_lines(target_tracee, new_mountinfo_fp);
++		/* And the cgroup2 mount this tracee sees (if --cgroup).  */
++		cgroup_append_mountinfo(target_tracee, new_mountinfo_fp);
+ 
+ 		free(line);
+ 		fclose(new_mountinfo_fp);
+diff --git a/src/linux/ashmem.h b/src/linux/ashmem.h
+new file mode 100644
+index 0000000..0473a3d
+--- /dev/null
++++ b/src/linux/ashmem.h
+@@ -0,0 +1,25 @@
++/* Host fallback for AOSP's <linux/ashmem.h>.
++ *
++ * Termux's PRoot is normally built with the Android NDK, which ships this
++ * header.  Desktop kernels do not, so forward to the system header when
++ * one exists and otherwise provide the few constants PRoot uses.
++ */
++
++#if defined(__has_include_next) && __has_include_next(<linux/ashmem.h>)
++#include_next <linux/ashmem.h>
++#else
++#ifndef _LINUX_ASHMEM_H
++#define _LINUX_ASHMEM_H
++
++#include <linux/ioctl.h>
++#include <linux/types.h>
++
++#define ASHMEM_NAME_LEN		256
++#define ASHMEM_NAME_DEF		"dev/ashmem"
++#define ASHMEM_GET_NAME		_IOR('a', 1, char[ASHMEM_NAME_LEN])
++#define ASHMEM_SET_NAME		_IOW('a', 1, char[ASHMEM_NAME_LEN])
++#define ASHMEM_SET_SIZE		_IOW('a', 3, size_t)
++#define ASHMEM_GET_SIZE		_IO('a', 4)
++
++#endif /* _LINUX_ASHMEM_H */
++#endif
+diff --git a/src/tracee/event.c b/src/tracee/event.c
+index 6c241b5..bfae4b9 100644
+--- a/src/tracee/event.c
++++ b/src/tracee/event.c
+@@ -669,25 +669,31 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
+ 			break;
+ 
+ 		case SIGSTOP:
++			/* cgroup.freeze owns the stop: leave the tracee in
++			 * its ptrace-stop until cgroup::thaw restarts it.  */
++			if (tracee->cgroup_frozen) {
++				signal = -1;
++				break;
++			}
+ 			/* Stop this tracee until PRoot has received
+ 			 * the EVENT_*FORK|CLONE notification.  */
+ 			if (tracee->exe == NULL) {
+ 				tracee->sigstop = SIGSTOP_PENDING;
+ 				signal = -1;
+ 			}
+-
+-			/* For each tracee, the first SIGSTOP
+-			 * is only used to notify the tracer.  */
+-			if (tracee->sigstop == SIGSTOP_IGNORED) {
++			else if (tracee->sigstop == SIGSTOP_IGNORED) {
++				/* The first SIGSTOP after exec is a real
++				 * job-control/stop request, not the startup
++				 * handshake.  Deliver it: cgroup.freeze and
++				 * ordinary "kill -STOP" depend on it.  */
+ 				tracee->sigstop = SIGSTOP_ALLOWED;
+-				signal = 0;
+ 			}
+ 			break;
+ 
+ 		case SIGSYS: {
+ 			siginfo_t siginfo = {};
+ 			ptrace(PTRACE_GETSIGINFO, tracee->pid, NULL, &siginfo);
+-			if (siginfo.si_code == SYS_SECCOMP) {
++			if (siginfo.si_code == PROOT_SYS_SECCOMP) {
+ 				/* Signal cannot happen when we're inside syscall,
+ 				 * tracee would have to exit from syscall first.
+ 				 * Execute exit handler now if seccomp triggered sysexit skip.  */
+diff --git a/src/tracee/tracee.h b/src/tracee/tracee.h
+index 7ac4ad1..092ac8c 100644
+--- a/src/tracee/tracee.h
++++ b/src/tracee/tracee.h
+@@ -192,6 +192,10 @@ typedef struct tracee {
+ 		SIGSTOP_PENDING,      /* Block SIGSTOP until the parent is unknown.  */
+ 	} sigstop;
+ 
++	/* Set while cgroup.freeze wants this tracee to stay stopped.  The
++	 * event loop must not restart it when its SIGSTOP arrives.  */
++	bool cgroup_frozen;
++
+ 	/* True if next SIGSYS caused by seccomp should be silently dropped
+ 	 * without affecting state of any registers.  */
+ 	bool skip_next_seccomp_signal;
+diff --git a/tests/cgroup/.gitignore b/tests/cgroup/.gitignore
+new file mode 100644
+index 0000000..8d7c185
+--- /dev/null
++++ b/tests/cgroup/.gitignore
+@@ -0,0 +1 @@
++cgroup_test
+diff --git a/tests/cgroup/README.md b/tests/cgroup/README.md
+new file mode 100644
+index 0000000..d85c076
+--- /dev/null
++++ b/tests/cgroup/README.md
+@@ -0,0 +1,36 @@
++# cgroup emulation tests
++
++`--cgroup` presents `/sys/fs/cgroup` as a private cgroup v2 hierarchy
++backed by material from `/proc/<pid>/stat` (`ppid`, `pgrp`, `session`,
++`starttime`) and PRoot's own fork/exit events.  These tests run each case
++inside a fresh PRoot instance, so every case starts with an empty virtual
++hierarchy rooted at `/`.
++
++```bash
++bash tests/cgroup/run.sh
++```
++
++The cases cover:
++
++| Case | What it exercises |
++|------|-------------------|
++| `root_layout` | cgroup2 `statfs` magic, root files, controllers, `/proc/self/cgroup`, `/proc/cgroups`, absent resource files |
++| `mkdir_rmdir` | directory lifecycle, `EEXIST`, `ENOTEMPTY`, `EBUSY`, root protection |
++| `membership_inheritance` | `cgroup.procs` writes, fork inheritance, `/proc/<pid>/cgroup`, populated events |
++| `move_process_tree` | moving a process while its existing child stays behind; new children inherit the new group |
++| `dirfd_operations` | the native daemon's `O_PATH` + `openat`/`unlinkat` pattern for procs, events, kill and rmdir |
++| `kill_subtree` | `cgroup.kill` reaches descendants that called `setsid`; invalid kill values |
++| `freeze_thaw` | real scheduling stop, frozen counter check, inherited freeze for migrated processes, thaw |
++| `threads` | `cgroup.procs` vs `cgroup.threads`, per-thread migration, sibling retention |
++| `proc_cgroup_and_mount` | `/proc/<pid>/cgroup`, a cgroup2 mount at another path, `statfs`, mountinfo, unmount |
++| `subtree_control` | no-internal-process `EBUSY`, controller delegation, child controller views |
++| `limits_and_type` | `cgroup.max.depth`, `cgroup.max.descendants`, `domain`/`threaded` type |
++| `events_inotify` | `cgroup.events` modification notifications for service managers |
++| `errors_and_permissions` | `ESRCH`, `EINVAL`, write-only/read-only files, mknod/symlink/unlink rejection |
++| `rename_group` | renaming a group updates membership and `/proc/<pid>/cgroup` |
++| `service_manager_flow` | systemd-like slice/service creation, freeze, kill, removal |
++| `hierarchy_events` | nested groups, inherited `frozen`, subtree kill |
++
++Resource controllers are intentionally unavailable: the test suite asserts
++that `memory.max` and other limit files do not exist.  The non-resource
++parts of cgroup v2 used for service management are implemented.
+diff --git a/tests/cgroup/cgroup_test.c b/tests/cgroup/cgroup_test.c
+new file mode 100644
+index 0000000..10dab6d
+--- /dev/null
++++ b/tests/cgroup/cgroup_test.c
+@@ -0,0 +1,1346 @@
++/*
++ * Behaviour tests for PRoot's --cgroup extension.
++ *
++ * This program runs *inside* PRoot, with /sys/fs/cgroup backed by the
++ * extension.  Each test case is a separate PRoot invocation so the virtual
++ * hierarchy starts empty.  See run.sh.
++ */
++
++#define _GNU_SOURCE
++
++#include <sys/inotify.h>
++#include <sys/mount.h>
++#include <sys/stat.h>
++#include <sys/statfs.h>
++#include <sys/syscall.h>
++#include <sys/types.h>
++#include <sys/wait.h>
++
++#include <dirent.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <pthread.h>
++#include <signal.h>
++#include <stdarg.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++#include <unistd.h>
++
++#define CG "/sys/fs/cgroup"
++#define CGROUP2_SUPER_MAGIC 0x63677270
++#define RESOURCE_NAMES \
++	"cpu cpuset io memory hugetlb pids rdma misc"
++
++static const char *standard_files[] = {
++	"cgroup.procs",
++	"cgroup.threads",
++	"cgroup.kill",
++	"cgroup.freeze",
++	"cgroup.events",
++	"cgroup.controllers",
++	"cgroup.subtree_control",
++	"cgroup.stat",
++	"cgroup.max.depth",
++	"cgroup.max.descendants",
++	"cgroup.type",
++	"cgroup.pressure",
++	"cgroup.available",
++};
++
++static void fail(const char *format, ...)
++{
++	va_list ap;
++
++	fprintf(stderr, "FAIL: ");
++	va_start(ap, format);
++	vfprintf(stderr, format, ap);
++	va_end(ap);
++	fprintf(stderr, " (errno=%d %s)\n", errno, strerror(errno));
++	exit(1);
++}
++
++static void check(bool condition, const char *format, ...)
++{
++	va_list ap;
++
++	if (condition)
++		return;
++	fprintf(stderr, "FAIL: ");
++	va_start(ap, format);
++	vfprintf(stderr, format, ap);
++	va_end(ap);
++	fprintf(stderr, " (errno=%d %s)\n", errno, strerror(errno));
++	exit(1);
++}
++
++static void msleep(int milliseconds)
++{
++	struct timespec ts = {
++		.tv_sec = milliseconds / 1000,
++		.tv_nsec = (long) (milliseconds % 1000) * 1000000L,
++	};
++	nanosleep(&ts, NULL);
++}
++
++static ssize_t read_text(const char *path, char *buffer, size_t size)
++{
++	ssize_t length;
++	int fd;
++
++	fd = open(path, O_RDONLY | O_CLOEXEC);
++	if (fd < 0)
++		return -1;
++	length = read(fd, buffer, size - 1);
++	close(fd);
++	if (length < 0)
++		return -1;
++	buffer[length] = '\0';
++	return length;
++}
++
++static int write_text(const char *path, const char *text)
++{
++	size_t length = strlen(text);
++	ssize_t written;
++	int fd;
++
++	fd = open(path, O_WRONLY | O_CLOEXEC);
++	if (fd < 0)
++		return -1;
++	written = write(fd, text, length);
++	close(fd);
++	if (written != (ssize_t) length) {
++		if (written >= 0)
++			errno = EIO;
++		return -1;
++	}
++	return 0;
++}
++
++static char *trim(char *text)
++{
++	char *end;
++
++	while (*text == ' ' || *text == '\t' || *text == '\n' || *text == '\r')
++		text++;
++	end = text + strlen(text);
++	while (end > text
++	       && (end[-1] == ' ' || end[-1] == '\t'
++		   || end[-1] == '\n' || end[-1] == '\r'))
++		*--end = '\0';
++	return text;
++}
++
++static bool text_has_pid(const char *text, pid_t pid)
++{
++	char copy[65536];
++	char *save;
++	char *token;
++
++	if (strlen(text) >= sizeof(copy))
++		return false;
++	strcpy(copy, text);
++	for (token = strtok_r(copy, " \t\r\n", &save);
++	     token != NULL;
++	     token = strtok_r(NULL, " \t\r\n", &save)) {
++		char *end;
++		long value = strtol(token, &end, 10);
++		if (*end == '\0' && value == pid)
++			return true;
++	}
++	return false;
++}
++
++static bool procs_has(const char *group, pid_t pid)
++{
++	char path[512];
++	char text[65536];
++
++	snprintf(path, sizeof(path), "%s/%s/cgroup.procs", CG, group);
++	if (read_text(path, text, sizeof(text)) < 0)
++		fail("read %s", path);
++	return text_has_pid(text, pid);
++}
++
++static void wait_procs_has(const char *group, pid_t pid)
++{
++	int i;
++
++	for (i = 0; i < 300; i++) {
++		if (procs_has(group, pid))
++			return;
++		msleep(10);
++	}
++	fail("%s never listed pid %d", group, (int) pid);
++}
++
++static bool threads_has(const char *group, pid_t tid)
++{
++	char path[512];
++	char text[65536];
++
++	snprintf(path, sizeof(path), "%s/%s/cgroup.threads", CG, group);
++	if (read_text(path, text, sizeof(text)) < 0)
++		fail("read %s", path);
++	return text_has_pid(text, tid);
++}
++
++static char process_state(pid_t pid)
++{
++	char path[64];
++	char text[1024];
++	char *close;
++	ssize_t length;
++
++	snprintf(path, sizeof(path), "/proc/%d/stat", (int) pid);
++	length = read_text(path, text, sizeof(text));
++	if (length < 0)
++		return '?';
++	close = strrchr(text, ')');
++	if (close == NULL || close[1] == '\0')
++		return '?';
++	return close[2];
++}
++
++static bool process_dead(pid_t pid)
++{
++	char path[64];
++	struct stat st;
++
++	snprintf(path, sizeof(path), "/proc/%d", (int) pid);
++	if (stat(path, &st) < 0)
++		return errno == ENOENT;
++	return process_state(pid) == 'Z' || process_state(pid) == 'X';
++}
++
++static void wait_dead(pid_t pid)
++{
++	int i;
++
++	for (i = 0; i < 300; i++) {
++		if (process_dead(pid))
++			return;
++		msleep(10);
++	}
++	fail("pid %d is still alive", (int) pid);
++}
++
++static void wait_state(pid_t pid, bool stopped)
++{
++	int i;
++
++	for (i = 0; i < 300; i++) {
++		char state = process_state(pid);
++		bool is_stopped = state == 't' || state == 'T';
++
++		if (stopped == is_stopped)
++			return;
++		msleep(10);
++	}
++	fail("pid %d did not become %s (state=%c)", (int) pid,
++	     stopped ? "stopped" : "running", process_state(pid));
++}
++
++static void make_group(const char *path)
++{
++	char full[512];
++
++	snprintf(full, sizeof(full), "%s/%s", CG, path);
++	if (mkdir(full, 0755) < 0)
++		fail("mkdir %s", full);
++}
++
++static void remove_group(const char *path)
++{
++	char full[512];
++
++	snprintf(full, sizeof(full), "%s/%s", CG, path);
++	if (rmdir(full) < 0)
++		fail("rmdir %s", full);
++}
++
++static void move_pid(const char *group, pid_t pid)
++{
++	char path[512];
++	char value[32];
++
++	snprintf(path, sizeof(path), "%s/%s/cgroup.procs", CG, group);
++	snprintf(value, sizeof(value), "%d\n", (int) pid);
++	if (write_text(path, value) < 0)
++		fail("move pid %d to %s", (int) pid, group);
++}
++
++static void check_standard_files(const char *group)
++{
++	char path[512];
++	size_t i;
++
++	for (i = 0; i < sizeof(standard_files) / sizeof(standard_files[0]); i++) {
++		snprintf(path, sizeof(path), "%s/%s/%s", CG, group, standard_files[i]);
++		if (access(path, F_OK) < 0)
++			fail("missing %s", path);
++	}
++}
++
++static void expect_error(long result, int error, const char *what)
++{
++	check(result == -1, "%s unexpectedly succeeded", what);
++	check(errno == error, "%s: expected errno %d, got %d", what, error, errno);
++}
++
++/* ------------------------------------------------------------------ */
++
++static void test_root_layout(void)
++{
++	char path[512];
++	char text[4096];
++	char *value;
++	struct stat st;
++	struct statfs fs;
++	size_t i;
++	int fd;
++
++	check(stat("/sys/fs/cgroup", &st) == 0, "stat /sys/fs/cgroup");
++	check(S_ISDIR(st.st_mode), "cgroup root is not a directory");
++
++	check(statfs("/sys/fs/cgroup", &fs) == 0, "statfs cgroup root");
++	check((unsigned long) fs.f_type == CGROUP2_SUPER_MAGIC,
++	      "cgroup root filesystem type is %lx, not cgroup2",
++	      (unsigned long) fs.f_type);
++
++	fd = open("/sys/fs/cgroup", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
++	check(fd >= 0, "open cgroup root");
++	check(fstatfs(fd, &fs) == 0, "fstatfs cgroup root");
++	check((unsigned long) fs.f_type == CGROUP2_SUPER_MAGIC,
++	      "fstatfs did not report cgroup2 magic");
++	close(fd);
++
++	for (i = 0; i < sizeof(standard_files) / sizeof(standard_files[0]); i++) {
++		snprintf(path, sizeof(path), "%s/%s", CG, standard_files[i]);
++		check(access(path, F_OK) == 0, "missing root file %s", path);
++	}
++
++	check(read_text(CG "/cgroup.controllers", text, sizeof(text)) >= 0,
++	      "read controllers");
++	value = trim(text);
++	check(strcmp(value, RESOURCE_NAMES) == 0,
++	      "root controllers = '%s', expected '%s'", value, RESOURCE_NAMES);
++
++	check(read_text(CG "/cgroup.events", text, sizeof(text)) >= 0,
++	      "read events");
++	check(strstr(text, "populated 1") != NULL,
++	      "root cgroup should be populated");
++	check(strstr(text, "frozen 0") != NULL,
++	      "root cgroup should not be frozen");
++
++	check(read_text("/proc/self/cgroup", text, sizeof(text)) >= 0,
++	      "read /proc/self/cgroup");
++	check(strcmp(text, "0::/\n") == 0, "self cgroup = '%s'", text);
++
++	check(read_text("/proc/cgroups", text, sizeof(text)) >= 0,
++	      "read /proc/cgroups");
++	check(strstr(text, "memory") != NULL, "/proc/cgroups has no memory");
++
++	errno = 0;
++	check(access(CG "/memory.max", F_OK) < 0 && errno == ENOENT,
++	      "resource file memory.max should not exist");
++
++	/* The real Android v1 freezer tree must be hidden from the daemon's
++	 * sweep; the virtual v2 hierarchy is authoritative.  */
++	errno = 0;
++	check(access("/dev/freezer/ct", F_OK) < 0 && errno == ENOENT,
++	      "real /dev/freezer/ct leaked into the container");
++}
++
++static void test_mkdir_rmdir(void)
++{
++	char path[512];
++
++	make_group("test.slice");
++	check_standard_files("test.slice");
++
++	errno = 0;
++	expect_error(mkdir(CG "/test.slice", 0755), EEXIST,
++		     "mkdir existing cgroup");
++	make_group("test.slice/child");
++
++	expect_error(rmdir(CG "/test.slice"), ENOTEMPTY, "rmdir parent cgroup");
++	remove_group("test.slice/child");
++	remove_group("test.slice");
++	expect_error(rmdir(CG), EBUSY, "rmdir cgroup root");
++
++	snprintf(path, sizeof(path), "%s/does-not-exist", CG);
++	errno = 0;
++	expect_error(rmdir(path), ENOENT, "rmdir missing cgroup");
++}
++
++static void test_membership_inheritance(void)
++{
++	int ready[2];
++	int grandchild_pipe[2];
++	pid_t child, grandchild;
++	char text[4096];
++
++	if (pipe(ready) < 0 || pipe(grandchild_pipe) < 0)
++		fail("pipe");
++	make_group("svc");
++
++	child = fork();
++	if (child < 0)
++		fail("fork");
++	if (child == 0) {
++		char value[32];
++		pid_t grandchild;
++
++		close(ready[0]);
++		close(grandchild_pipe[0]);
++		snprintf(value, sizeof(value), "%d\n", (int) getpid());
++		if (write_text(CG "/svc/cgroup.procs", value) < 0)
++			_exit(10);
++
++		grandchild = fork();
++		if (grandchild < 0)
++			_exit(11);
++		if (grandchild == 0) {
++			for (;;)
++				pause();
++		}
++		if (write(grandchild_pipe[1], &grandchild, sizeof(grandchild))
++		    != sizeof(grandchild))
++			_exit(12);
++		if (write(ready[1], "x", 1) != 1)
++			_exit(13);
++		for (;;)
++			pause();
++	}
++
++	close(ready[1]);
++	close(grandchild_pipe[1]);
++	check(read(ready[0], text, 1) == 1, "child did not report ready");
++	check(read(grandchild_pipe[0], &grandchild, sizeof(grandchild))
++	      == sizeof(grandchild), "no grandchild pid");
++	close(ready[0]);
++	close(grandchild_pipe[0]);
++
++	check(procs_has("svc", child), "svc does not contain child %d", (int) child);
++	check(procs_has("svc", grandchild), "svc does not contain grandchild %d",
++	      (int) grandchild);
++	check(read_text("/proc/self/cgroup", text, sizeof(text)) >= 0,
++	      "read self cgroup");
++	check(strcmp(text, "0::/\n") == 0, "test process moved unexpectedly");
++
++	snprintf(text, sizeof(text), "/proc/%d/cgroup", (int) child);
++	{
++		char content[256];
++		check(read_text(text, content, sizeof(content)) >= 0,
++		      "read child cgroup");
++		check(strcmp(content, "0::/svc\n") == 0,
++		      "child cgroup = '%s'", content);
++	}
++	snprintf(text, sizeof(text), "/proc/%d/cgroup", (int) grandchild);
++	{
++		char content[256];
++		check(read_text(text, content, sizeof(content)) >= 0,
++		      "read grandchild cgroup");
++		check(strcmp(content, "0::/svc\n") == 0,
++		      "grandchild cgroup = '%s'", content);
++	}
++
++	check(read_text(CG "/svc/cgroup.events", text, sizeof(text)) >= 0,
++	      "read svc events");
++	check(strstr(text, "populated 1") != NULL,
++	      "svc should be populated");
++
++	if (write_text(CG "/svc/cgroup.kill", "1\n") < 0)
++		fail("cgroup.kill svc");
++
++	waitpid(child, NULL, 0);
++	wait_dead(grandchild);
++	check(!procs_has("svc", child), "dead child still listed");
++	check(!procs_has("svc", grandchild), "dead grandchild still listed");
++	check(read_text(CG "/svc/cgroup.events", text, sizeof(text)) >= 0,
++	      "read svc events after kill");
++	check(strstr(text, "populated 0") != NULL,
++	      "svc should be empty after kill");
++
++	remove_group("svc");
++}
++
++static void test_move_process_tree(void)
++{
++	int pipefd[2];
++	pid_t child, first, second;
++	char text[4096];
++
++	if (pipe(pipefd) < 0)
++		fail("pipe");
++	make_group("a");
++	make_group("b");
++
++	child = fork();
++	if (child < 0)
++		fail("fork");
++	if (child == 0) {
++		pid_t grandchild;
++		char value[32];
++
++		close(pipefd[0]);
++		snprintf(value, sizeof(value), "%d\n", (int) getpid());
++		if (write_text(CG "/a/cgroup.procs", value) < 0)
++			_exit(10);
++
++		grandchild = fork();
++		if (grandchild == 0)
++			for (;;)
++				pause();
++		if (write(pipefd[1], &grandchild, sizeof(grandchild))
++		    != sizeof(grandchild))
++			_exit(11);
++
++		if (write_text(CG "/b/cgroup.procs", value) < 0)
++			_exit(12);
++
++		grandchild = fork();
++		if (grandchild == 0)
++			for (;;)
++				pause();
++		if (write(pipefd[1], &grandchild, sizeof(grandchild))
++		    != sizeof(grandchild))
++			_exit(13);
++		for (;;)
++			pause();
++	}
++
++	close(pipefd[1]);
++	check(read(pipefd[0], &first, sizeof(first)) == sizeof(first),
++	      "no first grandchild");
++	check(read(pipefd[0], &second, sizeof(second)) == sizeof(second),
++	      "no second grandchild");
++	close(pipefd[0]);
++
++	wait_procs_has("a", first);
++	wait_procs_has("b", child);
++	wait_procs_has("b", second);
++	check(!procs_has("a", child), "child should have moved out of a");
++	check(procs_has("a", first), "first grandchild should stay in a");
++	check(procs_has("b", child), "child should be in b");
++	check(procs_has("b", second), "second grandchild should inherit b");
++	check(!procs_has("b", first), "first grandchild moved unexpectedly");
++
++	snprintf(text, sizeof(text), "/proc/%d/cgroup", (int) child);
++	{
++		char content[256];
++		check(read_text(text, content, sizeof(content)) >= 0,
++		      "read child cgroup");
++		check(strcmp(content, "0::/b\n") == 0, "child cgroup = '%s'",
++		      content);
++	}
++	snprintf(text, sizeof(text), "/proc/%d/cgroup", (int) first);
++	{
++		char content[256];
++		check(read_text(text, content, sizeof(content)) >= 0,
++		      "read grandchild cgroup");
++		check(strcmp(content, "0::/a\n") == 0, "grandchild cgroup = '%s'",
++		      content);
++	}
++
++	if (write_text(CG "/a/cgroup.kill", "1\n") < 0
++	    || write_text(CG "/b/cgroup.kill", "1\n") < 0)
++		fail("cgroup.kill a/b");
++	waitpid(child, NULL, 0);
++	wait_dead(first);
++	wait_dead(second);
++	remove_group("a");
++	remove_group("b");
++}
++
++static void test_dirfd_operations(void)
++{
++	char text[4096];
++	char value[32];
++	pid_t child;
++	int dirfd;
++	int fd;
++	int rootfd;
++
++	make_group("fd");
++	dirfd = open(CG "/fd", O_PATH | O_DIRECTORY | O_CLOEXEC);
++	check(dirfd >= 0, "open cgroup directory with O_PATH");
++
++	child = fork();
++	if (child < 0)
++		fail("fork");
++	if (child == 0)
++		for (;;)
++			pause();
++
++	snprintf(value, sizeof(value), "%d\n", (int) child);
++	fd = openat(dirfd, "cgroup.procs", O_WRONLY | O_CLOEXEC);
++	check(fd >= 0, "openat cgroup.procs through O_PATH dirfd");
++	check(write(fd, value, strlen(value)) == (ssize_t) strlen(value),
++	      "write cgroup.procs through O_PATH dirfd");
++	close(fd);
++
++	fd = openat(dirfd, "cgroup.procs", O_RDONLY | O_CLOEXEC);
++	check(fd >= 0, "reopen cgroup.procs through dirfd");
++	check(read(fd, text, sizeof(text) - 1) > 0, "read cgroup.procs via dirfd");
++	close(fd);
++	check(text_has_pid(text, child), "dirfd move did not take effect");
++
++	fd = openat(dirfd, "cgroup.events", O_RDONLY | O_CLOEXEC);
++	check(fd >= 0, "openat cgroup.events through dirfd");
++	check(read(fd, text, sizeof(text) - 1) > 0, "read cgroup.events via dirfd");
++	close(fd);
++	check(strstr(text, "populated 1") != NULL,
++	      "dirfd event list is not populated: '%s'", text);
++
++	fd = openat(dirfd, "cgroup.kill", O_WRONLY | O_CLOEXEC);
++	check(fd >= 0, "openat cgroup.kill through dirfd");
++	check(write(fd, "1\n", 2) == 2, "write cgroup.kill through dirfd");
++	close(fd);
++	waitpid(child, NULL, 0);
++	wait_dead(child);
++
++	rootfd = open(CG, O_PATH | O_DIRECTORY | O_CLOEXEC);
++	check(rootfd >= 0, "open cgroup root with O_PATH");
++	check(unlinkat(rootfd, "fd", AT_REMOVEDIR) == 0,
++	      "rmdir through O_PATH dirfd");
++	close(rootfd);
++	close(dirfd);
++}
++
++static void test_kill_subtree(void)
++{
++	int pipefd[2];
++	pid_t child, grandchild;
++	char text[4096];
++
++	if (pipe(pipefd) < 0)
++		fail("pipe");
++	make_group("outer");
++	make_group("outer/inner");
++
++	child = fork();
++	if (child < 0)
++		fail("fork");
++	if (child == 0) {
++		pid_t grandchild;
++		char value[32];
++
++		close(pipefd[0]);
++		snprintf(value, sizeof(value), "%d\n", (int) getpid());
++		if (write_text(CG "/outer/cgroup.procs", value) < 0)
++			_exit(10);
++		(void) setsid();
++
++		grandchild = fork();
++		if (grandchild == 0) {
++			snprintf(value, sizeof(value), "%d\n", (int) getpid());
++			if (write_text(CG "/outer/inner/cgroup.procs", value) < 0)
++				_exit(11);
++			for (;;)
++				pause();
++		}
++		if (write(pipefd[1], &grandchild, sizeof(grandchild))
++		    != sizeof(grandchild))
++			_exit(12);
++		for (;;)
++			pause();
++	}
++
++	close(pipefd[1]);
++	check(read(pipefd[0], &grandchild, sizeof(grandchild))
++	      == sizeof(grandchild), "no grandchild pid");
++	close(pipefd[0]);
++
++	wait_procs_has("outer", child);
++	wait_procs_has("outer/inner", grandchild);
++
++	errno = 0;
++	expect_error((long) write_text(CG "/outer/cgroup.kill", "0\n"),
++		     EINVAL, "cgroup.kill with 0");
++
++	if (write_text(CG "/outer/cgroup.kill", "1\n") < 0)
++		fail("cgroup.kill outer");
++	waitpid(child, NULL, 0);
++	wait_dead(grandchild);
++	check(read_text(CG "/outer/cgroup.events", text, sizeof(text)) >= 0,
++	      "read outer events");
++	check(strstr(text, "populated 0") != NULL,
++	      "outer should be empty after subtree kill");
++
++	remove_group("outer/inner");
++	remove_group("outer");
++}
++
++static void test_freeze_thaw(void)
++{
++	char counter[128];
++	char value[32];
++	pid_t child, moved;
++	struct stat st;
++	off_t before, after;
++
++	snprintf(counter, sizeof(counter), "/tmp/proot-cg-counter-%d", (int) getpid());
++	unlink(counter);
++	make_group("fz");
++
++	child = fork();
++	if (child < 0)
++		fail("fork");
++	if (child == 0) {
++		snprintf(value, sizeof(value), "%d\n", (int) getpid());
++		if (write_text(CG "/fz/cgroup.procs", value) < 0)
++			_exit(10);
++		for (;;) {
++			int file = open(counter, O_WRONLY | O_CREAT | O_APPEND, 0644);
++			if (file >= 0) {
++				(void) write(file, "x", 1);
++				close(file);
++			}
++			msleep(5);
++		}
++	}
++
++	msleep(100);
++	check(stat(counter, &st) == 0, "stat counter before freeze");
++	before = st.st_size;
++
++	if (write_text(CG "/fz/cgroup.freeze", "1\n") < 0)
++		fail("freeze fz");
++	wait_state(child, true);
++
++	check(stat(counter, &st) == 0, "stat counter while frozen");
++	before = st.st_size;
++	msleep(200);
++	check(stat(counter, &st) == 0, "stat counter while frozen again");
++	after = st.st_size;
++	check(after == before, "frozen process still ran (%lld -> %lld)",
++	      (long long) before, (long long) after);
++
++	{
++		char text[1024];
++		check(read_text(CG "/fz/cgroup.events", text, sizeof(text)) >= 0,
++		      "read frozen events");
++		check(strstr(text, "populated 1") != NULL
++		      && strstr(text, "frozen 1") != NULL,
++		      "events = '%s'", text);
++	}
++
++	errno = 0;
++	expect_error((long) write_text(CG "/fz/cgroup.freeze", "2\n"),
++		     EINVAL, "invalid freeze value");
++
++	if (write_text(CG "/fz/cgroup.freeze", "0\n") < 0)
++		fail("thaw fz");
++	wait_state(child, false);
++	msleep(100);
++	check(stat(counter, &st) == 0, "stat counter after thaw");
++	check(st.st_size > after, "process did not resume after thaw");
++
++	/* A process moved into a frozen cgroup must stop too. */
++	if (write_text(CG "/fz/cgroup.freeze", "1\n") < 0)
++		fail("freeze fz again");
++	wait_state(child, true);
++	moved = fork();
++	if (moved < 0)
++		fail("fork moved");
++	if (moved == 0)
++		for (;;)
++			pause();
++	move_pid("fz", moved);
++	wait_state(moved, true);
++
++	if (write_text(CG "/fz/cgroup.kill", "1\n") < 0)
++		fail("kill frozen fz");
++	waitpid(child, NULL, 0);
++	waitpid(moved, NULL, 0);
++	unlink(counter);
++	remove_group("fz");
++}
++
++static volatile pid_t thread_ids[2];
++
++static void *thread_pause(void *argument)
++{
++	int index = (int) (intptr_t) argument;
++
++	thread_ids[index] = (pid_t) syscall(SYS_gettid);
++	for (;;)
++		pause();
++	return NULL;
++}
++
++static void test_threads(void)
++{
++	int pipefd[2];
++	pid_t child;
++	pid_t tids[2];
++
++	if (pipe(pipefd) < 0)
++		fail("pipe");
++	make_group("th");
++	make_group("th2");
++
++	child = fork();
++	if (child < 0)
++		fail("fork");
++	if (child == 0) {
++		pthread_t threads[2];
++		pid_t tgid = getpid();
++		char value[64];
++
++		close(pipefd[0]);
++		thread_ids[0] = 0;
++		thread_ids[1] = 0;
++		if (pthread_create(&threads[0], NULL, thread_pause,
++				   (void *) (intptr_t) 0) != 0
++		    || pthread_create(&threads[1], NULL, thread_pause,
++				      (void *) (intptr_t) 1) != 0)
++			_exit(13);
++		while (thread_ids[0] == 0 || thread_ids[1] == 0)
++			usleep(1000);
++		tids[0] = thread_ids[0];
++		tids[1] = thread_ids[1];
++		if (write(pipefd[1], &tgid, sizeof(tgid)) != sizeof(tgid)
++		    || write(pipefd[1], tids, sizeof(tids)) != sizeof(tids))
++			_exit(11);
++
++		snprintf(value, sizeof(value), "%d\n", (int) tgid);
++		if (write_text(CG "/th/cgroup.procs", value) < 0)
++			_exit(12);
++		for (;;)
++			pause();
++	}
++
++	close(pipefd[1]);
++	check(read(pipefd[0], &child, sizeof(child)) == sizeof(child),
++	      "no tgid from thread child");
++	check(read(pipefd[0], tids, sizeof(tids)) == sizeof(tids),
++	      "no thread ids");
++	close(pipefd[0]);
++
++	wait_procs_has("th", child);
++	check(threads_has("th", child), "th threads does not contain main tid");
++	check(threads_has("th", tids[0]) && threads_has("th", tids[1]),
++	      "th threads does not contain both pthread ids");
++	{
++		char path[128];
++		char content[256];
++
++		snprintf(path, sizeof(path), "/proc/%d/task/%d/cgroup",
++			 (int) child, (int) tids[0]);
++		check(read_text(path, content, sizeof(content)) >= 0,
++		      "read thread cgroup");
++		check(strcmp(content, "0::/th\n") == 0,
++		      "thread cgroup = '%s'", content);
++	}
++
++	{
++		char path[512];
++		char value[32];
++		snprintf(path, sizeof(path), "%s/th2/cgroup.threads", CG);
++		snprintf(value, sizeof(value), "%d\n", (int) tids[0]);
++		if (write_text(path, value) < 0)
++			fail("move thread to th2");
++	}
++	check(threads_has("th2", tids[0]), "th2 missing moved thread");
++	check(!threads_has("th", tids[0]), "th still lists moved thread");
++	check(threads_has("th", tids[1]), "th lost sibling thread");
++	check(procs_has("th", child), "th lost process after thread move");
++
++	if (write_text(CG "/th/cgroup.kill", "1\n") < 0
++	    || write_text(CG "/th2/cgroup.kill", "1\n") < 0)
++		fail("kill threaded cgroups");
++	waitpid(child, NULL, 0);
++	remove_group("th");
++	remove_group("th2");
++}
++
++static void test_proc_cgroup_and_mount(void)
++{
++	char path[512];
++	char text[4096];
++	char pi[32];
++	struct statfs fs;
++	pid_t child;
++
++	make_group("self");
++	snprintf(pi, sizeof(pi), "%d\n", (int) getpid());
++	if (write_text(CG "/self/cgroup.procs", pi) < 0)
++		fail("move self");
++
++	check(read_text("/proc/self/cgroup", text, sizeof(text)) >= 0,
++	      "read self cgroup");
++	check(strcmp(text, "0::/self\n") == 0, "self cgroup = '%s'", text);
++
++	child = fork();
++	if (child < 0)
++		fail("fork");
++	if (child == 0)
++		for (;;)
++			pause();
++	snprintf(path, sizeof(path), "/proc/%d/cgroup", (int) child);
++	check(read_text(path, text, sizeof(text)) >= 0, "read child cgroup");
++	check(strcmp(text, "0::/self\n") == 0, "child cgroup = '%s'", text);
++	kill(child, SIGKILL);
++	waitpid(child, NULL, 0);
++
++	if (mkdir("/tmp/proot-cgroup-mnt", 0755) < 0 && errno != EEXIST)
++		fail("mkdir mount point");
++	check(mount("none", "/tmp/proot-cgroup-mnt", "cgroup2", 0, NULL) == 0,
++	      "mount cgroup2");
++	check(statfs("/tmp/proot-cgroup-mnt", &fs) == 0,
++	      "statfs mounted cgroup2");
++	check((unsigned long) fs.f_type == CGROUP2_SUPER_MAGIC,
++	      "mounted alias has wrong fstype");
++
++	check(read_text("/proc/self/mountinfo", text, sizeof(text)) >= 0,
++	      "read mountinfo");
++	check(strstr(text, "/tmp/proot-cgroup-mnt") != NULL,
++	      "mountinfo has no cgroup2 alias entry");
++
++	check(mkdir("/tmp/proot-cgroup-mnt/g", 0755) == 0,
++	      "mkdir through mounted alias");
++	check(read_text("/tmp/proot-cgroup-mnt/g/cgroup.type", text,
++			sizeof(text)) >= 0, "read alias cgroup.type");
++	check(strcmp(text, "domain\n") == 0, "alias cgroup.type = '%s'", text);
++
++	check(umount2("/tmp/proot-cgroup-mnt", 0) == 0, "umount cgroup2");
++	check(statfs("/tmp/proot-cgroup-mnt", &fs) == 0,
++	      "statfs after umount");
++	check((unsigned long) fs.f_type != CGROUP2_SUPER_MAGIC,
++	      "cgroup2 still visible after umount");
++
++	if (write_text(CG "/cgroup.procs", pi) < 0)
++		fail("move self back to root");
++	remove_group("self");
++	rmdir("/tmp/proot-cgroup-mnt");
++}
++
++static void test_subtree_control(void)
++{
++	char text[4096];
++	char value[32];
++	char *trimmed;
++
++	make_group("leaf");
++	make_group("leaf/sub");
++	snprintf(value, sizeof(value), "%d\n", (int) getpid());
++
++	/* The root cgroup is exempt from the no-internal-process rule:
++	 * systemd enables controllers there while PID 1 is still in it.  */
++	if (write_text(CG "/cgroup.subtree_control", "+cpu +memory\n") < 0)
++		fail("enable controllers in populated root");
++	check(read_text(CG "/cgroup.subtree_control", text, sizeof(text)) >= 0,
++	      "read root subtree_control");
++	trimmed = trim(text);
++	check(strcmp(trimmed, "cpu memory") == 0,
++	      "root subtree_control = '%s'", trimmed);
++
++	check(read_text(CG "/leaf/cgroup.controllers", text, sizeof(text)) >= 0,
++	      "read leaf controllers");
++	trimmed = trim(text);
++	check(strcmp(trimmed, "cpu memory") == 0,
++	      "leaf controllers = '%s'", trimmed);
++
++	/* A populated non-root group rejects controller enablement.  */
++	if (write_text(CG "/leaf/cgroup.procs", value) < 0)
++		fail("move self to leaf");
++	errno = 0;
++	expect_error((long) write_text(CG "/leaf/cgroup.subtree_control", "+cpu\n"),
++		     EBUSY, "enable controller in populated non-root group");
++
++	/* Move out of leaf so it has no internal processes.  */
++	if (write_text(CG "/leaf/sub/cgroup.procs", value) < 0)
++		fail("move self to leaf/sub");
++	if (write_text(CG "/leaf/cgroup.subtree_control", "+cpu\n") < 0)
++		fail("enable leaf controller");
++	check(read_text(CG "/leaf/sub/cgroup.controllers", text, sizeof(text)) >= 0,
++	      "read sub controllers");
++	trimmed = trim(text);
++	check(strcmp(trimmed, "cpu") == 0, "sub controllers = '%s'", trimmed);
++
++	errno = 0;
++	expect_error((long) write_text(CG "/cgroup.subtree_control", "+bogus\n"),
++		     ENOENT, "unknown controller");
++
++	if (write_text(CG "/cgroup.procs", value) < 0)
++		fail("move self back to root");
++	remove_group("leaf/sub");
++	remove_group("leaf");
++}
++
++static void test_limits_and_type(void)
++{
++	char text[256];
++	char *trimmed;
++
++	make_group("lim");
++	check(read_text(CG "/lim/cgroup.max.depth", text, sizeof(text)) >= 0,
++	      "read max.depth");
++	check(strcmp(trim(text), "max") == 0, "max.depth default is not max");
++
++	if (write_text(CG "/lim/cgroup.max.depth", "1\n") < 0)
++		fail("write max.depth");
++	make_group("lim/a");
++	errno = 0;
++	expect_error(mkdir(CG "/lim/a/b", 0755), ENOENT,
++		     "max.depth should block grandchild");
++	check(write_text(CG "/lim/cgroup.max.depth", "max\n") == 0,
++	      "restore max.depth");
++	make_group("lim/a/b");
++
++	if (write_text(CG "/lim/cgroup.max.descendants", "2\n") < 0)
++		fail("write max.descendants");
++	errno = 0;
++	expect_error(mkdir(CG "/lim/c", 0755), ENOSPC,
++		     "max.descendants should block third group");
++	check(write_text(CG "/lim/cgroup.max.descendants", "max\n") == 0,
++	      "restore max.descendants");
++	make_group("lim/c");
++
++	check(read_text(CG "/lim/cgroup.type", text, sizeof(text)) >= 0,
++	      "read type");
++	check(strcmp(trim(text), "domain") == 0, "type default = '%s'", text);
++	if (write_text(CG "/lim/cgroup.type", "threaded\n") < 0)
++		fail("write threaded type");
++	check(read_text(CG "/lim/cgroup.type", text, sizeof(text)) >= 0,
++	      "read type again");
++	trimmed = trim(text);
++	check(strcmp(trimmed, "threaded") == 0, "type = '%s'", trimmed);
++	errno = 0;
++	expect_error((long) write_text(CG "/lim/cgroup.type", "bogus\n"),
++		     EINVAL, "invalid type");
++
++	remove_group("lim/a/b");
++	remove_group("lim/a");
++	remove_group("lim/c");
++	remove_group("lim");
++}
++
++static void test_events_inotify(void)
++{
++	char path[512];
++	char value[32];
++	char buffer[4096];
++	struct pollfd pollfd;
++	int inotify;
++	int watch;
++	int found = 0;
++	int i;
++
++	make_group("ev");
++	snprintf(path, sizeof(path), "%s/ev/cgroup.events", CG);
++	inotify = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
++	if (inotify < 0)
++		fail("inotify_init1");
++	watch = inotify_add_watch(inotify, path, IN_MODIFY | IN_ATTRIB);
++	if (watch < 0)
++		fail("inotify_add_watch");
++
++	pollfd.fd = inotify;
++	pollfd.events = POLLIN;
++	pollfd.revents = 0;
++	check(poll(&pollfd, 1, 0) >= 0, "poll inotify");
++
++	snprintf(value, sizeof(value), "%d\n", (int) getpid());
++	if (write_text(CG "/ev/cgroup.procs", value) < 0)
++		fail("move self into ev");
++
++	for (i = 0; i < 100; i++) {
++		pollfd.revents = 0;
++		if (poll(&pollfd, 1, 20) > 0) {
++			ssize_t length = read(inotify, buffer, sizeof(buffer));
++			char *cursor = buffer;
++			while (length > 0 && cursor < buffer + length) {
++				struct inotify_event *event =
++					(struct inotify_event *) cursor;
++				if ((event->mask & IN_MODIFY) != 0) {
++					found = 1;
++					break;
++				}
++				cursor += sizeof(*event) + event->len;
++			}
++		}
++		if (found)
++			break;
++	}
++	check(found != 0, "no inotify IN_MODIFY for cgroup.events");
++	check(read_text(path, buffer, sizeof(buffer)) >= 0,
++	      "read events after inotify");
++	check(strstr(buffer, "populated 1") != NULL,
++	      "events after move = '%s'", buffer);
++
++	close(inotify);
++	if (write_text(CG "/cgroup.procs", value) < 0)
++		fail("move self back to root");
++	remove_group("ev");
++}
++
++static void test_errors_and_permissions(void)
++{
++	char path[512];
++	int fd;
++
++	make_group("err");
++
++	errno = 0;
++	expect_error((long) write_text(CG "/err/cgroup.procs", "999999\n"),
++		     ESRCH, "move nonexistent pid");
++	errno = 0;
++	expect_error((long) write_text(CG "/err/cgroup.procs", "abc\n"),
++		     EINVAL, "malformed pid");
++	errno = 0;
++	expect_error((long) write_text(CG "/err/cgroup.procs", "0\n"),
++		     EINVAL, "zero pid");
++	errno = 0;
++	expect_error((long) write_text(CG "/err/cgroup.kill", "0\n"),
++		     EINVAL, "invalid kill value");
++
++	errno = 0;
++	fd = open(CG "/err/cgroup.events", O_WRONLY);
++	check(fd < 0 && errno == EACCES, "cgroup.events should be read-only");
++	errno = 0;
++	fd = open(CG "/err/cgroup.kill", O_RDONLY);
++	check(fd < 0 && errno == EACCES, "cgroup.kill should be write-only");
++	errno = 0;
++	expect_error(unlink(CG "/err/cgroup.procs"), EPERM,
++		     "unlink cgroup pseudo-file");
++	errno = 0;
++	expect_error(open(CG "/err/not-a-cgroup-file", O_CREAT | O_RDWR, 0644),
++		     EACCES, "create arbitrary cgroup file");
++	errno = 0;
++	expect_error(mknod(CG "/err/node", S_IFREG | 0644, 0), EPERM,
++		     "mknod in cgroupfs");
++	errno = 0;
++	expect_error(symlink("target", CG "/err/link"), EPERM,
++		     "symlink in cgroupfs");
++
++	make_group("err/child");
++	errno = 0;
++	expect_error(rename(CG "/err", CG "/err/child"), EEXIST,
++		     "rename over existing cgroup");
++	remove_group("err/child");
++	remove_group("err");
++
++	snprintf(path, sizeof(path), "%s/err", CG);
++	check(access(path, F_OK) < 0, "err group should be removed");
++}
++
++static void test_rename_group(void)
++{
++	char text[1024];
++	char value[32];
++
++	make_group("old");
++	make_group("old/child");
++	snprintf(value, sizeof(value), "%d\n", (int) getpid());
++	if (write_text(CG "/old/cgroup.procs", value) < 0)
++		fail("move self to old");
++	if (rename(CG "/old", CG "/new") < 0)
++		fail("rename cgroup group");
++
++	check(read_text("/proc/self/cgroup", text, sizeof(text)) >= 0,
++	      "read self cgroup after rename");
++	check(strcmp(text, "0::/new\n") == 0, "self cgroup = '%s'", text);
++	check(procs_has("new", getpid()), "renamed group lost process");
++	check(access(CG "/old", F_OK) < 0, "old group still exists");
++	check(access(CG "/new/child", F_OK) == 0,
++	      "descendant group was not renamed");
++	{
++		char events[1024];
++		check(read_text(CG "/new/child/cgroup.events", events,
++				sizeof(events)) >= 0, "read renamed child events");
++	}
++
++	if (write_text(CG "/cgroup.procs", value) < 0)
++		fail("move self back to root");
++	remove_group("new/child");
++	remove_group("new");
++}
++
++static void test_service_manager_flow(void)
++{
++	char text[4096];
++	char value[32];
++	char counter[128];
++	pid_t service;
++	struct stat st;
++	off_t before, after;
++
++	snprintf(counter, sizeof(counter), "/tmp/proot-cg-service-%d",
++		 (int) getpid());
++	unlink(counter);
++
++	make_group("system.slice");
++	make_group("system.slice/demo.service");
++
++	service = fork();
++	if (service < 0)
++		fail("fork");
++	if (service == 0) {
++		snprintf(value, sizeof(value), "%d\n", (int) getpid());
++		if (write_text(CG "/system.slice/demo.service/cgroup.procs",
++			       value) < 0)
++			_exit(10);
++		for (;;) {
++			int fd = open(counter, O_WRONLY | O_CREAT | O_APPEND, 0644);
++			if (fd >= 0) {
++				(void) write(fd, "x", 1);
++				close(fd);
++			}
++			msleep(5);
++		}
++	}
++
++	msleep(100);
++	check(read_text(CG "/system.slice/demo.service/cgroup.events", text,
++			sizeof(text)) >= 0, "read service events");
++	check(strstr(text, "populated 1") != NULL, "service not populated");
++	check(procs_has("system.slice/demo.service", service),
++	      "service pid not in unit cgroup");
++
++	if (write_text(CG "/system.slice/demo.service/cgroup.freeze", "1\n") < 0)
++		fail("freeze service");
++	wait_state(service, true);
++	check(stat(counter, &st) == 0, "stat service counter");
++	before = st.st_size;
++	msleep(150);
++	check(stat(counter, &st) == 0, "stat service counter again");
++	after = st.st_size;
++	check(before == after, "frozen service kept running");
++
++	if (write_text(CG "/system.slice/demo.service/cgroup.kill", "1\n") < 0)
++		fail("kill service");
++	waitpid(service, NULL, 0);
++	wait_dead(service);
++	check(read_text(CG "/system.slice/demo.service/cgroup.events", text,
++			sizeof(text)) >= 0, "read service events after kill");
++	check(strstr(text, "populated 0") != NULL,
++	      "service still populated after kill");
++
++	remove_group("system.slice/demo.service");
++	remove_group("system.slice");
++	unlink(counter);
++}
++
++static void test_hierarchy_events(void)
++{
++	int pipefd[2];
++	pid_t parent_proc, child_proc;
++	char text[1024];
++
++	if (pipe(pipefd) < 0)
++		fail("pipe");
++	make_group("outer");
++	make_group("outer/inner");
++
++	parent_proc = fork();
++	if (parent_proc < 0)
++		fail("fork");
++	if (parent_proc == 0) {
++		pid_t child;
++		char value[32];
++
++		close(pipefd[0]);
++		snprintf(value, sizeof(value), "%d\n", (int) getpid());
++		if (write_text(CG "/outer/cgroup.procs", value) < 0)
++			_exit(10);
++		child = fork();
++		if (child == 0) {
++			snprintf(value, sizeof(value), "%d\n", (int) getpid());
++			if (write_text(CG "/outer/inner/cgroup.procs", value) < 0)
++				_exit(11);
++			for (;;)
++				pause();
++		}
++		if (write(pipefd[1], &child, sizeof(child)) != sizeof(child))
++			_exit(12);
++		for (;;)
++			pause();
++	}
++
++	close(pipefd[1]);
++	check(read(pipefd[0], &child_proc, sizeof(child_proc))
++	      == sizeof(child_proc), "no nested child pid");
++	close(pipefd[0]);
++	wait_procs_has("outer", parent_proc);
++	wait_procs_has("outer/inner", child_proc);
++
++	check(read_text(CG "/outer/cgroup.events", text, sizeof(text)) >= 0,
++	      "read outer events");
++	check(strstr(text, "populated 1") != NULL, "outer not populated");
++	check(read_text(CG "/outer/inner/cgroup.events", text, sizeof(text)) >= 0,
++	      "read inner events");
++	check(strstr(text, "populated 1") != NULL, "inner not populated");
++
++	if (write_text(CG "/outer/cgroup.freeze", "1\n") < 0)
++		fail("freeze outer");
++	wait_state(parent_proc, true);
++	wait_state(child_proc, true);
++	check(read_text(CG "/outer/inner/cgroup.events", text, sizeof(text)) >= 0,
++	      "read inner events while frozen");
++	check(strstr(text, "frozen 1") != NULL,
++	      "descendant does not inherit frozen state");
++
++	if (write_text(CG "/outer/cgroup.kill", "1\n") < 0)
++		fail("kill outer");
++	waitpid(parent_proc, NULL, 0);
++	wait_dead(child_proc);
++	remove_group("outer/inner");
++	remove_group("outer");
++}
++
++int main(int argc, char **argv)
++{
++	if (argc != 2) {
++		fprintf(stderr, "usage: %s <case>\n", argv[0]);
++		return 2;
++	}
++
++	if (strcmp(argv[1], "root_layout") == 0)
++		test_root_layout();
++	else if (strcmp(argv[1], "mkdir_rmdir") == 0)
++		test_mkdir_rmdir();
++	else if (strcmp(argv[1], "membership_inheritance") == 0)
++		test_membership_inheritance();
++	else if (strcmp(argv[1], "move_process_tree") == 0)
++		test_move_process_tree();
++	else if (strcmp(argv[1], "dirfd_operations") == 0)
++		test_dirfd_operations();
++	else if (strcmp(argv[1], "kill_subtree") == 0)
++		test_kill_subtree();
++	else if (strcmp(argv[1], "freeze_thaw") == 0)
++		test_freeze_thaw();
++	else if (strcmp(argv[1], "threads") == 0)
++		test_threads();
++	else if (strcmp(argv[1], "proc_cgroup_and_mount") == 0)
++		test_proc_cgroup_and_mount();
++	else if (strcmp(argv[1], "subtree_control") == 0)
++		test_subtree_control();
++	else if (strcmp(argv[1], "limits_and_type") == 0)
++		test_limits_and_type();
++	else if (strcmp(argv[1], "events_inotify") == 0)
++		test_events_inotify();
++	else if (strcmp(argv[1], "errors_and_permissions") == 0)
++		test_errors_and_permissions();
++	else if (strcmp(argv[1], "rename_group") == 0)
++		test_rename_group();
++	else if (strcmp(argv[1], "service_manager_flow") == 0)
++		test_service_manager_flow();
++	else if (strcmp(argv[1], "hierarchy_events") == 0)
++		test_hierarchy_events();
++	else {
++		fprintf(stderr, "unknown case: %s\n", argv[1]);
++		return 2;
++	}
++
++	printf("PASS: %s\n", argv[1]);
++	return 0;
++}
+diff --git a/tests/cgroup/run.sh b/tests/cgroup/run.sh
+new file mode 100755
+index 0000000..4ce7a29
+--- /dev/null
++++ b/tests/cgroup/run.sh
+@@ -0,0 +1,56 @@
++#!/usr/bin/env bash
++# Build and run the --cgroup behaviour tests.
++set -u
++
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
++TEST_DIR="$ROOT/tests/cgroup"
++BIN="$TEST_DIR/cgroup_test"
++
++make -C "$ROOT/src" -j"$(nproc)" || exit 1
++
++cc -O2 -g -Wall -Wextra -pthread -o "$BIN" "$TEST_DIR/cgroup_test.c" || exit 1
++
++TMP="$(mktemp -d "${TMPDIR:-/tmp}/proot-cgroup-tests.XXXXXX")" || exit 1
++trap 'rm -rf "$TMP"' EXIT
++
++CASES=(
++  root_layout
++  mkdir_rmdir
++  membership_inheritance
++  move_process_tree
++  dirfd_operations
++  kill_subtree
++  freeze_thaw
++  threads
++  proc_cgroup_and_mount
++  subtree_control
++  limits_and_type
++  events_inotify
++  errors_and_permissions
++  rename_group
++  service_manager_flow
++  hierarchy_events
++)
++
++failed=0
++for case in "${CASES[@]}"; do
++  export PROOT_TMP_DIR="$TMP/proot-$case"
++  mkdir -p "$PROOT_TMP_DIR"
++  log="$TMP/$case.log"
++  printf '==> %s\n' "$case"
++  if timeout --kill-after=5 90 "$ROOT/src/proot" -0 --cgroup -r / -w / \
++      "$BIN" "$case" \
++      >"$log" 2>&1; then
++    tail -n 1 "$log"
++  else
++    printf 'FAIL: %s\n' "$case"
++    cat "$log"
++    failed=$((failed + 1))
++  fi
++done
++
++if [[ "$failed" -ne 0 ]]; then
++  printf '\n%d test case(s) failed\n' "$failed"
++  exit 1
++fi
++printf '\nall %d cgroup test cases passed\n' "${#CASES[@]}"
+-- 
+2.56.0
+

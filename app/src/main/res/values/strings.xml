@@ -7,6 +7,7 @@
     <string name="nav_root">Root /</string>
     <string name="home_title">Home</string>
     <string name="home_empty">Nothing here yet</string>
+    <string name="home_no_matches">No matching items</string>
     <string name="home_recent_files">Recent files</string>
     <string name="home_recent_locations">Recent locations</string>
     <string name="home_bookmarks">Bookmarks</string>
@@ -97,6 +98,7 @@
     <string name="toast_deleted">Deleted %1$s</string>
     <string name="session_manager">Sessions</string>
     <string name="history_title">History</string>
+    <string name="history_empty">(Empty)</string>
     <string name="done">Done</string>
     <string name="toast_deleted_count">Deleted %1$d items</string>
     <string name="toast_renamed">Renamed to %1$s</string>
@@ -202,6 +204,11 @@
     <string name="settings_pulse_mic_desc">Let containers record from this device\'s microphone while it is enabled.</string>
     <string name="settings_pulse_buffer">Audio buffer</string>
     <string name="settings_pulse_buffer_desc">Sink latency in milliseconds (10–1000). Lower reacts faster; too low stutters.</string>
+    <string name="settings_editor">Editor</string>
+    <string name="settings_editor_font">Font</string>
+    <string name="settings_editor_font_desc">Monospace by default (TTF/OTF)</string>
+    <string name="settings_editor_font_size">Default font size</string>
+    <string name="settings_editor_font_size_desc">Default editor text size</string>
     <string name="settings_terminal">Terminal</string>
     <string name="settings_terminal_desc">Font and display settings</string>
     <string name="settings_terminal_font">Font</string>

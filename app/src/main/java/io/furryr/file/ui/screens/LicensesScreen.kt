@@ -165,6 +165,11 @@ fun LicensesScreen(modifier: Modifier = Modifier) {
                 license = "BSD 3-Clause License"
             )
             LicenseEntry(
+                name = "Sora Editor / TextMate",
+                url = "https://github.com/Rosemoe/sora-editor/tree/0.23.5",
+                license = "GNU LGPL 2.1 or later"
+            )
+            LicenseEntry(
                 name = "EdDSA-Java",
                 url = "https://github.com/str4d/ed25519-java",
                 license = "CC0 1.0 / Public Domain"

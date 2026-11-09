@@ -31,7 +31,7 @@ native/
 - **Connection lifecycle**: `main()` accept loop + `handle_connection()` — one task per client
 - **Connection auth**: `auth::derive_socket_name` / `auth::verify`; every client must sign the `--key`/`--id`-derived socket's nonce before any request
 - **Abstract socket**: `create_abstract_server()` + `bind_abstract_socket()` (name derived from `--key`/`--id`)
-- **Container lifetime**: the daemon is the container's subreaper (parentage: orphans reparent to it) while `cgroup.procs` is the only enumeration this kernel allows; spawned children join the group and then `unshare(CLONE_NEWCGROUP)` (`cgroup::isolate_view`) so the container manages only its own subtree; `cgroup::install` / `attach_self` / `kill_and_remove` own the group, opened before the chroot and used through `openat`, and `cgroup::sweep` ends groups whose owner died
+- **Container lifetime**: the daemon is the container's subreaper (parentage: orphans reparent to it) while `cgroup.procs` is the only enumeration this kernel allows; spawned children join the group and then `unshare(CLONE_NEWCGROUP)` (`cgroup::isolate_view`) so the container manages only its own subtree; `cgroup::install` / `attach_self` / `kill_and_remove` own the group, opened before the chroot and used through `openat`, and `cgroup::sweep` ends groups whose owner died.  The proot backend uses PRoot `--cgroup` (a synthetic cgroup2 hierarchy backed by ppid/session data); resource limits are unavailable there
 - **UID check** for data path: `maybe_android_data_path()` — skips `/Android/data` UID trick when root
 - **Progress tracking**: `TaskState` in `HashMap`, tasks spawn via `tokio::spawn`
 - **Shared hub connection**: the agent's `Hub` methods take `&self` (ids are
@@ -80,7 +80,9 @@ native/
   or a shutdown tree walk. Every long-lived process inside a chroot container has
   to end itself: hang-up detection in its readers, plus
   `reaper::arm_parent_death_signal` on direct children (it is cleared by `fork`).
-  proot containers need none of this — Android does not let them escape.
+  proot containers use the PRoot `--cgroup` synthetic hierarchy for service
+  management and container lifetime; their processes still cannot escape the
+  app, and resource limits remain unavailable.
 - **Multi-client** — the daemon serves many concurrent connections. Each has its own
   read loop, write half and response channel; PTYs/handles/broker are shared via `Shared`.
   Disconnecting one client does not affect other authenticated clients.
@@ -130,4 +132,5 @@ NDK does not ship).
 - [ ] `wayland/src/render.rs`: verify frames are not re-rendered when nothing changed and that the 60 Hz tick does not spin the CPU while the viewer is closed.
 - [ ] `wayland/src/lib.rs`: verify a client launched from a container connects to `/dev/wayland/wayland-0` (foot: `failed to connect to wayland`), including after an app restart leaves an old socket file behind.
 - [ ] `agent/src/terminal.rs`: verify an `agent` running in a **chroot** container (proot sessions cannot escape, so they are out of scope) exits within one poll interval after the pty master closes (kill the daemon or the app while the UI is open), and that no `agent-input` thread keeps accumulating CPU time afterwards.
+- [ ] `native/build-proot.sh`: run a clean cross build to confirm the patch from `native/patches/proot/` applies to the pinned `v5.1.107.79` clone and that the resulting `libproot.so` still provides the `--cgroup` emulation.
 

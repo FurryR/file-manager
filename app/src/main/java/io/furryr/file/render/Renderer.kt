@@ -1,10 +1,35 @@
 package io.furryr.file.render
 
+import android.content.Context
+import androidx.compose.ui.graphics.vector.ImageVector
 import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.VFile
 import io.furryr.file.core.ViewRef
 import io.furryr.file.core.VNode
 import kotlinx.coroutines.CoroutineScope
+
+/**
+ * One item in the tab overflow menu. Renderers return only items that are
+ * currently actionable, so the menu never shows a disabled placeholder.
+ */
+data class RendererMenuItem(
+    val title: String,
+    val icon: ImageVector? = null,
+    val onClick: () -> Unit,
+)
+
+/**
+ * Top-bar path content owned by a renderer. The large line is the title, the
+ * caption uses the old directory-summary slot, and [editText] is what a tap
+ * puts into the inline editor (a page title is not a URL, and Home starts
+ * empty so the user can type any location).
+ */
+data class RendererPath(
+    val title: String,
+    val caption: String? = null,
+    val editText: String = title,
+    val editable: Boolean = true,
+)
 
 /**
  * What a tab is asking a renderer to show. Renderers receive node objects or
@@ -42,6 +67,21 @@ interface RenderHost {
     fun reportError(error: Throwable)
     fun requestClose()
 
+    /** App-level actions a renderer menu may expose. */
+    fun refresh() {}
+    fun toggleFilter() {}
+    fun openSort() {}
+
+    /**
+     * Unified leave hook: a renderer that holds unsaved state asks the tab to
+     * confirm before navigating away. The tab shows one dialog for every
+     * renderer; [onLeave] runs only after confirmation, [onCancel] when the
+     * user decides to stay. The default proceeds without a prompt.
+     */
+    fun confirmLeave(message: String?, onLeave: () -> Unit, onCancel: () -> Unit = {}) {
+        onLeave()
+    }
+
     /**
      * Ask the tab to open [file] through the shared opener/renderer pipeline.
      * A web page uses this for links whose response is not HTML, so archive,
@@ -65,6 +105,22 @@ interface RendererSession : AutoCloseable {
 
     /** Return false to veto tab close, e.g. unsaved editor content. */
     fun canClose(): Boolean = true
+
+    /**
+     * Close through the renderer's own leave hook. A renderer that does not
+     * register one still closes: the tab never depends on every renderer
+     * implementing the hook.
+     */
+    fun requestClose(action: () -> Unit) {
+        close()
+        action()
+    }
+
+    /** Menu items this renderer contributes while it owns the tab. */
+    fun menuItems(context: Context): List<RendererMenuItem> = emptyList()
+
+    /** Top-bar path content; null keeps the shell's directory fallback. */
+    fun pathBar(context: Context): RendererPath? = null
 
     suspend fun save(): Result<Unit> = Result.success(Unit)
 }

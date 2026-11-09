@@ -155,6 +155,7 @@ fun TerminalSheet(
     onShow: () -> Unit,
     onDropAccepted: () -> Unit = {},
     currentPath: String = "",
+    canCreateTerminal: Boolean = true,
 ) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
@@ -371,6 +372,7 @@ fun TerminalSheet(
     }
 
     fun createNewTab() {
+        if (!canCreateTerminal) return
         if (tabs.isEmpty() && activeTabIndex < 0) {
             scope.launch {
                 sessionError = null
@@ -506,6 +508,7 @@ fun TerminalSheet(
                     tabs = tabs,
                     activeTabIndex = activeTabIndex,
                     enabled = visible,
+                    canCreateTerminal = canCreateTerminal,
                     onSwitchTab = { idx ->
                         activeTabIndex = idx
                         showDrawer = false

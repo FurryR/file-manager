@@ -32,6 +32,8 @@ data class CommandSpec(
     val user: String? = null,
     /** Nice level for the process; negative values require a root daemon. */
     val nice: Int? = null,
+    /** Pipe stdin back to the caller instead of connecting /dev/null. */
+    val stdin: Boolean = false,
 )
 
 
@@ -41,6 +43,8 @@ interface PipeChannel : Closeable {
     val pid: Int
     val stdout: InputStream
     val stderr: InputStream
+    /** Write end of the child's stdin; a null sink when it was not piped. */
+    val output: OutputStream
     suspend fun waitFor(): Result<Int>
     suspend fun closeProcess()
 }
@@ -102,6 +106,7 @@ class ExecService internal constructor(private val resolve: () -> DaemonConnecti
                 args = spec.args,
                 cwd = spec.cwd,
                 env = spec.env,
+                stdin = spec.stdin,
             ).getOrThrow()
             PipeProcessChannel(connection, stream)
         }
@@ -149,6 +154,10 @@ private class PipeProcessChannel(
     override val pid: Int = stream.childPid
     override val stdout: InputStream = FileInputStream(stream.stdout)
     override val stderr: InputStream = FileInputStream(stream.stderr)
+    override val output: OutputStream = stream.stdin?.let(::FileOutputStream)
+        ?: object : OutputStream() {
+            override fun write(b: Int) = Unit
+        }
 
     override suspend fun waitFor(): Result<Int> = connection.waitExec(id)
 
@@ -157,6 +166,7 @@ private class PipeProcessChannel(
     }
 
     override fun close() {
+        runCatching { output.close() }
         runCatching { stdout.close() }
         runCatching { stderr.close() }
     }

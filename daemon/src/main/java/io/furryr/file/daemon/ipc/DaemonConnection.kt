@@ -72,6 +72,8 @@ data class ExecStreamFd(
     val childPid: Int,
     val stdout: FileDescriptor,
     val stderr: FileDescriptor,
+    /** Write end of the child's stdin pipe, present when requested. */
+    val stdin: FileDescriptor? = null,
 )
 
 data class OpenHandleResult(

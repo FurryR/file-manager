@@ -67,6 +67,7 @@ import io.furryr.file.R
 import io.furryr.file.AppLocale
 import io.furryr.file.agent.SessionManager
 import io.furryr.file.daemon.DaemonManager
+import io.furryr.file.editor.EditorPreferences
 import io.furryr.file.pulse.PulseManager
 import io.furryr.file.settings.PulseSettings
 import io.furryr.file.ui.theme.FileManagerTheme
@@ -145,6 +146,9 @@ private fun SettingsMainPage(
     var showTerminalFontSizeDialog by remember { mutableStateOf(false) }
     var terminalFontSize by remember { mutableStateOf(prefs.getInt("terminal_font_size", 9).toString()) }
     var showTerminalColorSchemeDialog by remember { mutableStateOf(false) }
+    var editorFont by remember { mutableStateOf(EditorPreferences.fontPath(context)) }
+    var editorFontSize by remember { mutableStateOf(EditorPreferences.fontSize(context).toString()) }
+    var showEditorFontSizeDialog by remember { mutableStateOf(false) }
     var showLanguageDialog by remember { mutableStateOf(false) }
     var showColorSchemeDialog by remember { mutableStateOf(false) }
     var showSearchEngineDialog by remember { mutableStateOf(false) }
@@ -363,6 +367,27 @@ private fun SettingsMainPage(
                     }
                 }
             }
+            val editorFontPickerLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument()
+            ) { uri: Uri? ->
+                if (uri != null) {
+                    scope.launch {
+                        val path = withContext(Dispatchers.IO) {
+                            val displayName = context.contentResolver.query(uri, null, null, null, null)?.use {
+                                if (it.moveToFirst()) it.getString(it.getColumnIndex(OpenableColumns.DISPLAY_NAME)) else null
+                            } ?: "custom_font.ttf"
+                            val dest = File(context.cacheDir, "fonts/editor/$displayName")
+                            dest.parentFile?.mkdirs()
+                            context.contentResolver.openInputStream(uri)?.use { input ->
+                                dest.outputStream().use { output -> input.copyTo(output) }
+                            }
+                            dest.absolutePath
+                        }
+                        editorFont = path
+                        prefs.edit().putString(EditorPreferences.FONT_KEY, path).apply()
+                    }
+                }
+            }
             SettingsValueRow(
                 title = stringResource(R.string.settings_terminal_font),
                 value = terminalFont.ifBlank { stringResource(R.string.settings_terminal_font_desc) },
@@ -389,6 +414,29 @@ private fun SettingsMainPage(
                 title = stringResource(R.string.settings_terminal_color_scheme),
                 value = TerminalSchemeStore.current(context).displayName,
                 onClick = { showTerminalColorSchemeDialog = true },
+            )
+            SettingsDivider()
+            SettingsSection(stringResource(R.string.settings_editor))
+            SettingsValueRow(
+                title = stringResource(R.string.settings_editor_font),
+                value = editorFont.ifBlank { stringResource(R.string.settings_editor_font_desc) },
+                onClick = {
+                    editorFontPickerLauncher.launch(
+                        arrayOf(
+                            "font/ttf",
+                            "font/otf",
+                            "font/x-ttf",
+                            "application/x-font-ttf",
+                            "application/x-font-opentype",
+                        ),
+                    )
+                },
+            )
+            SettingsDivider()
+            SettingsValueRow(
+                title = stringResource(R.string.settings_editor_font_size),
+                value = editorFontSize,
+                onClick = { showEditorFontSizeDialog = true },
             )
             SettingsDivider()
             SettingsSection(stringResource(R.string.settings_other))
@@ -659,6 +707,24 @@ private fun SettingsMainPage(
                 terminalFontSize = size.toString()
                 prefs.edit().putInt("terminal_font_size", size).apply()
                 showTerminalFontSizeDialog = false
+            },
+        )
+    }
+
+    if (showEditorFontSizeDialog) {
+        SettingsInputDialog(
+            title = stringResource(R.string.settings_editor_font_size),
+            label = stringResource(R.string.settings_editor_font_size_desc),
+            initialValue = editorFontSize,
+            filter = { value -> value.filter { it.isDigit() } },
+            onDismiss = { showEditorFontSizeDialog = false },
+            onConfirm = { value ->
+                val size = value.toIntOrNull()
+                    ?.coerceIn(EditorPreferences.MIN_FONT_SIZE, EditorPreferences.MAX_FONT_SIZE)
+                    ?: EditorPreferences.DEFAULT_FONT_SIZE
+                editorFontSize = size.toString()
+                prefs.edit().putInt(EditorPreferences.FONT_SIZE_KEY, size).apply()
+                showEditorFontSizeDialog = false
             },
         )
     }

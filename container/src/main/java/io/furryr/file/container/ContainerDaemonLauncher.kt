@@ -18,10 +18,12 @@ import io.furryr.file.wayland.WaylandManager
  *   It also owns the container cgroup (`--group <name>`): the daemon outlives the
  *   app on purpose (its parent is the su daemon, not the app) so that it can end
  *   the container when its last client goes away, and `cgroup::sweep` ends groups
- *   whose owner died. proot needs none of this: it is not root and cannot escape.
+ *   whose owner died. proot uses PRoot's `--cgroup` emulation instead (below).
  *   The daemon isolates the mount tree and chroots itself.
  * - proot: launched as the app UID through proot, so the daemon process itself
- *   lives inside the container.
+ *   lives inside the container.  proot's `--cgroup` emulation gives the daemon
+ *   a private cgroup v2 hierarchy, so `--group` still owns the container
+ *   lifetime even though the app cannot create real cgroups.
  */
 object ContainerDaemonLauncher {
     const val DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

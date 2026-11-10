@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::model::{AgentEvent, Entry, Message, WriteBlock};
 
-use super::{tool_line, App, GENERATING_CALL, MAX_LIVE_TOOL_BYTES};
+use super::{tool_line, Action, App, GENERATING_CALL, MAX_LIVE_TOOL_BYTES};
 
 impl App {
     pub fn complete_success(&mut self, messages: Vec<Message>, answer: String) {
@@ -42,7 +42,30 @@ impl App {
         self.bump();
     }
 
-    pub fn agent_event(&mut self, event: AgentEvent) {
+    /// Apply one agent event and report the action the UI must perform.
+    ///
+    /// Auto-approval lives here, not on the hub: when YOLO mode is on, an
+    /// approval request is answered immediately instead of opening a dialog.
+    pub fn agent_event(&mut self, event: AgentEvent) -> Action {
+        let action = match event {
+            AgentEvent::ApprovalRequest { id, name, reason } => {
+                if self.yolo {
+                    Action::Approval { id, allow: true }
+                } else {
+                    self.open_approval(id, &name, &reason);
+                    Action::None
+                }
+            }
+            event => {
+                self.apply_event(event);
+                Action::None
+            }
+        };
+        self.bump();
+        action
+    }
+
+    fn apply_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::ReasoningDelta(text) => {
                 let index = match self.reasoning_active {
@@ -150,17 +173,14 @@ impl App {
                 }
                 self.finish_tool((!ok).then_some("failed"));
             }
-            AgentEvent::ApprovalRequest { id, name, reason } => {
-                self.open_approval(id, &name, &reason);
-            }
             AgentEvent::Usage(usage) => {
                 self.context_tokens = usage.prompt_tokens;
                 self.prompt_tokens += usage.prompt_tokens;
                 self.completion_tokens += usage.completion_tokens;
                 self.requests += 1;
             }
+            AgentEvent::ApprovalRequest { .. } => {}
         }
-        self.bump();
     }
 
     pub fn complete_error(&mut self, error: String, messages: Option<Vec<Message>>) {

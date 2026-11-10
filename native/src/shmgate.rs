@@ -25,8 +25,10 @@
 //! so a client with its own fallback degrades instead of blocking. Note that
 //! *closing the listener does not wake a blocked caller* (measured on this
 //! kernel), so the supervisor must never die: the thread is started before the
-//! filter is armed, the notification loop only retries on transient errors, and
-//! the socket writes use `MSG_NOSIGNAL` so a dead factory cannot raise `SIGPIPE`.
+//! filter is armed, the notification loop retries every error except `EBADF`
+//! (returning would drop the listener and turn every `memfd_create` in the
+//! inherited tree into `ENOSYS`), and the socket writes use `MSG_NOSIGNAL` so a
+//! dead factory cannot raise `SIGPIPE`.
 
 use std::ffi::CString;
 use std::io;
@@ -315,26 +317,39 @@ fn install_filter() -> Option<OwnedFd> {
     unsafe { Some(OwnedFd::from_raw_fd(rc as RawFd)) }
 }
 
-/// Serve notifications until the listener disappears.
+/// Serve notifications until the listener fd itself is gone.
+///
+/// Every error except `EBADF` is retried, because returning would drop
+/// `listener` while the filter is already inherited by the whole container
+/// tree: the kernel would then answer every `memfd_create` in that tree with
+/// `ENOSYS`, permanently. `EBADF` means the fd cannot serve anything anymore,
+/// so the loop ends there.
 fn supervisor(listener: OwnedFd, factory: OwnedFd) {
     let listener_fd = listener.as_raw_fd();
     let factory_fd = factory.as_raw_fd();
     let mut served: u64 = 0;
+    let mut failures: u64 = 0;
     loop {
         let mut notification: SeccompNotif = unsafe { std::mem::zeroed() };
         let rc = ioctl(listener_fd, notif_recv(), &mut notification as *mut _ as *mut libc::c_void);
         if rc < 0 {
             let error = io::Error::last_os_error();
             match error.raw_os_error() {
-                // Transient: keep serving. Anything else means the listener is
-                // gone, and callers are already stuck, so only a loud log helps.
                 Some(libc::EINTR) | Some(libc::EAGAIN) => continue,
-                _ => {
-                    eprintln!("[shm-gate] notification loop stopped: {error}");
+                Some(libc::EBADF) => {
+                    eprintln!("[shm-gate] listener fd is invalid, supervisor exiting: {error}");
                     return;
+                }
+                _ => {
+                    failures += 1;
+                    if failures == 1 || failures % 1024 == 0 {
+                        eprintln!("[shm-gate] notification loop error #{failures}, retrying: {error}");
+                    }
+                    continue;
                 }
             }
         }
+        failures = 0;
         if notification.data.nr as i64 != sys::MEMFD_CREATE {
             // The filter only matches memfd_create; anything else is a kernel
             // surprise, so let it run untouched.

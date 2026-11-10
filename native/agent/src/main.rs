@@ -67,7 +67,7 @@ async fn run() -> io::Result<()> {
     let mcp_hub = Arc::new(Hub::connect().await?);
     let mcp = Arc::new(McpManager::connect(&capabilities, mcp_hub, &cwd).await);
     let agent_hub = Hub::connect().await?;
-    let attached = agent_hub
+    agent_hub
         .agent_attach(
             &session_id,
             &terminal_id,
@@ -79,7 +79,6 @@ async fn run() -> io::Result<()> {
         )
         .await
         .map_err(io::Error::other)?;
-    let _ = attached;
     agent_hub
         .agent_set_mcp_tools(&mcp.definitions())
         .await
@@ -116,7 +115,6 @@ async fn run() -> io::Result<()> {
         Vec::new(),
         String::new(),
     );
-    app.set_yolo(attached.yolo);
     let mut state = UiState::default();
     let mut pending: Option<tokio::task::JoinHandle<Result<AgentOutcome, String>>> = None;
     let mut pending_kind = TaskKind::Chat;
@@ -207,11 +205,6 @@ async fn run() -> io::Result<()> {
                             let _ = sender.send((id, allow));
                         }
                     }
-                    Action::Yolo(enabled) => {
-                        if let Err(error) = agent_hub.agent_yolo(enabled).await {
-                            app.yolo_failed(enabled, &error);
-                        }
-                    }
                     Action::PersistSelection => {
                         persist_selection(&hub, app.model(), app.effort());
                     }
@@ -229,8 +222,7 @@ async fn run() -> io::Result<()> {
                                 app.effort(),
                                 capabilities.workspace_mcp,
                             )
-                            .await
-                            .map(|attached| app.set_yolo(attached.yolo));
+                            .await;
                         let _ = agent_hub
                             .agent_set_mcp_tools(&mcp.definitions())
                             .await;
@@ -256,7 +248,7 @@ async fn run() -> io::Result<()> {
                             serde_json::from_str::<Vec<Message>>(&history_json).unwrap_or_default();
                         // Kotlin agent repairs dangling tool calls when it loads the session.
                         let _ = hub.set_active_session(&id).await;
-                        let attached = agent_hub
+                        let _ = agent_hub
                             .agent_attach(
                                 &id,
                                 &terminal_id,
@@ -277,7 +269,6 @@ async fn run() -> io::Result<()> {
                             stored_title
                         };
                         app.switch_session(history, &title);
-                        app.set_yolo(attached.map(|attached| attached.yolo).unwrap_or(false));
                     }
                     Action::NewSession => {
                         if let Some(handle) = pending.take() {
@@ -288,7 +279,7 @@ async fn run() -> io::Result<()> {
                         approvals = None;
                         let id = new_session_id(&terminal_id);
                         let _ = hub.set_active_session(&id).await;
-                        let attached = agent_hub
+                        let _ = agent_hub
                             .agent_attach(
                                 &id,
                                 &terminal_id,
@@ -304,7 +295,6 @@ async fn run() -> io::Result<()> {
                             .await;
                         session_id = id;
                         app.switch_session(Vec::new(), "New conversation");
-                        app.set_yolo(attached.map(|attached| attached.yolo).unwrap_or(false));
                     }
                 }
             }
@@ -315,10 +305,10 @@ async fn run() -> io::Result<()> {
                 }
             }, if events.is_some() => {
                 if let Some(event) = event {
-                    app.agent_event(event);
+                    dispatch_event(&mut app, approvals.as_ref(), event);
                     if let Some(receiver) = events.as_mut() {
                         while let Ok(event) = receiver.try_recv() {
-                            app.agent_event(event);
+                            dispatch_event(&mut app, approvals.as_ref(), event);
                         }
                     }
                 } else {
@@ -461,6 +451,24 @@ fn last_user(messages: &[Message]) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Feed one agent event to the UI and forward any approval it produces.
+///
+/// YOLO mode is answered entirely here: the hub still asks, and this side
+/// replies through the same channel a click on the popup would use. Nothing
+/// about `/yolo` crosses the hub connection, so toggling it cannot stall the
+/// run or the redraw.
+fn dispatch_event(
+    app: &mut App,
+    approvals: Option<&tokio::sync::mpsc::UnboundedSender<(u64, bool)>>,
+    event: AgentEvent,
+) {
+    if let Action::Approval { id, allow } = app.agent_event(event) {
+        if let Some(sender) = approvals {
+            let _ = sender.send((id, allow));
+        }
+    }
+}
+
 fn spawn_agent(
     app: &App,
     agent_hub: &Arc<Hub>,
@@ -476,9 +484,9 @@ fn spawn_agent(
     let hub = Arc::clone(agent_hub);
     let model = app.model().to_owned();
     let effort = app.effort().to_owned();
-    // The connection is shared, not owned: `/yolo`, steering and cancel have to
-    // reach the hub while this run is streaming, so nothing may hold a lock for
-    // the lifetime of a request.
+    // The connection is shared, not owned: steering and cancel have to reach
+    // the hub while this run is streaming, so nothing may hold a lock for the
+    // lifetime of a request.
     let handle = tokio::spawn(async move {
         hub.agent_run(
             &text,

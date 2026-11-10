@@ -46,9 +46,10 @@ message HubRequest {
     fileagent.AgentMcpResult agent_mcp_result = 37;
     fileagent.AgentMcpTools agent_mcp_tools = 38;
     fileagent.AgentCompactRequest agent_compact = 39;
-    fileagent.AgentYoloRequest agent_yolo = 40;
     fileagent.AgentSteerRequest agent_steer = 41;
   }
+  // Former hub-side YOLO toggle. Auto-approval never leaves the terminal.
+  reserved 40;
 }
 
 message HubResponse {

@@ -1,7 +1,10 @@
 //! Wayland protocol state for the nested Android compositor.
 
 use smithay::{
-    backend::renderer::gles::GlesRenderer,
+    backend::{
+        allocator::{dmabuf::Dmabuf, Buffer},
+        renderer::{gles::GlesRenderer, ImportDma},
+    },
     desktop::{Space, Window},
     input::{pointer::PointerHandle, Seat, SeatHandler, SeatState},
     output::{Mode, Output, PhysicalProperties, Subpixel},
@@ -17,6 +20,7 @@ use smithay::{
     wayland::{
         buffer::BufferHandler,
         compositor::{CompositorClientState, CompositorHandler, CompositorState},
+        dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         fractional_scale::{self, FractionalScaleHandler, FractionalScaleManagerState},
         output::OutputHandler,
         selection::{
@@ -55,6 +59,10 @@ pub struct State {
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
     pub shm_state: ShmState,
+    pub dmabuf_state: DmabufState,
+    /// `None` when the EGL display cannot import dmabufs at all; clients then
+    /// only see `wl_shm`.
+    pub dmabuf_global: Option<DmabufGlobal>,
     pub data_device_state: DataDeviceState,
     pub seat_state: SeatState<State>,
     pub fractional_scale_manager_state: FractionalScaleManagerState,
@@ -106,6 +114,22 @@ impl State {
             (),
         >(1, ());
 
+        // Advertise only what this EGL display can actually import. A global
+        // with zero formats is useless, and keeping it out lets clients pick
+        // `wl_shm` immediately instead of failing on their first frame.
+        let dmabuf_formats = ImportDma::dmabuf_formats(&renderer);
+        let mut dmabuf_state = DmabufState::new();
+        let dmabuf_global = if dmabuf_formats.indexset().is_empty() {
+            log::warn!("EGL cannot import dmabufs; clients will use wl_shm");
+            None
+        } else {
+            log::info!(
+                "advertising {} dmabuf formats",
+                dmabuf_formats.indexset().len()
+            );
+            Some(dmabuf_state.create_global::<Self>(&dh, dmabuf_formats))
+        };
+
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&dh, "file-manager");
         seat.add_keyboard(Default::default(), 200, 25)
@@ -128,6 +152,8 @@ impl State {
             compositor_state,
             xdg_shell_state,
             shm_state,
+            dmabuf_state,
+            dmabuf_global,
             data_device_state,
             seat_state,
             fractional_scale_manager_state,
@@ -308,6 +334,38 @@ impl ShmHandler for State {
     }
 }
 
+impl DmabufHandler for State {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    /// Import when the client builds the `wl_buffer`: a refused import must be
+    /// reported before the first commit. The renderer keeps the resulting
+    /// texture in its dmabuf cache, so the frame path only looks it up.
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        match self.renderer.import_dmabuf(&dmabuf, None) {
+            Ok(_) => {
+                log::debug!(
+                    "dmabuf imported {:?} {}x{}",
+                    dmabuf.format(),
+                    dmabuf.width(),
+                    dmabuf.height()
+                );
+                let _ = notifier.successful::<State>();
+            }
+            Err(error) => {
+                log::debug!("dmabuf import rejected: {error:?}");
+                notifier.failed();
+            }
+        }
+    }
+}
+
 impl SeatHandler for State {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
@@ -428,6 +486,7 @@ impl XdgShellHandler for State {
 
 smithay::delegate_compositor!(State);
 smithay::delegate_shm!(State);
+smithay::delegate_dmabuf!(State);
 smithay::delegate_data_device!(State);
 smithay::delegate_seat!(State);
 smithay::delegate_output!(State);

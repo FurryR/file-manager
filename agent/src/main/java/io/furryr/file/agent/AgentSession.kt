@@ -37,13 +37,10 @@ class AgentSession(
     var model: String,
     var effort: String,
     private var emit: suspend (AgentEvent) -> Unit,
-    yolo: Boolean = false,
 ) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     /** Independent of [scope] so a detaching session still kills its execs. */
     private val execKiller = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    @Volatile
-    private var yolo: Boolean = yolo
     private val runLock = Mutex()
     private val pendingMcp = ConcurrentHashMap<Long, CompletableDeferred<ToolResult>>()
     private val pendingApproval = ConcurrentHashMap<Long, CompletableDeferred<Boolean>>()
@@ -233,17 +230,6 @@ class AgentSession(
         pendingApproval.remove(approvalId)?.complete(allow)
     }
 
-    /**
-     * Full auto-approval for this session. Enabling it also releases prompts
-     * that are already waiting, so the model never stalls on an old dialog.
-     */
-    fun setYolo(enabled: Boolean) {
-        yolo = enabled
-        if (!enabled) return
-        pendingApproval.values.forEach { it.complete(true) }
-        pendingApproval.clear()
-    }
-
     private suspend fun run(prompt: String) {
         try {
             append(JSONObject().put("role", "user").put("content", prompt))
@@ -366,7 +352,7 @@ class AgentSession(
         val isBuiltin = name in BUILTINS
         val args = runCatching { JSONObject(arguments.ifBlank { "{}" }) }.getOrNull() ?: JSONObject()
         if (isBuiltin) {
-            val reason = if (yolo) null else AgentPolicy.approvalReason(name, args, cwd)
+            val reason = AgentPolicy.approvalReason(name, args, cwd)
             if (reason != null) {
                 val allowed = requestApproval(callId, name, reason)
                 if (!allowed) {

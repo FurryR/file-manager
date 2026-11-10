@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use crate::model::{Entry, Message};
 
+use super::popup::PopupKind;
 use super::{Action, App, Pending, UndoState, HELP};
 
 impl App {
@@ -36,13 +37,24 @@ impl App {
         self.input.clear();
         self.yolo = !self.yolo;
         self.transcript.push(Entry::notice(if self.yolo {
-            "YOLO mode enabled: every tool call in this session is auto-approved."
+            "YOLO mode enabled: every tool call in this terminal is auto-approved."
         } else {
             "YOLO mode disabled: approvals are required again."
         }));
+        // Auto-approval is local to this terminal: the hub keeps asking and the
+        // UI answers without drawing a dialog. Release a dialog that is already
+        // waiting instead of leaving it to time out.
+        let mut approval = Action::None;
+        if self.yolo {
+            if let Some(PopupKind::Approval(id)) = self.popup.as_ref().map(|popup| &popup.kind) {
+                let id = *id;
+                self.popup = None;
+                approval = Action::Approval { id, allow: true };
+            }
+        }
         self.follow = true;
         self.bump();
-        Action::Yolo(self.yolo)
+        approval
     }
 
     pub(super) fn insert_text(&mut self, value: &str) -> Action {

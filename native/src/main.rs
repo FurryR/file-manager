@@ -93,6 +93,7 @@ async fn main() -> io::Result<()> {
     let socket_name = auth::derive_socket_name(&public_key, &id);
     let chroot_rootfs = parse_value_arg("--chroot");
     let proot_mode = has_flag("--proot");
+    let container_mode = chroot_rootfs.is_some() || proot_mode;
     let group_name = parse_value_arg("--group");
 
     eprintln!(
@@ -111,7 +112,7 @@ async fn main() -> io::Result<()> {
     // Container daemons own the process tree: become a session/group leader so
     // the whole container can be signalled as a unit. Ignore failure (e.g. when
     // already a group leader).
-    if chroot_rootfs.is_some() || proot_mode {
+    if container_mode {
         unsafe {
             libc::setsid();
         }
@@ -169,10 +170,14 @@ async fn main() -> io::Result<()> {
         socket_name,
     });
 
-    serve(listener, shared).await
+    serve(listener, shared, container_mode).await
 }
 
-async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
+async fn serve(
+    listener: UnixListener,
+    shared: Arc<Shared>,
+    container_mode: bool,
+) -> io::Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut main_shutdown = shutdown_rx.clone();
     let mut connections: JoinSet<()> = JoinSet::new();
@@ -180,6 +185,18 @@ async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
     let first_auth_deadline = tokio::time::Instant::now() + FIRST_AUTH_TIMEOUT;
     let mut signal_check = tokio::time::interval(std::time::Duration::from_millis(100));
     let mut child_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
+
+    // The rootfs may ship its own init system. The daemon remains the subreaper
+    // and cgroup owner, so init is just another child: whichever init the user
+    // installed runs as a non-PID 1 process, and a rootfs without `/init` keeps
+    // working as a plain shell container. Spawn after the SIGCHLD stream exists
+    // so an init that exits immediately is still reaped, and off the runtime
+    // thread so metadata + fork/exec never delay accept().
+    let init_slot = Arc::new(container::InitSlot::new());
+    if container_mode {
+        let slot = init_slot.clone();
+        tokio::task::spawn_blocking(move || container::spawn_init(&slot));
+    }
 
     loop {
         if *main_shutdown.borrow() {
@@ -225,6 +242,10 @@ async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
         }
     }
 
+    // Stop adopting a late init spawn now; a running init is asked to stop
+    // gracefully below, before the cgroup's hard kill.
+    let init = init_slot.close();
+
     // Release the endpoint before draining clients; shutdown cannot accept new work.
     drop(listener);
     // Tell every connection to stop, then give them a moment to flush (e.g. the
@@ -241,6 +262,12 @@ async fn serve(listener: UnixListener, shared: Arc<Shared>) -> io::Result<()> {
     shared.pty_manager.lock().await.close_all();
     shared.execs.lock().await.clear();
     *shared.handles.lock().await = HandleTable::new();
+    // Give init a catchable SIGTERM and a bounded grace period. Its shutdown
+    // path is the rootfs's business; the cgroup kill below is the hard backstop
+    // for anything that ignores the signal or outlives the grace period.
+    if let Some(init) = init {
+        init.stop().await;
+    }
     // The handles above cover what they own; the group covers the rest --
     // descendants that ignored SIGHUP, sessions that called setsid(), and
     // anything spawned by binaries this daemon never saw. One write, issued

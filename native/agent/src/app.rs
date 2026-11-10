@@ -25,7 +25,7 @@ Left/Right/Home/End: move   Up/Down: previous/next line; at first/last line: pro
 PageUp/PageDown, Ctrl/Shift+Up/Down, mouse wheel: scroll   click a Thought header: toggle thinking
 Ctrl+P: commands   /models: switch model   /variants: reasoning effort
 /compact: summarize   /clear: clear   /undo: revert last message   /redo: restore it
-/yolo: auto-approve every tool in this session   /sessions: switch conversation
+/yolo: auto-approve every tool in this terminal   /sessions: switch conversation
 /help: shortcuts   /exit: exit
 
 Configure an AI provider in the app's settings first.";
@@ -50,7 +50,6 @@ pub enum Action {
     SelectSession { id: String, title: String },
     NewSession,
     Approval { id: u64, allow: bool },
-    Yolo(bool),
 }
 
 struct Pending {
@@ -102,6 +101,8 @@ pub struct App {
     completion_tokens: u64,
     requests: u64,
     popup: Option<Popup>,
+    /// Auto-approve every approval request in this terminal. Never sent to the
+    /// hub; the TUI answers requests as they arrive.
     yolo: bool,
 }
 
@@ -339,23 +340,6 @@ impl App {
 
     pub fn yolo(&self) -> bool {
         self.yolo
-    }
-
-    /// Adopt the hub's per-session auto-approval state after attach/switch.
-    pub fn set_yolo(&mut self, enabled: bool) {
-        if self.yolo == enabled {
-            return;
-        }
-        self.yolo = enabled;
-        self.bump();
-    }
-
-    pub fn yolo_failed(&mut self, enabled: bool, error: &str) {
-        self.yolo = !enabled;
-        self.transcript
-            .push(Entry::notice(format!("YOLO mode change failed: {error}")));
-        self.follow = true;
-        self.bump();
     }
 
     fn info(&self) -> Option<&ModelInfo> {

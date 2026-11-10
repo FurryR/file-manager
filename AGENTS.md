@@ -401,6 +401,11 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   windows on the nested desktop. GPU access is the guest's own stack:
   containers run turnip+zink against the KGSL device nodes and hand dma-bufs
   to the compositor, so no virgl/vtest/shim variables or binds exist.
+  The compositor advertises `zwp_linux_dmabuf_v1` (v3) with the formats its
+  own EGL display can import (`ImportDma::dmabuf_formats`), imports each
+  buffer into the GLES texture cache at `wl_buffer` creation, and refuses the
+  import when EGL rejects it. When EGL reports no importable formats the
+  global is not created at all, so clients keep using `wl_shm`.
   The output scale is `densityDpi / 160` (`WaylandManager.displayScale`):
   it sets the `wl_output`/`preferred_buffer_scale` integer fallback and the
   `wp_fractional_scale_v1` value, and refreshes as one unit, so clients
@@ -510,6 +515,13 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
   emulation: the same daemon code owns a synthetic v2 hierarchy backed by
   ppid/session data, which also ends the container on shutdown even though the
   processes are not root. Resource limits are unavailable in that hierarchy.
+- **Init is optional and user-chosen** — `container::spawn_init()` starts
+  `/init` once the container daemon is ready, only when it is an executable
+  file. It is an ordinary child (the daemon stays the subreaper and cgroup
+  owner), so it runs as non-PID 1; a rootfs without `/init` keeps working as a
+  plain shell container. On shutdown init gets a catchable SIGTERM and a bounded
+  20 s grace before the cgroup's SIGKILL. There is no daemon-side service manager
+  or service UI.
 - Client entry points live in `:daemon` (`DaemonManager.fileService/execService`).
 - **Terminal IME tap race (upstream-worthy)** — Termux's
   `TerminalView.onSingleTapUp()` calls `requestFocus()` on the terminal view, then

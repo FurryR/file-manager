@@ -73,7 +73,7 @@ impl Popup {
                 },
                 PopupItem {
                     label: "/yolo".to_owned(),
-                    hint: "Auto-approve every tool in this session".to_owned(),
+                    hint: "Auto-approve every tool in this terminal".to_owned(),
                     action: Some(PopupAction::Yolo),
                     session: None,
                 },

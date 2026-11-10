@@ -11,7 +11,103 @@
 
 use std::ffi::CString;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use std::time::Duration;
+use tokio::sync::watch;
+
+/// Optional init program at the container root.
+const INIT: &str = "/init";
+/// Grace period between SIGTERM to init and the cgroup's hard SIGKILL.
+const INIT_STOP_GRACE: Duration = Duration::from_secs(20);
+
+/// Shared between the off-runtime spawn task and the shutdown path.
+///
+/// The spawn runs on a blocking thread while the daemon keeps accepting, so a
+/// shutdown can race the fork/exec. `closed` makes that race harmless: a late
+/// spawn sees it and kills the child instead of adopting it.
+pub struct InitSlot {
+    state: Mutex<InitState>,
+}
+
+#[derive(Default)]
+struct InitState {
+    closed: bool,
+    handle: Option<InitHandle>,
+}
+
+/// The running container init, tracked so shutdown can ask it to stop.
+pub struct InitHandle {
+    pid: libc::pid_t,
+    exit: watch::Receiver<Option<i32>>,
+}
+
+impl InitSlot {
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(InitState::default()),
+        }
+    }
+
+    fn closed(&self) -> bool {
+        self.state.lock().unwrap().closed
+    }
+
+    fn adopt(&self, handle: InitHandle) {
+        let mut state = self.state.lock().unwrap();
+        if state.closed {
+            // Shutdown already passed: never let a late spawn survive it. A
+            // child that already exited and was reaped may have its pid reused,
+            // so only signal it while the reaper still holds an exit slot.
+            if handle.exit.borrow().is_none() {
+                unsafe {
+                    libc::kill(handle.pid, libc::SIGKILL);
+                }
+            }
+            crate::reaper::release(handle.pid as u32);
+            return;
+        }
+        state.handle = Some(handle);
+    }
+
+    /// Refuse new inits and hand the running one to the shutdown path.
+    pub fn close(&self) -> Option<InitHandle> {
+        let mut state = self.state.lock().unwrap();
+        state.closed = true;
+        state.handle.take()
+    }
+}
+
+impl InitHandle {
+    /// Ask init to stop, then wait a bounded time for it to exit.
+    ///
+    /// SIGTERM is the catchable signal every init system handles; the cgroup
+    /// SIGKILL that follows is only the backstop for a wedged init.
+    pub async fn stop(self) {
+        if self.exit.borrow().is_some() {
+            return;
+        }
+        eprintln!("[file-daemon] stopping /init (pid {})", self.pid);
+        unsafe {
+            libc::kill(self.pid, libc::SIGTERM);
+        }
+        let deadline = tokio::time::Instant::now() + INIT_STOP_GRACE;
+        loop {
+            if self.exit.borrow().is_some() {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                eprintln!("[file-daemon] /init did not stop within {INIT_STOP_GRACE:?}");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            crate::reaper::reap_orphans();
+        }
+    }
+}
 
 /// Directory binds.  `/dev` gets a container-private tmpfs and is populated
 /// separately, so it never reaches the host device tree.
@@ -92,6 +188,72 @@ pub fn enter_chroot(rootfs: &str, binds: &[(String, String)]) -> io::Result<()> 
         libc::chdir(slash.as_ptr());
     }
     Ok(())
+}
+
+/// Start the container's own init system when its rootfs ships `/init`.
+///
+/// The daemon stays the subreaper and cgroup owner, so init is an ordinary
+/// child: the user picks the init system by installing it in the rootfs, and it
+/// runs as a non-PID 1 process. Missing, non-executable or failing `/init` is
+/// not an error — the container keeps working as a plain shell rootfs.
+pub fn spawn_init(slot: &InitSlot) {
+    if slot.closed() || !executable(INIT).unwrap_or(false) {
+        return;
+    }
+    let daemon_pid = unsafe { libc::getpid() };
+    let mut command = Command::new(INIT);
+    command
+        .current_dir("/")
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: runs in the forked child; `prctl`, `getppid`, `openat`, `write`
+    // and `unshare` are async-signal-safe and allocate nothing.
+    unsafe {
+        command.pre_exec(move || {
+            if crate::reaper::arm_parent_death_signal(daemon_pid) {
+                // Join the container group and narrow cgroupfs to its subtree,
+                // exactly like every exec/pty child, so init can manage its own
+                // services without escaping the group that ends the container.
+                crate::cgroup::attach_self();
+                crate::cgroup::isolate_view();
+                Ok(())
+            } else {
+                Err(io::Error::from_raw_os_error(libc::ESRCH))
+            }
+        });
+    }
+    // This runs off the runtime thread, so the reaper gate must span fork and
+    // track: otherwise an init that exits immediately is reaped before its pid
+    // is registered, and that pid could be reused.
+    let gate = crate::reaper::spawn_guard();
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            drop(gate);
+            // A SIGCHLD for another child may have arrived while the gate was
+            // held and been skipped by the runtime; collect it now.
+            crate::reaper::reap_orphans();
+            eprintln!("[file-daemon] /init failed to start: {error}");
+            return;
+        }
+    };
+    let pid = child.id() as libc::pid_t;
+    let exit = crate::reaper::track(child.id());
+    drop(gate);
+    // A SIGCHLD for this init (or any other child) may have arrived while the
+    // gate was held; collect it now that the pid is registered.
+    crate::reaper::reap_orphans();
+    // The reaper owns waiting; dropping `Child` neither waits nor kills.
+    drop(child);
+    eprintln!("[file-daemon] started /init (pid {pid})");
+    slot.adopt(InitHandle { pid, exit });
+}
+
+fn executable(path: &str) -> Option<bool> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 // ── mount helpers ────────────────────────────────────────────────────

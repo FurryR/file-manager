@@ -3,7 +3,7 @@ use std::io;
 use std::os::fd::OwnedFd;
 
 use hub_client::fileagent::{self, agent_event, AgentApprovalReply, AgentAttachRequest,
-    AgentMcpResult, AgentMcpTools, AgentPromptRequest, AgentYoloRequest};
+    AgentMcpResult, AgentMcpTools, AgentPromptRequest};
 use hub_client::filehub::{
     self, hub_request::Op, hub_response, GetAiConfigRequest, GetCapabilitiesRequest,
     GetHistoryRequest, GetModelsRequest, HubRequest, ListSessionsRequest, RemoteMcpCall,
@@ -24,7 +24,7 @@ use crate::model_info::ModelCatalog;
 pub struct Hub {
     connection: hub_client::Connection,
     /// Request ids are handed out concurrently: a run stream and a control
-    /// request (cancel, steering, yolo) share one connection without a lock.
+    /// request (cancel, steering) share one connection without a lock.
     next_id: AtomicU32,
     pub caller: String,
 }
@@ -236,16 +236,6 @@ impl Hub {
             definitions_json: json,
         }))
         .await?;
-        Ok(())
-    }
-
-    /// Enable or disable full auto-approval for the attached session.
-    ///
-    /// Never gate this behind the run's connection lock: the run holds it for
-    /// its whole lifetime, so the toggle would block until the model finished.
-    pub async fn agent_yolo(&self, enabled: bool) -> Result<(), String> {
-        self.request(Op::AgentYolo(AgentYoloRequest { enabled }))
-            .await?;
         Ok(())
     }
 

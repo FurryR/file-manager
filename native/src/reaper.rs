@@ -33,6 +33,18 @@ fn children() -> &'static Mutex<HashMap<i32, ChildEntry>> {
     CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn spawn_gate() -> &'static Mutex<()> {
+    static GATE: OnceLock<Mutex<()>> = OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(()))
+}
+
+/// Hold this from `fork` through [`track`] when a spawn runs off the runtime
+/// thread, so the reaper cannot `waitpid` the child before its owner registers
+/// it and expose the pid to reuse. Never hold it across an await.
+pub fn spawn_guard() -> std::sync::MutexGuard<'static, ()> {
+    spawn_gate().lock().unwrap()
+}
+
 /// Register a freshly spawned child and return its exit subscription.
 ///
 /// Must be called immediately after spawn, before any await: registration has
@@ -102,6 +114,12 @@ fn exit_code(status: i32) -> i32 {
 /// place prevents two owners from stealing the same exit status, and it works
 /// without enumerating `/proc`.
 pub fn reap_orphans() {
+    // Off-runtime spawns hold this from fork until `track`; see `spawn_guard`.
+    // Never wait for it: the runtime thread must not stall behind a fork/exec.
+    // The spawn task reaps again after it registers the child.
+    let Ok(_gate) = spawn_gate().try_lock() else {
+        return;
+    };
     loop {
         let mut status = 0;
         let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };

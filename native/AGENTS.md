@@ -15,7 +15,7 @@ native/
 ├── hub-client/      # Shared hub protocol codegen, socket I/O and SCM_RIGHTS
 ├── wayland/         # Smithay Wayland compositor (libwayland_compositor.so)
 │   ├── src/lib.rs   # run loop, socket bind, Android JNI entry points
-│   ├── src/state.rs # protocol state: xdg-shell, shm, seat, output, fractional scale
+│   ├── src/state.rs # protocol state: xdg-shell, shm, dmabuf, seat, output, fractional scale
 │   ├── src/egl.rs   # EGL context + per-ANativeWindow EGLSurface (android only)
 │   ├── src/render.rs# damage-tracked frame drawing
 │   ├── src/scale.rs # density-derived output scale (fractional + integer fallback)
@@ -31,17 +31,21 @@ native/
 - **Connection lifecycle**: `main()` accept loop + `handle_connection()` — one task per client
 - **Connection auth**: `auth::derive_socket_name` / `auth::verify`; every client must sign the `--key`/`--id`-derived socket's nonce before any request
 - **Abstract socket**: `create_abstract_server()` + `bind_abstract_socket()` (name derived from `--key`/`--id`)
-- **Container lifetime**: the daemon is the container's subreaper (parentage: orphans reparent to it) while `cgroup.procs` is the only enumeration this kernel allows; spawned children join the group and then `unshare(CLONE_NEWCGROUP)` (`cgroup::isolate_view`) so the container manages only its own subtree; `cgroup::install` / `attach_self` / `kill_and_remove` own the group, opened before the chroot and used through `openat`, and `cgroup::sweep` ends groups whose owner died.  The proot backend uses PRoot `--cgroup` (a synthetic cgroup2 hierarchy backed by ppid/session data); resource limits are unavailable there
+- **Container lifetime**: the daemon is the container's subreaper (parentage: orphans reparent to it) while `cgroup.procs` is the only enumeration this kernel allows; spawned children join the group and then `unshare(CLONE_NEWCGROUP)` (`cgroup::isolate_view`) so the container manages only its own subtree; `cgroup::install` / `attach_self` / `kill_and_remove` own the group, opened before the chroot and used through `openat`, and `cgroup::sweep` ends groups whose owner died.  The proot backend uses PRoot `--cgroup` (a synthetic cgroup2 hierarchy backed by ppid/session data); resource limits are unavailable there.  `container::spawn_init()` starts an executable `/init` once as an ordinary child; the daemon remains subreaper and cgroup owner, so init is not PID 1 and a missing `/init` is not an error.  Shutdown sends it a catchable SIGTERM and waits up to 20 s before `cgroup::kill_and_remove()` hard-kills the group
 - **UID check** for data path: `maybe_android_data_path()` — skips `/Android/data` UID trick when root
 - **Progress tracking**: `TaskState` in `HashMap`, tasks spawn via `tokio::spawn`
 - **Shared hub connection**: the agent's `Hub` methods take `&self` (ids are
-  handed out atomically, `hub-client` serializes frames), so `/yolo`, Esc and
-  mid-run steering reach the hub *while* a run streams. Never reintroduce a
-  mutex held across `agent_run` — that deadlocks every control request behind
-  the running turn, which is exactly the `/yolo` freeze this replaced. Cancel
-  and steering are **write-only** (no reply wait): Esc drops the local run state
-  in the same tick and the hub kills the exec trees on its own side, so the
-  stop button never has a timeout to burn.
+  handed out atomically, `hub-client` serializes frames), so Esc and mid-run
+  steering reach the hub *while* a run streams. Never reintroduce a mutex held
+  across `agent_run` — that deadlocks every control request behind the running
+  turn. Cancel and steering are **write-only** (no reply wait): Esc drops the
+  local run state in the same tick and the hub kills the exec trees on its own
+  side, so the stop button never has a timeout to burn.
+- **`/yolo` is terminal-local**: it only sets `App::yolo`, and the UI answers
+  each approval request with `allow` as it arrives (`app/events.rs`,
+  `dispatch_event` in `main.rs`). Never send it to the hub: a control round-trip
+  on the shared connection stalls the draw loop until the hub answers, which is
+  the freeze this removed.
 - **Terminal utilities**: `run0/`, `here/`, `agent/`; common wire transport in `hub-client/`
 - **Agent UI/network**: ratatui + crossterm UI in `agent/src/{ui,terminal,app}.rs`; chat/models/history/online MCP go through the hub (`agent/src/hub.rs`), local stdio MCP in `agent/src/mcp.rs`. A finished title stream means the hub is gone — local abstract sockets do not drop on their own and the hub never evicts a client, so the agent must not re-subscribe or probe
 
@@ -119,6 +123,7 @@ NDK does not ship).
 ## TODO - Bug checks
 
 - [ ] `wayland/src/state.rs`: verify a plain `weston-simple-shm` client maps and fills the output on device, and that `xdg-shell` configure sizes match the logical output size.
+- [ ] `wayland/src/state.rs`: verify `zwp_linux_dmabuf_v1` is advertised with non-zero formats and a dmabuf client (e.g. `weston-simple-egl`, GTK4) renders through imported buffers; a device whose EGL lacks `EGL_EXT_image_dma_buf_import` must log the fallback and keep `wl_shm` working.
 - [ ] `wayland/src/scale.rs` + `state.rs`: verify `wl_output.scale`/`preferred_buffer_scale` and `wp_fractional_scale_v1` report `densityDpi / 160` and update live on `nativeSetScale`.
 - [ ] `wayland/src/egl.rs` + `render.rs`: verify surface re-attach after `SurfaceView` recreate, rotation resize, and that no stale `EGLSurface` is reused.
 - [ ] `wayland/src/input.rs`: verify touch down/move/up, multi-touch slots, mouse buttons/scroll and hardware keyboard typing all reach clients.

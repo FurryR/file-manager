@@ -362,7 +362,6 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                     state.agentJobs.clear()
                     state.agent?.dispose()
                     val sessionId = attach.sessionId.ifBlank { "agent" }
-                    val yolo = state.yoloSessions.contains(sessionId)
                     val session = AgentSession(
                         sessionId = sessionId,
                         terminalId = state.terminalId.ifBlank { attach.terminalId },
@@ -380,7 +379,6 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                 ),
                             )
                         },
-                        yolo = yolo,
                     )
                     state.agent = session
                     Reply(
@@ -390,7 +388,6 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                     .setSessionId(session.sessionId)
                                     .setTarget(session.targetName)
                                     .setCwd(session.cwd)
-                                    .setYolo(yolo)
                                     .build(),
                             ).build(),
                     )
@@ -429,18 +426,6 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                             )
                         }
                     }
-                    Reply(ok(id))
-                }
-
-                HubRequest.OpCase.AGENT_YOLO -> {
-                    val agent = state.agent ?: error("agent is not attached")
-                    val enabled = request.agentYolo.enabled
-                    if (enabled) {
-                        state.yoloSessions.add(agent.sessionId)
-                    } else {
-                        state.yoloSessions.remove(agent.sessionId)
-                    }
-                    agent.setYolo(enabled)
                     Reply(ok(id))
                 }
 
@@ -656,7 +641,6 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
 
                 HubRequest.OpCase.DELETE_SESSION -> {
                     AgentEnvironment.sessionDelete?.invoke(request.deleteSession.sessionId)
-                    state.yoloSessions.remove(request.deleteSession.sessionId)
                     Reply(ok(id))
                 }
 
@@ -793,7 +777,6 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
         val execs = ConcurrentHashMap<Long, OwnedExec>()
         val httpCalls = ConcurrentHashMap<Int, Job>()
         val agentJobs = ConcurrentHashMap<Int, Job>()
-        val yoloSessions: MutableSet<String> = ConcurrentHashMap.newKeySet()
         var agent: AgentSession? = null
 
         fun pty(handle: Long): OwnedPty =

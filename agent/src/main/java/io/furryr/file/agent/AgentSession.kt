@@ -9,6 +9,7 @@ import io.furryr.file.proto.agent.AgentMcpCall
 import io.furryr.file.proto.agent.AgentToolNotice
 import io.furryr.file.proto.agent.AgentUsage
 import io.furryr.file.proto.hub.ChatEvent
+import io.furryr.file.proto.hub.TokenUsage
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -52,6 +53,8 @@ class AgentSession(
     private var messages = JSONArray()
     private var job: Job? = null
     private var mcpDefinitions = JSONArray()
+    private var usage = AgentUsageState()
+    private var compactUsage: TokenUsage? = null
 
     init {
         val stored = runCatching { AgentEnvironment.sessionLoad?.invoke(sessionId) }.getOrNull()
@@ -59,6 +62,15 @@ class AgentSession(
             messages = runCatching { JSONArray(stored) }.getOrElse { JSONArray() }
             repairDanglingToolCalls(messages)
         }
+        usage = runCatching { AgentEnvironment.sessionUsageLoad?.invoke(sessionId) }.getOrNull()
+            ?: AgentUsageState()
+    }
+
+    /** Token accounting persisted by the app and returned on attach. */
+    fun usage(): AgentUsageState = usage
+
+    private fun saveUsage() {
+        runCatching { AgentEnvironment.sessionUsageSave?.invoke(sessionId, usage) }
     }
 
     /** Register the MCP host's tool definitions once it finishes initialization. */
@@ -85,25 +97,9 @@ class AgentSession(
 
     private suspend fun compactLocked(model: String, effort: String): AgentOutcome {
         if (messages.length() == 0) error("nothing to compact")
-        val transcript = transcriptText()
-        val summary = AiService.complete(
-            model = model,
-            effort = effort,
-            system = "Compress the conversation below into a concise handoff summary. Keep " +
-                "decisions, constraints, file paths, code changes, tool results and open " +
-                "questions. Reply with only the summary.",
-            history = JSONArray().put(
-                JSONObject().put("role", "user").put("content", transcript),
-            ),
-            toolsJson = "[]",
-            emit = {},
-        )?.content?.trim().orEmpty()
-        if (summary.isEmpty()) error("the model returned an empty summary")
-        val compacted = JSONObject()
-            .put("role", "user")
-            .put("content", "Summary of the earlier conversation (compacted):\n$summary")
-        messages = JSONArray().put(compacted)
-        persist()
+        val summary = summarize(model, effort)
+        appendCompaction(summary)
+        compactUsage?.let { emit(usageEvent(it.promptTokens, it.completionTokens)) }
         emit(
             AgentEvent.newBuilder().setFinished(
                 AgentFinished.newBuilder()
@@ -116,9 +112,115 @@ class AgentSession(
         return AgentOutcome(messages.toString(), summary)
     }
 
-    private fun transcriptText(): String = buildString {
-        for (index in 0 until messages.length()) {
+    /**
+     * Ask the model for a handoff summary. The previous history stays in
+     * [messages]; [appendCompaction] starts a new context without deleting it,
+     * so the transcript keeps everything and /undo can restore the old one.
+     */
+    private suspend fun summarize(model: String, effort: String): String {
+        val history = contextMessages()
+        var lastUsage: TokenUsage? = null
+        val summary = AiService.complete(
+            model = model,
+            effort = effort,
+            system = "Compress the conversation below into a concise handoff summary. Keep " +
+                "decisions, constraints, file paths, code changes, tool results and open " +
+                "questions. Reply with only the summary.",
+            history = JSONArray().put(
+                JSONObject().put("role", "user").put("content", transcriptText(history)),
+            ),
+            toolsJson = "[]",
+            emit = { event ->
+                if (event.hasUsage()) lastUsage = event.usage
+            },
+        )?.content?.trim().orEmpty()
+        if (summary.isEmpty()) error("the model returned an empty summary")
+        val billed = lastUsage
+        if (billed != null) {
+            // The summary request's completion is the new context size: it is
+            // all the next request will carry over.
+            applyUsage(billed, contextTokens = billed.completionTokens)
+        }
+        compactUsage = billed
+        return summary
+    }
+
+    private suspend fun appendCompaction(summary: String) {
+        append(
+            JSONObject()
+                .put("role", "user")
+                .put("content", "Summary of the earlier conversation (compacted):\n$summary")
+                .put("compaction_summary", true),
+        )
+        persist()
+        emit(
+            AgentEvent.newBuilder().setCompaction(
+                io.furryr.file.proto.agent.AgentCompaction.newBuilder()
+                    .setSummary(summary)
+                    .build(),
+            ).build(),
+        )
+    }
+
+    /** Messages the provider receives: everything after the newest compaction. */
+    private fun contextMessages(): JSONArray {
+        var start = 0
+        for (index in messages.length() - 1 downTo 0) {
             val message = messages.optJSONObject(index) ?: continue
+            if (message.optBoolean("compaction_summary", false)) {
+                start = index
+                break
+            }
+        }
+        if (start == 0) return messages
+        return JSONArray().apply {
+            for (index in start until messages.length()) {
+                messages.optJSONObject(index)?.let(::put)
+            }
+        }
+    }
+
+    private fun applyUsage(value: TokenUsage, contextTokens: Long? = null) {
+        usage = AgentUsageState(
+            contextTokens = contextTokens ?: value.promptTokens,
+            promptTokens = usage.promptTokens + value.promptTokens,
+            completionTokens = usage.completionTokens + value.completionTokens,
+            requests = usage.requests + 1,
+        )
+        saveUsage()
+    }
+
+    private fun usageEvent(prompt: Long, completion: Long): AgentEvent =
+        AgentEvent.newBuilder()
+            .setUsage(
+                AgentUsage.newBuilder()
+                    .setPromptTokens(prompt)
+                    .setCompletionTokens(completion)
+                    .setContextTokens(usage.contextTokens)
+                    .build(),
+            )
+            .build()
+
+    /** Rough token estimate used only before the first request of a session. */
+    private fun estimateTokens(): Long =
+        (transcriptText(contextMessages()).length / 4).toLong()
+
+    private suspend fun maybeAutoCompact() {
+        val window = runCatching { AgentEnvironment.modelContextWindow?.invoke(model) }
+            .getOrNull() ?: return
+        if (window <= 0) return
+        // A restored session may predate usage persistence; estimate from the
+        // text so the first request cannot walk straight into the limit.
+        val used = usage.contextTokens.takeIf { it > 0 } ?: estimateTokens()
+        if (used < (window * AUTO_COMPACT_PERCENT) / 100) return
+        val summary = summarize(model, effort)
+        appendCompaction(summary)
+        compactUsage?.let { emit(usageEvent(it.promptTokens, it.completionTokens)) }
+    }
+
+    private fun transcriptText(source: JSONArray): String = buildString {
+        for (index in 0 until source.length()) {
+            val message = source.optJSONObject(index) ?: continue
             val role = message.optString("role")
             append(
                 when (role) {
@@ -164,12 +266,13 @@ class AgentSession(
     }
 
     /** Move queued prompts into the conversation; true when anything was added. */
-    private fun drainSteering(): Boolean {
+    private suspend fun drainSteering(): Boolean {
         var inserted = false
         while (true) {
             val prompt = steering.poll() ?: break
             append(JSONObject().put("role", "user").put("content", prompt))
             inserted = true
+            emit(AgentEvent.newBuilder().setAcceptedPrompt(prompt).build())
         }
         if (inserted) persist()
         return inserted
@@ -232,6 +335,9 @@ class AgentSession(
 
     private suspend fun run(prompt: String) {
         try {
+            // Compact the old context before adding this prompt so the prompt
+            // itself stays visible to the model after the divider.
+            maybeAutoCompact()
             append(JSONObject().put("role", "user").put("content", prompt))
             persist()
             maybeTitle(prompt)
@@ -239,13 +345,16 @@ class AgentSession(
                 // Anything that arrived while the previous turn was streaming
                 // lands here, before the next model request.
                 drainSteering()
+                // Compact before the context would overflow instead of letting
+                // the provider reject the request at the limit.
+                maybeAutoCompact()
                 var toolCalls = JSONArray()
                 var error: String? = null
                 val result = AiService.complete(
                     model = model,
                     effort = effort,
                     system = SystemPrompt.build(target, targetName, cwd),
-                    history = messages,
+                    history = contextMessages(),
                     toolsJson = toolsJson(),
                 ) { event -> mapChatEvent(event, onToolCalls = { toolCalls = it }, onError = { error = it }) }
                     ?: run {
@@ -352,9 +461,10 @@ class AgentSession(
         val isBuiltin = name in BUILTINS
         val args = runCatching { JSONObject(arguments.ifBlank { "{}" }) }.getOrNull() ?: JSONObject()
         if (isBuiltin) {
-            val reason = AgentPolicy.approvalReason(name, args, cwd)
+            val reason = AgentPolicy.approvalReason(name, args, cwd, targetName)
             if (reason != null) {
-                val allowed = requestApproval(callId, name, reason)
+                val detail = AgentTools.info(name, arguments).detail
+                val allowed = requestApproval(callId, name, detail, reason)
                 if (!allowed) {
                     return ToolResult(false, "Tool call denied by the user.")
                 }
@@ -377,14 +487,20 @@ class AgentSession(
         return if (result.ok) result.copy(content = AgentTools.bound(result.content)) else result
     }
 
-    private suspend fun requestApproval(callId: String, name: String, reason: String): Boolean {
+    private suspend fun requestApproval(
+        callId: String,
+        name: String,
+        detail: String,
+        reason: String,
+    ): Boolean {
         val id = nextApproval.getAndIncrement()
         val deferred = CompletableDeferred<Boolean>()
         pendingApproval[id] = deferred
         emit(
             AgentEvent.newBuilder().setApproval(
                 AgentApprovalRequest.newBuilder()
-                    .setApprovalId(id).setCallId(callId).setName(name).setReason(reason)
+                    .setApprovalId(id).setCallId(callId).setName(name)
+                    .setDetail(detail).setReason(reason)
                     .build(),
             ).build(),
         )
@@ -437,14 +553,10 @@ class AgentSession(
                 AgentEvent.newBuilder().setContentDelta(event.contentDelta).build(),
             )
             event.toolCalling -> emit(AgentEvent.newBuilder().setToolCalling(true).build())
-            event.hasUsage() -> emit(
-                AgentEvent.newBuilder().setUsage(
-                    AgentUsage.newBuilder()
-                        .setPromptTokens(event.usage.promptTokens)
-                        .setCompletionTokens(event.usage.completionTokens)
-                        .build(),
-                ).build(),
-            )
+            event.hasUsage() -> {
+                applyUsage(event.usage)
+                emit(usageEvent(event.usage.promptTokens, event.usage.completionTokens))
+            }
             event.hasToolCallsJson() -> runCatching { JSONArray(event.toolCallsJson) }
                 .onSuccess(onToolCalls)
             event.hasError() -> onError(event.error)
@@ -520,6 +632,7 @@ class AgentSession(
         private const val APPROVAL_TIMEOUT_MS = 120_000L
         private const val KILL_TIMEOUT_MS = 3_000L
         private const val MCP_TIMEOUT_MS = 600_000L
+        private const val AUTO_COMPACT_PERCENT = 85L
     }
     data class AgentOutcome(val messagesJson: String, val answer: String)
 }

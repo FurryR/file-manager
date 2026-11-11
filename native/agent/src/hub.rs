@@ -56,7 +56,20 @@ impl Drop for TitleStream {
 pub struct SessionEntry {
     pub id: String,
     pub title: String,
-    pub message_count: u32,
+    pub created_at: u64,
+}
+
+/// Token accounting returned with an attachment.
+#[derive(Clone, Copy, Default)]
+pub struct AttachUsage {
+    pub context_tokens: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub requests: u64,
+}
+
+pub struct AttachResult {
+    pub usage: AttachUsage,
 }
 
 /// Remote MCP servers the hub may proxy for this caller, plus whether
@@ -130,7 +143,7 @@ impl Hub {
                 .map(|session| SessionEntry {
                     id: session.id,
                     title: session.title,
-                    message_count: session.message_count,
+                    created_at: session.created_at,
                 })
                 .collect()),
             _ => Err("hub returned no sessions".to_owned()),
@@ -212,7 +225,7 @@ impl Hub {
         model: &str,
         effort: &str,
         workspace_mcp: bool,
-    ) -> Result<fileagent::AgentAttachResponse, String> {
+    ) -> Result<AttachResult, String> {
         let response = self
             .request(Op::AgentAttach(AgentAttachRequest {
                 session_id: session_id.to_owned(),
@@ -225,7 +238,14 @@ impl Hub {
             }))
             .await?;
         match response.result {
-            Some(hub_response::Result::AgentAttach(attach)) => Ok(attach),
+            Some(hub_response::Result::AgentAttach(attach)) => Ok(AttachResult {
+                usage: AttachUsage {
+                    context_tokens: attach.context_tokens,
+                    prompt_tokens: attach.prompt_tokens,
+                    completion_tokens: attach.completion_tokens,
+                    requests: attach.requests,
+                },
+            }),
             _ => Err("hub returned no agent attachment".to_owned()),
         }
     }
@@ -291,6 +311,7 @@ impl Hub {
             .map_err(|error| error.to_string())?;
         let mut finished: Option<AgentOutcome> = None;
         let mut error: Option<String> = None;
+        let mut usage: Option<Usage> = None;
         loop {
             let (response, _) = self
                 .connection
@@ -308,12 +329,20 @@ impl Hub {
                 return Err("hub returned no compact event".to_owned());
             };
             match event.event {
+                Some(agent_event::Event::Usage(value)) => {
+                    usage = Some(Usage {
+                        prompt_tokens: value.prompt_tokens,
+                        completion_tokens: value.completion_tokens,
+                        context_tokens: value.context_tokens,
+                    });
+                }
                 Some(agent_event::Event::Finished(done)) => {
                     let messages = serde_json::from_str::<Vec<Message>>(&done.messages_json)
                         .unwrap_or_default();
                     finished = Some(AgentOutcome {
                         messages,
                         answer: done.answer,
+                        usage,
                     });
                 }
                 Some(agent_event::Event::Error(message)) => error = Some(message),
@@ -406,14 +435,22 @@ impl Hub {
                             let _ = events.send(AgentEvent::Usage(Usage {
                                 prompt_tokens: usage.prompt_tokens,
                                 completion_tokens: usage.completion_tokens,
+                                context_tokens: usage.context_tokens,
                             }));
                         }
                         Some(agent_event::Event::Approval(request)) => {
                             let _ = events.send(AgentEvent::ApprovalRequest {
                                 id: request.approval_id,
                                 name: request.name,
+                                detail: request.detail,
                                 reason: request.reason,
                             });
+                        }
+                        Some(agent_event::Event::AcceptedPrompt(prompt)) => {
+                            let _ = events.send(AgentEvent::AcceptedPrompt(prompt));
+                        }
+                        Some(agent_event::Event::Compaction(compaction)) => {
+                            let _ = events.send(AgentEvent::Compaction(compaction.summary));
                         }
                         Some(agent_event::Event::McpCall(call)) => {
                             let args = serde_json::from_str(&call.arguments)
@@ -436,6 +473,7 @@ impl Hub {
                             finished = Some(AgentOutcome {
                                 messages,
                                 answer: done.answer,
+                                usage: None,
                             });
                         }
                         Some(agent_event::Event::Error(message)) => error = Some(message),
@@ -602,6 +640,7 @@ impl Hub {
 pub struct AgentOutcome {
     pub messages: Vec<Message>,
     pub answer: String,
+    pub usage: Option<Usage>,
 }
 
 #[derive(Default)]

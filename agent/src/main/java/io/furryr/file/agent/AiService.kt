@@ -24,6 +24,34 @@ import java.net.URL
 object AiService {
     private const val MAX_METADATA = 4 * 1024 * 1024
 
+    private data class Resolved(
+        val provider: AgentAiProvider,
+        val model: String,
+    )
+
+    /** A qualified model is `Provider/model`; the longest provider name wins. */
+    private fun resolve(config: AgentAiConfig, model: String): Resolved {
+        val providers = config.providers.ifEmpty {
+            listOf(
+                AgentAiProvider(
+                    name = config.provider.ifBlank { "Default" },
+                    baseUrl = config.baseUrl,
+                    apiKey = config.apiKey,
+                    kind = config.kind,
+                ),
+            )
+        }
+        val matched = providers
+            .filter { model.startsWith("${it.name}/") }
+            .maxByOrNull { it.name.length }
+        if (matched != null) {
+            return Resolved(matched, model.removePrefix("${matched.name}/"))
+        }
+        val preferred = providers.firstOrNull { it.name == config.provider }
+            ?: providers.first()
+        return Resolved(preferred, model)
+    }
+
     suspend fun complete(
         model: String,
         effort: String,
@@ -47,19 +75,26 @@ object AiService {
         toolsJson: String,
         emit: suspend (ChatEvent) -> Unit,
     ): ChatResult? {
-        val url = endpoint(config.baseUrl)
-        val body = JSONObject().apply {
-            put("model", model)
-            put("stream", true)
-            put("stream_options", JSONObject().put("include_usage", true))
-            put("messages", providerMessages(system, history))
-            if (effort.isNotBlank() && effort != "auto") {
-                put("reasoning_effort", effort)
-            }
-            val tools = runCatching { JSONArray(toolsJson) }.getOrNull()
-            if (tools != null && tools.length() > 0) {
-                put("tools", tools)
-                put("tool_choice", "auto")
+        val resolved = resolve(config, model)
+        val provider = resolved.provider
+        val responses = provider.kind == AGENT_PROVIDER_RESPONSES
+        val url = if (responses) responsesEndpoint(provider.baseUrl) else endpoint(provider.baseUrl)
+        val body = if (responses) {
+            responsesBody(resolved.model, effort, system, history, toolsJson)
+        } else {
+            JSONObject().apply {
+                put("model", resolved.model)
+                put("stream", true)
+                put("stream_options", JSONObject().put("include_usage", true))
+                put("messages", providerMessages(system, history))
+                if (effort.isNotBlank() && effort != "auto") {
+                    put("reasoning_effort", effort)
+                }
+                val tools = runCatching { JSONArray(toolsJson) }.getOrNull()
+                if (tools != null && tools.length() > 0) {
+                    put("tools", tools)
+                    put("tool_choice", "auto")
+                }
             }
         }
         return withContext(Dispatchers.IO) {
@@ -71,8 +106,8 @@ object AiService {
                 readTimeout = 600_000
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "text/event-stream")
-                if (config.apiKey.isNotEmpty()) {
-                    setRequestProperty("Authorization", "Bearer ${config.apiKey}")
+                if (provider.apiKey.isNotEmpty()) {
+                    setRequestProperty("Authorization", "Bearer ${provider.apiKey}")
                 }
             }
             val cancelWatcher = launch(start = CoroutineStart.UNDISPATCHED) {
@@ -143,23 +178,29 @@ object AiService {
     private fun generateTitle(model: String, firstUser: String): String? {
         val config = runCatching { AgentEnvironment.aiConfigProvider?.invoke() }.getOrNull()
             ?: return null
-        val url = runCatching { endpoint(config.baseUrl) }.getOrNull() ?: return null
+        val selected = config.titleModel.ifBlank { model.ifBlank { config.model } }
+        val resolved = resolve(config, selected)
+        val responses = resolved.provider.kind == AGENT_PROVIDER_RESPONSES
+        val url = runCatching {
+            if (responses) responsesEndpoint(resolved.provider.baseUrl)
+            else endpoint(resolved.provider.baseUrl)
+        }.getOrNull() ?: return null
+        val prompt = "Create a short title (at most 8 words) for the conversation that starts " +
+            "with the user message below. Reply with only the title, without quotes."
         val body = JSONObject().apply {
-            put("model", config.titleModel.ifBlank { model.ifBlank { config.model } })
+            put("model", resolved.model)
             put("stream", false)
-            put("max_tokens", 256)
-            put("messages", JSONArray().apply {
-                put(
-                    JSONObject().put("role", "system").put(
-                        "content",
-                        "Create a short title (at most 8 words) for the conversation that starts " +
-                            "with the user message below. Reply with only the title, without quotes.",
-                    ),
-                )
-                put(
-                    JSONObject().put("role", "user").put("content", firstUser.take(2000)),
-                )
-            })
+            if (responses) {
+                put("instructions", prompt)
+                put("input", firstUser.take(2000))
+                put("max_output_tokens", 256)
+            } else {
+                put("max_tokens", 256)
+                put("messages", JSONArray().apply {
+                    put(JSONObject().put("role", "system").put("content", prompt))
+                    put(JSONObject().put("role", "user").put("content", firstUser.take(2000)))
+                })
+            }
         }
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -169,20 +210,31 @@ object AiService {
             readTimeout = 20_000
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Accept", "application/json")
-            if (config.apiKey.isNotEmpty()) {
-                setRequestProperty("Authorization", "Bearer ${config.apiKey}")
+            if (resolved.provider.apiKey.isNotEmpty()) {
+                setRequestProperty("Authorization", "Bearer ${resolved.provider.apiKey}")
             }
         }
         return try {
             connection.outputStream.use { it.write(body.toString().toByteArray()) }
             if (connection.responseCode !in 200..299) return null
             val text = connection.inputStream.bufferedReader().use { it.readText() }
-            val content = JSONObject(text)
-                .optJSONArray("choices")
-                ?.optJSONObject(0)
-                ?.optJSONObject("message")
-                ?.optString("content")
-                .orEmpty()
+            val root = JSONObject(text)
+            val content = if (responses) {
+                root.optString("output_text").ifBlank {
+                    root.optJSONArray("output")
+                        ?.optJSONObject(0)
+                        ?.optJSONArray("content")
+                        ?.optJSONObject(0)
+                        ?.optString("text")
+                        .orEmpty()
+                }
+            } else {
+                root.optJSONArray("choices")
+                    ?.optJSONObject(0)
+                    ?.optJSONObject("message")
+                    ?.optString("content")
+                    .orEmpty()
+            }
             content
                 .replace(Regex("\\s+"), " ")
                 .trim()
@@ -203,20 +255,44 @@ object AiService {
         val config = requireNotNull(AgentEnvironment.aiConfigProvider) {
             "AI configuration is unavailable"
         }.invoke()
-        val chatUrl = endpoint(config.baseUrl)
-        val catalog = Catalog()
-        for (pricingUrl in pricingEndpoints(chatUrl)) {
-            val json = getJson(pricingUrl, config.apiKey) ?: continue
-            catalog.applyPricing(json)
-            if (catalog.info.isNotEmpty()) break
+        val providers = config.providers.ifEmpty {
+            listOf(
+                AgentAiProvider(
+                    name = config.provider.ifBlank { "Default" },
+                    baseUrl = config.baseUrl,
+                    apiKey = config.apiKey,
+                    kind = config.kind,
+                ),
+            )
         }
-        modelsEndpoint(chatUrl)?.let { url ->
-            getJson(url, config.apiKey)?.let(catalog::applyModels)
+        val catalog = Catalog()
+        for (provider in providers) {
+            val chatUrl = runCatching { endpoint(provider.baseUrl) }.getOrNull()
+            if (chatUrl != null && provider.kind != AGENT_PROVIDER_RESPONSES) {
+                for (pricingUrl in pricingEndpoints(chatUrl)) {
+                    val json = getJson(pricingUrl, provider.apiKey) ?: continue
+                    catalog.applyPricing(json, provider.name)
+                    if (catalog.hasModels(provider.name)) break
+                }
+            }
+            val live = chatUrl?.let { modelsEndpoint(it) }
+                ?.let { getJson(it, provider.apiKey) }
+                ?.let(::modelEntries)
+                .orEmpty()
+            catalog.applyProvider(provider, live)
         }
         if (catalog.models.isEmpty()) {
             catalog.models.addAll(catalog.info.keys.sorted())
         }
         return catalog.toJson()
+    }
+
+    /** Model objects from either `{"data":[...]}` or a bare array. */
+    private fun modelEntries(json: JSONObject): List<JSONObject> {
+        val array = json.optJSONArray("data")
+            ?: json.optJSONArray("models")
+            ?: return emptyList()
+        return (0 until array.length()).mapNotNull { array.optJSONObject(it) }
     }
 
     private fun providerMessages(system: String, history: JSONArray): JSONArray {
@@ -225,9 +301,85 @@ object AiService {
             array.put(JSONObject().put("role", "system").put("content", system))
         }
         for (index in 0 until history.length()) {
-            history.optJSONObject(index)?.let { array.put(it) }
+            val message = history.optJSONObject(index) ?: continue
+            // `compaction_summary` is transcript metadata, not wire format.
+            val clean = JSONObject()
+            message.keys().forEach { key ->
+                if (key != "compaction_summary") clean.put(key, message.opt(key))
+            }
+            array.put(clean)
         }
         return array
+    }
+
+    /** Responses API request: `instructions` + typed input items. */
+    private fun responsesBody(
+        model: String,
+        effort: String,
+        system: String,
+        history: JSONArray,
+        toolsJson: String,
+    ): JSONObject = JSONObject().apply {
+        put("model", model)
+        put("stream", true)
+        if (system.isNotBlank()) put("instructions", system)
+        val input = JSONArray()
+        for (index in 0 until history.length()) {
+            val message = history.optJSONObject(index) ?: continue
+            when (message.optString("role")) {
+                "assistant" -> {
+                    val content = message.optString("content")
+                    if (content.isNotBlank()) {
+                        input.put(JSONObject().put("role", "assistant").put("content", content))
+                    }
+                    val calls = message.optJSONArray("tool_calls")
+                    if (calls != null) {
+                        for (callIndex in 0 until calls.length()) {
+                            val call = calls.optJSONObject(callIndex) ?: continue
+                            val function = call.optJSONObject("function") ?: continue
+                            input.put(
+                                JSONObject()
+                                    .put("type", "function_call")
+                                    .put("call_id", call.optString("id"))
+                                    .put("name", function.optString("name"))
+                                    .put("arguments", function.optString("arguments")),
+                            )
+                        }
+                    }
+                }
+                "tool" -> input.put(
+                    JSONObject()
+                        .put("type", "function_call_output")
+                        .put("call_id", message.optString("tool_call_id"))
+                        .put("output", message.optString("content")),
+                )
+                else -> input.put(
+                    JSONObject()
+                        .put("role", message.optString("role").ifBlank { "user" })
+                        .put("content", message.optString("content")),
+                )
+            }
+        }
+        put("input", input)
+        if (effort.isNotBlank() && effort != "auto") {
+            put("reasoning", JSONObject().put("effort", effort))
+        }
+        val tools = runCatching { JSONArray(toolsJson) }.getOrNull()
+        if (tools != null && tools.length() > 0) {
+            val converted = JSONArray()
+            for (index in 0 until tools.length()) {
+                val tool = tools.optJSONObject(index)?.optJSONObject("function") ?: continue
+                converted.put(
+                    JSONObject()
+                        .put("type", "function")
+                        .put("name", tool.optString("name"))
+                        .put("description", tool.optString("description"))
+                        .put("parameters", tool.optJSONObject("parameters") ?: JSONObject()),
+                )
+            }
+            put("tools", converted)
+            put("tool_choice", "auto")
+        }
     }
 
     private suspend fun emitError(emit: suspend (ChatEvent) -> Unit, message: String) {
@@ -394,6 +546,17 @@ object AiService {
         val trimmed = base.trim().trimEnd('/')
         val address = if (trimmed.endsWith("/chat/completions")) trimmed
         else "$trimmed/chat/completions"
+        val url = URL(address)
+        require(url.protocol == "http" || url.protocol == "https") {
+            "AI base URL must be HTTP(S)"
+        }
+        require(url.host.isNotBlank()) { "AI base URL has no host" }
+        return address
+    }
+
+    private fun responsesEndpoint(base: String): String {
+        val trimmed = base.trim().trimEnd('/')
+        val address = if (trimmed.endsWith("/responses")) trimmed else "$trimmed/responses"
         val url = URL(address)
         require(url.protocol == "http" || url.protocol == "https") {
             "AI base URL must be HTTP(S)"
@@ -573,7 +736,10 @@ object AiService {
         val models = ArrayList<String>()
         val info = LinkedHashMap<String, JSONObject>()
 
-        fun applyPricing(json: JSONObject) {
+        fun hasModels(provider: String): Boolean =
+            models.any { it.startsWith("$provider/") }
+
+        fun applyPricing(json: JSONObject, provider: String) {
             val group = json.optJSONObject("group_ratio")?.let { groups ->
                 groups.optDouble("default").takeIf { !it.isNaN() }
                     ?: groups.keys().asSequence().mapNotNull { key ->
@@ -583,8 +749,10 @@ object AiService {
             val entries = json.optJSONArray("data") ?: return
             for (index in 0 until entries.length()) {
                 val entry = entries.optJSONObject(index) ?: continue
-                val name = entry.optString("model_name").takeIf { it.isNotEmpty() } ?: continue
-                val info = info.getOrPut(name) { JSONObject() }
+                val id = entry.optString("model_name").takeIf { it.isNotEmpty() } ?: continue
+                val qualified = "$provider/$id"
+                if (qualified !in models) models.add(qualified)
+                val info = info.getOrPut(qualified) { baseInfo(provider) }
                 if (!info.has("context_window")) {
                     contextOf(entry)?.let { info.put("context_window", it) }
                 }
@@ -603,18 +771,104 @@ object AiService {
             }
         }
 
-        fun applyModels(json: JSONObject) {
-            val entries = json.optJSONArray("data") ?: return
-            for (index in 0 until entries.length()) {
-                val entry = entries.optJSONObject(index) ?: continue
-                val id = entry.optString("id").ifBlank { entry.optString("model") }
-                if (id.isEmpty()) continue
-                if (id !in models) models.add(id)
-                contextOf(entry)?.let {
-                    info.getOrPut(id) { JSONObject() }.put("context_window", it)
-                }
+        /**
+         * Merge live `/models` entries with the models configured in the app.
+         * Configured limits and prices win; capabilities and efforts are filled
+         * in when the API or the model family exposes them.
+         */
+        fun applyProvider(provider: AgentAiProvider, live: List<JSONObject>) {
+            val configured = provider.models.associateBy { it.id }
+            for (model in provider.models) {
+                add(provider, model.id, model, live.firstOrNull { idOf(it) == model.id })
+            }
+            for (entry in live) {
+                val id = idOf(entry) ?: continue
+                if (configured.containsKey(id)) continue
+                add(provider, id, null, entry)
             }
         }
+
+        private fun add(
+            provider: AgentAiProvider,
+            id: String,
+            configured: AgentModelConfig?,
+            live: JSONObject?,
+        ) {
+            val qualified = "${provider.name}/$id"
+            if (qualified !in models) models.add(qualified)
+            val info = info.getOrPut(qualified) { baseInfo(provider.name) }
+            val context = configured?.contextWindow?.takeIf { it > 0 } ?: live?.let(::contextOf)
+            if (context != null && !info.has("context_window")) {
+                info.put("context_window", context)
+            }
+            val maxOutput = configured?.maxOutput?.takeIf { it > 0 }
+                ?: live?.let(::maxOutputOf)
+            if (maxOutput != null && !info.has("max_output")) info.put("max_output", maxOutput)
+            if (configured != null) {
+                if (configured.inputPerMillion > 0.0 && !info.has("input_per_million")) {
+                    info.put("input_per_million", configured.inputPerMillion)
+                }
+                if (configured.outputPerMillion > 0.0 && !info.has("output_per_million")) {
+                    info.put("output_per_million", configured.outputPerMillion)
+                }
+                if (configured.cacheReadPerMillion > 0.0 && !info.has("cache_read_per_million")) {
+                    info.put("cache_read_per_million", configured.cacheReadPerMillion)
+                }
+                if (configured.cacheWritePerMillion > 0.0 && !info.has("cache_write_per_million")) {
+                    info.put("cache_write_per_million", configured.cacheWritePerMillion)
+                }
+            }
+            // OpenRouter-style per-token pricing and modalities.
+            live?.optJSONObject("pricing")?.let { pricing ->
+                val prompt = pricing.optDouble("prompt", 0.0)
+                val completion = pricing.optDouble("completion", 0.0)
+                val cacheRead = pricing.optDouble("input_cache_read", 0.0)
+                val cacheWrite = pricing.optDouble("input_cache_write", 0.0)
+                if (prompt > 0.0 && !info.has("input_per_million")) {
+                    info.put("input_per_million", prompt * 1_000_000.0)
+                }
+                if (completion > 0.0 && !info.has("output_per_million")) {
+                    info.put("output_per_million", completion * 1_000_000.0)
+                }
+                if (cacheRead > 0.0 && !info.has("cache_read_per_million")) {
+                    info.put("cache_read_per_million", cacheRead * 1_000_000.0)
+                }
+                if (cacheWrite > 0.0 && !info.has("cache_write_per_million")) {
+                    info.put("cache_write_per_million", cacheWrite * 1_000_000.0)
+                }
+            }
+            // Capabilities come from the configured model or the provider's
+            // own metadata. Never infer them from a model-name table.
+            val thinking = configured?.thinking
+                ?: live?.let { capability(it, "thinking", "reasoning") }
+                ?: false
+            val vision = configured?.vision
+                ?: live?.let { capability(it, "vision") }
+                ?: false
+            val toolCall = configured?.toolCall
+                ?: live?.let { capability(it, "tool_call", "tools", "function_calling") }
+                ?: true
+            info.put("thinking", thinking)
+            info.put("vision", vision)
+            info.put("tool_call", toolCall)
+            if (!info.has("efforts")) {
+                // TODO(effort discovery): most providers do not report their
+                // accepted reasoning-effort values yet. Parse the generic keys
+                // below when present; otherwise only configured values (or
+                // `auto`) are offered. No model-name table, no fixed scale.
+                val efforts = configured?.efforts?.filter { it.isNotBlank() }
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: live?.let(::effortsOf)
+                    ?: emptyList()
+                info.put("efforts", JSONArray().apply { efforts.forEach(::put) })
+            }
+        }
+
+        private fun baseInfo(provider: String) = JSONObject().put("provider", provider)
+
+        private fun idOf(entry: JSONObject): String? =
+            entry.optString("id").ifBlank { entry.optString("model") }
+                .takeIf { it.isNotEmpty() }
 
         fun toJson(): String {
             val modelArray = JSONArray()
@@ -644,6 +898,22 @@ object AiService {
             return null
         }
 
+        private fun maxOutputOf(value: JSONObject): Long? {
+            val keys = listOf(
+                "max_output_tokens", "max_completion_tokens", "output_token_limit",
+                "max_tokens",
+            )
+            for (key in keys) {
+                positiveLong(value.opt(key))?.let { return it }
+            }
+            for (key in listOf("top_provider", "limits")) {
+                value.optJSONObject(key)?.let { nested ->
+                    maxOutputOf(nested)?.let { return it }
+                }
+            }
+            return null
+        }
+
         private fun positiveLong(value: Any?): Long? {
             val number = when (value) {
                 is Number -> value.toDouble()
@@ -652,6 +922,55 @@ object AiService {
             } ?: return null
             return number.toLong().takeIf { number > 0.0 }
         }
+    }
+
+    private fun effortsOf(entry: JSONObject): List<String> {
+        val keys = listOf(
+            "reasoning_efforts", "reasoning_effort", "supported_efforts",
+            "effort_levels", "efforts",
+        )
+        for (key in keys) {
+            entry.optJSONArray(key)?.let { values ->
+                val list = (0 until values.length()).mapNotNull {
+                    values.optString(it).trim().takeIf(String::isNotEmpty)
+                }
+                if (list.isNotEmpty()) return list
+            }
+            for (container in listOf("capabilities", "metadata", "meta", "reasoning")) {
+                val nested = entry.optJSONObject(container) ?: continue
+                effortsOf(nested).takeIf { it.isNotEmpty() }?.let { return it }
+            }
+        }
+        return emptyList()
+    }
+
+    /** Read a capability flag from flat fields or a nested capabilities object. */
+    private fun capability(entry: JSONObject, vararg names: String): Boolean {
+        for (name in names) {
+            if (entry.has(name)) return entry.optBoolean(name)
+            for (container in listOf("capabilities", "metadata", "meta")) {
+                val nested = entry.optJSONObject(container) ?: continue
+                if (nested.has(name)) return nested.optBoolean(name)
+            }
+        }
+        // OpenRouter exposes modalities and supported parameters as lists.
+        entry.optJSONObject("architecture")?.optJSONArray("input_modalities")?.let { values ->
+            for (index in 0 until values.length()) {
+                val value = values.optString(index)
+                if (names.any { value.contains(it, ignoreCase = true) } ||
+                    (names.any { it == "vision" } && value.equals("image", true))
+                ) {
+                    return true
+                }
+            }
+        }
+        entry.optJSONArray("supported_parameters")?.let { values ->
+            for (index in 0 until values.length()) {
+                val value = values.optString(index)
+                if (names.any { value.contains(it, ignoreCase = true) }) return true
+            }
+        }
+        return false
     }
     data class ChatResult(
         val content: String,

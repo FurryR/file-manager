@@ -1,6 +1,8 @@
 package io.furryr.file.render
 
 import android.content.Context
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.FilterAlt
@@ -27,6 +29,12 @@ class DirectorySession(
         )
 
     suspend fun load(): Result<List<VNode>> = folder.listNodes().onSuccess { entries = it }
+
+    @Composable
+    override fun Content(darkTheme: Boolean, modifier: Modifier) {
+        // Directory tabs are still drawn by FileListScreen; this controller is
+        // only used when a folder is opened through the renderer table.
+    }
 
     override fun close() {
         // Provider folders hold no independent resources. Container sources are
@@ -68,13 +76,13 @@ class DirectoryRendererFactory : RendererFactory {
     override val id: String = "directory"
 
     override fun supports(target: RenderTarget): Boolean =
-        target is RenderTarget.Node && target.node is VFolder
+        target.node is VFolder
 
     override suspend fun create(
         target: RenderTarget,
         host: RenderHost,
     ): Result<RendererSession> = runCatching {
-        val folder = (target as? RenderTarget.Node)?.node as? VFolder
+        val folder = target.node as? VFolder
             ?: error("directory renderer requires a folder")
         DirectorySession(folder).also { it.load().getOrThrow() }
     }

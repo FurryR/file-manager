@@ -86,7 +86,7 @@ internal class SshConnection(private val location: RemoteLocation) {
             "PreferredAuthentications",
             if (location.privateKey.isNotBlank()) "publickey,password" else "password",
         )
-        session.setPassword(location.password)
+        session.setPassword(location.password.toByteArray())
         session.timeout = 30_000
         session.serverAliveInterval = 15_000
         try {

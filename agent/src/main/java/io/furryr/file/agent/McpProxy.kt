@@ -38,7 +38,7 @@ object McpProxy {
                 instanceFollowRedirects = false
                 connectTimeout = 20_000
                 readTimeout = 120_000
-                for ((name, value) in request.headers + server.headers) {
+                for ((name, value) in request.headersMap + server.headers) {
                     setRequestProperty(name, value)
                 }
                 if (request.body.size() > 0 || requestMethod in setOf("POST", "PUT", "PATCH")) {

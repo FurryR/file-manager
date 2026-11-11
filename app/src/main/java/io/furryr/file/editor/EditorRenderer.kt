@@ -4,8 +4,8 @@ import android.content.Context
 import android.view.KeyEvent
 import android.view.ViewGroup
 import android.widget.Toast
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,15 +17,24 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.automirrored.filled.WrapText
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.FormatListNumbered
+import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.SaveAs
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -45,13 +54,11 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import io.furryr.file.R
-import io.furryr.file.container.ContainerManager
 import io.furryr.file.core.DirectoryCapabilities
-import io.furryr.file.core.NodeRef
 import io.furryr.file.core.Path
+import io.furryr.file.core.RemoteFile
 import io.furryr.file.core.VFile
 import io.furryr.file.core.VFolder
-import io.furryr.file.core.ViewRef
 import io.furryr.file.render.LocationAddress
 import io.furryr.file.render.RenderCapabilities
 import io.furryr.file.render.RenderHost
@@ -78,7 +85,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
 
 /**
  * One text buffer and its Sora view, owned by a tab. The view is created on
@@ -96,7 +105,7 @@ class EditorRendererSession(
         private set
     var saving by mutableStateOf(false)
         private set
-    var loading by mutableStateOf(true)
+    override var loading by mutableStateOf(true)
         private set
     var error by mutableStateOf<String?>(null)
     var conflict by mutableStateOf(false)
@@ -110,7 +119,7 @@ class EditorRendererSession(
         private set
     var matchCount by mutableIntStateOf(0)
         private set
-    var showLspSettings by mutableStateOf(false)
+    var showLanguagePicker by mutableStateOf(false)
     var showDiagnostics by mutableStateOf(false)
     var showGoto by mutableStateOf(false)
     var gotoLine by mutableStateOf("")
@@ -125,7 +134,7 @@ class EditorRendererSession(
         private set
     var wrap by mutableStateOf(false)
         private set
-    var lspSettings by mutableStateOf<LspSettings?>(null)
+    var completionsEnabled by mutableStateOf(true)
         private set
     /** Directory actions (terminal) depend on the folder that owns the file. */
     var parentCapabilities by mutableStateOf(DirectoryCapabilities())
@@ -134,37 +143,38 @@ class EditorRendererSession(
     var revision by mutableIntStateOf(0)
         private set
 
-    val languageId: String = EditorLanguages.id(file.name)
+    var languageId by mutableStateOf(EditorLanguages.id(file.name))
+        private set
     /** Folder that owns this file; Up and the terminal action use it. */
     val parentFolder: VFolder? get() = file.parent
     /** Address of [parentFolder] in the same form the file bar uses. */
     val parentAddress: String?
         get() = parentFolder?.let { folder ->
-            runCatching { LocationAddress.format(folder.ref()) }.getOrNull()
+            runCatching { LocationAddress.format(folder.path) }.getOrNull()
         }
     val title: String get() = (if (dirty) "• " else "") + file.name
 
     /**
-     * Providers whose open(WRITE) is unsupported, plus archive/web views,
-     * cannot commit bytes. The buffer stays viewable but never pretends a save
-     * could succeed.
+     * A live resource and a view cannot commit bytes, and so can the providers
+     * whose `open(WRITE)` is not implemented. The buffer stays viewable but
+     * never pretends a save could succeed.
      */
-    val readOnly: Boolean = when (val ref = file.ref()) {
-        is ViewRef.Url -> true
-        is ViewRef.Session -> true
-        is ViewRef.Node -> ref.viewId != "vfs" ||
-            ((ref.root as? NodeRef.Vfs)?.uri?.let { uri ->
-                Path.parse(uri).scheme in setOf("saf", "ftp", "document")
-            } ?: false)
-    }
+    val readOnly: Boolean =
+        file.path.isViewed ||
+            file is RemoteFile ||
+            file.path.scheme in setOf("saf", "ftp", "document")
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var appContext: Context? = null
     private var editorView: CodeEditor? = null
     private var lsp: LspSession? = null
+    private var lspJob: Job? = null
+    private var lspGeneration = 0
     private var changeJob: Job? = null
     private var lastPublishedTitle: String? = null
     private var closed = false
+    /** Continuation of a leave action waiting for the conflict dialog. */
+    private var pendingSave: ((Boolean) -> Unit)? = null
 
     override val capabilities: RenderCapabilities
         get() {
@@ -181,6 +191,37 @@ class EditorRendererSession(
             )
         }
 
+    override val consumesEdgeGestures: Boolean get() = true
+    override val canDismiss: Boolean get() = true
+    override val modalActive: Boolean get() = conflict
+
+    @Composable
+    override fun Content(darkTheme: Boolean, modifier: Modifier) {
+        EditorContent(this, darkTheme, modifier)
+    }
+
+    override fun requestClose(action: () -> Unit) {
+        if (saving) {
+            appContext?.let { error = it.getString(R.string.editor_saving_wait) }
+            return
+        }
+        if (canClose()) {
+            close()
+            action()
+            return
+        }
+        host.confirmLeave(
+            message = null,
+            canSave = capabilities.canSave,
+            onSave = { saveForLeave() },
+            onLeave = {
+                close()
+                action()
+            },
+            onCancel = {},
+        )
+    }
+
     override fun canClose(): Boolean = !dirty && !saving
 
     override fun refresh(): Boolean = true
@@ -196,72 +237,86 @@ class EditorRendererSession(
 
     override fun menuItems(context: Context): List<RendererMenuItem> = buildList {
         val view = editorView?.takeIf { !it.isReleased }
-        if (capabilities.canSave) {
-            add(
-                RendererMenuItem(
-                    title = context.getString(R.string.editor_save),
-                    icon = Icons.Default.Save,
-                ) { requestSave() },
-            )
-        }
-        if (view != null && !saving) {
-            if (view.text.canUndo()) {
-                add(
-                    RendererMenuItem(
-                        title = context.getString(R.string.editor_undo),
-                        icon = Icons.AutoMirrored.Filled.Undo,
-                    ) { undo() },
-                )
-            }
-            if (view.text.canRedo()) {
-                add(
-                    RendererMenuItem(
-                        title = context.getString(R.string.editor_redo),
-                        icon = Icons.AutoMirrored.Filled.Redo,
-                    ) { redo() },
-                )
-            }
-        }
+        val canUndo = view != null && !saving && view.text.canUndo()
+        val canRedo = view != null && !saving && view.text.canRedo()
+        add(
+            RendererMenuItem(
+                title = context.getString(R.string.editor_file),
+                icon = Icons.Default.Description,
+                children = buildList {
+                    add(
+                        RendererMenuItem(
+                            title = context.getString(R.string.editor_save),
+                            icon = Icons.Default.Save,
+                            enabled = capabilities.canSave,
+                        ) { requestSave() },
+                    )
+                    add(
+                        RendererMenuItem(
+                            title = context.getString(R.string.editor_save_as),
+                            icon = Icons.Default.SaveAs,
+                            enabled = !saving,
+                        ) { saveAs() },
+                    )
+                    add(
+                        RendererMenuItem(
+                            title = context.getString(R.string.editor_undo),
+                            icon = Icons.AutoMirrored.Filled.Undo,
+                            enabled = canUndo,
+                        ) { undo() },
+                    )
+                    add(
+                        RendererMenuItem(
+                            title = context.getString(R.string.editor_redo),
+                            icon = Icons.AutoMirrored.Filled.Redo,
+                            enabled = canRedo,
+                        ) { redo() },
+                    )
+                    add(
+                        RendererMenuItem(
+                            title = context.getString(R.string.editor_file_type),
+                            icon = Icons.Default.Code,
+                        ) { showLanguagePicker = true },
+                    )
+                },
+            ),
+        )
         add(
             RendererMenuItem(
                 title = context.getString(R.string.editor_search),
                 icon = Icons.Default.Search,
             ) { showSearch = !showSearch },
         )
-        add(
-            RendererMenuItem(title = context.getString(R.string.editor_lsp_settings)) {
-                showLspSettings = true
-            },
-        )
-        if (!readOnly) {
-            add(
-                RendererMenuItem(title = context.getString(R.string.editor_complete)) {
-                    showCompletions()
-                },
-            )
-        }
         if (diagnostics.isNotEmpty()) {
             add(
                 RendererMenuItem(
                     title = context.getString(R.string.editor_diagnostics, diagnostics.size),
+                    icon = Icons.Default.Warning,
                 ) { showDiagnostics = true },
             )
         }
-        if (lspSettings != null) {
-            add(
-                RendererMenuItem(title = context.getString(R.string.editor_lsp_disconnect)) {
-                    disconnectLsp()
-                },
-            )
-        }
         add(
-            RendererMenuItem(title = context.getString(R.string.editor_goto)) {
+            RendererMenuItem(
+                title = context.getString(R.string.editor_goto),
+                icon = Icons.Default.FormatListNumbered,
+            ) {
                 gotoLine = ""
                 showGoto = true
             },
         )
         add(
-            RendererMenuItem(title = context.getString(R.string.editor_wrap)) { toggleWrap() },
+            RendererMenuItem(
+                title = context.getString(R.string.editor_wrap),
+                icon = Icons.AutoMirrored.Filled.WrapText,
+                checked = wrap,
+            ) { toggleWrap() },
+        )
+        add(
+            RendererMenuItem(
+                title = context.getString(R.string.editor_complete),
+                icon = Icons.Default.Lightbulb,
+                checked = completionsEnabled,
+            ) { toggleCompletions(context) },
         )
     }
 
@@ -296,11 +351,9 @@ class EditorRendererSession(
      */
     fun ensureEditor(context: Context, dark: Boolean = true): CodeEditor {
         appContext = context.applicationContext
-        if (lspSettings == null) {
-            lspSettings = LspSettings.load(context, address, languageId)
-        }
         editorView?.let { return it }
         lspStatus = context.getString(R.string.editor_lsp_disconnected)
+        completionsEnabled = EditorPreferences.completionEnabled(context)
         val typeface = EditorPreferences.typeface(context)
         val editor = CodeEditor(context).apply {
             setTextSize(EditorPreferences.fontSize(context).toFloat())
@@ -313,6 +366,7 @@ class EditorRendererSession(
             isEditable = document != null && !readOnly
             document?.let { setText(it.text, true, null) }
             EditorLanguages.configure(context, this, languageId, dark) { lsp }
+            getComponent(EditorAutoCompletion::class.java)?.setEnabled(completionsEnabled)
         }
         editorView = editor
         editor.subscribeEvent(ContentChangeEvent::class.java) { _, _ ->
@@ -363,10 +417,11 @@ class EditorRendererSession(
                 }
             }
         }
+        LspSettings.forFile(context, address, languageId)?.let { connect(it) }
         return editor
     }
 
-    /** Re-read font keys after the settings screen changes them. */
+    /** Re-read display and completion keys after the settings screen changes them. */
     fun applyPreferences() {
         val context = appContext ?: return
         val editor = editorView?.takeIf { !it.isReleased } ?: return
@@ -374,6 +429,10 @@ class EditorRendererSession(
         val typeface = EditorPreferences.typeface(context)
         editor.typefaceText = typeface
         editor.typefaceLineNumber = typeface
+        val enabled = EditorPreferences.completionEnabled(context)
+        completionsEnabled = enabled
+        editor.getComponent(EditorAutoCompletion::class.java)?.setEnabled(enabled)
+        if (!enabled) editor.hideAutoCompleteWindow()
     }
 
     fun currentEditor(): CodeEditor? = editorView
@@ -455,19 +514,42 @@ class EditorRendererSession(
     }
 
     /**
-     * Overwrite after a conflict. The caller decides whether a pending leave
-     * action should run once the replacement lands.
+     * Save as part of leaving the editor. A conflict keeps this suspended until
+     * the renderer's own conflict dialog is resolved.
      */
-    fun overwrite(onDone: ((Boolean) -> Unit)? = null) {
+    suspend fun saveForLeave(): Result<Unit> {
+        val result = save()
+        if (result.isSuccess || !conflict) return result
+        return suspendCancellableCoroutine { continuation ->
+            pendingSave = { success ->
+                if (success) {
+                    continuation.resume(Result.success(Unit))
+                } else {
+                    continuation.resume(Result.failure(EditorConflictException()))
+                }
+            }
+            continuation.invokeOnCancellation { pendingSave = null }
+        }
+    }
+
+    /** Overwrite after the conflict dialog; resumes a pending leave on success. */
+    fun overwrite() {
         scope.launch {
             val result = save(overwrite = true)
-            if (result.isSuccess) conflict = false
-            onDone?.invoke(result.isSuccess)
+            if (result.isSuccess) {
+                conflict = false
+                val done = pendingSave
+                pendingSave = null
+                done?.invoke(true)
+            }
         }
     }
 
     fun dismissConflict() {
         conflict = false
+        val done = pendingSave
+        pendingSave = null
+        done?.invoke(false)
     }
 
     fun undo() {
@@ -483,8 +565,28 @@ class EditorRendererSession(
         editorView?.isWordwrap = wrap
     }
 
-    fun showCompletions() {
-        editorView?.getComponent(EditorAutoCompletion::class.java)?.requireCompletion()
+    /** Enter the tab's copy flow so the user picks a destination for the file. */
+    fun saveAs() {
+        host.copyFile(file)
+    }
+
+    fun toggleCompletions(context: Context) {
+        val enabled = !completionsEnabled
+        completionsEnabled = enabled
+        EditorPreferences.setCompletionEnabled(context, enabled)
+        val editor = editorView?.takeIf { !it.isReleased } ?: return
+        editor.getComponent(EditorAutoCompletion::class.java)?.setEnabled(enabled)
+        if (!enabled) editor.hideAutoCompleteWindow()
+    }
+
+    /** Re-highlight the buffer with another language without losing its text. */
+    fun setLanguage(context: Context, id: String, dark: Boolean) {
+        if (id == languageId) return
+        languageId = id
+        disconnectLsp()
+        val editor = editorView?.takeIf { !it.isReleased } ?: return
+        EditorLanguages.configure(context, editor, id, dark) { lsp }
+        LspSettings.forFile(context, address, id)?.let { connect(it) }
     }
 
     fun applySearch() {
@@ -521,18 +623,18 @@ class EditorRendererSession(
     fun connect(settings: LspSettings) {
         val context = appContext ?: return
         val editor = editorView ?: return
-        if (connecting || document == null) return
-        settings.save(context, languageId)
-        lspSettings = settings
+        if (document == null) return
+        lspJob?.cancel()
         lsp?.close()
         lsp = null
         diagnostics = emptyList()
         editor.diagnostics = null
         connecting = true
         lspStatus = context.getString(R.string.editor_lsp_connecting)
+        val generation = ++lspGeneration
         val initialText = editor.text.toString()
         val initialRevision = editor.text.documentVersion
-        scope.launch {
+        lspJob = scope.launch {
             try {
                 val server = LspSession.start(settings, languageId, initialText, initialRevision,
                     diagnostics = { items, serverRevision ->
@@ -570,6 +672,10 @@ class EditorRendererSession(
                         scope.launch { if (!closed) lspStatus = message }
                     },
                 )
+                if (generation != lspGeneration || closed) {
+                    server.close()
+                    return@launch
+                }
                 lsp = server
                 lspStatus = context.getString(R.string.editor_lsp_connected, settings.container)
                 server.changed(editor.text.toString(), editor.text.documentVersion)
@@ -577,15 +683,18 @@ class EditorRendererSession(
                 if (failure is CancellationException) throw failure
                 lspStatus = failure.localizedMessage ?: context.getString(R.string.editor_lsp_disconnected)
             } finally {
-                connecting = false
+                if (generation == lspGeneration) connecting = false
             }
         }
     }
 
     fun disconnectLsp() {
+        lspGeneration++
+        lspJob?.cancel()
+        lspJob = null
         lsp?.close()
         lsp = null
-        lspSettings = null
+        connecting = false
         editorView?.diagnostics = null
         diagnostics = emptyList()
         appContext?.let { lspStatus = it.getString(R.string.editor_lsp_disconnected) }
@@ -604,7 +713,12 @@ class EditorRendererSession(
     override fun close() {
         if (closed) return
         closed = true
+        pendingSave?.invoke(false)
+        pendingSave = null
         changeJob?.cancel()
+        lspGeneration++
+        lspJob?.cancel()
+        lspJob = null
         lsp?.close()
         lsp = null
         scope.cancel()
@@ -621,18 +735,17 @@ class EditorRendererFactory : RendererFactory {
     override val id: String = "editor"
 
     override fun supports(target: RenderTarget): Boolean {
-        val nodeTarget = target as? RenderTarget.Node ?: return false
-        val node = nodeTarget.node as? VFile ?: return false
-        return EditorLanguages.supports(node.name, nodeTarget.content)
+        val node = target.node as? VFile ?: return false
+        return EditorLanguages.supports(node.name, target.content)
     }
 
     override suspend fun create(
         target: RenderTarget,
         host: RenderHost,
     ): Result<RendererSession> = runCatching {
-        val node = (target as? RenderTarget.Node)?.node as? VFile
+        val node = target.node as? VFile
             ?: error("editor renderer requires a file")
-        val address = runCatching { LocationAddress.format(node.ref()) }.getOrNull() ?: node.name
+        val address = runCatching { LocationAddress.format(node.path) }.getOrNull() ?: node.name
         EditorRendererSession(node, address, host).also { it.load().getOrThrow() }
     }
 }
@@ -652,14 +765,16 @@ fun EditorContent(
     val bracketBackground = scheme.primary
         .copy(alpha = if (darkTheme) 0.32f else 0.18f)
         .toArgb()
-    val lineHighlight = scheme.surfaceContainerHigh.toArgb()
+    val lineNumberBackground = scheme.surfaceContainerHigh.toArgb()
+    val lineHighlight = scheme.surfaceContainerHighest.toArgb()
     val muted = scheme.onSurfaceVariant.toArgb()
     val prefs = remember(context) { context.getSharedPreferences("settings", Context.MODE_PRIVATE) }
     var preferencesVersion by remember { mutableIntStateOf(0) }
 
     DisposableEffect(prefs) {
         val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-            if (key == EditorPreferences.FONT_SIZE_KEY || key == EditorPreferences.FONT_KEY) {
+            if (key == EditorPreferences.FONT_SIZE_KEY || key == EditorPreferences.FONT_KEY ||
+                key == EditorPreferences.COMPLETION_KEY) {
                 preferencesVersion++
             }
         }
@@ -675,8 +790,59 @@ fun EditorContent(
     }
 
     Column(modifier.fillMaxSize()) {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            key(session) {
+                AndroidView(
+                    factory = { context ->
+                        val editor = session.ensureEditor(context, darkTheme)
+                        // A tab switch may compose the new holder before the
+                        // previous one releases the view.
+                        (editor.parent as? ViewGroup)?.removeView(editor)
+                        editor
+                    },
+                    onRelease = { editor ->
+                        (editor.parent as? ViewGroup)?.removeView(editor)
+                    },
+                    update = { editor ->
+                        editor.isEditable = session.document != null && !session.saving && !session.readOnly
+                        editor.isWordwrap = session.wrap
+                        editor.isScalable = true
+                        editor.getComponent(EditorAutoCompletion::class.java)
+                            ?.setEnabled(session.completionsEnabled)
+                        EditorLanguages.applyColors(
+                            editor = editor,
+                            dark = darkTheme,
+                            background = background,
+                            foreground = foreground,
+                            accent = accent,
+                            bracketBackground = bracketBackground,
+                            lineNumberBackground = lineNumberBackground,
+                            lineHighlight = lineHighlight,
+                            muted = muted,
+                        )
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            if (session.loading || session.saving) {
+                CircularProgressIndicator(Modifier.align(Alignment.Center))
+            }
+        }
         if (session.showSearch) {
-            Column(Modifier.padding(horizontal = 8.dp)) {
+            Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        stringResource(R.string.editor_search),
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    IconButton(onClick = { session.showSearch = false }) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = stringResource(R.string.cd_close_search),
+                        )
+                    }
+                }
                 OutlinedTextField(
                     value = session.query,
                     onValueChange = { session.query = it },
@@ -718,41 +884,6 @@ fun EditorContent(
                 session.searchError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }
         }
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            key(session) {
-                AndroidView(
-                    factory = { context ->
-                        val editor = session.ensureEditor(context, darkTheme)
-                        // A tab switch may compose the new holder before the
-                        // previous one releases the view.
-                        (editor.parent as? ViewGroup)?.removeView(editor)
-                        editor
-                    },
-                    onRelease = { editor ->
-                        (editor.parent as? ViewGroup)?.removeView(editor)
-                    },
-                    update = { editor ->
-                        editor.isEditable = session.document != null && !session.saving && !session.readOnly
-                        editor.isWordwrap = session.wrap
-                        editor.isScalable = true
-                        EditorLanguages.applyColors(
-                            editor = editor,
-                            dark = darkTheme,
-                            background = background,
-                            foreground = foreground,
-                            accent = accent,
-                            bracketBackground = bracketBackground,
-                            lineHighlight = lineHighlight,
-                            muted = muted,
-                        )
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-            if (session.loading || session.saving) {
-                CircularProgressIndicator(Modifier.align(Alignment.Center))
-            }
-        }
     }
 
     session.error?.let { message ->
@@ -765,14 +896,53 @@ fun EditorContent(
             },
         )
     }
-    if (session.showLspSettings) {
-        LspSettingsDialog(
-            initial = session.lspSettings ?: LspSettings.load(context, session.address, session.languageId),
-            connecting = session.connecting,
-            onDismiss = { session.showLspSettings = false },
-            onConnect = {
-                session.showLspSettings = false
-                session.connect(it)
+    if (session.conflict) {
+        AlertDialog(
+            onDismissRequest = session::dismissConflict,
+            title = { Text(stringResource(R.string.editor_conflict)) },
+            text = { Text(stringResource(R.string.editor_conflict_message)) },
+            confirmButton = {
+                TextButton(onClick = session::overwrite) {
+                    Text(stringResource(R.string.editor_overwrite))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = session::dismissConflict) {
+                    Text(stringResource(R.string.cancel))
+                }
+            },
+        )
+    }
+    if (session.showLanguagePicker) {
+        AlertDialog(
+            onDismissRequest = { session.showLanguagePicker = false },
+            title = { Text(stringResource(R.string.editor_file_type)) },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    EditorLanguages.languageIds.forEach { id ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    session.setLanguage(context, id, darkTheme)
+                                    session.showLanguagePicker = false
+                                }
+                                .padding(vertical = 4.dp),
+                        ) {
+                            RadioButton(
+                                selected = session.languageId == id,
+                                onClick = null,
+                            )
+                            Text(EditorLanguages.label(context, id))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { session.showLanguagePicker = false }) {
+                    Text(stringResource(R.string.cancel))
+                }
             },
         )
     }
@@ -824,87 +994,4 @@ fun EditorContent(
             },
         )
     }
-}
-
-@Composable
-private fun LspSettingsDialog(
-    initial: LspSettings,
-    connecting: Boolean,
-    onDismiss: () -> Unit,
-    onConnect: (LspSettings) -> Unit,
-) {
-    val context = LocalContext.current
-    var container by remember { mutableStateOf(initial.container) }
-    var command by remember { mutableStateOf(initial.command) }
-    var root by remember { mutableStateOf(initial.root) }
-    var documentPath by remember { mutableStateOf(initial.documentPath) }
-    var containers by remember { mutableStateOf<List<String>>(emptyList()) }
-    var menu by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        containers = withContext(Dispatchers.IO) {
-            ContainerManager.listContainers(context).getOrDefault(emptyList()).map { it.name }
-        }
-    }
-    val settings = LspSettings(container.trim(), command.trim(), root, documentPath)
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.editor_lsp_settings)) },
-        text = {
-            Column(
-                Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(stringResource(R.string.editor_lsp_hint), style = MaterialTheme.typography.bodySmall)
-                Box {
-                    OutlinedTextField(
-                        value = container,
-                        onValueChange = { container = it },
-                        singleLine = true,
-                        label = { Text(stringResource(R.string.editor_lsp_container)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        trailingIcon = { TextButton(onClick = { menu = true }) { Text("▾") } },
-                    )
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        containers.forEach { name ->
-                            DropdownMenuItem(
-                                text = { Text(name) },
-                                onClick = {
-                                    container = name
-                                    menu = false
-                                },
-                            )
-                        }
-                    }
-                }
-                OutlinedTextField(
-                    value = command,
-                    onValueChange = { command = it },
-                    label = { Text(stringResource(R.string.editor_lsp_command)) },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = root,
-                    onValueChange = { root = it },
-                    label = { Text(stringResource(R.string.editor_lsp_root)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = documentPath,
-                    onValueChange = { documentPath = it },
-                    label = { Text(stringResource(R.string.editor_lsp_document)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { onConnect(settings) }, enabled = settings.valid && !connecting) {
-                Text(stringResource(R.string.editor_lsp_connect))
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
-        },
-    )
 }

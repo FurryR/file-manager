@@ -182,6 +182,7 @@
     <string name="container_state_failed">失敗</string>
     <string name="container_state_deleted">削除済み</string>
     <string name="terminal_drawer_title">ターミナル</string>
+    <string name="terminal_empty">利用可能なターミナルはありません</string>
     <string name="terminal_key_enter">Enter</string>
     <string name="terminal_drop_hint">ここにドロップしてパスを挿入</string>
     <string name="wizard_pull_title">Docker Hub から Linux rootfs を取得</string>
@@ -304,4 +305,11 @@
     <string name="agent_session_rename_title">会話の名前を変更</string>
     <string name="agent_session_messages">件のメッセージ</string>
     <string name="agent_session_title">タイトル</string>
+
+    <!-- WebView 長押しリンク/画像ダイアログ -->
+    <string name="web_hit_link">リンク</string>
+    <string name="web_hit_image">画像</string>
+    <string name="web_copy_link_text">リンクテキストをコピー</string>
+    <string name="web_copy_url">URL をコピー</string>
+    <string name="web_share_url">URL を共有</string>
 </resources>

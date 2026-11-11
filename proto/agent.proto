@@ -29,6 +29,13 @@ message AgentAttachResponse {
   // Former per-session YOLO flag. Auto-approval is a terminal-local setting
   // now: the hub always asks and the TUI decides whether to answer.
   reserved 4;
+
+  // Token accounting persisted with the session. The TUI shows it as soon as
+  // a session is attached instead of waiting for the next provider request.
+  uint64 context_tokens = 5;
+  uint64 prompt_tokens = 6;
+  uint64 completion_tokens = 7;
+  uint64 requests = 8;
 }
 
 message AgentPromptRequest {
@@ -82,12 +89,22 @@ message AgentEvent {
     AgentApprovalRequest approval = 11;
     AgentMcpCall mcp_call = 12;
     AgentFinished finished = 13;
+    AgentCompaction compaction = 14;
+    // A mid-run prompt that the agent loop has inserted into the conversation.
+    string accepted_prompt = 15;
   }
 }
 
 message AgentUsage {
   uint64 prompt_tokens = 1;
   uint64 completion_tokens = 2;
+  // Context size after the request. Set after a compaction so the TUI can show
+  // the smaller context without waiting for the next request.
+  uint64 context_tokens = 3;
+}
+
+message AgentCompaction {
+  string summary = 1;
 }
 
 message AgentToolNotice {

@@ -1,6 +1,5 @@
 package io.furryr.file.core
 
-import io.furryr.file.core.PermissionDeniedException
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.source.FileSource
@@ -41,124 +40,162 @@ object Vfs {
         default = provider
     }
 
-    fun resolve(uri: String): Result<ResolvedProvider> {
-        if (uri.startsWith("/")) {
-            val def = default ?: return Result.failure(IllegalStateException("No default provider"))
-            return Result.success(ResolvedProvider(def, Path.parse(uri), uri))
+    /** Route a parsed [Path] to its provider. View levels never reach a provider. */
+    fun resolve(path: Path): Result<ResolvedProvider> {
+        if (path.isViewed) {
+            return Result.failure(
+                IllegalArgumentException("a view address has no provider: $path"),
+            )
         }
+        val scheme = path.scheme
+        val provider = if (scheme == null) {
+            default ?: return Result.failure(IllegalStateException("No default provider"))
+        } else {
+            providers[scheme]
+                ?: return Result.failure(IllegalStateException("No provider for scheme '$scheme'"))
+        }
+        return Result.success(ResolvedProvider(provider, path, path.toString()))
+    }
+
+    /** Address-text boundary: parse once, then stay on [Path]. */
+    fun resolve(uri: String): Result<ResolvedProvider> {
         val path = runCatching { Path.parse(uri) }.getOrElse { error ->
             return Result.failure(IllegalArgumentException("Cannot parse path: $uri", error))
         }
-        val scheme = path.scheme
-            ?: return Result.failure(IllegalArgumentException("No scheme in URI: $uri"))
-        val provider = providers[scheme]
-            ?: return Result.failure(IllegalStateException("No provider for scheme '$scheme'"))
-        return Result.success(ResolvedProvider(provider, path, uri))
+        return resolve(path)
     }
 
-    fun folder(path: String): Result<Folder> {
+    fun folder(path: Path): Result<Folder> {
         val resolved = resolve(path).getOrElse { return Result.failure(it) }
         return Result.success(Folder(resolved.path, resolved.provider, resolved.innerPath))
     }
 
-    fun file(path: String): Result<File> {
+    fun folder(path: String): Result<Folder> = folder(Path.parse(path))
+
+    fun file(path: Path): Result<File> {
         val resolved = resolve(path).getOrElse { return Result.failure(it) }
         return Result.success(File(resolved.path, resolved.provider, resolved.innerPath))
     }
 
-    suspend fun node(path: String): Result<VNode> {
+    fun file(path: String): Result<File> = file(Path.parse(path))
+
+    /**
+     * The node at [path]. The provider mints it: a storage provider answers with
+     * a [Folder]/[File], a live one with its own [VNode] implementation, and the
+     * caller never has to know which.
+     */
+    suspend fun node(path: Path): Result<VNode> {
         val resolved = resolve(path).getOrElse { return Result.failure(it) }
-        val stat = resolved.provider.stat(resolved.innerPath).getOrElse { return Result.failure(it) }
-        return Result.success(
-            if (stat.isDirectory) {
-                Folder(resolved.path, resolved.provider, resolved.innerPath)
-            } else {
-                File(resolved.path, resolved.provider, resolved.innerPath)
-            },
-        )
+        return resolved.provider.node(resolved.path, resolved.innerPath)
     }
 
-    fun navigate(currentPath: String, relPath: String): String? {
-        val path = Path.parse(currentPath)
-        val result = path.navigate(relPath)
-        if (result == path) return null
-        return result.toString()
-    }
+    suspend fun node(path: String): Result<VNode> = node(Path.parse(path))
 
     // ── Simple operations ──────────────────────────────────────────
 
-    fun list(path: String) = dispatch(path) { provider, inner -> runBlocking { provider.list(inner) } }
-
     fun stat(path: String) = dispatch(path) { provider, inner -> runBlocking { provider.stat(inner) } }
 
-    suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
-        val resolved = resolve(path).getOrNull() ?: return DirectoryCapabilities()
-        return resolved.provider.directoryCapabilities(resolved.innerPath)
-    }
+    // ── Node operations ────────────────────────────────────────────
+    //
+    // Everything below takes nodes, never paths. A caller that has a path
+    // resolved it once through [node]/[folder]/[file] (or [destination]), and
+    // stays on nodes afterwards; only provider implementations and the
+    // address parser still see strings.
 
-    fun createFile(parentPath: String, name: String): Result<String> = runCatching {
-        if (!runBlocking { directoryCapabilities(parentPath) }.canCreate) {
-            throw PermissionDeniedException(parentPath)
+    /**
+     * Copy [source] onto [target]. Both nodes already exist: the caller takes
+     * the destination from [VFolder.destination] / [VFolder.destinationFolder]
+     * (or resolved it), so an operation never formats a provider path. A page
+     * link (`WebUrlFile`) is a [VFile] like any other and streams straight into
+     * the destination node.
+     */
+    fun copyTo(source: VNode, target: VNode): Flow<CopyProgress> =
+        copyNode(source, target, isCopy = true)
+
+    /** Move [source] onto [target], renaming when both live in one provider. */
+    fun moveTo(source: VNode, target: VNode): Flow<CopyProgress> = flow {
+        if (source is File && target is File && source.provider === target.provider) {
+            source.provider.copy(source.innerPath, target.innerPath, isCopy = false)
+                .collect { emit(it) }
+            return@flow
         }
-        val fullPath = Path.parse(parentPath).child(name).toString()
-        dispatch(fullPath) { provider, inner -> runBlocking { provider.createFile(inner) } }.getOrThrow()
-        fullPath
-    }
-
-    fun createDirectory(parentPath: String, name: String): Result<String> = runCatching {
-        if (!runBlocking { directoryCapabilities(parentPath) }.canCreate) {
-            throw PermissionDeniedException(parentPath)
-        }
-        val fullPath = Path.parse(parentPath).child(name).toString()
-        dispatch(fullPath) { provider, inner ->
-            runBlocking { provider.createDirectory(inner) }
-        }.getOrThrow()
-        fullPath
-    }
-
-    fun rename(path: String, newName: String): Result<Unit> =
-        dispatch(path) { provider, inner -> runBlocking { provider.rename(inner, newName) } }
-
-    fun delete(path: String): Result<Unit> =
-        dispatch(path) { provider, inner -> runBlocking { provider.delete(inner) } }
-
-    // ── Event-driven copy/move ──────────────────────────────────────
-
-    fun copy(from: String, toDir: String): Flow<CopyProgress> = flow {
-        val sourceName = Path.parse(from).name ?: from.substringAfterLast('/')
-        val targetPath = Path.parse(toDir).child(sourceName).toString()
-        val source = resolve(from).getOrThrow()
-        val destination = resolve(targetPath).getOrThrow()
-        copyRecursive(source, destination, isCopy = true).collect { emit(it) }
+        // Folder children keep the provider rename when they share one, so a
+        // move inside a provider never moves bytes.
+        copyNode(source, target, isCopy = false).collect { emit(it) }
+        source.delete().getOrThrow()
     }.flowOn(Dispatchers.IO)
 
-    /** Copy [from] to the exact path [to], across providers if needed. */
-    fun copyTo(from: String, to: String): Flow<CopyProgress> = flow {
-        val source = resolve(from).getOrThrow()
-        val destination = resolve(to).getOrThrow()
-        copyRecursive(source, destination, isCopy = true).collect { emit(it) }
-    }.flowOn(Dispatchers.IO)
+    /**
+     * The file node at [path] for writing: the existing node, or a new one in
+     * its parent folder. This is the string→node boundary for callers that are
+     * handed a path from outside (agent tool input, restored state).
+     */
+    suspend fun destination(path: String): Result<VFile> = runCatching {
+        (node(path).getOrNull() as? VFile)?.let { return@runCatching it }
+        val parsed = Path.parse(path)
+        val name = parsed.name ?: error("no file name in $path")
+        val parent = parsed.parent() ?: error("no parent folder for $path")
+        folder(parent).getOrThrow().destination(name).getOrThrow()
+    }
 
-    fun move(from: String, toDir: String): Flow<CopyProgress> = flow {
-        val sourceName = Path.parse(from).name ?: from.substringAfterLast('/')
-        val targetPath = Path.parse(toDir).child(sourceName).toString()
-        val source = resolve(from).getOrThrow()
-        val destination = resolve(targetPath).getOrThrow()
-        copyRecursive(source, destination, isCopy = false).collect { emit(it) }
-        runBlocking(Dispatchers.IO) {
-            runCatching { source.provider.delete(source.innerPath) }
+    private fun copyNode(source: VNode, target: VNode, isCopy: Boolean): Flow<CopyProgress> = flow {
+        when {
+            source is VFolder && target is VFolder ->
+                copyFolder(source, target, isCopy).collect { emit(it) }
+            source is VFile && target is VFile ->
+                copyFile(source, target, isCopy).collect { emit(it) }
+            else -> error("copy needs a file→file or folder→folder pair: ${source.path} → ${target.path}")
         }
     }.flowOn(Dispatchers.IO)
 
-    suspend fun info(path: String): DirectoryStats {
-        val stat = resolve(path).getOrNull()?.let { resolved ->
-            resolved.provider.stat(resolved.innerPath).getOrNull()
+    private fun copyFolder(
+        source: VFolder,
+        target: VFolder,
+        isCopy: Boolean,
+    ): Flow<CopyProgress> = flow {
+        for (child in source.listNodes().getOrThrow()) {
+            val destination = when (child) {
+                is VFolder -> target.destinationFolder(child.name).getOrThrow()
+                is VFile -> target.destination(child.name).getOrThrow()
+                else -> continue
+            }
+            copyNode(child, destination, isCopy).collect { emit(it) }
         }
-        return DirectoryStats(
-            usableBytes = stat?.usableBytes ?: 0,
-            totalBytes = stat?.totalBytes ?: 0,
-        )
-    }
+    }.flowOn(Dispatchers.IO)
+
+    private fun copyFile(source: VFile, target: VFile, isCopy: Boolean): Flow<CopyProgress> = flow {
+        // Same provider on both sides: the provider moves or copies natively.
+        if (source is File && target is File && source.provider === target.provider) {
+            source.provider.copy(source.innerPath, target.innerPath, isCopy).collect { emit(it) }
+            return@flow
+        }
+        // Otherwise stream through the destination node. The source may be a
+        // URL, an archive entry or a remote backend with no kernel handle.
+        val input = source.open(OpenMode.READ).getOrThrow()
+        try {
+            val output = target.open(OpenMode.WRITE).getOrThrow()
+            try {
+                var offset = 0L
+                emit(CopyProgress(input.size, 0L, target.name, finished = false, isCopy = isCopy))
+                while (true) {
+                    val chunk = input.readChunk(offset, COPY_CHUNK)
+                    if (chunk.isEmpty()) break
+                    output.writeAt(offset, chunk)
+                    offset += chunk.size
+                    emit(CopyProgress(input.size, offset, target.name, finished = false, isCopy = isCopy))
+                }
+                // The destination may be longer than the source.
+                runCatching { output.truncate(offset) }
+                emit(CopyProgress(input.size, offset, target.name, finished = true, isCopy = isCopy))
+            } finally {
+                runCatching { output.close() }
+            }
+        } finally {
+            runCatching { input.close() }
+        }
+    }.flowOn(Dispatchers.IO)
+
+    private const val COPY_CHUNK = 256 * 1024
 
     // ── Internal ────────────────────────────────────────────────────
 
@@ -169,51 +206,4 @@ object Vfs {
         val resolved = resolve(path).getOrElse { return Result.failure(it) }
         return block(resolved.provider, resolved.innerPath)
     }
-
-    /**
-     * Recursive copy across one or two providers. Directories are created,
-     * listed, and recursed. Files use the zero-copy same-provider path when
-     * possible and a streaming source otherwise.
-     */
-    private fun copyRecursive(
-        source: ResolvedProvider,
-        destination: ResolvedProvider,
-        isCopy: Boolean,
-    ): Flow<CopyProgress> = flow {
-        val stat = runBlocking(Dispatchers.IO) {
-            source.provider.stat(source.innerPath).getOrThrow()
-        }
-
-        if (stat.isDirectory) {
-            runBlocking(Dispatchers.IO) {
-                destination.provider.createDirectory(destination.innerPath).getOrThrow()
-            }
-            val entries = runBlocking(Dispatchers.IO) {
-                source.provider.list(source.innerPath).getOrThrow()
-            }
-            for (entry in entries) {
-                val childSourcePath = source.path.child(entry.name).toString()
-                val childDestinationPath = destination.path.child(entry.name).toString()
-                val childSource = resolve(childSourcePath).getOrNull() ?: continue
-                val childDestination = resolve(childDestinationPath).getOrNull() ?: continue
-                copyRecursive(childSource, childDestination, isCopy).collect { emit(it) }
-            }
-        } else if (source.provider === destination.provider) {
-            destination.provider.copy(
-                source.innerPath,
-                destination.innerPath,
-                isCopy,
-            ).collect { emit(it) }
-        } else {
-            val fileSource = runBlocking(Dispatchers.IO) {
-                source.provider.open(source.innerPath, OpenMode.READ).getOrThrow()
-            }
-            try {
-                destination.provider.copy(fileSource, destination.innerPath, isCopy)
-                    .collect { emit(it) }
-            } finally {
-                runCatching { fileSource.close() }
-            }
-        }
-    }.flowOn(Dispatchers.IO)
 }

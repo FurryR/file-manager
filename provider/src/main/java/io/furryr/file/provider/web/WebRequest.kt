@@ -1,4 +1,4 @@
-package io.furryr.file.render
+package io.furryr.file.provider.web
 
 import android.webkit.CookieManager
 import java.net.HttpURLConnection
@@ -16,8 +16,8 @@ import java.util.Locale
  * logged-in download answers 401/403.
  */
 internal object WebRequest {
-    const val CONNECT_TIMEOUT_MS = 15_000
-    const val READ_TIMEOUT_MS = 20_000
+    private const val CONNECT_TIMEOUT_MS = 15_000
+    private const val READ_TIMEOUT_MS = 20_000
     private const val USER_AGENT = "Mozilla/5.0 (Linux; Android) file-manager"
 
     fun headers(url: String, referer: String?): Map<String, String> {

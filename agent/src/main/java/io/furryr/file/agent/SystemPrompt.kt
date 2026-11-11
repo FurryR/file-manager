@@ -30,7 +30,8 @@ internal object SystemPrompt {
                 "File paths are absolute inside the current target, or canonical VFS URIs " +
                     "(file:///..., container://name/..., ftp://..., sftp://..., saf://...) for " +
                     "another location. copy takes a from/to pair. Use list_targets to discover " +
-                    "location roots. Read a file before rewriting it. Keep answers concise.",
+                    "location roots. Read a file before rewriting it. If you need to create " +
+                    "temporary files, create them under /tmp/agent. Keep answers concise.",
             )
         }
     }
@@ -76,24 +77,31 @@ internal object SystemPrompt {
 
 /**
  * Path policy. Approval is a Kotlin decision made before any side effect; the
- * terminal shell only renders the prompt.
+ * terminal shell only renders the prompt and never re-evaluates paths.
+ *
+ * Only access outside the workspace and `/tmp` asks. Commands themselves are
+ * not inspected: the tools' `cwd` and file arguments are the addresses the
+ * model asked to touch.
  */
 internal object AgentPolicy {
-    /**
-     * Force a prompt before every exec, even for safe read-only commands.
-     * Off by default: [isSafeCommand] auto-approves inspections, and anything
-     * that can mutate state still asks.
-     */
-    @Volatile
-    var approveExec: Boolean = false
-
-    fun approvalReason(name: String, args: JSONObject, cwd: String): String? = when (name) {
-        "write" -> outsideWorkspace(args.optString("path"), cwd)?.let {
+    fun approvalReason(
+        name: String,
+        args: JSONObject,
+        cwd: String,
+        targetName: String,
+    ): String? = when (name) {
+        "read" -> outside(args.optString("path"), cwd, targetName)?.let {
+            "read outside the workspace: $it"
+        }
+        "write" -> outside(args.optString("path"), cwd, targetName)?.let {
             "write outside the workspace: $it"
         }
+        "glob" -> outside(args.optString("path").ifBlank { cwd }, cwd, targetName)?.let {
+            "glob outside the workspace: $it"
+        }
         "copy" -> {
-            val from = outsideWorkspace(args.optString("from"), cwd)
-            val to = outsideWorkspace(args.optString("to"), cwd)
+            val from = outside(args.optString("from"), cwd, targetName)
+            val to = outside(args.optString("to"), cwd, targetName)
             when {
                 from != null && to != null -> "copy outside the workspace: $from -> $to"
                 from != null -> "copy source outside the workspace: $from"
@@ -101,13 +109,28 @@ internal object AgentPolicy {
                 else -> null
             }
         }
-        "exec" -> {
-            val command = args.optString("command")
-            val requested = args.optString("cwd").takeIf { it.isNotBlank() }
-            val outside = requested?.let { outsideWorkspace(it, cwd) }
+        "archive_list", "archive_read" -> outside(args.optString("archive"), cwd, targetName)?.let {
+            "archive access outside the workspace: $it"
+        }
+        "archive_copy" -> {
+            val archive = outside(args.optString("archive"), cwd, targetName)
+            val to = outside(args.optString("to"), cwd, targetName)
             when {
-                outside != null -> "exec outside the workspace: $outside"
-                approveExec || !isSafeCommand(command) -> "exec requires approval: $command"
+                archive != null && to != null -> "archive copy outside the workspace: $archive -> $to"
+                archive != null -> "archive source outside the workspace: $archive"
+                to != null -> "archive destination outside the workspace: $to"
+                else -> null
+            }
+        }
+        "exec" -> {
+            val requested = args.optString("container_id").takeIf { it.isNotBlank() }
+            val outsideCwd = args.optString("cwd").takeIf { it.isNotBlank() }?.let {
+                outside(it, cwd, targetName)
+            }
+            when {
+                requested != null && requested != targetName ->
+                    "exec in another target: ${requested.removePrefix("container-")}"
+                outsideCwd != null -> "exec outside the workspace: $outsideCwd"
                 else -> null
             }
         }
@@ -115,198 +138,33 @@ internal object AgentPolicy {
     }
 
     /**
-     * Read-only commands that cannot change files, spawn other programs or
-     * alter the system. Chained and piped commands are safe only when every
-     * segment is safe, and shell redirection or command substitution always
-     * asks.
+     * Return the path when it is outside [cwd] and `/tmp`, otherwise null.
+     * Workspace-local and temporary access never asks; a VFS URI for another
+     * location (ftp, saf, a different container) is always outside.
      */
-    private fun isSafeCommand(command: String): Boolean {
-        val segments = splitCommands(command) ?: return false
-        return segments.isNotEmpty() && segments.all(::isSafeSegment)
-    }
-
-    /** Split on unquoted `|`, `;`, `&&` and `||`, rejecting every other operator. */
-    private fun splitCommands(command: String): List<List<String>>? {
-        val segments = ArrayList<List<String>>()
-        var words = ArrayList<String>()
-        val word = StringBuilder()
-        var wordStarted = false
-        var quote: Char? = null
-        var index = 0
-
-        fun flushWord() {
-            if (!wordStarted) return
-            words.add(word.toString())
-            word.setLength(0)
-            wordStarted = false
-        }
-
-        fun flushSegment(): Boolean {
-            flushWord()
-            if (words.isEmpty()) return false
-            segments.add(words)
-            words = ArrayList()
-            return true
-        }
-
-        while (index < command.length) {
-            val char = command[index]
-            if (quote != null) {
-                if (quote == '\'') {
-                    if (char == '\'') quote = null else word.append(char)
-                } else {
-                    when {
-                        char == '"' -> quote = null
-                        char == '\\' && index + 1 < command.length -> {
-                            word.append(command[index + 1])
-                            index++
-                        }
-                        char == '`' -> return null
-                        char == '$' && index + 1 < command.length &&
-                            command[index + 1] == '(' -> return null
-                        else -> word.append(char)
-                    }
-                }
-                wordStarted = true
-                index++
-                continue
-            }
-            when {
-                char == '\\' -> {
-                    if (index + 1 >= command.length) return null
-                    word.append(command[index + 1])
-                    wordStarted = true
-                    index++
-                }
-                char == '\'' || char == '"' -> {
-                    quote = char
-                    wordStarted = true
-                }
-                char == '`' -> return null
-                char == '$' && index + 1 < command.length && command[index + 1] == '(' -> return null
-                char in SHELL_REDIRECTIONS -> return null
-                char == ';' -> {
-                    if (!flushSegment()) return null
-                }
-                char == '&' -> {
-                    if (index + 1 >= command.length || command[index + 1] != '&') return null
-                    index++
-                    if (!flushSegment()) return null
-                }
-                char == '|' -> {
-                    if (index + 1 < command.length && command[index + 1] == '|') index++
-                    if (!flushSegment()) return null
-                }
-                char.isWhitespace() -> flushWord()
-                else -> {
-                    word.append(char)
-                    wordStarted = true
-                }
-            }
-            index++
-        }
-        if (quote != null) return null
-        if (!flushSegment()) return null
-        return segments
-    }
-
-    private fun isSafeSegment(tokens: List<String>): Boolean {
-        val program = tokens.first()
-        // A path can point at a same-named script; only bare PATH lookups.
-        if (program.isEmpty() || program.contains('/')) return false
-        val args = tokens.drop(1)
-        return when (program) {
-            in SAFE_COMMANDS -> true
-            "date" -> args.none { it == "-s" || it == "--set" || it.startsWith("--set=") }
-            "hostname" -> args.isEmpty() || args.all { it in HOSTNAME_READ_FLAGS }
-            "file" -> args.none { it == "-C" || it == "--compile" }
-            "find" -> args.none { it in FIND_WRITE_FLAGS }
-            "sort" -> args.none {
-                it == "-o" || it.startsWith("--output") || it.startsWith("--compress-program")
-            }
-            "tree" -> args.none { it == "-o" || it.startsWith("--output") }
-            "diff" -> args.none { it.startsWith("--output") }
-            "rg", "grep" -> args.none {
-                it == "--pre" || it.startsWith("--pre=") ||
-                    it == "--hostname-bin" || it.startsWith("--hostname-bin=")
-            }
-            "git" -> isSafeGit(args)
-            else -> false
-        }
-    }
-
-    private fun isSafeGit(args: List<String>): Boolean {
-        if (args.any {
-                it.startsWith("--output") ||
-                    it.startsWith("--open-files-in-pager") ||
-                    it == "--ext-diff" || it == "--textconv"
-            }
-        ) {
-            return false
-        }
-        val subcommand = args.firstOrNull() ?: return false
-        val rest = args.drop(1)
-        return when (subcommand) {
-            "--version", "--help", "help", "version",
-            "status", "diff", "log", "show", "blame", "describe", "shortlog",
-            "whatchanged", "rev-parse", "ls-files", "ls-tree", "cat-file",
-            "merge-base", "grep",
-            -> true
-            "branch" -> rest.all { flag ->
-                flag in GIT_BRANCH_READ_FLAGS ||
-                    flag.startsWith("--contains") ||
-                    flag.startsWith("--merged") ||
-                    flag.startsWith("--no-merged") ||
-                    flag.startsWith("--points-at") ||
-                    flag.startsWith("--sort") ||
-                    flag.startsWith("--format")
-            }
-            "tag" -> rest.isEmpty() || rest.all {
-                it == "-l" || it == "--list" || it.startsWith("--sort")
-            }
-            "remote" -> rest.all { it == "-v" || it == "--verbose" }
-            "stash" -> rest.firstOrNull() in setOf("list", "show")
-            "config" -> rest.any {
-                it == "--get" || it == "--get-all" || it == "--list" || it == "-l" ||
-                    it.startsWith("--get-regexp")
-            }
-            else -> false
-        }
-    }
-
-    private val SAFE_COMMANDS = setOf(
-        "base64", "basename", "bzcat", "cat", "cd", "cksum", "cmp", "comm", "cut",
-        "df", "dirname", "du", "echo", "egrep", "fgrep", "free", "getprop",
-        "groups", "head", "hexdump", "id", "jq", "ls", "md5sum", "nl",
-        "nm", "nproc", "od", "paste", "pgrep", "printenv", "printf", "ps", "pwd",
-        "readlink", "realpath", "rev", "sha1sum", "sha256sum", "sha512sum", "stat",
-        "strings", "tac", "tail", "tr", "type", "uname", "uptime", "wc", "whereis",
-        "which", "whoami", "xxd", "xzcat", "zcat",
-    )
-
-    private val HOSTNAME_READ_FLAGS = setOf(
-        "-f", "--fqdn", "-s", "--short", "-i", "--ip-address",
-        "-I", "--all-ip-addresses", "-d", "--domain",
-    )
-
-    private val SHELL_REDIRECTIONS = setOf('>', '<', '\n', '\r')
-
-    private val FIND_WRITE_FLAGS = setOf(
-        "-delete", "-exec", "-execdir", "-ok", "-okdir",
-        "-fprint", "-fprint0", "-fprintf", "-fls",
-    )
-
-    private val GIT_BRANCH_READ_FLAGS = setOf(
-        "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose",
-        "--list", "--show-current",
-    )
-
-    /** Return the path when it is outside [cwd], otherwise null. */
-    private fun outsideWorkspace(path: String, cwd: String): String? {
+    private fun outside(path: String, cwd: String, targetName: String): String? {
         if (path.isBlank()) return null
-        if (path.contains("://")) return path
-        val normalized = normalize(path)
+        val bare = if (path.contains("://")) {
+            // Keep only the path part of a URI. Local scopes (file:///... and
+            // container://name/...) can still be inside the workspace or /tmp;
+            // every other protocol is a separate domain and always asks.
+            val scheme = path.substringBefore("://")
+            if (scheme != "file" && scheme != "container") return path
+            val rest = path.substringAfter("://")
+            val slash = rest.indexOf('/')
+            if (slash < 0) return path
+            if (scheme == "container") {
+                val container = rest.substring(0, slash).removePrefix("container-")
+                if (container != targetName.removePrefix("container-")) return path
+            }
+            rest.substring(slash)
+        } else {
+            path
+        }
+        if (!bare.startsWith('/')) return path
+        val normalized = normalize(bare)
         val base = normalize(cwd.ifBlank { "/" })
+        if (normalized == "/tmp" || normalized.startsWith("/tmp/")) return null
         return when {
             normalized == base -> null
             base == "/" -> null

@@ -67,7 +67,7 @@ async fn run() -> io::Result<()> {
     let mcp_hub = Arc::new(Hub::connect().await?);
     let mcp = Arc::new(McpManager::connect(&capabilities, mcp_hub, &cwd).await);
     let agent_hub = Hub::connect().await?;
-    agent_hub
+    let attached = agent_hub
         .agent_attach(
             &session_id,
             &terminal_id,
@@ -79,6 +79,7 @@ async fn run() -> io::Result<()> {
         )
         .await
         .map_err(io::Error::other)?;
+    let initial_usage = attached.usage;
     agent_hub
         .agent_set_mcp_tools(&mcp.definitions())
         .await
@@ -115,6 +116,12 @@ async fn run() -> io::Result<()> {
         Vec::new(),
         String::new(),
     );
+    app.set_usage(crate::app::UsageState {
+        context_tokens: initial_usage.context_tokens,
+        prompt_tokens: initial_usage.prompt_tokens,
+        completion_tokens: initial_usage.completion_tokens,
+        requests: initial_usage.requests,
+    });
     let mut state = UiState::default();
     let mut pending: Option<tokio::task::JoinHandle<Result<AgentOutcome, String>>> = None;
     let mut pending_kind = TaskKind::Chat;
@@ -160,6 +167,37 @@ async fn run() -> io::Result<()> {
                         events = None;
                         approvals = None;
                     }
+                    Action::CancelAndPersist(messages) => {
+                        if let Err(error) = agent_hub.agent_cancel().await {
+                            app.push_error(&format!("cancel could not be sent: {error}"));
+                        }
+                        pending = None;
+                        events = None;
+                        approvals = None;
+                        let _ = hub.save_history(&session_id, &messages).await;
+                        let attached = agent_hub
+                            .agent_attach(
+                                &session_id,
+                                &terminal_id,
+                                &cwd,
+                                &context,
+                                app.model(),
+                                app.effort(),
+                                capabilities.workspace_mcp,
+                            )
+                            .await;
+                        if let Ok(attached) = attached {
+                            app.set_usage(crate::app::UsageState {
+                                context_tokens: attached.usage.context_tokens,
+                                prompt_tokens: attached.usage.prompt_tokens,
+                                completion_tokens: attached.usage.completion_tokens,
+                                requests: attached.usage.requests,
+                            });
+                        }
+                        let _ = agent_hub
+                            .agent_set_mcp_tools(&mcp.definitions())
+                            .await;
+                    }
                     Action::Submit(messages) => {
                         if let Some(handle) = pending.take() {
                             handle.abort();
@@ -203,6 +241,16 @@ async fn run() -> io::Result<()> {
                     Action::Approval { id, allow } => {
                         if let Some(sender) = approvals.as_ref() {
                             let _ = sender.send((id, allow));
+                        }
+                        if !allow {
+                            // Denying a tool call stops the turn by default: the
+                            // model should not keep spending tokens down a path
+                            // the user already rejected.
+                            app.cancel();
+                            let _ = agent_hub.agent_cancel().await;
+                            pending = None;
+                            events = None;
+                            approvals = None;
                         }
                     }
                     Action::PersistSelection => {
@@ -248,7 +296,7 @@ async fn run() -> io::Result<()> {
                             serde_json::from_str::<Vec<Message>>(&history_json).unwrap_or_default();
                         // Kotlin agent repairs dangling tool calls when it loads the session.
                         let _ = hub.set_active_session(&id).await;
-                        let _ = agent_hub
+                        let attached = agent_hub
                             .agent_attach(
                                 &id,
                                 &terminal_id,
@@ -259,6 +307,14 @@ async fn run() -> io::Result<()> {
                                 capabilities.workspace_mcp,
                             )
                             .await;
+                        if let Ok(attached) = attached {
+                            app.set_usage(crate::app::UsageState {
+                                context_tokens: attached.usage.context_tokens,
+                                prompt_tokens: attached.usage.prompt_tokens,
+                                completion_tokens: attached.usage.completion_tokens,
+                                requests: attached.usage.requests,
+                            });
+                        }
                         let _ = agent_hub
                             .agent_set_mcp_tools(&mcp.definitions())
                             .await;
@@ -279,7 +335,7 @@ async fn run() -> io::Result<()> {
                         approvals = None;
                         let id = new_session_id(&terminal_id);
                         let _ = hub.set_active_session(&id).await;
-                        let _ = agent_hub
+                        let attached = agent_hub
                             .agent_attach(
                                 &id,
                                 &terminal_id,
@@ -290,11 +346,20 @@ async fn run() -> io::Result<()> {
                                 capabilities.workspace_mcp,
                             )
                             .await;
+                        session_id = id;
+                        app.switch_session(Vec::new(), "New conversation");
+                        app.set_usage(match attached {
+                            Ok(attached) => crate::app::UsageState {
+                                context_tokens: attached.usage.context_tokens,
+                                prompt_tokens: attached.usage.prompt_tokens,
+                                completion_tokens: attached.usage.completion_tokens,
+                                requests: attached.usage.requests,
+                            },
+                            Err(_) => crate::app::UsageState::default(),
+                        });
                         let _ = agent_hub
                             .agent_set_mcp_tools(&mcp.definitions())
                             .await;
-                        session_id = id;
-                        app.switch_session(Vec::new(), "New conversation");
                     }
                 }
             }
@@ -339,7 +404,7 @@ async fn run() -> io::Result<()> {
                         let _ = hub
                             .save_history(&session_id, &outcome.messages)
                             .await;
-                        app.complete_compact(outcome.answer)
+                        app.complete_compact(outcome.messages, outcome.answer, outcome.usage)
                     }
                     (TaskKind::Compact, Ok(Err(error))) => {
                         app.complete_error(error, None)

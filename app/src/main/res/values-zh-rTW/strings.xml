@@ -182,6 +182,7 @@
     <string name="container_state_failed">失敗</string>
     <string name="container_state_deleted">已刪除</string>
     <string name="terminal_drawer_title">終端機</string>
+    <string name="terminal_empty">沒有可用的終端機</string>
     <string name="terminal_key_enter">Enter</string>
     <string name="terminal_drop_hint">拖到此處插入路徑</string>
     <string name="wizard_pull_title">從 Docker Hub 取得 Linux rootfs</string>
@@ -304,4 +305,11 @@
     <string name="agent_session_rename_title">重新命名對話</string>
     <string name="agent_session_messages">則訊息</string>
     <string name="agent_session_title">標題</string>
+
+    <!-- WebView 長按連結/圖像對話框 -->
+    <string name="web_hit_link">連結</string>
+    <string name="web_hit_image">圖像</string>
+    <string name="web_copy_link_text">複製連結文字</string>
+    <string name="web_copy_url">複製 URL</string>
+    <string name="web_share_url">分享 URL</string>
 </resources>

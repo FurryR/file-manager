@@ -3,6 +3,20 @@ package io.furryr.file.core
 /**
  * Protocol-aware path with support for full URIs and bare filesystem paths.
  *
+ * A path may also carry view levels: everything after a `!` is the address
+ * *inside* a file (an archive entry, a virtual document, …) and is invisible to
+ * providers. The rule is explicit, never inferred:
+ *
+ * ```
+ * /storage/a.zip!/docs/page.html          one view level
+ * /storage/a.zip!/inner.zip!/x.txt        two levels: zip inside a zip
+ * https://host/a.zip!/x.txt               a URL owns the bytes, the view does not
+ * ```
+ *
+ * Every provider-facing accessor ([toFullUri], [toInnerPath], [toLocalPath],
+ * [segmentList], [parent], [child], [name], [navigate]) sees only the part
+ * before the first `!`; only [views] and [toString] know about the rest.
+ *
  * Supported formats:
  * - [container://alpine/home/test]  → scheme=container, host=alpine, segments=[home, test]
  * - [ftp://user:pass@192.168.1.1:8080/path/to/file] → scheme=ftp, userInfo=user:pass,
@@ -20,6 +34,8 @@ class Path private constructor(
     val host: String?,
     val port: Int?,
     private val segments: List<String>,
+    /** View levels entered inside the file, outermost first. Provider-blind. */
+    val views: List<List<String>> = emptyList(),
 ) {
     // ── Companion & factory ──────────────────────────────────────────────
 
@@ -37,6 +53,20 @@ class Path private constructor(
          * ```
          */
         fun parse(raw: String): Path {
+            // `!` is reserved for view levels: the provider only ever sees the
+            // text before the first one.
+            val bang = raw.indexOf('!')
+            if (bang >= 0) {
+                val views = raw.substring(bang + 1)
+                    .split('!')
+                    .map(::parseSegments)
+                    .filter { it.isNotEmpty() }
+                return parse(raw.substring(0, bang)).enterViews(views)
+            }
+            return parseProviderPath(raw)
+        }
+
+        private fun parseProviderPath(raw: String): Path {
             // Absolute paths and provider URIs are exact filesystem names:
             // trailing spaces are significant, and a bare filename may contain
             // "://" without becoming a URI.
@@ -118,6 +148,19 @@ class Path private constructor(
     /** Immutable copy of path segments (zero-copy view). */
     val segmentList: List<String> get() = segments
 
+    /** True when the address points inside a file rather than at a provider path. */
+    val isViewed: Boolean get() = views.isNotEmpty()
+
+    /** This path plus one more view level; the provider part is untouched. */
+    fun enterView(view: List<String>): Path = if (view.isEmpty()) this else enterViews(listOf(view))
+
+    private fun enterViews(extra: List<List<String>>): Path =
+        Path(scheme, userInfo, host, port, segments, views + extra)
+
+    /** The provider-visible address, with every view level dropped. */
+    fun providerPath(): Path =
+        if (views.isEmpty()) this else Path(scheme, userInfo, host, port, segments)
+
     // ── Navigation ───────────────────────────────────────────────────────
 
     /**
@@ -130,6 +173,12 @@ class Path private constructor(
      * ```
      */
     fun parent(): Path? {
+        if (views.isNotEmpty()) {
+            // One level up inside the innermost view; an emptied level closes.
+            val last = views.last().dropLast(1)
+            val remaining = if (last.isEmpty()) views.dropLast(1) else views.dropLast(1) + listOf(last)
+            return Path(scheme, userInfo, host, port, segments, remaining)
+        }
         if (segments.isEmpty()) return null
         return Path(scheme, userInfo, host, port, segments.dropLast(1))
     }
@@ -190,7 +239,11 @@ class Path private constructor(
      *
      * Trailing slashes are never present (except for root `"/"`).
      */
-    override fun toString(): String = toFullUri()
+    override fun toString(): String {
+        val base = toFullUri()
+        if (views.isEmpty()) return base
+        return base + views.joinToString("") { view -> "!/" + view.joinToString("/") }
+    }
 
     /**
      * Full URI with scheme, authority, and path.
@@ -252,7 +305,7 @@ class Path private constructor(
         if (other !is Path) return false
         return scheme == other.scheme && userInfo == other.userInfo &&
             host == other.host && port == other.port &&
-            segments == other.segments
+            segments == other.segments && views == other.views
     }
 
     override fun hashCode(): Int {
@@ -261,6 +314,7 @@ class Path private constructor(
         result = 31 * result + (host?.hashCode() ?: 0)
         result = 31 * result + (port ?: 0)
         result = 31 * result + segments.hashCode()
+        result = 31 * result + views.hashCode()
         return result
     }
 }

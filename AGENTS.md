@@ -30,7 +30,7 @@ file-manager/
 │       ├── OpenRouter.kt       # generic ordered open-with table (C, R)
 │       ├── ArchiveOpener.kt    # zip-compatible file → ArchiveFolder
 │       ├── ArchiveFolder.kt    # ArchiveFolder/ArchiveFile/ArchiveSource
-│       ├── Archives.kt         # process-wide mount cache keyed by ViewRef
+│       ├── Archives.kt         # process-wide mount cache keyed by Path
 │       └── ZipArchiveSource.kt # in-place central-directory index + entry reads
 ├── daemon/              # :daemon — daemon IPC over :uds.Transport
 │   └── src/main/java/io/furryr/file/daemon/
@@ -102,7 +102,8 @@ file-manager/
 - `:core` is the **pure VFS abstraction** (Kotlin/JVM): `Path`, `Vfs`,
   `Folder`/`File`, `FileProvider`, location entries, models and the
   `FileSource` interface. It also owns the node/view model (`VNode`, `VFile`,
-  `VFolder`, flat `ViewRef`, `ContentInfo`, `Navigator`, `NodeService`). It
+  `VFolder`, `Path` (address + view levels), `ContentInfo`, `Navigator`,
+  `NodeService`). It
   must not import Android, `:uds`, `:daemon`, or any concrete provider.
 - `:opener` is the **file-to-view route** (Kotlin/JVM): `Opener`/`Openers`,
   the generic `OpenRouter<C, R>` open-with table, concrete openers and the
@@ -116,9 +117,15 @@ file-manager/
   protobuf, `DaemonManager`, `FileService`, `ExecService`, hub callbacks. It
   depends on `:core` for neutral models and the `FileSource` contract.
 - `:provider` implements **protocol domains** over `:core`: Local (`:daemon`),
-  FTP/SFTP, SAF/Document and remote AList/SSH. One provider instance owns all
-  locations of its protocol (internal subinstances), so Router keys are strict
-  scheme names with no duplicates. **No provider owns persistence**: the app
+  FTP/SFTP, SAF/Document, remote AList/SSH and HTTP(S). One provider instance
+  owns all locations of its protocol (internal subinstances), so Router keys are
+  strict scheme names with no duplicates. `HttpProvider` registers both `http`
+  and `https` and is the only place that knows a URL is a network address: it
+  mints a `RemoteFile` node and everything above it — openers, renderers, copy,
+  share, forward provider — treats that node like any other file. No layer
+  inspects a scheme to decide how to open, copy or share a resource. It also
+  fetches the progress/`WebTransfers` state the app's foreground notification
+  observes (the app binds the service starter, `:provider` owns the facts). **No provider owns persistence**: the app
   opens the SQLite/preference/encrypted stores and passes the current records
   through `SafLocationSource` / `FtpServerSource` / `SftpServerSource` /
   `RemoteLocationSource` / `DocumentTreeSource` at `init()` time.
@@ -152,21 +159,31 @@ file-manager/
   `ForwardFileProvider`, provider registration and the Android renderer layer
   under `app/.../render/`. It must not implement routing.
 
-## RENDERER / VIEWREF (NEW)
+## NODES / PATHS
 
+- **One address type.** `core/.../Path.kt` is the only address: the provider
+  part (`scheme`/`host`/`segments`) plus **view levels**, everything after a
+  `!`. A provider never sees a view level — `toFullUri`, `toInnerPath`,
+  `segmentList`, `parent`, `child` and `name` are all view-blind.
+  - `/storage/a.zip!/docs/page.html` — one view level (archive entry).
+  - `/storage/a.zip!/inner.zip!/x.txt` — two levels; nesting is a chain, never a
+    recursive `Nested`/`Proxy` type and never a `zip:` scheme.
+  - `https://host/a.zip!/x.txt` — the *bytes* come from HTTP, the view does not.
+  - The `!` is mandatory and reserved: boundaries are written, never guessed by
+    probing the filesystem the way `root!/inner` locators used to.
 - **Object model, not provider strings.** `core/.../VNode.kt` defines
-  `VNode`/`VFile`/`VFolder`, `NodeRef` and the **flat** `ViewRef`:
-  - `NodeRef` is only a real Vfs URI (`NodeRef.Vfs`).
-  - `ViewRef.Node(root, viewId, path)` is a flattened view. A zip inside a
-    zip is a longer `path`, never a recursive `Nested`/`Proxy` type. There is
-    no `zip:` scheme and no mount table.
-  - `VFolder.listNodes()`, `child()` and `VNode.parent` are the navigation
-    currency. Renderers receive nodes/`ViewRef`s, never provider paths. Only
-    `Vfs` and `NodeService` may turn a reference into a node.
+  `VNode`/`VFile`/`VFolder`; `VNode.path: Path` is the node's identity (there is
+  no `ViewRef`/`NodeRef` any more). `VFolder.listNodes()`, `child()` and
+  `VNode.parent` are the navigation currency; only `Vfs` and `NodeService` turn
+  an address into a node, and `NodeService.resolve(path)` enters each `!` level
+  through the opener registry. `FileProvider.node(path, innerPath)` is what
+  mints a node, so a provider whose files are not storage paths (a live
+  `RemoteFile`) returns its own `VFile` implementation and no caller needs to
+  know which kind it got.
 - **Archives.** `opener/.../ArchiveFolder.kt` owns `ArchiveFolder`/
   `ArchiveFile`/`ArchiveSource`; core only knows `VFile`/`VFolder` and the
-  `Openers` SPI. `ViewRef.Node(root, viewId, path)` auto-enters intermediate
-  files through the opener registry when more path segments follow.
+  `Openers` SPI. An archive node's identity is `backing.path.enterView(segments)`,
+  so nested archives extend the chain one level at a time.
   `opener/.../ZipArchiveSource.kt` reads the central directory in place
   when the outer `FileSource` is seekable (local/daemon fd or handle, SFTP/SSH,
   AList cache) and inflates entries on demand, so opening a large archive never
@@ -174,8 +191,8 @@ file-manager/
   staged once. Entries are read-only; `ArchiveFolder.capabilities()` is what
   greys out create/terminal/share/modify actions. An APK is a zip but is not
   offered as an archive: `ContentTypes` maps it to the package MIME kind so it
-  opens with the installer. Opening an entry externally signs its flat
-  `ViewRef` into a `ForwardFileProvider` URI; the provider resolves it through
+  opens with the installer. Opening an entry externally signs its address text
+  into a `ForwardFileProvider` URI; the provider resolves it through
   `DefaultNodeService`, so a zip member never needs a synthetic VFS path.
 - **Content facts.** `core/.../ContentInfo.kt` defines `ContentInfo`,
   `ContentKind` and `ContentTypes` (extension map + magic sniffing).
@@ -185,17 +202,40 @@ file-manager/
   back/forward and breadcrumb ancestry. `core/.../NodeService.kt` is the
   string-free resolve/list/open facade; `app/.../DefaultNodeService.kt` applies
   the "enter an intermediate file through `Openers`" policy.
-  `app/.../render/ViewRefJson.kt` is the persistence codec; `Address.kt` is
+  A node address is its `Path` text (`/a.zip!/docs`), persisted as-is; `Address.kt` is
   the breadcrumb projection.
+- **One history.** The tab owns it: `FileTab.backStack`/`forwardStack` hold
+  every stop, and a page, a folder, Home and an edited file are the same kind of
+  stop. A live page does not keep a second list — each navigation it reports
+  (`RenderHost.onPageVisited`) is recorded like any other step, and the WebView's
+  own back/forward list is only a cache of pages it already holds
+  (`WebRendererSession.retrace`, used by `moveToStop` so a history step costs no
+  request). `historyStops(tab)` projects the two stacks into the one linear list
+  the panel, Back and Forward all read; `stacksAt` rebuilds the stacks around any
+  stop, so a jump of ten steps is the same operation as one.
 - **Renderers/Openers.** `app/.../render/Renderer.kt` defines
-  `RenderTarget` (`Node`/`Url`), `RendererFactory`/`RendererSession`,
+  `RenderTarget` (a node plus its facts), `RendererFactory`/`RendererSession`,
   `RenderHost` and `Renderers`. Directory, Web and the tab-owned Sora text
   editor are registered. `opener/.../Opener.kt` defines the format-agnostic `Opener`/
   `Openers` route. `DirectorySession` is the shared directory controller;
   `FileListScreen` is still its transitional view. `ArchiveOpener` turns a zip
   file into an `ArchiveFolder`; it draws nothing.
-- **HTML.** `HtmlDocument`/`DocumentView`/`WebRenderer.kt` project both HTML
-  files and HTTP(S) URLs as a `DocumentView`; `WebContent` is the WebView.
+- **HTML.** `HtmlDocument`/`DocumentView`/`WebRenderer.kt` project HTML files
+  and live URLs as one `DocumentView`; `WebContent` is the WebView. A projected
+  page reports no `remoteBase`, so the renderer serves it (and its siblings)
+  through `Vfs` on the synthetic `ASSET_HOST`; a live page reports its address,
+  so the WebView loads that origin itself and resolves the page's references
+  there. The renderer never sees a scheme — it asks the document.
+  A long press on a link or an image sets `WebRendererSession.hitTarget`: the
+  target *is* a node (`RemoteFile` is a `VFile`), plus the anchor/`alt` text read
+  from the DOM through `elementFromPoint` and the response facts from its own
+  probe. `WebHitDialog` replaces Chromium's own menu with five actions: copy the
+  file, copy the link text, copy the URL, share the file, share the URL. Both
+  file actions take the node, never a string: `RenderHost.copyFile` enters the
+  tab's normal copy flow (`CopyMoveSource(node)` → `VFolder.destination` →
+  `Vfs.copyTo(source, target)`, so the destination node streams the link in on
+  demand), and `RenderHost.shareFile` hands the receiver an on-demand
+  `content://` stream through the forward provider.
   Relative assets resolve through the node graph (`file.parent.child(...)`),
   so HTML inside a zip works. WebView never learns about `zip:`/`ssh:`; a
   future `_vfs` gateway + `WebAccessPolicy` is the way to expose other
@@ -204,9 +244,12 @@ file-manager/
   `FileManagerApp` keeps `FileTab.folder` plus flat folder back/forward
   stacks, enters `ArchiveFolder` on archive open, and displays
   `WebContent` for HTML/URL renderers. A `WebRendererSession` is kept per tab
-  (`FileTab.id`), so tab switches preserve the WebView's own history, and
-  `webUrl`/`webTitle` carry the address and page title for the address bar and
-  tab label. It is still not a full per-tab `NavTarget`.
+  (`FileTab.id`), so a tab switch neither pays Chromium start-up again nor
+  reloads the page; `webUrl` is the page that tab is showing and `webTitle` its
+  title, which the path bar and tab label read. Losing the session (an editor
+  takes the tab over, another location opens) loses nothing but the cache: the
+  pages visited are already stops of the tab. It is still not a full per-tab
+  `NavTarget`.
 - **Agent.** `AgentEnvironment.nodeService` is injected with
   `DefaultNodeService`. `archive_list`/`archive_read`/`archive_copy` are
   read-only and never teach the daemon or hub about archives.
@@ -221,10 +264,11 @@ file-manager/
 | UI screens | `app/.../FileManagerApp.kt` | Main composable, tabs, state |
 | File listing | `app/.../ui/screens/FileListScreen.kt` | LazyColumn, pull-to-refresh |
 | Settings | `app/.../ui/screens/SettingsActivity.kt` | Root/shell toggles, su path → `DaemonManager` |
-| File operations | `core/.../Vfs.kt` | Scheme-strict routing + Folder/File facade; UI only calls this |
-| Node/view model | `core/.../VNode.kt` | `VNode`/`VFile`/`VFolder`, flat `ViewRef`, no `Nested` |
-| Node service | `app/.../DefaultNodeService.kt` | Resolves `ViewRef`, auto-enters intermediate files via `Openers.openFolder` |
-| Open-with table | `opener/.../OpenRouter.kt` + `app/.../OpenRoutes.kt` | Generic `OpenRouter<C, R>` in `:opener`; app registers web-page/opener/renderer/external order |
+| File operations | `core/.../Vfs.kt` | Scheme-strict routing + node facade (`provider.node` mints the node); UI only calls this |
+| Node/view model | `core/.../VNode.kt` | `VNode`/`VFile`/`VFolder`; identity is `Path`, views are `!` levels |
+| Node service | `app/.../DefaultNodeService.kt` | Resolves a `Path`: provider part, then one `Openers.openFolder` per `!` level |
+| Node operations | `core/.../VNode.kt`, `core/.../Vfs.kt` | `rename`/`delete`/`create`/`mkdir`/`destination` on nodes; `Vfs.copyTo(source, target)` takes two nodes — no operation formats a path |
+| Open-with table | `opener/.../OpenRouter.kt` + `app/.../OpenRoutes.kt` | Generic `OpenRouter<C, R>` in `:opener`; app registers opener/renderer/external order (no per-scheme route) |
 | Archive view | `opener/.../ArchiveFolder.kt` + `opener/.../ZipArchiveSource.kt` | Opener-owned view; core knows only `VFile`/`VFolder` |
 | Renderers | `app/.../render/Renderer.kt` | `RenderTarget`, `Renderers`, `RenderHost` (Directory + Web + Editor) |
 | Openers route | `opener/.../Opener.kt` | Format-agnostic SPI + priority registry; archive implementation lives beside it |

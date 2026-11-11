@@ -21,8 +21,24 @@ interface VNode {
     /** Parent folder, or null at a provider root / detached root. */
     val parent: VFolder?
 
-    /** Stable identity used by history, selection and persistence. */
-    fun ref(): ViewRef
+    /**
+     * Complete, stable address of this node: the provider path plus any view
+     * levels entered inside a file. This is the only identity the app persists;
+     * providers only ever see [Path.toFullUri].
+     */
+    val path: Path
+
+    /**
+     * Rename inside the parent folder and return this node under its new name.
+     * Callers keep working with nodes; no path is ever rebuilt from strings.
+     * Read-only views (archives, URLs) refuse.
+     */
+    suspend fun rename(newName: String): Result<VNode> =
+        Result.failure(UnsupportedOperationException("$path cannot be renamed"))
+
+    /** Delete through the owning provider; read-only views refuse. */
+    suspend fun delete(): Result<Unit> =
+        Result.failure(UnsupportedOperationException("$path is read-only"))
 }
 
 /** A file node. It may also be an archive/container, but it is still bytes. */
@@ -55,45 +71,36 @@ interface VFolder : VNode {
 
     suspend fun folder(name: String): Result<VFolder>
     suspend fun file(name: String): Result<VFile>
-}
 
-/**
- * Identity of a real Vfs node. It is deliberately only a URI: container and
- * document views are represented by [ViewRef], not by nesting this type.
- */
-sealed interface NodeRef {
-    data class Vfs(val uri: String) : NodeRef
+    /** Create [name] here and return the new file node. */
+    suspend fun create(name: String): Result<VFile> =
+        Result.failure(UnsupportedOperationException("$path is read-only"))
+
+    /** Create [name] here and return the new folder node. */
+    suspend fun mkdir(name: String): Result<VFolder> =
+        Result.failure(UnsupportedOperationException("$path is read-only"))
 
     /**
-     * A resource addressed outside Vfs. Remote files (HTTP(S)) live here, so a
-     * view over one — an archive whose backing file is a URL — still has a
-     * stable root instead of a provider-invented URI.
+     * The child file [name], created when this folder does not have it yet.
+     *
+     * Copy destinations are nodes: the caller resolves one of these first and
+     * hands it to [Vfs.copyTo], so a provider path is never formatted for an
+     * operation.
      */
-    data class Url(val url: String) : NodeRef
+    suspend fun destination(name: String): Result<VFile> =
+        when (val node = child(name).getOrNull()) {
+            null -> create(name)
+            is VFile -> Result.success(node)
+            is VFolder -> Result.failure(IllegalStateException("$name is a folder"))
+            else -> Result.failure(IllegalStateException("unsupported child: $name"))
+        }
+
+    /** The child folder [name], created when missing. */
+    suspend fun destinationFolder(name: String): Result<VFolder> =
+        when (val node = child(name).getOrNull()) {
+            null -> mkdir(name)
+            is VFolder -> Result.success(node)
+            is VFile -> Result.failure(IllegalStateException("$name is a file"))
+            else -> Result.failure(IllegalStateException("unsupported child: $name"))
+        }
 }
-
-/**
- * Flattened view identity.
- *
- * A file that offers a folder view (a container, a virtual document, ...) is
- * represented by [ViewRef.Node] with the opener's id in [ViewRef.Node.viewId]
- * and a flat inner [ViewRef.Node.path]. There is no recursive Nested type: a
- * container inside a container is just a longer path, and the resolver enters
- * intermediate files automatically when more segments follow. The view id is
- * chosen by the opener registry, so core never enumerates concrete formats.
- */
-sealed interface ViewRef {
-    data class Node(
-        val root: NodeRef,
-        val viewId: String,
-        val path: List<String> = emptyList(),
-    ) : ViewRef
-
-    /** A web location; it has no Vfs node. */
-    data class Url(val url: String) : ViewRef
-
-    /** A live session (terminal / DevTools); owned by a service, not Vfs. */
-    data class Session(val id: String, val kind: String) : ViewRef
-}
-
-

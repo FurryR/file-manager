@@ -388,6 +388,10 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                     .setSessionId(session.sessionId)
                                     .setTarget(session.targetName)
                                     .setCwd(session.cwd)
+                                    .setContextTokens(session.usage().contextTokens)
+                                    .setPromptTokens(session.usage().promptTokens)
+                                    .setCompletionTokens(session.usage().completionTokens)
+                                    .setRequests(session.usage().requests)
                                     .build(),
                             ).build(),
                     )
@@ -614,6 +618,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                     SessionInfo.newBuilder()
                                         .setId(session.id)
                                         .setTitle(session.title)
+                                        .setCreatedAt(session.createdAt)
                                         .setUpdatedAt(session.updatedAt)
                                         .setMessageCount(session.messageCount)
                                         .build()

@@ -48,6 +48,7 @@ fun BottomToolbar(
     onTerminal: () -> Unit,
     onParent: () -> Unit,
     copyMoveActive: Boolean = false,
+    canConfirmCopyMove: Boolean = true,
     onCopyMoveConfirm: () -> Unit = {},
     onCopyMoveCancel: () -> Unit = {},
     selectionMode: Boolean = false,
@@ -80,7 +81,7 @@ fun BottomToolbar(
                 Icon(if (selectionMode) Icons.Default.FlipToBack else Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = stringResource(R.string.cd_forward))
             }
             if (copyMoveActive) {
-                IconButton(onClick = onCopyMoveConfirm) {
+                IconButton(enabled = canConfirmCopyMove, onClick = onCopyMoveConfirm) {
                     Icon(Icons.Default.Done, contentDescription = stringResource(R.string.cd_confirm))
                 }
             } else if (selectionMode) {

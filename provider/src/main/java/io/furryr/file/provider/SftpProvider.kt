@@ -304,7 +304,7 @@ object SftpProvider : FileProvider {
 
     private fun createSession(server: SftpServer): Session {
         val s = jsch.getSession(server.username, server.host, server.port)
-        s.setPassword(server.password)
+        s.setPassword(server.password.toByteArray())
         s.setConfig("StrictHostKeyChecking", "no")
         s.setTimeout(TIMEOUT_MS)
         s.setServerAliveInterval(30_000)

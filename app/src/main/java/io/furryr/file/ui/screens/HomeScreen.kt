@@ -17,10 +17,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.ClearAll
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -257,7 +257,7 @@ private fun HomeRow(
         ) {
             Icon(
                 imageVector = when (entry.kind) {
-                    HomeEntryKind.FILE -> Icons.Default.InsertDriveFile
+                    HomeEntryKind.FILE -> Icons.AutoMirrored.Filled.InsertDriveFile
                     HomeEntryKind.FOLDER -> Icons.Default.Folder
                     HomeEntryKind.WEB -> Icons.Default.Language
                 },

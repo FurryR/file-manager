@@ -1,21 +1,27 @@
 package io.furryr.file.render
 
 import android.content.Context
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.VFile
-import io.furryr.file.core.ViewRef
 import io.furryr.file.core.VNode
 import kotlinx.coroutines.CoroutineScope
 
 /**
- * One item in the tab overflow menu. Renderers return only items that are
- * currently actionable, so the menu never shows a disabled placeholder.
+ * One item in the tab overflow menu. A non-empty [children] list turns the
+ * item into a submenu; [checked] draws the menu's tick for toggle rows.
+ * Renderers normally return only actionable items, but may keep a meaningful
+ * action visible and disabled (for example Save in a read-only editor).
  */
 data class RendererMenuItem(
     val title: String,
     val icon: ImageVector? = null,
-    val onClick: () -> Unit,
+    val enabled: Boolean = true,
+    val checked: Boolean? = null,
+    val children: List<RendererMenuItem>? = null,
+    val onClick: () -> Unit = {},
 )
 
 /**
@@ -32,13 +38,17 @@ data class RendererPath(
 )
 
 /**
- * What a tab is asking a renderer to show. Renderers receive node objects or
- * an explicit URL; they never receive a provider path or a synthetic scheme.
+ * What a tab is asking a renderer to show: a node, plus its facts when the
+ * caller already described it.
+ *
+ * A page address is a node like any other — the provider that answered
+ * `Vfs.node` decided what it is — so renderers never receive an address string
+ * or a synthetic scheme.
  */
-sealed interface RenderTarget {
-    data class Node(val node: VNode, val content: ContentInfo? = null) : RenderTarget
-    data class Url(val url: String) : RenderTarget
-}
+data class RenderTarget(
+    val node: VNode,
+    val content: ContentInfo? = null,
+)
 
 /** Capabilities surfaced to the shared toolbar. */
 data class RenderCapabilities(
@@ -63,6 +73,14 @@ interface RenderHost {
     val scope: CoroutineScope
     fun navigate(node: VNode, rendererId: String? = null)
     fun updateTitle(title: String?)
+
+    /**
+     * The live page moved itself to [address]: a link the WebView followed, a
+     * redirect, or the page's own back/forward. History belongs to the tab, so
+     * the host decides whether this is a new stop, a stop it already made, or
+     * a move it should ignore.
+     */
+    fun onPageVisited(address: String) {}
     fun updateCapabilities(capabilities: RenderCapabilities)
     fun reportError(error: Throwable)
     fun requestClose()
@@ -78,24 +96,57 @@ interface RenderHost {
      * renderer; [onLeave] runs only after confirmation, [onCancel] when the
      * user decides to stay. The default proceeds without a prompt.
      */
-    fun confirmLeave(message: String?, onLeave: () -> Unit, onCancel: () -> Unit = {}) {
+    fun confirmLeave(
+        message: String?,
+        canSave: Boolean = false,
+        onSave: (suspend () -> Result<Unit>)? = null,
+        onLeave: () -> Unit,
+        onCancel: () -> Unit = {},
+    ) {
         onLeave()
     }
 
     /**
      * Ask the tab to open [file] through the shared opener/renderer pipeline.
-     * A web page uses this for links whose response is not HTML, so archive,
-     * external and document handling stay in one place.
+     * The browser renderer uses this for a link hit: the route table decides
+     * whether the target is a page, an archive or a file, so a page can never
+     * bypass the same pipeline an address-bar open takes.
      */
     fun openFile(file: VFile, content: ContentInfo? = null) {}
+
+    /**
+     * Start the tab's copy flow with [file] as the source. The user picks the
+     * destination exactly like copying a listed file; the node is kept, not a
+     * path, because a page link has no Vfs address.
+     */
+    fun copyFile(file: VFile, content: ContentInfo? = null) {}
+
+    /** Share [file] itself (an on-demand stream), not its address. */
+    fun shareFile(file: VFile, content: ContentInfo? = null) {}
 }
 
 /** One live renderer instance, owned by a tab entry. */
 interface RendererSession : AutoCloseable {
     val capabilities: RenderCapabilities
 
-    /** Return true when the renderer consumed the back gesture. */
-    fun onBack(): Boolean = false
+    /** True while the renderer is still loading its document/page. */
+    val loading: Boolean get() = false
+
+    /** Load progress in the 0..100 range; only meaningful while [loading]. */
+    val progress: Int get() = 0
+
+    /** The content consumes horizontal gestures; the drawer must not. */
+    val consumesEdgeGestures: Boolean get() = false
+
+    /** Back dismisses this renderer as an overlay before tab history moves. */
+    val canDismiss: Boolean get() = false
+
+    /** The renderer is showing its own modal correction/confirmation UI. */
+    val modalActive: Boolean get() = false
+
+    /** Draw this renderer's tab content. */
+    @Composable
+    fun Content(darkTheme: Boolean, modifier: Modifier = Modifier)
 
     /**
      * Refresh the view. Returns false when this renderer has no refresh action,
@@ -165,6 +216,3 @@ object Renderers {
 
     fun resolve(target: RenderTarget): RendererFactory? = candidates(target).firstOrNull()
 }
-
-/** Optional helper shared by renderers that need a stable node identity. */
-fun VNode.viewRef(): ViewRef = ref()

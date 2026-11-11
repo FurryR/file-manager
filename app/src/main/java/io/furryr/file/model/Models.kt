@@ -5,6 +5,7 @@ import io.furryr.file.isHomePath
 import io.furryr.file.ui.util.formatSize
 import io.furryr.file.core.DirectoryStats
 import io.furryr.file.core.Path
+import io.furryr.file.core.VNode
 import io.furryr.file.core.VFolder
 
 data class FileTab(
@@ -23,7 +24,12 @@ data class FileTab(
     val folderForwardStack: List<VFolder?> = emptyList(),
     val selectedPaths: Set<String> = emptySet(),
     val lastSelectedIndex: Int = -1,
-    /** Web address shown by this tab's renderer, or null for a directory. */
+    /**
+     * The page this tab is showing, or null when it shows a directory/home.
+     *
+     * History is the tab's, so this is a history stop like a folder path: the
+     * live page's `Path` (or its URL) as the address bar shows it.
+     */
     val webUrl: String? = null,
     /** Page title reported by the WebView, preferred over the path label. */
     val webTitle: String? = null,
@@ -55,18 +61,22 @@ fun DirectoryStats.summary(context: Context): String =
         formatSize(totalBytes),
     ) else ""
 
+/**
+ * One pending copy/move source: always a node.
+ *
+ * A listed entry, a page link and an archive member are all [VNode]s, so the
+ * paste flow never rebuilds a path and the destination is another node
+ * (`VFolder.destination`) handed to `Vfs.copyTo`.
+ */
 data class CopyMoveSource(
-    val path: String,
-    val name: String
+    val node: VNode,
+    val name: String = node.name,
 )
 
 data class CopyMoveState(
     val sources: List<CopyMoveSource>,
     val isCopy: Boolean,
-    val sourceParent: String = sources.firstOrNull()?.let {
-        val parentFile = java.io.File(it.path).parentFile
-        parentFile?.name ?: ""
-    } ?: "",
+    val sourceParent: String = sources.firstOrNull()?.node?.parent?.name ?: "",
     val targetPath: String = ""
 ) {
     val sourceName: String

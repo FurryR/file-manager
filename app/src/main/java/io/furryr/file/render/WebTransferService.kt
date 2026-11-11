@@ -13,6 +13,7 @@ import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import io.furryr.file.MainActivity
 import io.furryr.file.R
+import io.furryr.file.provider.web.WebTransfers
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job

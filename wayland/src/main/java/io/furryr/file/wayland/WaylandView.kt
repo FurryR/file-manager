@@ -72,6 +72,9 @@ class WaylandView(context: Context) : SurfaceView(context), SurfaceHolder.Callba
         imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
     }
 
+    // Deprecated in API 34 in favour of explicit show/hide, but no replacement
+    // can decide the direction from the current IME state the way this toggle does.
+    @Suppress("DEPRECATION")
     fun toggleKeyboard() {
         requestFocus()
         imm.toggleSoftInput(InputMethodManager.SHOW_IMPLICIT, 0)

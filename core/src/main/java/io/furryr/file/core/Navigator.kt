@@ -61,16 +61,16 @@ class Navigator(
     }
 
     /**
-     * Rebuild the current node from a persisted reference. The service may
+     * Rebuild the current node from a persisted address. The service may
      * descend a container one level at a time (or batch internally); history
      * is intentionally not restored here, only the current location.
      */
     suspend fun restore(
         service: NodeService,
-        ref: ViewRef,
+        path: Path,
         rendererId: String? = null,
     ): Result<VNode> = runCatching {
-        val node = service.resolve(ref).getOrThrow()
+        val node = service.resolve(path).getOrThrow()
         current = node
         this.rendererId = rendererId
         backStack.clear()
@@ -78,7 +78,7 @@ class Navigator(
         node
     }
 
-    /** References for persisting history; resolution happens on restore. */
-    fun backRefs(): List<ViewRef> = backStack.map { it.ref() }
-    fun forwardRefs(): List<ViewRef> = forwardStack.map { it.ref() }
+    /** Addresses for persisting history; resolution happens on restore. */
+    fun backRefs(): List<Path> = backStack.map { it.path }
+    fun forwardRefs(): List<Path> = forwardStack.map { it.path }
 }

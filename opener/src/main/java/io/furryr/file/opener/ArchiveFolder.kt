@@ -4,11 +4,10 @@ import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.ContentTypes
 import io.furryr.file.core.DirectoryCapabilities
 import io.furryr.file.core.DirectoryStats
-import io.furryr.file.core.NodeRef
+import io.furryr.file.core.Path
 import io.furryr.file.core.VFile
 import io.furryr.file.core.VFolder
 import io.furryr.file.core.VNode
-import io.furryr.file.core.ViewRef
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
 import io.furryr.file.core.source.FileSource
@@ -36,41 +35,27 @@ interface ArchiveSource {
 }
 
 /**
- * Flatten the backing file's own reference with the container path, so a zip
- * inside a zip becomes one longer path. The root may be a Vfs URI or a URL:
- * a remote archive is the same kind of view, only its bytes come from HTTP.
- */
-private fun archiveViewRef(backing: VFile, path: List<String>): ViewRef.Node =
-    when (val base = backing.ref()) {
-        is ViewRef.Node -> ViewRef.Node(
-            root = base.root,
-            viewId = "archive",
-            path = base.path + path,
-        )
-        is ViewRef.Url -> ViewRef.Node(
-            root = NodeRef.Url(base.url),
-            viewId = "archive",
-            path = path,
-        )
-        is ViewRef.Session -> error("a session cannot back an archive view")
-    }
-
-/**
  * Folder inside a container. [backing] is the file that was opened (which may
- * itself live inside another [ArchiveFolder]); [path] is relative to the
- * archive root. There is no synthetic URI scheme: identity is [ViewRef.Node] with viewId = "archive".
+ * itself live inside another [ArchiveFolder]); [segments] is relative to the
+ * archive root. Identity is the backing path plus one view level, so a
+ * container inside a container is simply a longer chain — and providers never
+ * see any of it.
  */
 class ArchiveFolder(
     val backing: VFile,
     val source: ArchiveSource,
-    val path: List<String> = emptyList(),
+    val segments: List<String> = emptyList(),
 ) : VFolder {
-    override val name: String get() = path.lastOrNull() ?: backing.name
+    override val path: Path = backing.path.enterView(segments)
+
+    override val name: String get() = segments.lastOrNull() ?: backing.name
 
     override val parent: VFolder?
-        get() = if (path.isEmpty()) backing.parent else ArchiveFolder(backing, source, path.dropLast(1))
-
-    override fun ref(): ViewRef.Node = archiveViewRef(backing, path)
+        get() = if (segments.isEmpty()) {
+            backing.parent
+        } else {
+            ArchiveFolder(backing, source, segments.dropLast(1))
+        }
 
     override suspend fun list(): Result<List<FileEntry>> = listNodes().map { nodes ->
         nodes.map { node ->
@@ -81,7 +66,7 @@ class ArchiveFolder(
             }
             FileEntry(
                 name = entry.name,
-                path = displayPath(path + entry.name),
+                path = displayPath(segments + entry.name),
                 isDirectory = entry.isDirectory,
                 modifiedAt = entry.modifiedAt,
                 size = entry.size,
@@ -90,9 +75,9 @@ class ArchiveFolder(
     }
 
     override suspend fun listNodes(): Result<List<VNode>> =
-        source.entries(path).map { entries ->
+        source.entries(segments).map { entries ->
             entries.map { entry ->
-                val childPath = path + entry.name
+                val childPath = segments + entry.name
                 if (entry.isDirectory) {
                     ArchiveFolder(backing, source, childPath)
                 } else {
@@ -118,9 +103,9 @@ class ArchiveFolder(
         require(name.isNotEmpty() && name != "." && name != ".." && '/' !in name) {
             "invalid child name: $name"
         }
-        val entry = source.entries(path).getOrThrow().firstOrNull { it.name == name }
+        val entry = source.entries(segments).getOrThrow().firstOrNull { it.name == name }
             ?: error("not found: $name")
-        val childPath = path + entry.name
+        val childPath = segments + entry.name
         if (entry.isDirectory) {
             ArchiveFolder(backing, source, childPath)
         } else {
@@ -136,7 +121,7 @@ class ArchiveFolder(
         node as? VFile ?: error("not a file: $name")
     }
 
-    override fun toString(): String = "ArchiveFolder(${displayPath(path)})"
+    override fun toString(): String = "ArchiveFolder($path)"
 
     private fun displayPath(segments: List<String>): String =
         "/" + segments.joinToString("/")
@@ -146,15 +131,15 @@ class ArchiveFolder(
 class ArchiveFile(
     val backing: VFile,
     val source: ArchiveSource,
-    val path: List<String>,
+    val segments: List<String>,
     val entry: ArchiveEntry,
 ) : VFile {
+    override val path: Path = backing.path.enterView(segments)
+
     override val name: String get() = entry.name
 
     override val parent: VFolder
-        get() = ArchiveFolder(backing, source, path.dropLast(1))
-
-    override fun ref(): ViewRef.Node = archiveViewRef(backing, path)
+        get() = ArchiveFolder(backing, source, segments.dropLast(1))
 
     override suspend fun stat(): Result<ProviderStat> = Result.success(
         ProviderStat(
@@ -168,7 +153,7 @@ class ArchiveFile(
         if (mode != OpenMode.READ) {
             return Result.failure(UnsupportedOperationException("archive entries are read-only"))
         }
-        return source.open(path, mode)
+        return source.open(segments, mode)
     }
 
     override suspend fun describe(): Result<ContentInfo> = runCatching {
@@ -185,5 +170,5 @@ class ArchiveFile(
         ContentTypes.describe(entry.name, size, head, seekable)
     }
 
-    override fun toString(): String = "ArchiveFile(${path.joinToString("/")})"
+    override fun toString(): String = "ArchiveFile($path)"
 }

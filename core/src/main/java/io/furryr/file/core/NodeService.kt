@@ -4,12 +4,13 @@ import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
 
 /**
- * String-free access to nodes for clients that only have a [ViewRef] (tab
- * restore, agent tools, share targets). This is the only place outside [Vfs]
- * that may turn a reference into a node.
+ * Resolve an address into a node. A [Path] without view levels is one provider
+ * lookup; with view levels the service enters each level through the opener
+ * registry, so a container inside a container is just a longer chain. This is
+ * the only place outside [Vfs] that turns an address into a node.
  */
 interface NodeService {
-    suspend fun resolve(ref: ViewRef): Result<VNode>
+    suspend fun resolve(path: Path): Result<VNode>
 
     /**
      * Resolve [path] from an already resolved [root], entering any intermediate
@@ -19,21 +20,21 @@ interface NodeService {
      */
     suspend fun resolveFrom(root: VNode, path: List<String>): Result<VNode>
 
-    suspend fun list(ref: ViewRef): Result<List<VNode>> = runCatching {
-        val folder = resolve(ref).getOrThrow() as? VFolder
-            ?: error("not a folder: $ref")
+    suspend fun list(path: Path): Result<List<VNode>> = runCatching {
+        val folder = resolve(path).getOrThrow() as? VFolder
+            ?: error("not a folder: $path")
         folder.listNodes().getOrThrow()
     }
 
-    suspend fun open(ref: ViewRef, mode: OpenMode): Result<FileSource> = runCatching {
-        val file = resolve(ref).getOrThrow() as? VFile
-            ?: error("not a file: $ref")
+    suspend fun open(path: Path, mode: OpenMode): Result<FileSource> = runCatching {
+        val file = resolve(path).getOrThrow() as? VFile
+            ?: error("not a file: $path")
         file.open(mode).getOrThrow()
     }
 
-    suspend fun describe(ref: ViewRef): Result<ContentInfo> = runCatching {
-        val file = resolve(ref).getOrThrow() as? VFile
-            ?: error("not a file: $ref")
+    suspend fun describe(path: Path): Result<ContentInfo> = runCatching {
+        val file = resolve(path).getOrThrow() as? VFile
+            ?: error("not a file: $path")
         file.describe().getOrThrow()
     }
 }

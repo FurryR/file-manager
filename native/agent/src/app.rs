@@ -23,12 +23,27 @@ Enter: send   Shift+Enter / Ctrl+J: newline   Esc: stop the run and its commands
 Enter while a request runs: hand it to the running turn, inserted after the current tool call
 Left/Right/Home/End: move   Up/Down: previous/next line; at first/last line: prompt history   Ctrl+U: clear input   Ctrl+W: delete word
 PageUp/PageDown, Ctrl/Shift+Up/Down, mouse wheel: scroll   click a Thought header: toggle thinking
-Ctrl+P: commands   /models: switch model   /variants: reasoning effort
-/compact: summarize   /clear: clear   /undo: revert last message   /redo: restore it
-/yolo: auto-approve every tool in this terminal   /sessions: switch conversation
+Ctrl+P: commands   /models: switch model (type to search)   /effort: reasoning effort
+/compact: summarize without hiding history   /clear: clear   /undo: interrupt and revert
+/redo: restore it   /new: new conversation   /sessions: switch conversation
+/yolo: auto-approve every tool in this terminal
 /help: shortcuts   /exit: exit
 
 Configure an AI provider in the app's settings first.";
+
+pub const COMMANDS: [(&str, &str); 11] = [
+    ("/compact", "Summarize the conversation into a new context"),
+    ("/effort", "Switch reasoning effort"),
+    ("/models", "Switch model"),
+    ("/new", "Start a new conversation"),
+    ("/sessions", "Switch conversation"),
+    ("/undo", "Revert the last message"),
+    ("/redo", "Restore the reverted message"),
+    ("/clear", "Clear the conversation"),
+    ("/yolo", "Auto-approve every tool in this terminal"),
+    ("/help", "Show keyboard shortcuts"),
+    ("/exit", "Exit the agent"),
+];
 
 const SCROLL_LINES: usize = 3;
 pub(super) const GENERATING_CALL: &str = "~ Generating call";
@@ -38,6 +53,8 @@ pub enum Action {
     None,
     Quit,
     Cancel,
+    /// Cancel the current run, then persist the restored history.
+    CancelAndPersist(Vec<Message>),
     Submit(Vec<Message>),
     /// A prompt typed while a run is working. It goes to the agent loop right
     /// away and is spliced into the conversation at the next gap, instead of
@@ -51,6 +68,27 @@ pub enum Action {
     NewSession,
     Approval { id: u64, allow: bool },
 }
+
+/// The input block becomes this confirmation while a tool call is waiting.
+pub struct ApprovalState {
+    pub id: u64,
+    pub name: String,
+    pub detail: String,
+    pub reason: String,
+    pub selected: usize,
+    pub confirm_always: bool,
+}
+
+/// Session token accounting, persisted by the app and restored on attach.
+#[derive(Clone, Copy, Default)]
+pub struct UsageState {
+    pub context_tokens: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub requests: u64,
+}
+
+pub const APPROVAL_BUTTONS: [&str; 3] = ["Allow multiple", "Allow once", "Deny"];
 
 struct Pending {
     started: Instant,
@@ -104,6 +142,20 @@ pub struct App {
     /// Auto-approve every approval request in this terminal. Never sent to the
     /// hub; the TUI answers requests as they arrive.
     yolo: bool,
+    /// Rules accepted with "Allow multiple": tool name plus the path/command it
+    /// asked about, so the same access is not asked twice in this session.
+    allow_rules: Vec<String>,
+    pub approval: Option<ApprovalState>,
+    /// Prompts typed while a run is working and not yet inserted by the agent.
+    /// They are drawn below the newest transcript line with a grey marker.
+    queued: Vec<String>,
+    esc_armed: bool,
+    command_selection: usize,
+    command_done: bool,
+}
+
+pub(super) fn approval_rule(name: &str, detail: &str) -> String {
+    format!("{name}\u{0}{detail}")
 }
 
 fn tool_line(name: &str, detail: &str) -> String {
@@ -174,7 +226,11 @@ fn transcript_from_history(history: &[Message]) -> Vec<Entry> {
                     .as_deref()
                     .filter(|text| !text.trim().is_empty())
                 {
-                    transcript.push(Entry::user(content.to_owned()));
+                    if message.compaction_summary == Some(true) {
+                        transcript.push(Entry::compaction(compaction_body(content)));
+                    } else {
+                        transcript.push(Entry::user(content.to_owned()));
+                    }
                 }
             }
             "assistant" => {
@@ -229,6 +285,13 @@ fn transcript_from_history(history: &[Message]) -> Vec<Entry> {
         }
     }
     transcript
+}
+
+fn compaction_body(content: &str) -> String {
+    content
+        .strip_prefix("Summary of the earlier conversation (compacted):\n")
+        .unwrap_or(content)
+        .to_owned()
 }
 
 /// Split the tool's formatted result (`exit_code: N\n…`) into displayable
@@ -310,6 +373,12 @@ impl App {
             requests: 0,
             popup: None,
             yolo: false,
+            allow_rules: Vec::new(),
+            approval: None,
+            queued: Vec::new(),
+            esc_armed: false,
+            command_selection: 0,
+            command_done: false,
         }
     }
 
@@ -348,6 +417,67 @@ impl App {
 
     pub fn context_window(&self) -> Option<u64> {
         self.info().and_then(|info| info.context_window)
+    }
+
+    pub fn efforts(&self) -> Vec<String> {
+        self.info().map(|info| info.efforts.clone()).unwrap_or_default()
+    }
+
+    pub fn set_usage(&mut self, usage: UsageState) {
+        self.context_tokens = usage.context_tokens;
+        self.prompt_tokens = usage.prompt_tokens;
+        self.completion_tokens = usage.completion_tokens;
+        self.requests = usage.requests;
+        self.bump();
+    }
+
+    pub fn queued(&self) -> &[String] {
+        &self.queued
+    }
+
+    pub fn esc_armed(&self) -> bool {
+        self.esc_armed
+    }
+
+    pub fn approval(&self) -> Option<&ApprovalState> {
+        self.approval.as_ref()
+    }
+
+    pub fn command_active(&self) -> bool {
+        let text = self.input.text();
+        !self.command_done
+            && text.starts_with('/')
+            && !text.chars().any(char::is_whitespace)
+    }
+
+    /// Commands whose name starts with the current `/...` token.
+    pub fn command_matches(&self) -> Vec<(&'static str, &'static str)> {
+        let token = self.input.text();
+        COMMANDS
+            .iter()
+            .copied()
+            .filter(|(command, _)| command.starts_with(token))
+            .collect()
+    }
+
+    pub fn command_selection(&self) -> usize {
+        self.command_selection
+    }
+
+    fn reset_command_menu(&mut self) {
+        self.command_selection = 0;
+        self.command_done = false;
+    }
+
+    fn complete_command(&mut self) {
+        let matches = self.command_matches();
+        let Some((command, _)) = matches.get(self.command_selection) else {
+            return;
+        };
+        self.input.set((*command).to_owned());
+        self.command_done = true;
+        self.command_selection = 0;
+        self.bump();
     }
 
     pub fn cost(&self) -> Option<f64> {
@@ -407,8 +537,51 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return Action::None;
         }
+        if self.approval.is_some() {
+            return self.handle_approval_key(key);
+        }
         if self.popup.is_some() {
             return self.handle_popup_key(key);
+        }
+        if self.command_active() {
+            match key.code {
+                KeyCode::Up => {
+                    let total = self.command_matches().len();
+                    if total > 0 {
+                        self.command_selection = self.command_selection.saturating_sub(1);
+                    }
+                    return Action::None;
+                }
+                KeyCode::Down => {
+                    let total = self.command_matches().len();
+                    if total > 0 {
+                        self.command_selection = (self.command_selection + 1) % total;
+                    }
+                    return Action::None;
+                }
+                KeyCode::Enter => {
+                    if self.command_matches().is_empty() {
+                        return Action::None;
+                    }
+                    self.complete_command();
+                    return Action::None;
+                }
+                KeyCode::Tab => {
+                    if !self.command_matches().is_empty() {
+                        self.complete_command();
+                    }
+                    return Action::None;
+                }
+                KeyCode::Esc if self.pending.is_none() => {
+                    self.command_done = true;
+                    return Action::None;
+                }
+                KeyCode::Esc => {}
+                _ => {}
+            }
+        }
+        if self.pending.is_some() && key.code != KeyCode::Esc {
+            self.esc_armed = false;
         }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -425,6 +598,7 @@ impl App {
                 'w' => {
                     self.input.delete_word();
                     self.detach_prompt_browse();
+                    self.reset_command_menu();
                     Action::None
                 }
                 'a' => {
@@ -452,11 +626,13 @@ impl App {
             KeyCode::Backspace => {
                 self.input.backspace();
                 self.detach_prompt_browse();
+                self.reset_command_menu();
                 Action::None
             }
             KeyCode::Delete => {
                 self.input.delete();
                 self.detach_prompt_browse();
+                self.reset_command_menu();
                 Action::None
             }
             KeyCode::Left => {
@@ -505,8 +681,16 @@ impl App {
             }
             KeyCode::Esc => {
                 if self.pending.is_some() {
-                    self.cancel();
-                    Action::Cancel
+                    if self.esc_armed {
+                        self.cancel();
+                        Action::Cancel
+                    } else {
+                        // Two-step interrupt: the first Esc only arms it, so a
+                        // stray keypress cannot kill a running build.
+                        self.esc_armed = true;
+                        self.bump();
+                        Action::None
+                    }
                 } else {
                     Action::None
                 }
@@ -521,29 +705,48 @@ impl App {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc => {
-                let approval = match self.popup.as_ref().map(|popup| &popup.kind) {
-                    Some(PopupKind::Approval(id)) => Some(*id),
-                    _ => None,
-                };
                 self.popup = None;
-                match approval {
-                    Some(id) => Action::Approval { id, allow: false },
-                    None => Action::None,
-                }
+                Action::None
             }
             KeyCode::Char('p') if control => {
                 self.popup = None;
                 Action::None
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up | KeyCode::Char('k') if !self.popup_search_active() => {
                 if let Some(popup) = self.popup.as_mut() {
-                    popup.selected = popup.selected.saturating_sub(1);
+                    popup.move_selection(false);
                 }
                 Action::None
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down | KeyCode::Char('j') if !self.popup_search_active() => {
                 if let Some(popup) = self.popup.as_mut() {
-                    popup.selected = (popup.selected + 1) % popup.items.len().max(1);
+                    popup.move_selection(true);
+                }
+                Action::None
+            }
+            KeyCode::Up => {
+                if let Some(popup) = self.popup.as_mut() {
+                    popup.move_selection(false);
+                }
+                Action::None
+            }
+            KeyCode::Down => {
+                if let Some(popup) = self.popup.as_mut() {
+                    popup.move_selection(true);
+                }
+                Action::None
+            }
+            KeyCode::Backspace if self.popup_search_active() => {
+                if let Some(popup) = self.popup.as_mut() {
+                    popup.query.pop();
+                    popup.selected = 0;
+                }
+                Action::None
+            }
+            KeyCode::Char(c) if self.popup_search_active() && !control => {
+                if let Some(popup) = self.popup.as_mut() {
+                    popup.query.push(c);
+                    popup.selected = 0;
                 }
                 Action::None
             }
@@ -551,7 +754,7 @@ impl App {
                 let Some(popup) = self.popup.take() else {
                     return Action::None;
                 };
-                let Some(item) = popup.items.get(popup.selected) else {
+                let Some(item) = popup.selected_item().cloned() else {
                     return Action::None;
                 };
                 match popup.kind {
@@ -562,11 +765,20 @@ impl App {
                             self.open_models();
                             Action::None
                         }
-                        Some(PopupAction::Variants) => {
-                            self.open_variants();
+                        Some(PopupAction::Effort) => {
+                            self.open_efforts();
                             Action::None
                         }
                         Some(PopupAction::Sessions) => Action::ListSessions,
+                        Some(PopupAction::NewSession) => Action::NewSession,
+                        Some(PopupAction::Undo) => {
+                            self.input.clear();
+                            return self.undo();
+                        }
+                        Some(PopupAction::Redo) => {
+                            self.input.clear();
+                            return self.redo();
+                        }
                         Some(PopupAction::Clear) => {
                             if self.pending.is_none() {
                                 self.clear_conversation();
@@ -578,24 +790,21 @@ impl App {
                             Action::None
                         }
                         Some(PopupAction::Exit) => Action::Quit,
-                        Some(PopupAction::Allow) | Some(PopupAction::Deny) => Action::None,
-                        None | Some(PopupAction::NewSession) => Action::None,
+                        None => Action::None,
                     },
                     PopupKind::Models => {
-                        self.model = item.label.clone();
+                        let Some(model) = item.session else {
+                            return Action::None;
+                        };
+                        self.model = model;
                         self.bump();
                         Action::PersistSelection
                     }
-                    PopupKind::Variants => {
+                    PopupKind::Effort => {
                         self.effort = item.label.clone();
                         self.bump();
                         Action::PersistSelection
                     }
-                    PopupKind::Approval(id) => match item.action {
-                        Some(PopupAction::Allow) => Action::Approval { id, allow: true },
-                        Some(PopupAction::Deny) => Action::Approval { id, allow: false },
-                        _ => Action::None,
-                    },
                     PopupKind::Sessions => {
                         // Switching while a request runs would land its result
                         // and history writes on the wrong session.
@@ -609,6 +818,83 @@ impl App {
                             },
                             None => Action::NewSession,
                         }
+                    }
+                }
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn popup_search_active(&self) -> bool {
+        self.popup.as_ref().is_some_and(|popup| popup.searchable)
+    }
+
+    fn handle_approval_key(&mut self, key: KeyEvent) -> Action {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(approval) = self.approval.as_mut() else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                if approval.confirm_always {
+                    approval.confirm_always = false;
+                    self.bump();
+                    Action::None
+                } else {
+                    let id = approval.id;
+                    self.approval = None;
+                    self.esc_armed = false;
+                    self.bump();
+                    Action::Approval { id, allow: false }
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                if !approval.confirm_always {
+                    approval.selected = approval.selected.saturating_sub(1);
+                    self.bump();
+                }
+                Action::None
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                if !approval.confirm_always {
+                    approval.selected = (approval.selected + 1) % APPROVAL_BUTTONS.len();
+                    self.bump();
+                }
+                Action::None
+            }
+            KeyCode::Up | KeyCode::Down | KeyCode::Tab => {
+                if !approval.confirm_always {
+                    approval.selected = (approval.selected + 1) % APPROVAL_BUTTONS.len();
+                    self.bump();
+                }
+                Action::None
+            }
+            KeyCode::Enter if !control => {
+                if approval.confirm_always {
+                    let id = approval.id;
+                    let rule = approval_rule(&approval.name, &approval.detail);
+                    self.allow_rules.push(rule);
+                    self.approval = None;
+                    self.bump();
+                    return Action::Approval { id, allow: true };
+                }
+                match approval.selected {
+                    0 => {
+                        approval.confirm_always = true;
+                        self.bump();
+                        Action::None
+                    }
+                    1 => {
+                        let id = approval.id;
+                        self.approval = None;
+                        self.bump();
+                        Action::Approval { id, allow: true }
+                    }
+                    _ => {
+                        let id = approval.id;
+                        self.approval = None;
+                        self.bump();
+                        Action::Approval { id, allow: false }
                     }
                 }
             }
@@ -630,11 +916,27 @@ impl App {
         } else {
             title.to_owned()
         };
-        self.transcript = transcript_from_history(&history);
-        self.history = history;
+        // A restored conversation has no in-memory undo history. Seed one
+        // snapshot per user turn so /undo works on messages that predate this
+        // terminal, walking back one turn at a time.
         self.undo.clear();
         self.redo.clear();
+        for index in 0..history.len() {
+            if history[index].role != "user" {
+                continue;
+            }
+            let earlier = &history[..index];
+            self.push_undo(UndoState {
+                history: earlier.to_vec(),
+                transcript: transcript_from_history(earlier),
+                input: String::new(),
+            });
+        }
+        self.transcript = transcript_from_history(&history);
+        self.history = history;
+        self.queued.clear();
         self.compact_snapshot = None;
+        self.approval = None;
         self.detach_prompt_browse();
         self.input.clear();
         self.reasoning_active = None;
@@ -642,25 +944,42 @@ impl App {
         self.calling_tool = None;
         self.streaming_index = None;
         self.answer_streamed = false;
+        self.esc_armed = false;
         self.follow = true;
         self.scroll = 0;
         self.bump();
     }
 
-    pub fn open_approval(&mut self, id: u64, name: &str, reason: &str) {
-        self.popup = Some(Popup::approval(id, name, reason));
+    pub fn open_approval(&mut self, id: u64, name: &str, detail: &str, reason: &str) {
+        self.popup = None;
+        self.approval = Some(ApprovalState {
+            id,
+            name: name.to_owned(),
+            detail: detail.to_owned(),
+            reason: reason.to_owned(),
+            selected: 1,
+            confirm_always: false,
+        });
         self.bump();
+    }
+
+    pub fn auto_approval(&self, name: &str, detail: &str) -> bool {
+        self.yolo
+            || self
+                .allow_rules
+                .iter()
+                .any(|rule| rule == &approval_rule(name, detail))
     }
 
     fn open_models(&mut self) {
         if self.models.is_empty() {
             return;
         }
-        self.popup = Some(Popup::models(&self.models, &self.model, &self.provider));
+        self.popup = Some(Popup::models(&self.models, &self.infos, &self.model));
     }
 
-    fn open_variants(&mut self) {
-        self.popup = Some(Popup::variants(&self.effort));
+    fn open_efforts(&mut self) {
+        self.popup = Some(Popup::efforts(&self.efforts(), &self.effort));
     }
 
     fn begin_compact(&mut self) -> Option<Action> {
@@ -693,7 +1012,9 @@ impl App {
             .active_tool
             .and_then(|index| self.transcript.get(index))
             .is_some_and(|entry| entry.tool.is_some() && entry.started.is_some());
-        if self.reasoning_active.is_some() || exec_running {
+        // A pending run animates the interrupt hint in the status bar even
+        // when the model is silent and no tool is drawing a spinner.
+        if self.pending.is_some() || self.reasoning_active.is_some() || exec_running {
             self.thinking_frame = self.thinking_frame.wrapping_add(1);
             self.bump();
         }

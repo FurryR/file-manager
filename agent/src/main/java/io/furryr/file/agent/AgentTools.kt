@@ -1,7 +1,6 @@
 package io.furryr.file.agent
 
-import io.furryr.file.core.NodeRef
-import io.furryr.file.core.ViewRef
+import io.furryr.file.core.Path
 import io.furryr.file.core.VFile
 import io.furryr.file.core.VFolder
 import io.furryr.file.core.Vfs
@@ -183,7 +182,7 @@ internal object AgentTools {
 
     private suspend fun write(args: JSONObject, context: ToolContext): String {
         val path = stringArg(args, "path")
-        val content = args.optString("content", null)
+        val content = args.opt("content")?.toString()
             ?: error("missing 'content'")
         val old = runCatching {
             readFile(
@@ -221,7 +220,16 @@ internal object AgentTools {
 
     private suspend fun glob(args: JSONObject, context: ToolContext): String {
         val pattern = stringArg(args, "pattern")
+        require(!pattern.startsWith('/') && !pattern.contains("://")) {
+            "glob pattern is relative; pass the base directory in 'path'"
+        }
+        // The workspace is the default domain. Any other domain (another
+        // container, a network location) must be named explicitly in `path`;
+        // a wildcard pattern alone never fans out across providers.
         val path = args.optString("path").takeIf { it.isNotBlank() } ?: context.cwd
+        require(path.startsWith('/') || path.contains("://")) {
+            "glob path must be absolute or a VFS URI"
+        }
         val maxResults = args.optInt("max_results", 200).coerceAtLeast(1)
         val response = glob(
             GlobRequest.newBuilder()
@@ -352,7 +360,8 @@ internal object AgentTools {
         collected
     }
 
-    private fun archiveRef(args: JSONObject, context: ToolContext): ViewRef {
+    /** Tool input is text; the address after it is a `Path` with view levels. */
+    private fun archiveRef(args: JSONObject, context: ToolContext): Path {
         val archive = callerPath(context.target, stringArg(args, "archive"), "archive")
         val inner = args.optString("path").trim('/')
         val segments = if (inner.isEmpty()) {
@@ -361,7 +370,7 @@ internal object AgentTools {
             inner.split('/').filter { it.isNotEmpty() }
         }
         require(segments.none { it == "." || it == ".." }) { "invalid archive path" }
-        return ViewRef.Node(NodeRef.Vfs(archive), viewId = "archive", path = segments)
+        return Path.parse(archive).enterView(segments)
     }
 
     private suspend fun archiveList(args: JSONObject, context: ToolContext): String {
@@ -431,15 +440,11 @@ internal object AgentTools {
         val file = service.resolve(ref).getOrThrow() as? VFile
             ?: error("not a file in archive: ${args.optString("path")}")
         val destination = callerPath(context.target, stringArg(args, "to"), "copy destination")
-        val resolved = Vfs.resolve(destination).getOrThrow()
-        val source = file.open(OpenMode.READ).getOrThrow()
+        // Address text ends here: the copy itself is node → node.
+        val target = Vfs.destination(destination).getOrThrow()
         var copied = 0L
-        try {
-            resolved.provider.copy(source, resolved.innerPath, true).collect { progress ->
-                copied = progress.copiedBytes
-            }
-        } finally {
-            source.close()
+        Vfs.copyTo(file, target).collect { progress ->
+            if (progress.finished) copied = progress.copiedBytes
         }
         return "Copied $copied bytes from ${refLabel(args)} to $destination"
     }
@@ -600,10 +605,10 @@ internal object AgentTools {
 
     private fun globDefinition() = function(
         "glob",
-        "Find files and directories matching a glob pattern. The base path resolves inside the current target or may be a VFS URI.",
+        "Find files and directories matching a glob pattern. Searches downward from the workspace by default. To search another domain, name its directory explicitly in path (an absolute path in the current target or a VFS URI); a wildcard pattern never searches several domains at once.",
         JSONObject()
-            .put("pattern", stringProp("Glob such as **/*.kt, matched against paths relative to path. **/ also matches at the base level itself."))
-            .put("path", stringProp("Absolute directory in the current target, or a VFS URI. Defaults to the current directory."))
+            .put("pattern", stringProp("Relative glob such as **/*.kt, matched against paths below path. Must not start with '/' or contain '://'. **/ also matches at the base level itself."))
+            .put("path", stringProp("Base directory: an absolute path in the current target, or a VFS URI for another location. Defaults to the workspace cwd."))
             .put("max_results", intProp("Maximum number of matches. Defaults to 200.")),
         listOf("pattern"),
     )

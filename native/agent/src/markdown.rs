@@ -56,6 +56,8 @@ pub fn render(entries: &[Entry], width: usize, spinner: usize) -> Rendered {
                 render_entry(&mut output, &entry.content, width, theme::notice());
             }
             Role::Error => render_error(&mut output, &entry.content, width),
+            Role::Reverted => render_reverted(&mut output, &entry.content, width),
+            Role::Compaction => render_compaction(&mut output, &entry.content, width),
         }
     }
     Rendered {
@@ -148,6 +150,46 @@ fn error_line(line: Line<'static>, width: usize) -> Line<'static> {
         spans.push(Span::styled(" ".repeat(width - used), theme::error_bg()));
     }
     Line::from(spans).style(theme::error_bg())
+}
+
+fn render_reverted(output: &mut Vec<Line<'static>>, content: &str, width: usize) {
+    for (index, line) in content.lines().enumerate() {
+        let style = if index == 0 {
+            theme::text()
+        } else {
+            theme::muted()
+        };
+        let mut spans = vec![
+            Span::styled("┃", Style::new().fg(theme::MUTED).bg(theme::BLOCK_BG)),
+            Span::styled("  ", theme::exec()),
+            Span::styled(fit(line, width.saturating_sub(EXEC_LEFT_PAD)), style),
+        ];
+        let used: usize = spans
+            .iter()
+            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+            .sum();
+        if used < width.saturating_sub(EXEC_RIGHT_PAD) {
+            spans.push(Span::styled(
+                " ".repeat(width - EXEC_RIGHT_PAD - used),
+                theme::exec(),
+            ));
+        }
+        output.push(Line::from(spans).style(theme::exec()));
+    }
+}
+
+fn render_compaction(output: &mut Vec<Line<'static>>, summary: &str, width: usize) {
+    let width = width.max(1);
+    let label = " Compaction ";
+    let label_width = UnicodeWidthStr::width(label);
+    let side = width.saturating_sub(label_width) / 2;
+    output.push(Line::from(vec![
+        Span::styled("─".repeat(side), theme::muted()),
+        Span::styled(label.to_owned(), theme::warn()),
+        Span::styled("─".repeat(width.saturating_sub(side + label_width)), theme::muted()),
+    ]));
+    output.push(Line::default());
+    render_entry(output, summary, width, theme::text());
 }
 
 fn render_tool(
@@ -372,8 +414,11 @@ fn exec_block_line(mut spans: Vec<Span<'static>>, width: usize) -> Line<'static>
         .iter()
         .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
         .sum();
-    if used < width {
-        line.push(Span::styled(" ".repeat(width - used), theme::exec()));
+    // Leave a right margin so code and exec blocks never touch the terminal
+    // edge. The background spans the content plus that breathing room only.
+    let target = width.saturating_sub(EXEC_RIGHT_PAD).max(used);
+    if used < target {
+        line.push(Span::styled(" ".repeat(target - used), theme::exec()));
     }
     Line::from(line).style(theme::exec())
 }
@@ -391,16 +436,27 @@ fn exec_marked(
         .saturating_sub(EXEC_LEFT_PAD + EXEC_RIGHT_PAD + marker_width)
         .max(1);
     let clean = sanitize(text);
-    let mut lines = wrap_segments(&[(style, clean)], inner, true);
-    for (line_index, line) in lines.iter_mut().enumerate() {
-        let mut spans = Vec::with_capacity(line.spans.len() + 1);
-        if line_index == 0 {
-            spans.push(Span::styled(marker.to_owned(), marker_style));
-        } else {
-            spans.push(Span::styled(" ".repeat(marker_width), style));
+    // A command with embedded newlines is several logical lines. Wrapping the
+    // whole string through `wrap_segments` swallowed the newline (it has zero
+    // width), so split first and keep the marker only on the first physical
+    // line; continuation rows align under the text.
+    let mut first = true;
+    for logical in clean.split('\n') {
+        let mut lines = wrap_segments(&[(style, logical.to_owned())], inner, true);
+        if lines.is_empty() {
+            lines.push(Line::default());
         }
-        spans.append(&mut line.spans);
-        output.push(exec_block_line(spans, width));
+        for line in lines.iter_mut() {
+            let mut spans = Vec::with_capacity(line.spans.len() + 1);
+            if first {
+                spans.push(Span::styled(marker.to_owned(), marker_style));
+                first = false;
+            } else {
+                spans.push(Span::styled(" ".repeat(marker_width), style));
+            }
+            spans.append(&mut line.spans);
+            output.push(exec_block_line(spans, width));
+        }
     }
 }
 
@@ -453,6 +509,45 @@ fn tail_lines(text: &str, width: usize, style: Style, limit: usize) -> (Vec<Line
         }
     }
     (output, truncated)
+}
+
+/// Mid-run prompts that have not reached the agent yet. They sit below the
+/// newest transcript line and use a grey bar; the moment the agent inserts one,
+/// it becomes a normal user block.
+pub fn queued(messages: &[String], width: usize) -> Vec<Line<'static>> {
+    let mut output = Vec::new();
+    for message in messages {
+        output.push(Line::default());
+        let start = output.len();
+        render_entry(
+            &mut output,
+            message,
+            width.saturating_sub(3).max(1),
+            theme::muted(),
+        );
+        output.insert(start, Line::default());
+        for line in &mut output[start..] {
+            let used: usize = line
+                .spans
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum();
+            let mut spans = vec![
+                Span::styled("┃", Style::new().fg(theme::MUTED).bg(theme::USER_BG)),
+                Span::styled("  ", theme::user()),
+            ];
+            spans.extend(line.spans.iter().cloned());
+            let used = used + 3;
+            if used < width {
+                spans.push(Span::styled(
+                    " ".repeat(width - used),
+                    theme::user(),
+                ));
+            }
+            *line = Line::from(spans).style(theme::user());
+        }
+    }
+    output
 }
 
 pub(crate) fn fit(text: &str, width: usize) -> String {

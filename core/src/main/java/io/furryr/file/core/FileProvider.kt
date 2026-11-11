@@ -20,8 +20,38 @@ interface FileProvider {
     val label: String
     val features: Set<ProviderFeature>
 
+    /**
+     * True when the provider addresses its files by the full URI instead of an
+     * authority-first inner path.
+     *
+     * A storage provider strips the scheme (`saf://hex/dir` → `/hex/dir`)
+     * because the scheme names the backend, not the resource. A live provider
+     * cannot: `http` and `https` reach different origins, so the address *is*
+     * the URI and must arrive intact.
+     */
+    val fullUriPaths: Boolean get() = false
+
     suspend fun list(path: String): Result<List<FileEntry>>
     suspend fun stat(path: String): Result<ProviderStat>
+
+    /**
+     * The node at [path].
+     *
+     * A provider whose bytes are not a kernel storage path (a live remote
+     * resource, a generated listing, …) returns its own [VNode] type here; the
+     * default is the provider-backed [Folder]/[File] pair. [Vfs] never builds a
+     * node itself, so a provider decides what its own addresses are — and the
+     * renderer/opener pipeline only ever sees the resulting node.
+     */
+    suspend fun node(path: Path, innerPath: String): Result<VNode> = runCatching {
+        val stat = stat(innerPath).getOrThrow()
+        // A node is an *existing* file or folder. A provider that answers with
+        // `exists = false` has no node at this address, and the caller must be
+        // able to tell: a typed address that no provider owns falls through to
+        // the search/browser fallback instead of becoming a phantom file.
+        if (!stat.exists) error("no such file or folder: $path")
+        if (stat.isDirectory) Folder(path, this, innerPath) else File(path, this, innerPath)
+    }
     suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
         return DirectoryCapabilities(
             canCreate = (ProviderFeature.CREATE_FILE in features || ProviderFeature.CREATE_DIR in features) &&

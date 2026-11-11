@@ -19,15 +19,14 @@ import io.furryr.file.ForwardProviderAuthority
 import io.furryr.file.DefaultNodeService
 import io.furryr.file.core.ContentTypes
 import io.furryr.file.core.Path
+import io.furryr.file.core.RemoteFile
 import io.furryr.file.core.VFile
-import io.furryr.file.core.ViewRef
+import io.furryr.file.provider.web.withReferer
 import io.furryr.file.core.Vfs
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
 import io.furryr.file.daemon.source.FdFileSource
 import io.furryr.file.installFileProviders
-import io.furryr.file.render.ViewRefJson
-import io.furryr.file.render.WebUrlFile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -57,9 +56,9 @@ class ForwardFacts(
  * ContentProvider that serves files the app itself cannot hand to the platform
  * [androidx.core.content.FileProvider] — root-only locations, other volumes and
  * provider-backed paths (container/SAF/…). Remote HTTP(S) URLs take the same
- * route: [WebUrlFile] is a [FileSource] like any other, so a URL becomes a
- * `content://` file instead of a browser intent. Archive entries and container
- * files are addressed by their flattened [ViewRef], re-resolved through
+ * route: a live file node's handle is a [FileSource] like any other, so a URL
+ * becomes a `content://` file instead of a browser intent. Archive entries and
+ * container files are addressed by their `Path` text, re-resolved through
  * [DefaultNodeService], so opening a zip member never fabricates a VFS path.
  *
  * Every resource is one [FileSource] handle, and the descriptor follows the
@@ -69,7 +68,10 @@ class ForwardFacts(
  *  - a seekable handle without an fd (range-capable HTTP, SFTP) is exposed
  *    through a [StorageManager] proxy descriptor, so the reader can seek;
  *  - a stream-only handle (SAF/FTP, non-range HTTP) is pumped through a pipe.
- * URIs are built with [buildUri] and carry the source path or URL.
+ * URIs are built with [buildUri] and carry the source path or URL. The display
+ * name is also appended as the last path segment: share sheets that never call
+ * [query] label a shared file after `getLastPathSegment()`, and the segment
+ * used to be the constant "file".
  */
 class ForwardFileProvider : ContentProvider() {
 
@@ -123,7 +125,7 @@ class ForwardFileProvider : ContentProvider() {
             is Target.Path -> facts?.mime
                 ?: ContentTypes.fromName(facts?.name ?: target.displayName())
                 ?: mimeTypeOf(target.path)
-            is Target.Ref -> facts?.mime
+            is Target.Node -> facts?.mime
                 ?: ContentTypes.fromName(facts?.name ?: target.displayName())
                 ?: "*/*"
         }
@@ -168,8 +170,11 @@ class ForwardFileProvider : ContentProvider() {
     // ── Internals ───────────────────────────────────────────────────
 
     private sealed interface Target {
+        /** A provider path or a URL, kept as text so the referer can ride along. */
         data class Path(val path: String, val referer: String?) : Target
-        data class Ref(val ref: ViewRef) : Target
+
+        /** Any address, including `!` view levels; resolved through the node service. */
+        data class Node(val path: io.furryr.file.core.Path) : Target
     }
 
     /**
@@ -260,27 +265,28 @@ class ForwardFileProvider : ContentProvider() {
     }
 
     private suspend fun openSource(target: Target): FileSource = when (target) {
-        is Target.Path -> if (isRemote(target.path)) {
-            WebUrlFile(target.path, target.referer).open(OpenMode.READ).getOrThrow()
-        } else {
-            val resolved = Vfs.resolve(target.path).getOrThrow()
-            resolved.provider.open(resolved.innerPath, OpenMode.READ).getOrThrow()
+        // One provider lookup whatever the address is. The signed referer only
+        // changes anything for a live file, which is a capability of the node.
+        is Target.Path -> {
+            val node = Vfs.node(target.path).getOrThrow()
+            val file = node as? VFile ?: throw FileNotFoundException("not a file: ${target.path}")
+            file.withReferer(target.referer).open(OpenMode.READ).getOrThrow()
         }
-        is Target.Ref -> {
-            val node = DefaultNodeService().resolve(target.ref).getOrThrow()
-            val file = node as? VFile ?: throw FileNotFoundException("not a file: ${target.ref}")
+        is Target.Node -> {
+            val node = DefaultNodeService().resolve(target.path).getOrThrow()
+            val file = node as? VFile ?: throw FileNotFoundException("not a file: ${target.path}")
             file.open(OpenMode.READ).getOrThrow()
         }
     }
 
     private fun Target.label(): String = when (this) {
         is Target.Path -> path
-        is Target.Ref -> ref.toString()
+        is Target.Node -> path.toString()
     }
 
     private fun Target.displayName(): String = when (this) {
         is Target.Path -> Path.parse(path).name ?: path
-        is Target.Ref -> ref.toString()
+        is Target.Node -> path.name ?: path.toString()
     }
 
     private fun pump(source: FileSource, writeEnd: ParcelFileDescriptor) {
@@ -371,6 +377,14 @@ class ForwardFileProvider : ContentProvider() {
                 .scheme("content")
                 .authority(ForwardProviderAuthority)
                 .appendPath("file")
+                // The display name is a path segment, not only a queried fact:
+                // some ROMs never call query() and label a shared file after
+                // `getLastPathSegment()`, which would otherwise be "file".
+                .apply {
+                    displaySegment(
+                        facts?.name ?: runCatching { Path.parse(path).name }.getOrNull(),
+                    )
+                }
                 .appendQueryParameter(QUERY_PATH, path)
                 .apply {
                     if (!referer.isNullOrBlank()) appendQueryParameter(QUERY_REFERER, referer)
@@ -381,23 +395,51 @@ class ForwardFileProvider : ContentProvider() {
         }
 
         /**
-         * Build a URI for a view node (an archive entry, a container file, …)
-         * that has no standalone VFS path. The signed payload is the flattened
-         * [ViewRef], so the provider can re-resolve the same node later through
-         * the opener route.
+         * Build a URI for a node.
+         *
+         * A live file is addressed by its own URL and carries the page it came
+         * from; any other node is addressed by its `Path` text, so an archive
+         * entry or a container file behind `!` re-resolves through the opener
+         * route instead of being flattened into a provider path.
          */
-        fun buildUri(ref: ViewRef, facts: ForwardFacts? = null): Uri {
-            val encoded = ViewRefJson.encodeString(ref)
+        fun buildUri(file: VFile, facts: ForwardFacts? = null): Uri {
+            val remote = file as? RemoteFile
+            return if (remote != null) {
+                buildUri(remote.address, remote.referer, facts)
+            } else {
+                buildUri(file.path, facts)
+            }
+        }
+
+        /**
+         * Build a URI for a node address that is not a plain provider path — an
+         * archive entry, a container file, anything behind `!`. The signed
+         * payload is the address text itself, so the provider re-resolves the
+         * same node through the opener route; nothing has to be encoded twice.
+         */
+        fun buildUri(path: io.furryr.file.core.Path, facts: ForwardFacts? = null): Uri {
+            val encoded = path.toString()
             val (expires, token) = ShareToken.sign(refPayload(encoded))
             rememberFacts(token, expires, facts)
             return Uri.Builder()
                 .scheme("content")
                 .authority(ForwardProviderAuthority)
                 .appendPath("file")
+                .apply { displaySegment(facts?.name ?: path.name) }
                 .appendQueryParameter(QUERY_REF, encoded)
                 .appendQueryParameter(QUERY_EXPIRES, expires.toString())
                 .appendQueryParameter(QUERY_TOKEN, token)
                 .build()
+        }
+
+        /** Last path segment, for receivers that never ask for the columns. */
+        private fun android.net.Uri.Builder.displaySegment(name: String?) {
+            val segment = name
+                ?.substringAfterLast('/')
+                ?.substringAfterLast('\\')
+                ?.takeIf { it.isNotBlank() && it != "." && it != ".." }
+                ?: return
+            appendPath(segment)
         }
 
         private class ResolvedTarget(val target: Target, val token: String)
@@ -408,8 +450,9 @@ class ForwardFileProvider : ContentProvider() {
             val encoded = uri.getQueryParameter(QUERY_REF)
             if (encoded != null) {
                 if (!ShareToken.verify(refPayload(encoded), expires, token)) return null
-                val ref = runCatching { ViewRefJson.decodeString(encoded) }.getOrNull() ?: return null
-                return ResolvedTarget(Target.Ref(ref), token)
+                val path = runCatching { io.furryr.file.core.Path.parse(encoded) }.getOrNull()
+                    ?: return null
+                return ResolvedTarget(Target.Node(path), token)
             }
             val path = uri.getQueryParameter(QUERY_PATH) ?: return null
             val referer = uri.getQueryParameter(QUERY_REFERER)
@@ -422,9 +465,5 @@ class ForwardFileProvider : ContentProvider() {
 
         private fun refPayload(encoded: String): String = "ref\u0000$encoded"
 
-        private fun isRemote(path: String): Boolean {
-            val scheme = runCatching { Uri.parse(path).scheme }.getOrNull()?.lowercase(Locale.ROOT)
-            return scheme == "http" || scheme == "https"
-        }
     }
 }

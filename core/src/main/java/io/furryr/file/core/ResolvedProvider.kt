@@ -5,7 +5,11 @@ data class ResolvedProvider(
     val path: Path,
     val originalUri: String,
 ) {
-    /** Inner path string for calling provider methods. */
-    val innerPath: String get() = if (path.scheme == "file" || path.scheme == null)
-        path.toLocalPath() else path.toInnerPath()
+    /** Provider-facing address for calling provider methods. */
+    val innerPath: String
+        get() = when {
+            provider.fullUriPaths -> path.toFullUri()
+            path.scheme == "file" || path.scheme == null -> path.toLocalPath()
+            else -> path.toInnerPath()
+        }
 }

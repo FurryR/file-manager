@@ -1,7 +1,6 @@
 package io.furryr.file.ui.screens
 
 import android.os.Bundle
-import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
@@ -25,6 +24,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import io.furryr.file.ui.theme.FileManagerTheme
 import io.furryr.file.R
 import io.furryr.file.wayland.WaylandManager
@@ -51,10 +53,12 @@ class WaylandActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // Immersive, edge-to-edge desktop: keep the system bars out of the way
         // while still allowing swipe reveal.
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_FULLSCREEN,
-            WindowManager.LayoutParams.FLAG_FULLSCREEN,
-        )
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         setContent {
             val darkTheme = remember { prefs.getBoolean("dark_theme", true) }

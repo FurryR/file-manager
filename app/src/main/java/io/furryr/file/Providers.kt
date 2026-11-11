@@ -25,7 +25,9 @@ import io.furryr.file.render.DirectoryRendererFactory
 import io.furryr.file.opener.Openers
 import io.furryr.file.render.Renderers
 import io.furryr.file.render.WebRendererFactory
-import io.furryr.file.render.WebTransfers
+import io.furryr.file.render.WebTransferService
+import io.furryr.file.provider.web.HttpProvider
+import io.furryr.file.provider.web.WebTransfers
 import io.furryr.file.settings.PulseSettings
 import io.furryr.file.store.LocalLocationStore
 import io.furryr.file.store.LocationStores
@@ -52,7 +54,9 @@ fun installFileProviders(context: Context) {
     LocalLocationStore.init(appContext)
     WebLocationStore.init(appContext)
     HomeStore.init(appContext)
-    WebTransfers.init(appContext)
+    // A remote handle may be read after the activity is gone; the provider-side
+    // registry asks the app to keep its foreground service alive.
+    WebTransfers.init { WebTransferService.start(appContext) }
     AgentSettings.install(appContext)
     PulseSettings.install(appContext)
     DaemonManager.configure(
@@ -88,6 +92,10 @@ fun installFileProviders(context: Context) {
     Vfs.register("ftp", FtpProvider)
     SftpProvider.init(LocationStores)
     Vfs.register("sftp", SftpProvider)
+    // A URL is an address like any other: both schemes reach the same
+    // read-only provider, and nothing above it inspects the scheme.
+    Vfs.register("http", HttpProvider)
+    Vfs.register("https", HttpProvider)
     HereNavigation.install(appContext)
     HubActions.locationTargets = {
         LocationsRepository.locations(appContext, local)

@@ -16,6 +16,10 @@ pub struct Message {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Starts a compacted context. Everything before this message stays in the
+    /// transcript for display but is no longer sent to the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_summary: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -49,6 +53,7 @@ impl Message {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
+            compaction_summary: None,
         }
     }
 
@@ -64,6 +69,18 @@ impl Message {
 pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// Context size reported after the request. Zero means "use prompt_tokens".
+    pub context_tokens: u64,
+}
+
+impl Usage {
+    pub fn context(&self) -> u64 {
+        if self.context_tokens > 0 {
+            self.context_tokens
+        } else {
+            self.prompt_tokens
+        }
+    }
 }
 
 /// Progress emitted by the tool loop for the terminal UI.
@@ -91,8 +108,13 @@ pub enum AgentEvent {
     ApprovalRequest {
         id: u64,
         name: String,
+        detail: String,
         reason: String,
     },
+    /// A previously queued mid-run prompt has entered the conversation.
+    AcceptedPrompt(String),
+    /// The agent summarized its context. Older messages stay visible.
+    Compaction(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -103,6 +125,10 @@ pub enum Role {
     Tool,
     Notice,
     Error,
+    /// A row after an undo, showing how many messages went away.
+    Reverted,
+    /// The horizontal `Compaction` divider plus the model's summary.
+    Compaction,
 }
 
 /// Live view of an exec tool call rendered as a shell-style block.
@@ -197,5 +223,17 @@ impl Entry {
 
     pub fn error(content: impl Into<String>) -> Self {
         Self::new(Role::Error, content)
+    }
+
+    pub fn reverted(count: usize) -> Self {
+        let label = if count == 1 { "message" } else { "messages" };
+        Self::new(
+            Role::Reverted,
+            format!("{count} {label} reverted\nuse /redo to redo"),
+        )
+    }
+
+    pub fn compaction(summary: impl Into<String>) -> Self {
+        Self::new(Role::Compaction, summary)
     }
 }

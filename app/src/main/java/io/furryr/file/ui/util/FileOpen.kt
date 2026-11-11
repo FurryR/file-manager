@@ -6,6 +6,7 @@ import io.furryr.file.ui.util.*
 import io.furryr.file.model.*
 import io.furryr.file.R
 
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -26,8 +27,10 @@ import java.util.ArrayList
 /**
  * Hand [entry] to the platform viewer.
  *
- * When [file] is provided, the URI addresses the node's flat `ViewRef` instead
- * of the display path, so archive entries and container paths stay resolvable.
+ * When [file] is provided, the URI addresses the node's own `Path` (view levels included) instead
+ * of the display path, so archive entries and container paths stay resolvable. A live remote file
+ * is a node like any other: the URI streams the same bytes on demand, carrying the page it came
+ * from, so the chooser never receives an `http(s)://` address to hand to a browser.
  */
 fun openFile(
     context: Context,
@@ -41,7 +44,7 @@ fun openFile(
         mime = content?.mime,
     )
     val uri = if (file != null) {
-        ForwardFileProvider.buildUri(file.ref(), facts)
+        ForwardFileProvider.buildUri(file, facts)
     } else {
         shareableUri(context, entry.path, facts)
     }
@@ -59,32 +62,28 @@ fun openFile(
 }
 
 /**
- * Treat a remote resource like any other file: hand an "open with" chooser a
- * `content://` URI. [ForwardFileProvider] serves the URL through the same
- * [io.furryr.file.core.source.FileSource] path as a local file, using a proxy
- * descriptor when the server supports byte ranges and a pipe otherwise, so the
- * system never falls back to a browser for an http(s) URI.
+ * Share the file itself — a stream the receiver reads on demand — not its
+ * address. [file] may be a page link or any node; the forward provider serves
+ * both, keeping the page as referer so hotlink-protected hosts still answer the
+ * range requests.
  */
-fun openRemoteFile(
-    context: Context,
-    url: String,
-    content: ContentInfo?,
-    name: String,
-    referer: String?,
-) {
-    val display = content?.name?.takeIf { it.isNotBlank() } ?: name
+fun shareFile(context: Context, file: VFile, content: ContentInfo? = null) {
+    val display = content?.name?.takeIf { it.isNotBlank() } ?: file.name
     val mime = content?.mime ?: ContentTypes.fromName(display) ?: "*/*"
     val uri = ForwardFileProvider.buildUri(
-        url,
-        referer,
+        file,
         ForwardFacts(name = display, size = content?.size ?: -1L, mime = mime),
     )
-    val intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(uri, mime)
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = mime
+        putExtra(Intent.EXTRA_STREAM, uri)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        // The clip label is the second place a ROM looks for the file name;
+        // without it some share sheets fall back to the URI's last segment.
+        runCatching { clipData = ClipData.newUri(context.contentResolver, display, uri) }
     }
     runCatching { context.startActivity(Intent.createChooser(intent, display)) }.onFailure {
-        Toast.makeText(context, context.getString(R.string.toast_no_app, display), Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, context.getString(R.string.toast_failed), Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -103,6 +102,13 @@ fun shareEntries(context: Context, entries: List<FileEntry>) {
             type = mimeType(File(files.first().path))
             putExtra(Intent.EXTRA_STREAM, uris.first())
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            runCatching {
+                clipData = ClipData.newUri(
+                    context.contentResolver,
+                    files.first().name,
+                    uris.first(),
+                )
+            }
         }
     } else {
         Intent(Intent.ACTION_SEND_MULTIPLE).apply {

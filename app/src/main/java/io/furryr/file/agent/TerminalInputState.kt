@@ -39,6 +39,9 @@ class TerminalInputState {
         dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
     }
 
+    // ACTION_MULTIPLE/characters are deprecated since API 29 (the IME should
+    // commit text), but older keyboards and IMEs still deliver a batch this way.
+    @Suppress("DEPRECATION")
     internal fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val view = terminalView?.takeIf { it.isEnabled } ?: return false
         if (event.action == KeyEvent.ACTION_MULTIPLE && event.keyCode == KeyEvent.KEYCODE_UNKNOWN) {

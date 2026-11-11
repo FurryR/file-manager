@@ -182,6 +182,7 @@
     <string name="container_state_failed">Failed</string>
     <string name="container_state_deleted">Deleted</string>
     <string name="terminal_drawer_title">Terminals</string>
+    <string name="terminal_empty">No terminals available</string>
     <string name="terminal_key_enter">Enter</string>
     <string name="terminal_drop_hint">Drop here to insert the path</string>
     <string name="wizard_pull_title">Pull a Linux rootfs from Docker Hub</string>
@@ -304,4 +305,11 @@
     <string name="agent_session_rename_title">Rename conversation</string>
     <string name="agent_session_messages">messages</string>
     <string name="agent_session_title">Title</string>
+
+    <!-- WebView long-press link/image dialog -->
+    <string name="web_hit_link">Link</string>
+    <string name="web_hit_image">Image</string>
+    <string name="web_copy_link_text">Copy link text</string>
+    <string name="web_copy_url">Copy URL</string>
+    <string name="web_share_url">Share URL</string>
 </resources>

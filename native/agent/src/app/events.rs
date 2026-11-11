@@ -17,10 +17,17 @@ impl App {
         if !self.answer_streamed {
             self.transcript.push(Entry::assistant(answer));
         }
+        self.drop_unsent_queue();
+        self.esc_armed = false;
         self.bump();
     }
 
-    pub fn complete_compact(&mut self, summary: String) {
+    pub fn complete_compact(
+        &mut self,
+        messages: Vec<Message>,
+        summary: String,
+        usage: Option<crate::model::Usage>,
+    ) {
         if self.pending.take().is_none() {
             return;
         }
@@ -28,18 +35,34 @@ impl App {
         self.finish_tool(None);
         self.finish_calling(None);
         self.streaming_index = None;
-        self.history = vec![Message::user(format!(
-            "Summary of the earlier conversation (compacted):\n{summary}"
-        ))];
+        self.history = messages;
+        if let Some(usage) = usage {
+            self.context_tokens = usage.context();
+            self.prompt_tokens += usage.prompt_tokens;
+            self.completion_tokens += usage.completion_tokens;
+            self.requests += 1;
+        }
         if let Some(snapshot) = self.compact_snapshot.take() {
             self.push_undo(snapshot);
         }
         self.redo.clear();
-        self.transcript.clear();
-        self.transcript
-            .push(Entry::notice("Conversation compacted."));
+        // The old conversation stays visible; the divider starts the part the
+        // provider will actually receive next time.
+        self.transcript.push(Entry::compaction(summary));
+        self.drop_unsent_queue();
+        self.esc_armed = false;
         self.follow = true;
         self.bump();
+    }
+
+    fn drop_unsent_queue(&mut self) {
+        if !self.queued.is_empty() {
+            let count = self.queued.len();
+            self.queued.clear();
+            let label = if count == 1 { "message" } else { "messages" };
+            self.transcript
+                .push(Entry::notice(format!("{count} queued {label} not delivered.")));
+        }
     }
 
     /// Apply one agent event and report the action the UI must perform.
@@ -48,11 +71,16 @@ impl App {
     /// approval request is answered immediately instead of opening a dialog.
     pub fn agent_event(&mut self, event: AgentEvent) -> Action {
         let action = match event {
-            AgentEvent::ApprovalRequest { id, name, reason } => {
-                if self.yolo {
+            AgentEvent::ApprovalRequest {
+                id,
+                name,
+                detail,
+                reason,
+            } => {
+                if self.auto_approval(&name, &detail) {
                     Action::Approval { id, allow: true }
                 } else {
-                    self.open_approval(id, &name, &reason);
+                    self.open_approval(id, &name, &detail, &reason);
                     Action::None
                 }
             }
@@ -165,19 +193,28 @@ impl App {
                 }
             }
             AgentEvent::ToolResult { ok, .. } => {
-                if matches!(
-                    self.popup.as_ref().map(|popup| &popup.kind),
-                    Some(crate::app::popup::PopupKind::Approval(_))
-                ) {
-                    self.popup = None;
-                }
+                self.approval = None;
                 self.finish_tool((!ok).then_some("failed"));
             }
             AgentEvent::Usage(usage) => {
-                self.context_tokens = usage.prompt_tokens;
+                self.context_tokens = usage.context();
                 self.prompt_tokens += usage.prompt_tokens;
                 self.completion_tokens += usage.completion_tokens;
                 self.requests += 1;
+            }
+            AgentEvent::AcceptedPrompt(prompt) => {
+                // The agent loop reports the exact moment a mid-run prompt was
+                // spliced into the conversation. Move it from the grey queue
+                // into the transcript below everything already shown.
+                if let Some(index) = self.queued.iter().position(|queued| queued == &prompt) {
+                    self.queued.remove(index);
+                }
+                self.transcript.push(Entry::user(prompt));
+                self.follow = true;
+            }
+            AgentEvent::Compaction(summary) => {
+                self.transcript.push(Entry::compaction(summary));
+                self.follow = true;
             }
             AgentEvent::ApprovalRequest { .. } => {}
         }
@@ -192,10 +229,13 @@ impl App {
         self.finish_tool(Some("failed"));
         self.finish_calling(Some("failed"));
         self.streaming_index = None;
+        self.approval = None;
         self.transcript.push(Entry::error(error));
         if let Some(messages) = messages {
             self.history = messages;
         }
+        self.drop_unsent_queue();
+        self.esc_armed = false;
         self.follow = true;
         self.bump();
     }

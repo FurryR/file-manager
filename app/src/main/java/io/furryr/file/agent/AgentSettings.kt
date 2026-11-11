@@ -35,6 +35,8 @@ object AgentSettings {
         val name: String,
         val baseUrl: String,
         val apiKey: String,
+        val kind: String = AGENT_PROVIDER_COMPATIBLE,
+        val models: List<AgentModelConfig> = emptyList(),
     )
 
     /** A remote (Streamable HTTP) MCP server. Local stdio servers are configured
@@ -50,6 +52,7 @@ object AgentSettings {
     data class SessionInfo(
         val id: String,
         val title: String,
+        val createdAt: Long,
         val updatedAt: Long,
         val messageCount: Int,
     )
@@ -63,6 +66,7 @@ object AgentSettings {
             check(provider != null && validEndpoint(provider.baseUrl)) {
                 appContext.getString(R.string.agent_config_required)
             }
+            val configured = providers(appContext)
             AgentAiConfig(
                 baseUrl = provider.baseUrl,
                 apiKey = provider.apiKey,
@@ -70,6 +74,16 @@ object AgentSettings {
                 effort = lastEffort(appContext),
                 provider = provider.name,
                 titleModel = titleModel(appContext),
+                kind = provider.kind,
+                providers = configured.map { item ->
+                    AgentAiProvider(
+                        name = item.name,
+                        baseUrl = item.baseUrl,
+                        apiKey = item.apiKey,
+                        kind = item.kind,
+                        models = item.models,
+                    )
+                },
             )
         }
         AgentEnvironment.aiSelectionSaver = { model, effort ->
@@ -97,10 +111,20 @@ object AgentSettings {
                 AgentSessionInfo(
                     id = session.id,
                     title = session.title,
+                    createdAt = session.createdAt,
                     updatedAt = session.updatedAt,
                     messageCount = session.messageCount,
                 )
             }
+        }
+        AgentEnvironment.sessionUsageLoad = { sessionId ->
+            sessionUsage(appContext, sessionId)
+        }
+        AgentEnvironment.sessionUsageSave = { sessionId, usage ->
+            saveSessionUsage(appContext, sessionId, usage)
+        }
+        AgentEnvironment.modelContextWindow = { model ->
+            modelContextWindow(appContext, model)
         }
         AgentEnvironment.sessionDelete = { sessionId -> deleteSession(appContext, sessionId) }
         AgentEnvironment.sessionRename = { sessionId, title ->
@@ -129,6 +153,8 @@ object AgentSettings {
                 baseUrl = item.optString("base_url"),
                 apiKey = item.optString("api_key").takeIf { it.isNotEmpty() }
                     ?.let { runCatching { decrypt(it) }.getOrDefault("") }.orEmpty(),
+                kind = item.optString("kind").ifBlank { AGENT_PROVIDER_COMPATIBLE },
+                models = readModels(item.optJSONArray("models")),
             )
         }
     }
@@ -137,7 +163,9 @@ object AgentSettings {
         val providers = providers(context)
         if (providers.isEmpty()) return null
         val active = prefs(context).getString(ACTIVE_PROVIDER, null)
-        return providers.firstOrNull { it.id == active } ?: providers.first()
+        return providers.firstOrNull { it.id == active && validEndpoint(it.baseUrl) }
+            ?: providers.firstOrNull { validEndpoint(it.baseUrl) }
+            ?: providers.first()
     }
 
     fun saveProvider(context: Context, provider: Provider) {
@@ -146,9 +174,18 @@ object AgentSettings {
         val id = provider.id.ifBlank { UUID.randomUUID().toString() }
         val providers = providers(context).toMutableList()
         val index = providers.indexOfFirst { it.id == id }
+        // Qualified model ids are `Provider/model`, so names must be unique and
+        // cannot contain the separator.
+        val baseName = provider.name.trim().replace('/', '-')
+        var name = baseName
+        var suffix = 2
+        while (providers.any { it.id != id && it.name.equals(name, ignoreCase = true) }) {
+            name = "$baseName ($suffix)"
+            suffix++
+        }
         val saved = provider.copy(
             id = id,
-            name = provider.name.trim(),
+            name = name,
             baseUrl = provider.baseUrl.trim().trimEnd('/'),
         )
         if (index >= 0) providers[index] = saved else providers.add(saved)
@@ -262,12 +299,17 @@ object AgentSettings {
                 existing?.title?.takeIf { it.isNotBlank() && it != "New conversation" }
                     ?: titleOf(parsed)
             }
+            val now = System.currentTimeMillis()
             val wrapper = JSONObject()
                 .put("id", id)
                 .put("title", title)
                 .put("title_generated", existing?.titleGenerated == true)
-                .put("updated_at", System.currentTimeMillis())
+                .put("created_at", existing?.createdAt ?: now)
+                .put("updated_at", now)
                 .put("messages", parsed)
+                .apply {
+                    existing?.usage?.let { put("usage", it) }
+                }
             file.parentFile?.mkdirs()
             file.writeText(wrapper.toString())
             if (existing == null) {
@@ -287,6 +329,7 @@ object AgentSettings {
                     SessionInfo(
                         id = session.id,
                         title = session.title,
+                        createdAt = session.createdAt,
                         updatedAt = session.updatedAt,
                         messageCount = session.messages.length(),
                     )
@@ -322,8 +365,10 @@ object AgentSettings {
                     .put("id", session.id)
                     .put("title", trimmed)
                     .put("title_generated", true)
+                    .put("created_at", session.createdAt)
                     .put("updated_at", session.updatedAt)
                     .put("messages", session.messages)
+                    .apply { session.usage?.let { put("usage", it) } }
                     .toString(),
             )
             AgentEvents.publishTitle(sessionId, trimmed)
@@ -341,8 +386,10 @@ object AgentSettings {
                     .put("id", session.id)
                     .put("title", trimmed)
                     .put("title_generated", true)
+                    .put("created_at", session.createdAt)
                     .put("updated_at", session.updatedAt)
                     .put("messages", session.messages)
+                    .apply { session.usage?.let { put("usage", it) } }
                     .toString(),
             )
             AgentEvents.publishTitle(sessionId, trimmed)
@@ -376,8 +423,10 @@ object AgentSettings {
         val id: String,
         val title: String,
         val titleGenerated: Boolean,
+        val createdAt: Long,
         val updatedAt: Long,
         val messages: JSONArray,
+        val usage: JSONObject?,
     )
 
     private fun activeSessions(context: Context): JSONObject =
@@ -400,9 +449,20 @@ object AgentSettings {
         val title = objectRoot?.optString("title")?.takeIf { it.isNotBlank() }
             ?: titleOf(messages)
         val titleGenerated = objectRoot?.optBoolean("title_generated", false) ?: false
+        val createdAt = objectRoot?.optLong("created_at")?.takeIf { it > 0 }
+            ?: objectRoot?.optLong("updated_at")?.takeIf { it > 0 }
+            ?: file.lastModified()
         val updatedAt = objectRoot?.optLong("updated_at")?.takeIf { it > 0 }
             ?: file.lastModified()
-        return SessionData(id, title, titleGenerated, updatedAt, messages)
+        return SessionData(
+            id,
+            title,
+            titleGenerated,
+            createdAt,
+            updatedAt,
+            messages,
+            objectRoot?.optJSONObject("usage"),
+        )
     }
 
     private fun titleOf(messages: JSONArray): String {
@@ -436,6 +496,8 @@ object AgentSettings {
                     .put("id", provider.id)
                     .put("name", provider.name)
                     .put("base_url", provider.baseUrl)
+                    .put("kind", provider.kind)
+                    .put("models", writeModels(provider.models))
                     .put(
                         "api_key",
                         provider.apiKey.takeIf { it.isNotEmpty() }?.let(::encrypt).orEmpty(),
@@ -443,6 +505,103 @@ object AgentSettings {
             )
         }
         prefs(context).edit().putString(PROVIDERS, array.toString()).apply()
+    }
+
+    private fun readModels(array: JSONArray?): List<AgentModelConfig> {
+        if (array == null) return emptyList()
+        return (0 until array.length()).mapNotNull { index ->
+            val item = array.optJSONObject(index) ?: return@mapNotNull null
+            val id = item.optString("id").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            AgentModelConfig(
+                id = id,
+                contextWindow = item.optLong("context_window", 0L),
+                maxOutput = item.optLong("max_output", 0L),
+                inputPerMillion = item.optDouble("input_per_million", 0.0),
+                outputPerMillion = item.optDouble("output_per_million", 0.0),
+                cacheReadPerMillion = item.optDouble("cache_read_per_million", 0.0),
+                cacheWritePerMillion = item.optDouble("cache_write_per_million", 0.0),
+                thinking = item.optBoolean("thinking", false),
+                toolCall = item.optBoolean("tool_call", true),
+                vision = item.optBoolean("vision", false),
+                efforts = item.optJSONArray("efforts")?.let { values ->
+                    (0 until values.length()).mapNotNull {
+                        values.optString(it).takeIf(String::isNotBlank)
+                    }
+                }.orEmpty(),
+            )
+        }
+    }
+
+    private fun writeModels(models: List<AgentModelConfig>): JSONArray = JSONArray().apply {
+        for (model in models) {
+            put(
+                JSONObject()
+                    .put("id", model.id)
+                    .put("context_window", model.contextWindow)
+                    .put("max_output", model.maxOutput)
+                    .put("input_per_million", model.inputPerMillion)
+                    .put("output_per_million", model.outputPerMillion)
+                    .put("cache_read_per_million", model.cacheReadPerMillion)
+                    .put("cache_write_per_million", model.cacheWritePerMillion)
+                    .put("thinking", model.thinking)
+                    .put("tool_call", model.toolCall)
+                    .put("vision", model.vision)
+                    .put("efforts", JSONArray(model.efforts)),
+            )
+        }
+    }
+
+    /**
+     * Context limit for a qualified model (`Provider/model`), or the active
+     * provider's model when unqualified.
+     */
+    fun modelContextWindow(context: Context, model: String): Long? {
+        if (model.isBlank()) return null
+        for (provider in providers(context)) {
+            val prefix = "${provider.name}/"
+            val id = model.removePrefix(prefix)
+            if (id == model && provider.id != activeProvider(context)?.id) continue
+            provider.models.firstOrNull { it.id == id }?.contextWindow
+                ?.takeIf { it > 0 }?.let { return it }
+        }
+        return null
+    }
+
+    @Synchronized
+    fun sessionUsage(context: Context, sessionId: String): AgentUsageState? {
+        val usage = readSessionFile(sessionFile(context, sessionId))?.usage ?: return null
+        return AgentUsageState(
+            contextTokens = usage.optLong("context_tokens", 0L),
+            promptTokens = usage.optLong("prompt_tokens", 0L),
+            completionTokens = usage.optLong("completion_tokens", 0L),
+            requests = usage.optLong("requests", 0L),
+        )
+    }
+
+    @Synchronized
+    fun saveSessionUsage(context: Context, sessionId: String, usage: AgentUsageState) {
+        runCatching {
+            val file = sessionFile(context, sessionId)
+            val session = readSessionFile(file) ?: return@runCatching
+            file.writeText(
+                JSONObject()
+                    .put("id", session.id)
+                    .put("title", session.title)
+                    .put("title_generated", session.titleGenerated)
+                    .put("created_at", session.createdAt)
+                    .put("updated_at", session.updatedAt)
+                    .put(
+                        "usage",
+                        JSONObject()
+                            .put("context_tokens", usage.contextTokens)
+                            .put("prompt_tokens", usage.promptTokens)
+                            .put("completion_tokens", usage.completionTokens)
+                            .put("requests", usage.requests),
+                    )
+                    .put("messages", session.messages)
+                    .toString(),
+            )
+        }
     }
 
     private fun writeMcpServers(context: Context, servers: List<McpServer>) {

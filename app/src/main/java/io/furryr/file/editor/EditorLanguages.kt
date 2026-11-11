@@ -3,6 +3,7 @@ package io.furryr.file.editor
 import android.content.Context
 import android.os.Bundle
 import android.util.Log
+import io.furryr.file.R
 import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.ContentKind
 import io.github.rosemoe.sora.lang.EmptyLanguage
@@ -45,6 +46,35 @@ internal object EditorLanguages {
         "sh", "bash", "zsh", "fish", "sql", "lua", "dart", "swift", "cs", "gradle", "cmake",
         "bat", "cmd", "ps1", "patch", "diff",
     )
+
+    /** Languages the editor can highlight, exposed by the file-type picker. */
+    val languageIds = listOf(
+        "plaintext", "kotlin", "java", "python", "javascript", "typescript", "rust",
+        "c", "cpp", "csharp", "go", "ruby", "php", "swift", "dart", "shellscript",
+        "json", "yaml", "ini", "xml", "html", "css", "markdown", "sql", "lua",
+        "dockerfile", "makefile", "cmakelists",
+    )
+
+    fun label(context: Context, id: String): String = when (id) {
+        "plaintext" -> context.getString(R.string.editor_language_plain_text)
+        "dockerfile" -> "Dockerfile"
+        "makefile" -> "Makefile"
+        "cmakelists" -> "CMake"
+        "shellscript" -> "Shell"
+        "javascript" -> "JavaScript"
+        "typescript" -> "TypeScript"
+        "cpp" -> "C++"
+        "csharp" -> "C#"
+        "json" -> "JSON"
+        "yaml" -> "YAML"
+        "ini" -> "INI"
+        "xml" -> "XML"
+        "html" -> "HTML"
+        "css" -> "CSS"
+        "php" -> "PHP"
+        "sql" -> "SQL"
+        else -> id.replaceFirstChar { it.uppercase() }
+    }
 
     /** Text/code facts, or a known text extension when a provider could not sniff. */
     fun supports(name: String, content: ContentInfo?): Boolean {
@@ -151,13 +181,14 @@ internal object EditorLanguages {
         foreground: Int,
         accent: Int,
         bracketBackground: Int,
+        lineNumberBackground: Int,
         lineHighlight: Int,
         muted: Int,
     ) {
         selectTheme(dark)
         val scheme = editor.colorScheme ?: return
         scheme.setColor(EditorColorScheme.WHOLE_BACKGROUND, background)
-        scheme.setColor(EditorColorScheme.LINE_NUMBER_BACKGROUND, background)
+        scheme.setColor(EditorColorScheme.LINE_NUMBER_BACKGROUND, lineNumberBackground)
         scheme.setColor(EditorColorScheme.TEXT_NORMAL, foreground)
         scheme.setColor(EditorColorScheme.LINE_NUMBER, muted)
         scheme.setColor(EditorColorScheme.LINE_NUMBER_CURRENT, foreground)

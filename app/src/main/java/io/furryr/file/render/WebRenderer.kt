@@ -1,15 +1,20 @@
 package io.furryr.file.render
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Build
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ProgressBar
+import android.widget.Toast
 import android.webkit.JsResult
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -17,59 +22,118 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import io.furryr.file.R
 import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.ContentTypes
+import io.furryr.file.core.RemoteFile
 import io.furryr.file.core.VFile
+import io.furryr.file.provider.web.httpFile
 import io.furryr.file.ui.util.BrowseAddress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import org.json.JSONTokener
 import java.io.ByteArrayInputStream
 
 private const val ASSET_HOST = "file-manager.local"
 private const val DOCUMENT_PATH = "__document__"
 private const val LOADING_TAG = "web-loading"
 
-/** One page of the WebView's own back/forward list, already display-formatted. */
-data class WebHistoryEntry(val address: String, val title: String?)
-
-/** Snapshot of the page history; [currentIndex] points at the visible page. */
-data class WebHistorySnapshot(val entries: List<WebHistoryEntry>, val currentIndex: Int)
+/** `scheme:` prefix: a hit-test URL that already stands on its own. */
+private val ABSOLUTE_URL = Regex("^[a-zA-Z][a-zA-Z0-9+.\\-]*:")
 
 /**
- * WebView-backed renderer for both HTTP(S) URLs and local/archived HTML files.
- * The renderer only sees a [DocumentView]; it never knows whether the document
- * came from Vfs, a zip mount or a network URL.
+ * What a long press landed on inside the page: the link target or the image
+ * source as the node it already is — a [RemoteFile], which is a [VFile] like
+ * any other — plus the text the element carries (anchor text or `alt`).
+ *
+ * "Copy" and "share" hand this node to the tab, so a URL takes the same copy
+ * and share paths as a listed file; [content] is the response's own
+ * name/size/type once the probe answers.
+ */
+data class WebHitTarget(
+    val file: RemoteFile,
+    val text: String?,
+    val isImage: Boolean,
+    val content: ContentInfo? = null,
+) {
+    /** Absolute address of the target, for display and for the text actions. */
+    val url: String get() = file.address
+}
+
+/**
+ * WebView-backed renderer for an HTML document.
+ *
+ * The session only sees a [DocumentView]: whether the page is projected out of
+ * a Vfs path, an archive view or a live origin is the document's business
+ * ([DocumentView.remoteBase]), never a scheme this renderer inspects.
  *
  * The session owns its WebView for as long as the tab lives, so switching tabs
  * keeps the WebView's own back/forward history and does not pay Chromium
  * start-up again. Only [close] destroys it.
  */
 class WebRendererSession(
-    val document: HtmlDocument?,
-    initialUrlArg: String?,
+    val document: HtmlDocument,
     internal val host: RenderHost,
 ) : RendererSession {
-    var initialUrl: String = initialUrlArg ?: "https://$ASSET_HOST/$DOCUMENT_PATH"
+    /**
+     * A live document is loaded by its own origin; a projected one is served
+     * through [ASSET_HOST] so relative resources can be resolved through the
+     * node graph.
+     */
+    private val liveBase: String? = document.remoteBase
+
+    /** True when the page's bytes live at a network origin. */
+    val isRemote: Boolean get() = liveBase != null
+
+    var initialUrl: String = liveBase ?: "https://$ASSET_HOST/$DOCUMENT_PATH"
         private set
 
-    var address by mutableStateOf(initialUrlArg ?: document?.file?.name.orEmpty())
+    /** Text address of the document itself (provider path plus view levels). */
+    private val documentAddress: String = document.origin.let(LocationAddress::format)
+
+    var address by mutableStateOf(liveBase ?: documentAddress)
         internal set
 
     /** Last page title; cleared as soon as a new document starts loading. */
@@ -77,20 +141,42 @@ class WebRendererSession(
         private set
 
     /** 0..100, drives the slim progress bar above the page. */
-    var progress by mutableIntStateOf(0)
+    override var progress by mutableIntStateOf(0)
         internal set
 
-    var loading by mutableStateOf(true)
+    override var loading by mutableStateOf(true)
         internal set
 
     /** True once the current page produced its first visible frame. */
     var contentVisible by mutableStateOf(false)
         internal set
 
-    var canGoBack by mutableStateOf(false)
-        private set
+    /**
+     * True while the tab is still settling whether this address is a page.
+     *
+     * An optimistic open hands the address to this renderer before the server
+     * has said what it is, so the cover must outlive the first committed frame:
+     * a response that turns out to be an archive or an image is handed back to
+     * the opener, and its bytes must never flash on the way out.
+     */
+    var probing by mutableStateOf(false)
+        internal set
 
-    var canGoForward by mutableStateOf(false)
+    /** The page may replace the loading cover once nothing still has to confirm it. */
+    internal val settled: Boolean get() = contentVisible && !probing
+
+    /** Hold the cover up: the address is on screen but not confirmed yet. */
+    fun beginProbe() {
+        probing = true
+    }
+
+    /** The address is confirmed as a page: the cover may get out of the way. */
+    fun settlePage() {
+        probing = false
+    }
+
+    /** Link or image under the last long press; drives the renderer dialog. */
+    var hitTarget by mutableStateOf<WebHitTarget?>(null)
         private set
 
     private var webView: WebView? = null
@@ -100,42 +186,69 @@ class WebRendererSession(
     private var pendingUnload: JsResult? = null
     /** URLs this session already decided to load itself. */
     private val approvedNavigations = mutableSetOf<String>()
+    /** URLs this session moved to by itself (a retrace); the tab already knows. */
+    private val selfDriven = mutableSetOf<String>()
 
     override val capabilities: RenderCapabilities
         get() = RenderCapabilities(
-            canGoBack = canGoBack,
-            canGoForward = canGoForward,
+            // Back/forward are the tab's history, not the WebView's cache: the
+            // session has nothing to advertise here.
             canRefresh = true,
             // A page is not a directory: no file creation, no PTY/terminal.
             canCreate = false,
             canTerminal = false,
         )
 
-    /** Navigate an existing URL session without rebuilding its WebView. */
+    override val consumesEdgeGestures: Boolean get() = true
+    override val canDismiss: Boolean get() = true
+
+    @Composable
+    override fun Content(darkTheme: Boolean, modifier: Modifier) {
+        WebContent(this, modifier)
+    }
+
+    /**
+     * Point this session at [url], keeping its WebView.
+     *
+     * The address is recorded as approved, so the WebView's own navigation
+     * callback recognises it as the page the route table just chose instead of
+     * classifying it a second time (and asking the server again).
+     */
     fun load(url: String) {
         pendingUnload?.cancel()
         pendingUnload = null
+        hitTarget = null
         initialUrl = url
         address = url
+        approvedNavigations += url
+        selfDriven.clear()
         // Keep the old title until the new document reports one; a navigation
         // should not blank the path bar while the page is still loading.
         loading = true
         progress = 0
         contentVisible = false
+        probing = false
         webView?.loadUrl(url)
     }
 
-    override fun onBack(): Boolean {
+    /**
+     * Reposition the WebView to a page it already holds, so a history step
+     * costs no request.
+     *
+     * The tab owns the history; this only moves the cache, so the landing is
+     * not reported back as a new visit. Returns false when the page is not in
+     * the list and has to be opened again through the route table.
+     */
+    fun retrace(address: String): Boolean {
         val view = webView ?: return false
-        if (!view.canGoBack()) return false
-        view.goBack()
-        return true
-    }
-
-    fun goForward(): Boolean {
-        val view = webView ?: return false
-        if (!view.canGoForward()) return false
-        view.goForward()
+        val list = view.copyBackForwardList()
+        val target = (list.size - 1 downTo 0).firstOrNull { index ->
+            list.getItemAtIndex(index)?.url?.let(::displayAddress) == address
+        } ?: return false
+        val delta = target - list.currentIndex
+        if (delta == 0) return true
+        selfDriven += address
+        view.goBackOrForward(delta)
         return true
     }
 
@@ -158,16 +271,28 @@ class WebRendererSession(
         closing = true
         pendingUnload?.cancel()
         pendingUnload = null
+        hitTarget = null
         val view = webView ?: return
         webView = null
-        canGoBack = false
-        canGoForward = false
         loading = false
         progress = 0
         contentVisible = false
+        probing = false
         view.stopLoading()
         view.loadUrl("about:blank")
         view.destroy()
+    }
+
+    /** Close the long-press dialog; the page itself keeps running. */
+    fun dismissHitTarget() {
+        hitTarget = null
+    }
+
+    /** Patch the open hit target, unless the dialog moved on to another link. */
+    private fun updateHitTarget(url: String, transform: (WebHitTarget) -> WebHitTarget) {
+        val current = hitTarget ?: return
+        if (current.url != url) return
+        hitTarget = transform(current)
     }
 
     override fun menuItems(context: Context): List<RendererMenuItem> = listOf(
@@ -178,7 +303,10 @@ class WebRendererSession(
     )
 
     override fun pathBar(context: Context): RendererPath {
+        // The title line keeps the file name; the address below it carries the
+        // whole path, so a saved page is still locatable.
         val title = pageTitle?.takeIf { it.isNotBlank() }
+            ?: document.file.name
             ?: address.substringAfter("://").substringBefore('/').ifBlank { address }
         return RendererPath(
             title = title,
@@ -206,9 +334,9 @@ class WebRendererSession(
                     view: WebView?,
                     request: WebResourceRequest?,
                 ): WebResourceResponse? {
-                    // Network pages are never intercepted: only resources of a
-                    // document that this session projects through Vfs.
-                    val document = document ?: return null
+                    // Only a projected document is served through this host; a
+                    // live page fetches its own resources from its origin and
+                    // never reaches this branch.
                     val uri = request?.url ?: return null
                     if (uri.host != ASSET_HOST) return null
                     val path = uri.path.orEmpty().trimStart('/')
@@ -238,73 +366,33 @@ class WebRendererSession(
                     if (request == null || !request.isForMainFrame) return false
                     if (request.method != "GET") return false
                     val uri = request.url ?: return false
-                    // A local document owns its own pages through ASSET_HOST.
-                    if (document != null && uri.host == ASSET_HOST) return false
+                    // A projected document owns its own pages through ASSET_HOST.
+                    if (uri.host == ASSET_HOST) return false
                     if (!BrowseAddress.isWebUrl(uri.toString())) return false
                     val url = uri.toString()
+                    selfDriven.clear()
                     if (approvedNavigations.remove(url)) return false
                     // Same-document fragment jumps must not start a request.
                     val current = view?.url
                     if (current != null && stripFragment(current) == stripFragment(url)) return false
-                    val target = view ?: return false
-                    // A visible page extension is definitive: load it without
-                    // the probe round-trip.
-                    if (WebUrlFile.hasHtmlExtension(url)) return false
-                    // Everything else is decided by the response, not the name.
-                    // `github.com/user/repo.git` is a page, and an extensionless
-                    // `/download?id=1` may be a PDF: only Content-Type (with
-                    // magic-byte/sniff fallbacks) can tell them apart.
-                    val file = WebUrlFile(url, referer = current)
+                    if (view == null) return false
+                    // A link is just a node at an address: hand it to the same
+                    // route table an address-bar open uses, with no facts. A page
+                    // comes back as this session (reused and loaded), an archive
+                    // or a file goes to its opener or viewer — this renderer
+                    // decides nothing, and probing here would delay the very
+                    // navigation the WebView can already start. The tab settles
+                    // the guess against the server and reopens the node if it was
+                    // not a page.
+                    val file = httpFile(url, referer = current)
                     loading = true
                     this@WebRendererSession.progress = 0
-                    host.scope.launch {
-                        // A page is recognized from HEAD alone, so the WebView
-                        // fetches it exactly once. A concrete non-HTML type is
-                        // a file and goes to the shared opener pipeline.
-                        val head = withContext(Dispatchers.IO) { file.peek() }
-                        if (head != null && ContentTypes.isHtmlMime(head.mime)) {
-                            target.post {
-                                if (webView !== target) return@post
-                                approvedNavigations += url
-                                target.loadUrl(url)
-                            }
-                            return@launch
-                        }
-                        val concrete = head != null &&
-                            !ContentTypes.isGenericMime(head.mime) &&
-                            // `text/plain` is also what misconfigured servers
-                            // send for HTML: let the body sniff decide.
-                            head.mime != "text/plain"
-                        if (concrete) {
-                            target.post {
-                                if (webView !== target) return@post
-                                loading = false
-                                host.openFile(file)
-                            }
-                            return@launch
-                        }
-                        val content = withContext(Dispatchers.IO) {
-                            file.describe().getOrNull()
-                        }
-                        target.post {
-                            // The tab may have closed or navigated while the
-                            // probe was in flight.
-                            if (webView !== target) return@post
-                            if (content == null || WebUrlFile.isHtml(content, file.name)) {
-                                approvedNavigations += url
-                                target.loadUrl(url)
-                            } else {
-                                loading = false
-                                host.openFile(file, content)
-                            }
-                        }
-                    }
+                    host.openFile(file)
                     return true
                 }
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                     updateAddress(url)
-                    refreshHistory(view)
                     loading = true
                     this@WebRendererSession.progress = 0
                     contentVisible = false
@@ -316,12 +404,10 @@ class WebRendererSession(
 
                 override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                     updateAddress(url)
-                    refreshHistory(view)
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     updateAddress(url)
-                    refreshHistory(view)
                     loading = false
                     contentVisible = true
                     view?.let { injectColorScheme(it) }
@@ -381,6 +467,59 @@ class WebRendererSession(
                     return true
                 }
             }
+            // A long press on a link or an image opens this renderer's own
+            // dialog instead of Chromium's built-in menu. The press point is
+            // captured here because the hit test result only carries the URL,
+            // while the anchor/alt text lives in the DOM.
+            var pressX = 0f
+            var pressY = 0f
+            setOnTouchListener { _, event ->
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    pressX = event.x
+                    pressY = event.y
+                }
+                false
+            }
+            setOnLongClickListener { pressed ->
+                val target = pressed as WebView
+                val hit = target.hitTestResult ?: return@setOnLongClickListener false
+                val type = hit.type
+                val isImage = type == WebView.HitTestResult.IMAGE_TYPE ||
+                    type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
+                if (!isImage && type != WebView.HitTestResult.SRC_ANCHOR_TYPE) {
+                    // Plain text, form fields and blank space keep the
+                    // WebView's own selection behaviour.
+                    return@setOnLongClickListener false
+                }
+                val raw = hit.extra?.takeIf { it.isNotBlank() }
+                    ?: return@setOnLongClickListener false
+                val url = absoluteUrl(raw)
+                // The link is a node: the page it came from is the referer the
+                // probe and the forward provider must carry.
+                val file = httpFile(url, referer = target.url)
+                this@WebRendererSession.hitTarget = WebHitTarget(
+                    file = file,
+                    text = null,
+                    isImage = isImage,
+                )
+                // The dialog already shows the URL; the element text arrives
+                // one script round-trip later, the response facts after the
+                // probe. Neither blocks the other.
+                requestHitText(target, pressX, pressY, isImage) { text ->
+                    this@WebRendererSession.updateHitTarget(url) { it.copy(text = text) }
+                }
+                // A link inside a local document points at this session's own
+                // asset host: there is no server to probe.
+                if (Uri.parse(url).host != ASSET_HOST) {
+                    this@WebRendererSession.host.scope.launch {
+                        val content = withContext(Dispatchers.IO) { file.describe().getOrNull() }
+                        target.post {
+                            this@WebRendererSession.updateHitTarget(url) { it.copy(content = content) }
+                        }
+                    }
+                }
+                true
+            }
             webView = this
             // Keep the renderer resident across tab switches; a killed renderer
             // would make the next page look like a cold start.
@@ -420,68 +559,80 @@ class WebRendererSession(
         )
     }
 
-    private fun refreshHistory(view: WebView?) {
-        canGoBack = view?.canGoBack() == true
-        canGoForward = view?.canGoForward() == true
-    }
-
-    /**
-     * The WebView's own back/forward list in display form: every URL the page
-     * history holds, including in-page link navigations that never reach the
-     * tab's folder stacks. The current page is the entry at [currentIndex].
-     */
-    fun historySnapshot(): WebHistorySnapshot {
-        val view = webView
-            ?: return WebHistorySnapshot(listOf(WebHistoryEntry(address, null)), 0)
-        val list = view.copyBackForwardList()
-        if (list.size <= 0) {
-            return WebHistorySnapshot(listOf(WebHistoryEntry(address, null)), 0)
-        }
-        val entries = (0 until list.size).map { index ->
-            val item = list.getItemAtIndex(index)
-            val raw = item?.url
-            WebHistoryEntry(
-                address = raw?.let(::displayAddress) ?: address,
-                title = item?.title?.takeIf { it.isNotBlank() && it != raw },
-            )
-        }
-        return WebHistorySnapshot(entries, list.currentIndex.coerceIn(0, entries.lastIndex))
-    }
-
-    /** Move inside the WebView's own history without appending an entry. */
-    fun jumpToHistory(index: Int) {
-        val view = webView ?: return
-        val current = view.copyBackForwardList().currentIndex
-        if (index == current) return
-        view.goBackOrForward(index - current)
-    }
-
     private fun updateAddress(url: String?) {
-        if (url == null) return
+        // A closing session loads about:blank first; that is not a location.
+        if (url == null || closing) return
         approvedNavigations.clear()
         val next = displayAddress(url)
         if (next == address) return
         address = next
-        // Keep the previous title while the new document loads. The title is
-        // replaced by onReceivedTitle, so the path bar never flashes blank.
+        // A retrace lands on a stop the tab already made. Anything else is a
+        // visit, and the tab decides what it becomes: a new stop, a stop it
+        // already holds, or nothing. Keep the previous title while the new
+        // document loads; onReceivedTitle replaces it.
+        if (selfDriven.remove(next)) return
+        host.onPageVisited(next)
     }
 
     private fun stripFragment(url: String): String = url.substringBefore('#')
 
+    /** Make a hit-test URL absolute against the page it was found in. */
+    private fun absoluteUrl(raw: String): String {
+        if (ABSOLUTE_URL.containsMatchIn(raw)) return raw
+        val base = webView?.url ?: return raw
+        return runCatching { java.net.URI(base).resolve(raw).toString() }.getOrDefault(raw)
+    }
+
+    /**
+     * Read the anchor text (or the image `alt`) of the element under the
+     * press. A DOM point is in CSS pixels, so the view point is divided by the
+     * current page scale. A blank answer just leaves the "copy link text"
+     * action falling back to the URL.
+     */
+    private fun requestHitText(
+        view: WebView,
+        x: Float,
+        y: Float,
+        isImage: Boolean,
+        onResult: (String?) -> Unit,
+    ) {
+        // getScale() is the only view→CSS pixel factor available on all
+        // supported versions; the page has no other way to report its zoom.
+        @Suppress("DEPRECATION")
+        val scale = view.scale.takeIf { it > 0f } ?: 1f
+        val px = (x / scale).toInt()
+        val py = (y / scale).toInt()
+        val script = if (isImage) {
+            "(function(){var e=document.elementFromPoint($px,$py);if(!e)return '';" +
+                "if(e.tagName==='IMG')return e.alt||'';" +
+                "var i=e.querySelector?e.querySelector('img'):null;return i?(i.alt||''):'';})()"
+        } else {
+            "(function(){var e=document.elementFromPoint($px,$py);if(!e)return '';" +
+                "var a=e.closest?e.closest('a'):null;var t=a||e;" +
+                "return (t.innerText||t.textContent||'').trim();})()"
+        }
+        view.evaluateJavascript(script) { value -> onResult(decodeJsString(value)) }
+    }
+
+    /** Unwrap the JSON-encoded string `evaluateJavascript` hands back. */
+    private fun decodeJsString(value: String?): String? {
+        if (value == null || value == "null") return null
+        val text = runCatching { JSONTokener(value).nextValue() as? String }.getOrNull()
+        return text?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
     /** Turn a WebView URL into what the address bar and history should show. */
     private fun displayAddress(url: String): String {
         val uri = Uri.parse(url)
-        return if (uri.host == ASSET_HOST) documentAddress(uri) else url
-    }
-
-    private fun documentAddress(uri: Uri): String {
-        val file = document?.file ?: return uri.toString()
+        if (uri.host != ASSET_HOST) return url
+        val base = documentAddress
         val path = uri.path.orEmpty().trimStart('/')
-        return if (path.isEmpty() || path == DOCUMENT_PATH) {
-            file.name
-        } else {
-            "${file.name}/$path"
-        }
+        // The main document is addressed by its own path; anything else it
+        // loads is a sibling of that file, so the path extends the document's
+        // folder rather than the document itself.
+        if (path.isEmpty() || path == DOCUMENT_PATH) return base
+        val parent = base.substringBeforeLast('/', "")
+        return if (parent.isEmpty()) path else "$parent/$path"
     }
 
     private fun notFound(): WebResourceResponse =
@@ -498,29 +649,29 @@ class WebRendererSession(
 class WebRendererFactory : RendererFactory {
     override val id: String = "web"
 
-    override fun supports(target: RenderTarget): Boolean = when (target) {
-        is RenderTarget.Url -> true
-        is RenderTarget.Node -> {
-            val content = target.content
-            val mime = content?.mime ?: ContentTypes.fromName(target.node.name)
-            ContentTypes.isHtmlMime(mime) ||
-                target.node.name.endsWith(".html", ignoreCase = true) ||
-                target.node.name.endsWith(".htm", ignoreCase = true) ||
-                target.node.name.endsWith(".xhtml", ignoreCase = true)
+    override fun supports(target: RenderTarget): Boolean {
+        val node = target.node
+        val content = target.content
+        if (content != null && !ContentTypes.isGenericMime(content.mime)) {
+            val mime = content.mime ?: ContentTypes.fromName(node.name)
+            return ContentTypes.isHtmlMime(mime) ||
+                node.name.endsWith(".html", ignoreCase = true) ||
+                node.name.endsWith(".htm", ignoreCase = true) ||
+                node.name.endsWith(".xhtml", ignoreCase = true)
         }
+        // No usable type: only a live address can still be a page, because the
+        // server answers for it (and a typed address must never fall through to
+        // a file chooser just because the probe was inconclusive). A projected
+        // file without facts has nothing to show.
+        return node is RemoteFile
     }
 
     override suspend fun create(
         target: RenderTarget,
         host: RenderHost,
     ): Result<RendererSession> = runCatching {
-        when (target) {
-            is RenderTarget.Url -> WebRendererSession(document = null, initialUrlArg = target.url, host = host)
-            is RenderTarget.Node -> {
-                val file = target.node as? VFile ?: error("web renderer requires a file")
-                WebRendererSession(document = HtmlDocument(file), initialUrlArg = null, host = host)
-            }
-        }
+        val file = target.node as? VFile ?: error("web renderer requires a file")
+        WebRendererSession(document = HtmlDocument(file), host = host)
     }
 }
 
@@ -533,8 +684,13 @@ fun WebContent(
     val surface = MaterialTheme.colorScheme.surface
     val surfaceArgb = surface.toArgb()
     val dark = surface.luminance() < 0.5f
-    val contentVisible = session.contentVisible
+    val settled = session.settled
     val spinnerTint = MaterialTheme.colorScheme.primary.toArgb()
+    // A tab switch drops this content but keeps the session: never bring a
+    // stale long-press dialog back with the tab.
+    DisposableEffect(session) {
+        onDispose { session.dismissHitTarget() }
+    }
     key(session) {
         // The WebView is attached only after this holder has been laid out.
         // Creating Chromium inside the first AndroidView pass can leave the
@@ -560,7 +716,7 @@ fun WebContent(
                     session.applyTheme(view, dark, surfaceArgb)
                     spinner?.let {
                         it.setBackgroundColor(surfaceArgb)
-                        it.visibility = if (contentVisible) View.GONE else View.VISIBLE
+                        it.visibility = if (settled) View.GONE else View.VISIBLE
                     }
                 } else if (host.tag == null && host.childCount == 0) {
                     host.tag = Unit
@@ -603,10 +759,124 @@ fun WebContent(
                         }
                         host.addView(cover)
                         cover.visibility =
-                            if (session.contentVisible) View.GONE else View.VISIBLE
+                            if (session.settled) View.GONE else View.VISIBLE
                     }
                 }
             },
         )
+    }
+    // The dialog lives next to the WebView, so a long press never has to
+    // leave Chromium's hit test result behind to reach Compose.
+    session.hitTarget?.let { target ->
+        WebHitDialog(
+            target = target,
+            host = session.host,
+            onDismiss = session::dismissHitTarget,
+        )
+    }
+}
+
+/**
+ * Long-press dialog for a link or an image: the address on top, then five
+ * actions. "Copy" and "Share" act on the resource itself ([WebHitTarget] is an
+ * on-demand [RemoteFile], served to the receiver through the forward
+ * provider), while the other three act on the text the page carries.
+ */
+@Composable
+private fun WebHitDialog(
+    target: WebHitTarget,
+    host: RenderHost,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val url = target.url
+    val label = stringResource(if (target.isImage) R.string.web_hit_image else R.string.web_hit_link)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(label) },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = url,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(12.dp))
+                WebHitAction(Icons.Default.ContentCopy, stringResource(R.string.copy)) {
+                    // The file, not a string: the tab's own copy flow takes the
+                    // node, so the destination folder streams it on demand.
+                    host.copyFile(target.file, target.content)
+                    onDismiss()
+                }
+                WebHitAction(
+                    Icons.Default.TextFields,
+                    stringResource(R.string.web_copy_link_text),
+                ) {
+                    copyToClipboard(context, label, target.text ?: url)
+                    onDismiss()
+                }
+                WebHitAction(Icons.Default.Link, stringResource(R.string.web_copy_url)) {
+                    copyToClipboard(context, label, url)
+                    onDismiss()
+                }
+                WebHitAction(Icons.Default.Share, stringResource(R.string.share)) {
+                    // Shared as a file: the receiver opens a content URI and
+                    // reads it on demand, exactly like a local file share.
+                    host.shareFile(target.file, target.content)
+                    onDismiss()
+                }
+                WebHitAction(Icons.AutoMirrored.Filled.Send, stringResource(R.string.web_share_url)) {
+                    shareUrlText(context, url)
+                    onDismiss()
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {},
+    )
+}
+
+@Composable
+private fun WebHitAction(icon: ImageVector, label: String, onClick: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 10.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp),
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(text = label, style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+private fun copyToClipboard(context: Context, label: String, text: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        ?: return
+    runCatching { clipboard.setPrimaryClip(ClipData.newPlainText(label, text)) }
+        .onFailure {
+            Toast.makeText(context, context.getString(R.string.toast_failed), Toast.LENGTH_SHORT)
+                .show()
+        }
+}
+
+private fun shareUrlText(context: Context, url: String) {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, url)
+    }
+    runCatching {
+        context.startActivity(Intent.createChooser(intent, context.getString(R.string.share)))
+    }.onFailure {
+        Toast.makeText(context, context.getString(R.string.toast_failed), Toast.LENGTH_SHORT).show()
     }
 }

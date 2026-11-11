@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -95,6 +96,7 @@ import io.furryr.file.daemon.shellQuote
 import io.furryr.file.agent.TerminalInputState
 import io.furryr.file.agent.TerminalViewComposable
 import io.furryr.file.daemon.DaemonManager
+import io.furryr.file.ui.theme.TerminalSchemeStore
 import android.app.Activity
 import android.content.Context
 import android.util.Log
@@ -119,6 +121,7 @@ internal fun ContentWithDrawer(
     activeTabIndex: Int,
     enabled: Boolean,
     canCreateTerminal: Boolean,
+    creatingTerminal: Boolean,
     onSwitchTab: (Int) -> Unit,
     onCloseTab: (TerminalTab) -> Unit,
     onDismissDrawer: () -> Unit,
@@ -126,6 +129,8 @@ internal fun ContentWithDrawer(
     onNewTab: () -> Unit,
 ) {
     val inputState = remember { TerminalInputState() }
+    val context = LocalContext.current
+    val terminalScheme = TerminalSchemeStore.current(context)
     Box(modifier = modifier) {
         Box(
             modifier = Modifier
@@ -159,22 +164,55 @@ internal fun ContentWithDrawer(
                     )
                 }
             } else {
-                // No live tab: show the failure (if any) but keep a way out, so
-                // one failed SSH connection cannot strand the sheet.
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.padding(16.dp),
-                    ) {
-                        if (sessionError != null) {
-                            Text(sessionError, color = MaterialTheme.colorScheme.error)
-                        }
-                        TextButton(
-                            onClick = onNewTab,
-                            enabled = canCreateTerminal,
-                            modifier = Modifier.padding(top = 8.dp),
+                // A session that is still connecting already renders as an
+                // empty terminal. The no-terminal state keeps the sheet
+                // surface the old create view used.
+                Box(Modifier.fillMaxSize()) {
+                    if (creatingTerminal) {
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .background(Color(terminalScheme.background))
                         ) {
-                            Text(stringResource(R.string.drawer_new_terminal))
+                            TerminalViewComposable(
+                                session = null,
+                                modifier = Modifier.fillMaxSize(),
+                                enabled = false,
+                                inputState = inputState,
+                            )
+                        }
+                    } else {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.align(Alignment.Center).padding(16.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.Terminal,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier.size(48.dp),
+                            )
+                            Text(
+                                stringResource(R.string.terminal_empty),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                modifier = Modifier.padding(top = 8.dp),
+                            )
+                            if (sessionError != null) {
+                                Text(
+                                    sessionError,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(top = 8.dp),
+                                )
+                            }
+                            if (canCreateTerminal && sessionError != null) {
+                                TextButton(
+                                    onClick = onNewTab,
+                                    modifier = Modifier.padding(top = 4.dp),
+                                ) {
+                                    Text(stringResource(R.string.drawer_new_terminal))
+                                }
+                            }
                         }
                     }
                 }

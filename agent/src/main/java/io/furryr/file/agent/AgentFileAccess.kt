@@ -155,8 +155,11 @@ public suspend fun writeFile(request: WriteFileRequest, target: DaemonTarget): W
 public suspend fun copyFile(request: CopyFileRequest, target: DaemonTarget): CopyFileResponse {
     val from = callerPath(target, request.from, "copy source")
     val to = callerPath(target, request.to, "copy destination")
+    // Tool input is a path; it becomes a node here and stays a node.
+    val source = Vfs.node(from).getOrThrow()
+    val destination = Vfs.destination(to).getOrThrow()
     var copied = 0L
-    Vfs.copyTo(from, to).collect { progress ->
+    Vfs.copyTo(source, destination).collect { progress ->
         if (progress.finished) copied += progress.copiedBytes
     }
     return CopyFileResponse.newBuilder().setBytesCopied(copied).build()
@@ -175,7 +178,10 @@ public fun callerPath(target: DaemonTarget, path: String, label: String): String
 }
 
 public suspend fun glob(request: GlobRequest, target: DaemonTarget): GlobResponse {
-    val base = request.path.ifBlank { "/" }
+    // A base must name one domain explicitly; never fall back to the host root.
+    val base = requireNotNull(request.path.takeIf { it.isNotBlank() }) {
+        "glob requires an explicit base path"
+    }
     // Inside the caller's own scope the scope prefix is omitted: rewrite the
     // base to a plain path and walk the caller's daemon, so results are plain
     // paths like /src/Main.kt instead of container://name/src/Main.kt.

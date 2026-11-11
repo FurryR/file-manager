@@ -2,7 +2,12 @@
 <resources>
     <string name="editor_close">Close editor</string>
     <string name="editor_save">Save</string>
+    <string name="editor_save_as">Save as</string>
     <string name="editor_saved">File saved</string>
+    <string name="editor_file">File</string>
+    <string name="editor_file_type">File type</string>
+    <string name="editor_language">Language</string>
+    <string name="editor_language_plain_text">Plain text</string>
     <string name="editor_undo">Undo</string>
     <string name="editor_redo">Redo</string>
     <string name="editor_search">Search and replace</string>
@@ -19,19 +24,20 @@
     <string name="editor_conflict_message">The current file differs from the version you opened. Keep editing or explicitly overwrite it with this buffer.</string>
     <string name="editor_overwrite">Overwrite</string>
     <string name="editor_error">Editor error</string>
-    <string name="editor_wrap">Toggle word wrap</string>
+    <string name="editor_wrap">Word wrap</string>
     <string name="editor_font_larger">Larger font</string>
     <string name="editor_font_smaller">Smaller font</string>
     <string name="editor_goto">Go to line</string>
-    <string name="editor_complete">Show completions</string>
+    <string name="editor_complete">Code completion</string>
     <string name="editor_diagnostics">Diagnostics (%1$d)</string>
     <string name="editor_no_diagnostics">No current diagnostics.</string>
-    <string name="editor_lsp_settings">Container language server</string>
+    <string name="editor_lsp_settings">Language server</string>
+    <string name="editor_lsp_settings_desc">Container and server command</string>
     <string name="editor_lsp_container">Container</string>
     <string name="editor_lsp_command">Server command (stdio)</string>
     <string name="editor_lsp_root">Workspace path inside container</string>
     <string name="editor_lsp_document">Document path inside container</string>
-    <string name="editor_lsp_hint">Start an installed server such as clangd, rust-analyzer or pylsp using raw standard I/O. The document path must match the file as seen inside this container; remote files are not copied there automatically. Configuration is remembered per language.</string>
+    <string name="editor_lsp_hint">Start an installed server such as clangd, rust-analyzer or pylsp using raw standard I/O. Files opened inside the configured container connect automatically. Leave the command empty to disable the server.</string>
     <string name="editor_lsp_connect">Connect</string>
     <string name="editor_lsp_disconnect">Disconnect language server</string>
     <string name="editor_lsp_disconnected">LSP disconnected · syntax highlighting available</string>

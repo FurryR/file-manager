@@ -168,6 +168,7 @@ fun TerminalSheet(
     var activeTabIndex by remember { mutableIntStateOf(-1) }
     var showDrawer by remember { mutableStateOf(false) }
     var sessionError by remember { mutableStateOf<String?>(null) }
+    var creatingTerminal by remember { mutableStateOf(false) }
     var dropHovered by remember { mutableStateOf(false) }
     var dragDropped by remember { mutableStateOf(false) }
     var dragBounds by remember { mutableStateOf(Rect.Zero) }
@@ -372,9 +373,10 @@ fun TerminalSheet(
     }
 
     fun createNewTab() {
-        if (!canCreateTerminal) return
+        if (!canCreateTerminal || creatingTerminal) return
         if (tabs.isEmpty() && activeTabIndex < 0) {
             scope.launch {
+                creatingTerminal = true
                 sessionError = null
                 try {
                     val (type, label) = resolveSessionType(currentPath)
@@ -395,6 +397,8 @@ fun TerminalSheet(
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to create terminal", e)
                     sessionError = e.message ?: "Failed to create terminal"
+                } finally {
+                    creatingTerminal = false
                 }
             }
         }
@@ -509,6 +513,7 @@ fun TerminalSheet(
                     activeTabIndex = activeTabIndex,
                     enabled = visible,
                     canCreateTerminal = canCreateTerminal,
+                    creatingTerminal = creatingTerminal,
                     onSwitchTab = { idx ->
                         activeTabIndex = idx
                         showDrawer = false
@@ -521,6 +526,7 @@ fun TerminalSheet(
                     onOpenDrawer = { showDrawer = true },
                     onNewTab = {
                         scope.launch {
+                            creatingTerminal = true
                             sessionError = null
                             try {
                                 val (type, label) = resolveSessionType(currentPath)
@@ -543,6 +549,8 @@ fun TerminalSheet(
                             } catch (e: Exception) {
                                 Log.e(TAG, "Failed to create tab", e)
                                 sessionError = e.message ?: "Failed to create tab"
+                            } finally {
+                                creatingTerminal = false
                             }
                         }
                     },

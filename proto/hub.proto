@@ -353,6 +353,8 @@ message SessionInfo {
   string title = 2;
   uint64 updated_at = 3;
   uint32 message_count = 4;
+  // Creation time in Unix milliseconds. The session picker shows its age.
+  uint64 created_at = 5;
 }
 
 message ListSessionsRequest {}

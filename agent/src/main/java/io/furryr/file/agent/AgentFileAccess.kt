@@ -1,12 +1,12 @@
 package io.furryr.file.agent
 
 import com.google.protobuf.ByteString
+import io.furryr.file.container.ContainerUris
+import io.furryr.file.core.NodeOps
 import io.furryr.file.core.Vfs
 import io.furryr.file.core.source.OpenMode
 import io.furryr.file.daemon.DaemonManager
-import io.furryr.file.daemon.ipc.*
 import io.furryr.file.daemon.DaemonTarget
-import io.furryr.file.proto.HandleMode
 import io.furryr.file.proto.hub.CopyFileRequest
 import io.furryr.file.proto.hub.CopyFileResponse
 import io.furryr.file.proto.hub.GlobRequest
@@ -36,11 +36,9 @@ private val GLOB_SKIP_DIRS = setOf("/proc", "/sys", "/dev")
 public suspend fun readFile(request: ReadFileRequest, target: DaemonTarget): ReadFileResponse {
     require(request.path.isNotBlank()) { "read requires a path" }
     if (isVfsPath(request.path)) return readVfsFile(request)
-    val connection = DaemonManager.connection(target)
-    val handle = connection.openHandle(request.path, HandleMode.READ, wantFd = false)
-        .getOrThrow()
+    val file = DaemonManager.fileService(target).open(request.path, OpenMode.READ).getOrThrow()
     try {
-        val size = handle.size
+        val size = file.size
         val offset = request.offset.coerceAtMost(size)
         val limit = if (request.length <= 0) DEFAULT_READ_SIZE
         else request.length.toLong().coerceAtMost(MAX_READ_SIZE)
@@ -49,15 +47,14 @@ public suspend fun readFile(request: ReadFileRequest, target: DaemonTarget): Rea
         var eof = position >= size
         while (!eof && output.size() < limit) {
             val remaining = (limit - output.size()).coerceAtMost(CHUNK_SIZE.toLong()).toInt()
-            val chunk = connection.readHandle(handle.handleId, position, remaining).getOrThrow()
-            val data = chunk.data.toByteArray()
+            val data = file.readAt(position, remaining)
             if (data.isEmpty()) {
                 eof = true
                 break
             }
             output.write(data)
             position += data.size
-            eof = chunk.eof || position >= size
+            eof = position >= size
         }
         return ReadFileResponse.newBuilder()
             .setData(ByteString.copyFrom(output.toByteArray()))
@@ -65,7 +62,7 @@ public suspend fun readFile(request: ReadFileRequest, target: DaemonTarget): Rea
             .setEof(eof)
             .build()
     } finally {
-        runCatching { connection.closeHandle(handle.handleId) }
+        file.close()
     }
 }
 
@@ -106,7 +103,7 @@ public suspend fun listDirectory(
     val entries = if (isVfsPath(path)) {
         Vfs.folder(path).getOrThrow().list().getOrThrow()
     } else {
-        DaemonManager.connection(target).listFiles(path).getOrThrow()
+        DaemonManager.fileService(target).list(path).getOrThrow()
     }
     val sorted = entries.sortedWith(
         compareByDescending<io.furryr.file.core.model.FileEntry> { it.isDirectory }
@@ -139,16 +136,15 @@ public suspend fun writeFile(request: WriteFileRequest, target: DaemonTarget): W
         }
         return WriteFileResponse.newBuilder().setBytesWritten(data.size.toLong()).build()
     }
-    val connection = DaemonManager.connection(target)
-    val handle = connection.openHandle(request.path, HandleMode.WRITE, wantFd = false)
-        .getOrThrow()
+    val file = DaemonManager.fileService(target).open(request.path, OpenMode.WRITE).getOrThrow()
     try {
         if (data.isNotEmpty()) {
-            connection.writeHandle(handle.handleId, 0, data).getOrThrow()
+            file.writeAt(0, data)
         }
+        if (file.seekable) file.truncate(data.size.toLong())
         return WriteFileResponse.newBuilder().setBytesWritten(data.size.toLong()).build()
     } finally {
-        runCatching { connection.closeHandle(handle.handleId) }
+        file.close()
     }
 }
 
@@ -157,9 +153,9 @@ public suspend fun copyFile(request: CopyFileRequest, target: DaemonTarget): Cop
     val to = callerPath(target, request.to, "copy destination")
     // Tool input is a path; it becomes a node here and stays a node.
     val source = Vfs.node(from).getOrThrow()
-    val destination = Vfs.destination(to).getOrThrow()
+    val destination = NodeOps.destination(to).getOrThrow()
     var copied = 0L
-    Vfs.copyTo(source, destination).collect { progress ->
+    NodeOps.copyTo(source, destination).collect { progress ->
         if (progress.finished) copied += progress.copiedBytes
     }
     return CopyFileResponse.newBuilder().setBytesCopied(copied).build()
@@ -172,7 +168,7 @@ public fun callerPath(target: DaemonTarget, path: String, label: String): String
     if (isVfsPath(path)) return path
     require(path.startsWith('/')) { "$label must be absolute or a VFS URI" }
     return when (target) {
-        is DaemonTarget.Named -> "container://${target.name}$path"
+        is DaemonTarget.Named -> ContainerUris.forContainer(target.name, path)
         else -> path
     }
 }
@@ -195,7 +191,7 @@ private suspend fun globDaemon(
     base: String,
     target: DaemonTarget,
 ): GlobResponse {
-    val connection = DaemonManager.connection(target)
+    val files = DaemonManager.fileService(target)
     require(base.startsWith('/')) { "glob path must be absolute" }
     val basePath = base.trimEnd('/').ifEmpty { "/" }
     val prefix = if (basePath == "/") "/" else "$basePath/"
@@ -204,7 +200,7 @@ private suspend fun globDaemon(
         basePath,
         list = { directory ->
             try {
-                connection.listFiles(directory).getOrThrow()
+                files.list(directory).getOrThrow()
             } catch (e: Exception) {
                 if (directory == basePath) throw e
                 emptyList()
@@ -294,7 +290,7 @@ public fun isVfsPath(path: String): Boolean = path.contains("://")
 // The VFS root of the caller's own scope, resolved from the Hello handshake.
 public fun ownScopeRoot(target: DaemonTarget): String? = when (target) {
     DaemonTarget.Host -> "file://"
-    is DaemonTarget.Named -> "container://${target.name}"
+    is DaemonTarget.Named -> ContainerUris.forContainer(target.name)
     DaemonTarget.App -> null
 }
 

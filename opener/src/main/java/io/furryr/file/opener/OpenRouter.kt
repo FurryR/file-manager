@@ -14,13 +14,12 @@ data class OpenRequest<C>(
 )
 
 /**
- * One open-with route. [open] returns null to let the next route try; any
- * non-null result wins.
+ * One open-with rule. [open] returns null to let the next rule try; any
+ * non-null result wins. Claiming a request and handling it are the same step,
+ * so a rule never resolves the same thing twice.
  */
-interface OpenRoute<C, R> {
+interface OpenRule<C, R> {
     val id: String
-
-    fun supports(request: OpenRequest<C>): Boolean
 
     suspend fun open(request: OpenRequest<C>): R?
 }
@@ -31,12 +30,12 @@ interface OpenRoute<C, R> {
  * UI, renderers and the `:core` VFS route.
  */
 class OpenRouter<C, R> {
-    private val entries = mutableListOf<Pair<Int, OpenRoute<C, R>>>()
+    private val entries = mutableListOf<Pair<Int, OpenRule<C, R>>>()
 
     @Synchronized
-    fun register(priority: Int, route: OpenRoute<C, R>) {
-        entries.removeAll { it.second.id == route.id }
-        entries += priority to route
+    fun register(priority: Int, rule: OpenRule<C, R>) {
+        entries.removeAll { it.second.id == rule.id }
+        entries += priority to rule
         entries.sortByDescending { it.first }
     }
 
@@ -46,12 +45,11 @@ class OpenRouter<C, R> {
     }
 
     @Synchronized
-    private fun routes(): List<OpenRoute<C, R>> = entries.map { it.second }
+    private fun rules(): List<OpenRule<C, R>> = entries.map { it.second }
 
     suspend fun route(request: OpenRequest<C>): R? {
-        for (route in routes()) {
-            if (!route.supports(request)) continue
-            route.open(request)?.let { return it }
+        for (rule in rules()) {
+            rule.open(request)?.let { return it }
         }
         return null
     }

@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material3.Icon
@@ -46,18 +47,20 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.furryr.file.R
+import io.furryr.file.model.HistoryStop
+import io.furryr.file.model.StopKind
 
-/** One entry of the per-tab history sheet. */
-data class HistoryStop(
-    /** Navigation target: a raw Vfs path or a page address. */
-    val path: String,
+/**
+ * One rendered row of the per-tab history sheet. The history model carries
+ * identity and kind; labels and the current marker are the sheet's view of it.
+ */
+data class HistoryRow(
+    val stop: HistoryStop,
     /** Primary line: folder name or page title. */
     val label: String,
     /** Secondary line: the full path or URL this entry points at. */
     val detail: String,
-    val isWeb: Boolean,
-    val current: Boolean = false,
-    val folder: io.furryr.file.core.VFolder? = null,
+    val current: Boolean,
 )
 
 /**
@@ -72,9 +75,9 @@ data class HistoryStop(
 fun HistorySheet(
     visible: Boolean,
     dragPx: Float,
-    stops: List<HistoryStop>,
+    stops: List<HistoryRow>,
     bottomInset: Dp,
-    onSelect: (HistoryStop) -> Unit,
+    onSelect: (HistoryRow) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var panelHeightPx by remember { mutableFloatStateOf(0f) }
@@ -174,7 +177,8 @@ fun HistorySheet(
                                     Icon(
                                         imageVector = when {
                                             stop.current -> Icons.Default.Check
-                                            stop.isWeb -> Icons.Default.Language
+                                            stop.stop.kind == StopKind.PAGE -> Icons.Default.Language
+                                            stop.stop.kind == StopKind.FILE -> Icons.Default.Description
                                             else -> Icons.Default.Folder
                                         },
                                         contentDescription = null,

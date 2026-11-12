@@ -65,9 +65,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import io.furryr.file.R
 import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.ContentTypes
-import io.furryr.file.core.RemoteFile
 import io.furryr.file.core.VFile
-import io.furryr.file.provider.web.httpFile
+import io.furryr.file.core.Vfs
 import io.furryr.file.ui.util.BrowseAddress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -85,21 +84,21 @@ private val ABSOLUTE_URL = Regex("^[a-zA-Z][a-zA-Z0-9+.\\-]*:")
 
 /**
  * What a long press landed on inside the page: the link target or the image
- * source as the node it already is — a [RemoteFile], which is a [VFile] like
- * any other — plus the text the element carries (anchor text or `alt`).
+ * source as the node it already is — a [VFile] like any other — plus the text
+ * the element carries (anchor text or `alt`).
  *
  * "Copy" and "share" hand this node to the tab, so a URL takes the same copy
  * and share paths as a listed file; [content] is the response's own
  * name/size/type once the probe answers.
  */
 data class WebHitTarget(
-    val file: RemoteFile,
+    val file: VFile,
     val text: String?,
     val isImage: Boolean,
     val content: ContentInfo? = null,
 ) {
     /** Absolute address of the target, for display and for the text actions. */
-    val url: String get() = file.address
+    val url: String get() = file.liveAddress ?: file.path.toString()
 }
 
 /**
@@ -126,14 +125,24 @@ class WebRendererSession(
 
     /** True when the page's bytes live at a network origin. */
     val isRemote: Boolean get() = liveBase != null
+    override val isLive: Boolean get() = isRemote
+    override val webAddress: String? get() = address
+    override val title: String? get() = pageTitle
+
+    /**
+     * The folder that owns the document. A live page's node has no browsable
+     * parent, so Up stays disabled there; a stored page (local, archive, ssh,
+     * ftp, ...) reports its own folder like any other file.
+     */
+    override val parent get() = document.file.parent
 
     var initialUrl: String = liveBase ?: "https://$ASSET_HOST/$DOCUMENT_PATH"
         private set
 
     /** Text address of the document itself (provider path plus view levels). */
-    private val documentAddress: String = document.origin.let(LocationAddress::format)
+    private val documentAddress: String = document.origin.let(NodeAddress::format)
 
-    var address by mutableStateOf(liveBase ?: documentAddress)
+    override var address by mutableStateOf(liveBase ?: documentAddress)
         internal set
 
     /** Last page title; cleared as soon as a new document starts loading. */
@@ -175,6 +184,22 @@ class WebRendererSession(
         probing = false
     }
 
+    override fun beginConfirmation() = beginProbe()
+    override fun settleConfirmation() = settlePage()
+
+    /**
+     * A live page can keep its WebView when the route table chose another
+     * live page. A projected page is a different document, so it gets a
+     * fresh session instead.
+     */
+    override fun adopt(address: String, next: RendererSession): Boolean {
+        val other = next as? WebRendererSession ?: return false
+        if (!isRemote || !other.isRemote) return false
+        other.close()
+        load(address)
+        return true
+    }
+
     /** Link or image under the last long press; drives the renderer dialog. */
     var hitTarget by mutableStateOf<WebHitTarget?>(null)
         private set
@@ -188,12 +213,20 @@ class WebRendererSession(
     private val approvedNavigations = mutableSetOf<String>()
     /** URLs this session moved to by itself (a retrace); the tab already knows. */
     private val selfDriven = mutableSetOf<String>()
+    /**
+     * Last address that actually rendered a page. A redirect target that
+     * arrives before this catches up to [address] replaces the provisional
+     * stop instead of adding one.
+     */
+    private var committedAddress: String? = null
 
     override val capabilities: RenderCapabilities
         get() = RenderCapabilities(
             // Back/forward are the tab's history, not the WebView's cache: the
             // session has nothing to advertise here.
             canRefresh = true,
+            // A document reports its owning folder; a live page has none.
+            canGoParent = parent != null,
             // A page is not a directory: no file creation, no PTY/terminal.
             canCreate = false,
             canTerminal = false,
@@ -239,7 +272,7 @@ class WebRendererSession(
      * not reported back as a new visit. Returns false when the page is not in
      * the list and has to be opened again through the route table.
      */
-    fun retrace(address: String): Boolean {
+    override fun retrace(address: String): Boolean {
         val view = webView ?: return false
         val list = view.copyBackForwardList()
         val target = (list.size - 1 downTo 0).firstOrNull { index ->
@@ -295,12 +328,15 @@ class WebRendererSession(
         hitTarget = transform(current)
     }
 
-    override fun menuItems(context: Context): List<RendererMenuItem> = listOf(
-        RendererMenuItem(
-            title = context.getString(R.string.refresh),
-            icon = Icons.Default.Refresh,
-        ) { refresh() },
-    )
+    override fun menuItems(context: Context): List<RendererMenuItem> = buildList {
+        add(
+            RendererMenuItem(
+                title = context.getString(R.string.refresh),
+                icon = Icons.Default.Refresh,
+            ) { refresh() },
+        )
+        host.bookmarkMenuItem(context)?.let(::add)
+    }
 
     override fun pathBar(context: Context): RendererPath {
         // The title line keeps the file name; the address below it carries the
@@ -384,7 +420,7 @@ class WebRendererSession(
                     // navigation the WebView can already start. The tab settles
                     // the guess against the server and reopens the node if it was
                     // not a page.
-                    val file = httpFile(url, referer = current)
+                    val file = Vfs.liveFile(url, referer = current).getOrThrow()
                     loading = true
                     this@WebRendererSession.progress = 0
                     host.openFile(file)
@@ -399,17 +435,25 @@ class WebRendererSession(
                 }
 
                 override fun onPageCommitVisible(view: WebView?, url: String?) {
+                    updateAddress(url)
                     contentVisible = true
+                    committedAddress = url?.let(::displayAddress) ?: address
                 }
 
                 override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                    // pushState/replaceState update the page's history without
+                    // a new document; there is no commit callback to follow, so
+                    // this URL becomes the committed page now.
+                    val inPage = contentVisible && !loading
                     updateAddress(url)
+                    if (inPage) committedAddress = url?.let(::displayAddress) ?: address
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     updateAddress(url)
                     loading = false
                     contentVisible = true
+                    committedAddress = url?.let(::displayAddress) ?: address
                     view?.let { injectColorScheme(it) }
                 }
             }
@@ -496,7 +540,7 @@ class WebRendererSession(
                 val url = absoluteUrl(raw)
                 // The link is a node: the page it came from is the referer the
                 // probe and the forward provider must carry.
-                val file = httpFile(url, referer = target.url)
+                val file = Vfs.liveFile(url, referer = target.url).getOrThrow()
                 this@WebRendererSession.hitTarget = WebHitTarget(
                     file = file,
                     text = null,
@@ -565,13 +609,18 @@ class WebRendererSession(
         approvedNavigations.clear()
         val next = displayAddress(url)
         if (next == address) return
+        val previous = address
+        // The page being replaced never rendered: this is a redirect (or a
+        // redirect chain), not a visit. The tab must replace its provisional
+        // stop instead of pushing it into history.
+        val replacePrevious = previous.takeIf { committedAddress != previous }
         address = next
         // A retrace lands on a stop the tab already made. Anything else is a
         // visit, and the tab decides what it becomes: a new stop, a stop it
         // already holds, or nothing. Keep the previous title while the new
         // document loads; onReceivedTitle replaces it.
         if (selfDriven.remove(next)) return
-        host.onPageVisited(next)
+        host.onPageVisited(next, replacePrevious)
     }
 
     private fun stripFragment(url: String): String = url.substringBefore('#')
@@ -654,16 +703,13 @@ class WebRendererFactory : RendererFactory {
         val content = target.content
         if (content != null && !ContentTypes.isGenericMime(content.mime)) {
             val mime = content.mime ?: ContentTypes.fromName(node.name)
-            return ContentTypes.isHtmlMime(mime) ||
-                node.name.endsWith(".html", ignoreCase = true) ||
-                node.name.endsWith(".htm", ignoreCase = true) ||
-                node.name.endsWith(".xhtml", ignoreCase = true)
+            return ContentTypes.isHtmlMime(mime)
         }
         // No usable type: only a live address can still be a page, because the
         // server answers for it (and a typed address must never fall through to
         // a file chooser just because the probe was inconclusive). A projected
         // file without facts has nothing to show.
-        return node is RemoteFile
+        return (node as? VFile)?.liveAddress != null
     }
 
     override suspend fun create(
@@ -779,7 +825,7 @@ fun WebContent(
 /**
  * Long-press dialog for a link or an image: the address on top, then five
  * actions. "Copy" and "Share" act on the resource itself ([WebHitTarget] is an
- * on-demand [RemoteFile], served to the receiver through the forward
+ * on-demand live file, served to the receiver through the forward
  * provider), while the other three act on the text the page carries.
  */
 @Composable

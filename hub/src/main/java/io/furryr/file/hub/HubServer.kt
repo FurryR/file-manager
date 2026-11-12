@@ -5,15 +5,13 @@ import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.agent.AgentEnvironment
 import io.furryr.file.agent.AgentEvents
-import io.furryr.file.agent.copyFile
-import io.furryr.file.agent.glob
-import io.furryr.file.agent.listDirectory
-import io.furryr.file.agent.readFile
-import io.furryr.file.agent.writeFile
 import io.furryr.file.agent.AgentMcp
 import io.furryr.file.agent.AgentService
 import io.furryr.file.agent.AgentSession
-import io.furryr.file.daemon.ipc.*
+import io.furryr.file.container.ContainerUris
+import io.furryr.file.daemon.process.CommandSpec
+import io.furryr.file.daemon.process.PipeChannel
+import io.furryr.file.daemon.process.ProcessChannel
 import io.furryr.file.proto.agent.AgentAttachResponse
 import io.furryr.file.proto.agent.AgentEvent
 import io.furryr.file.daemon.HubActions
@@ -47,7 +45,6 @@ import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.Closeable
 import java.io.FileDescriptor
@@ -225,9 +222,9 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                 } else {
                                     launch {
                                         val reply = try {
-                                            val code = runInterruptible {
-                                                exec.connection.waitExec(exec.execId, EXEC_WAIT_TIMEOUT_MS).getOrThrow()
-                                            }
+                                            val code = withTimeoutOrNull(EXEC_WAIT_TIMEOUT_MS) {
+                                                exec.channel.waitFor().getOrThrow()
+                                            } ?: error("exec wait timed out")
                                             state.execs.remove(handle, exec)
                                             Reply(
                                                 HubResponse.newBuilder().setId(request.id).setOk(true)
@@ -237,7 +234,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                             throw e
                                         } catch (e: Exception) {
                                             state.execs.remove(handle, exec)
-                                            runCatching { exec.connection.closeExec(exec.execId) }
+                                            runCatching { exec.channel.closeProcess() }
                                             Reply(failure(request.id, e.message ?: "hub request failed"))
                                         }
                                         try {
@@ -259,9 +256,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                 } else {
                                     launch {
                                         val reply = try {
-                                            val code = runInterruptible {
-                                                pty.connection.waitPty(pty.id).getOrThrow()
-                                            }
+                                            val code = pty.channel.waitFor().getOrThrow()
                                             state.ptys.remove(handle, pty)
                                             pty.terminalTarget?.close()
                                             Reply(
@@ -323,15 +318,16 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
             runCatching { client.close() }
             state.ptys.values.forEach { pty ->
                 pty.terminalTarget?.close()
-                pty.connection.closePty(pty.id).onFailure {
+                runCatching { pty.channel.close() }.onFailure {
                     Log.w(TAG, "hub PTY cleanup failed", it)
                 }
             }
             state.ptys.clear()
             state.execs.values.forEach { exec ->
-                exec.connection.closeExec(exec.execId).onFailure {
+                runCatching { exec.channel.closeProcess() }.onFailure {
                     Log.w(TAG, "hub exec cleanup failed", it)
                 }
+                exec.channel.close()
             }
             state.execs.clear()
             state.httpCalls.values.forEach { it.cancel() }
@@ -512,48 +508,52 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                         requireNotNull(HubActions.resolveCwd) { "filesystem resolution is unavailable" }
                             .invoke(root, targetId, it)
                     }
-                    val connection = DaemonManager.connection(target)
                     val env = exec.envMap + Hub.environment(target) +
                         mapOf("HUB_TERMINAL" to state.terminalId)
+                    val service = DaemonManager.execService(target)
                     if (exec.pipes) {
-                        val stream = connection.spawnExec(
-                            command = exec.command,
-                            args = exec.argsList,
-                            cwd = cwd,
-                            env = env,
+                        val stream = service.spawnPipes(
+                            CommandSpec(
+                                command = exec.command,
+                                args = exec.argsList,
+                                env = env,
+                                cwd = cwd,
+                            ),
                         ).getOrThrow()
                         val handle = state.nextHandle++
-                        state.execs[handle] = OwnedExec(connection, stream.execId)
+                        state.execs[handle] = OwnedExec(stream)
                         return@runCatching Reply(
                             HubResponse.newBuilder().setId(id).setOk(true)
                                 .setExec(
                                     ExecResponse.newBuilder()
-                                        .setExecId(handle).setPid(stream.childPid).build(),
+                                        .setExecId(handle).setPid(stream.pid).build(),
                                 ).build(),
-                            listOf(stream.stdout, stream.stderr),
+                            listOf(stream.stdoutFd, stream.stderrFd),
                         )
                     }
-                    val pty = connection.spawnPty(
-                        command = exec.command,
-                        args = exec.argsList,
-                        env = env,
-                        termType = exec.term,
-                        rows = exec.rows,
-                        cols = exec.cols,
-                        cwd = cwd,
-                        user = if (exec.hasUser()) exec.user else null,
-                        nice = if (exec.hasNice()) exec.nice else null,
+                    val pty = service.spawn(
+                        CommandSpec(
+                            command = exec.command,
+                            args = exec.argsList,
+                            env = env,
+                            cwd = cwd,
+                            termType = exec.term,
+                            rows = exec.rows,
+                            cols = exec.cols,
+                            user = if (exec.hasUser()) exec.user else null,
+                            nice = if (exec.hasNice()) exec.nice else null,
+                        ),
                     ).getOrThrow()
                     val handle = state.nextHandle++
                     state.ptys[handle] = OwnedPty(
-                        connection, pty.ptyId,
+                        pty,
                         HubActions.onTerminalTarget?.invoke(state.terminalId, targetId),
                     )
                     Reply(
                         HubResponse.newBuilder().setId(id).setOk(true)
                             .setExec(
                                 ExecResponse.newBuilder()
-                                    .setPtyId(handle).setPid(pty.childPid).build(),
+                                    .setPtyId(handle).setPid(pty.pid).build(),
                             ).build(),
                         listOfNotNull(pty.fileDescriptor),
                     )
@@ -652,7 +652,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                 HubRequest.OpCase.RESIZE -> {
                     val r = request.resize
                     val pty = state.pty(r.ptyId)
-                    pty.connection.resizePty(pty.id, r.rows, r.cols).getOrThrow()
+                    pty.channel.resize(r.rows, r.cols).getOrThrow()
                     Reply(ok(id))
                 }
 
@@ -667,14 +667,14 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                 HubRequest.OpCase.SIGNAL -> {
                     val s = request.signal
                     val pty = state.pty(s.ptyId)
-                    pty.connection.signalPty(pty.id, s.signal).getOrThrow()
+                    pty.channel.signal(s.signal).getOrThrow()
                     Reply(ok(id))
                 }
 
                 HubRequest.OpCase.CLOSE -> {
                     val handle = request.close.ptyId
                     val pty = state.pty(handle)
-                    pty.connection.closePty(pty.id).getOrThrow()
+                    pty.channel.close()
                     state.ptys.remove(handle, pty)
                     pty.terminalTarget?.close()
                     Reply(ok(id))
@@ -683,7 +683,8 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                 HubRequest.OpCase.CLOSE_EXEC -> {
                     val handle = request.closeExec.execId
                     val exec = state.execs.remove(handle) ?: error("exec not owned by client")
-                    exec.connection.closeExec(exec.execId).getOrThrow()
+                    exec.channel.closeProcess()
+                    exec.channel.close()
                     Reply(ok(id))
                 }
 
@@ -714,7 +715,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                 .setElevated(endpoint?.elevated == true)
                 .setRunning(endpoint != null)
                 .setKind("exec")
-                .setLabel(name.removePrefix(CONTAINER_PREFIX))
+                .setLabel(DaemonManager.hubDisplayName(name))
                 .setRoot(execRoot(name))
                 .build()
         }
@@ -746,7 +747,8 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
      */
     private fun execRoot(name: String): String = when {
         name == "host" -> "file:///"
-        name.startsWith(CONTAINER_PREFIX) -> "container://${name.removePrefix(CONTAINER_PREFIX)}"
+        DaemonManager.isContainerHubId(name) ->
+            ContainerUris.forContainer(DaemonManager.hubDisplayName(name))
         else -> ""
     }
 
@@ -754,10 +756,10 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
         "host" -> DaemonTarget.Host
         "app" -> DaemonTarget.App
         else -> {
-            require(containerId.startsWith(CONTAINER_PREFIX)) {
+            require(DaemonManager.isContainerHubId(containerId)) {
                 "invalid container id '$containerId'"
             }
-            DaemonTarget.Named(containerId.removePrefix(CONTAINER_PREFIX))
+            DaemonTarget.Named(DaemonManager.hubDisplayName(containerId))
         }
     }
 
@@ -789,14 +791,12 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
     }
 
     private class OwnedPty(
-        val connection: DaemonConnection,
-        val id: Long,
+        val channel: ProcessChannel,
         val terminalTarget: Closeable?,
     )
 
     private class OwnedExec(
-        val connection: DaemonConnection,
-        val execId: Long,
+        val channel: PipeChannel,
     )
 
     private class Reply(
@@ -806,7 +806,6 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
 
     companion object {
         private const val TAG = "HubServer"
-        private const val CONTAINER_PREFIX = "container-"
 
         /**
          * Bound on one pipe-mode exec wait. Only a wedged daemon reaches it; the

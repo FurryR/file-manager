@@ -5,6 +5,7 @@ import io.furryr.file.core.ContentTypes
 import io.furryr.file.core.FileProvider
 import io.furryr.file.core.Path
 import io.furryr.file.core.ProviderFeature
+import io.furryr.file.core.VFile
 import io.furryr.file.core.VNode
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.model.FileEntry
@@ -12,6 +13,7 @@ import io.furryr.file.core.model.ProviderStat
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
 import io.furryr.file.core.source.StreamFileSource
+import io.furryr.file.provider.ProviderSchemes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -32,12 +34,17 @@ import kotlinx.coroutines.withContext
  * error instead of inventing an empty directory.
  */
 object HttpProvider : FileProvider {
-    override val scheme: String get() = "http"
+    override val scheme: String get() = ProviderSchemes.HTTP
+
+    /** Both schemes reach the same origin; `https` is not a second backend. */
+    val schemes: Set<String> get() = ProviderSchemes.web
 
     /** No authority: the host is part of the URL, not a provider namespace. */
     override val authority: String? get() = null
 
     override val label: String get() = "Web"
+
+    override val writable: Boolean get() = false
 
     override val features: Set<ProviderFeature>
         get() = setOf(ProviderFeature.STAT, ProviderFeature.OPEN)
@@ -186,6 +193,8 @@ object HttpProvider : FileProvider {
      */
     override suspend fun node(path: Path, innerPath: String): Result<VNode> =
         runCatching { HttpFile(innerPath) }
+
+    override fun liveFile(address: String, referer: String?): VFile = HttpFile(address, referer)
 
     private fun readOnly(path: String): Result<Unit> =
         Result.failure(UnsupportedOperationException("$path is read-only"))

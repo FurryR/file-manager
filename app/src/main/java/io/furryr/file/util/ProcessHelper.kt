@@ -4,6 +4,7 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.Log
 import io.furryr.file.container.ContainerDaemonLauncher
+import io.furryr.file.container.ContainerUris
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.hub.Hub
@@ -38,7 +39,6 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 object ProcessHelper {
     private const val TAG = "ProcessHelper"
-    private const val CONTAINER_PREFIX = "container://"
     private const val SSH_PREFIX = "ssh://"
 
     private val fdToChannel = HashMap<Int, ProcessChannel>()
@@ -66,8 +66,7 @@ object ProcessHelper {
             )
         }
 
-        val containerName = cmd.removePrefix(CONTAINER_PREFIX)
-            .takeIf { cmd.startsWith(CONTAINER_PREFIX) && it.isNotBlank() }
+        val containerName = ContainerUris.commandName(cmd)?.takeIf { it.isNotBlank() }
         val target = if (containerName != null) {
             DaemonTarget.Named(containerName)
         } else {

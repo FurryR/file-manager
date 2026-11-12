@@ -1,95 +1,20 @@
 package io.furryr.file.store
 
 import android.content.Context
-import android.database.sqlite.SQLiteDatabase
-import android.database.sqlite.SQLiteOpenHelper
 import io.furryr.file.provider.SftpServerSource
 import io.furryr.file.provider.model.SftpServer
 
-class SftpDatabase(context: Context) : SQLiteOpenHelper(context, "sftp_servers.db", null, 1),
-    SftpServerSource {
-
-    override fun onCreate(db: SQLiteDatabase) {
-        db.execSQL("""
-            CREATE TABLE servers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                host TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                port INTEGER NOT NULL DEFAULT 22,
-                username TEXT NOT NULL DEFAULT '',
-                password TEXT NOT NULL DEFAULT '',
-                sort_order INTEGER NOT NULL DEFAULT 0
-            )
-        """)
-    }
-
-    override fun onUpgrade(db: SQLiteDatabase, oldV: Int, newV: Int) {
-        db.execSQL("DROP TABLE IF EXISTS servers")
-        onCreate(db)
-    }
-
-    fun insert(host: String, name: String, port: Int, username: String, password: String) {
-        val uniqueName = uniqueName(name)
-        writableDatabase.execSQL(
-            "INSERT OR IGNORE INTO servers (host, name, port, username, password, sort_order) VALUES (?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order),0)+1 FROM servers))",
-            arrayOf(host, uniqueName, port, username, password)
-        )
-    }
-
-    fun delete(host: String) =
-        writableDatabase.execSQL("DELETE FROM servers WHERE host=?", arrayOf(host))
-
-    fun rename(host: String, name: String) =
-        writableDatabase.execSQL("UPDATE servers SET name=? WHERE host=?", arrayOf(name, host))
-
-    fun update(host: String, newHost: String, name: String, port: Int, username: String, password: String) =
-        writableDatabase.execSQL(
-            "UPDATE servers SET host=?, name=?, port=?, username=?, password=? WHERE host=?",
-            arrayOf(newHost, name, port, username, password, host)
-        )
-
-    fun reorder(hosts: List<String>) {
-        writableDatabase.execSQL("UPDATE servers SET sort_order=-1")
-        hosts.forEachIndexed { i, host ->
-            writableDatabase.execSQL("UPDATE servers SET sort_order=? WHERE host=?", arrayOf(i, host))
-        }
-        writableDatabase.execSQL("DELETE FROM servers WHERE sort_order=-1")
-    }
-
-    fun getAll(): List<SftpServer> {
-        val list = mutableListOf<SftpServer>()
-        readableDatabase.rawQuery(
-            "SELECT host, name, port, username, password, sort_order FROM servers ORDER BY sort_order",
-            null
-        ).use { c ->
-            while (c.moveToNext()) {
-                list.add(SftpServer(c.getString(0), c.getString(1), c.getInt(2), c.getString(3), c.getString(4), c.getInt(5)))
-            }
-        }
-        return list
-    }
-
-    fun findByHost(host: String): SftpServer? {
-        readableDatabase.rawQuery(
-            "SELECT host, name, port, username, password, sort_order FROM servers WHERE host=?",
-            arrayOf(host)
-        ).use { c ->
-            if (c.moveToFirst()) {
-                return SftpServer(c.getString(0), c.getString(1), c.getInt(2), c.getString(3), c.getString(4), c.getInt(5))
-            }
-        }
-        return null
-    }
+class SftpDatabase(context: Context) : ServerDatabase<SftpServer>(
+    context = context,
+    name = "sftp_servers.db",
+    defaultPort = 22,
+    mapper = { host, name, port, username, password, sortOrder ->
+        SftpServer(host, name, port, username, password, sortOrder)
+    },
+    nameOf = { it.name },
+), SftpServerSource {
 
     override fun sftpServers(): List<SftpServer> = getAll()
 
     override fun sftpServer(host: String): SftpServer? = findByHost(host)
-
-    private fun uniqueName(base: String): String {
-        val names = getAll().map { it.name }.toSet()
-        if (base !in names) return base
-        var i = 1
-        while ("$base ($i)" in names) i++
-        return "$base ($i)"
-    }
 }

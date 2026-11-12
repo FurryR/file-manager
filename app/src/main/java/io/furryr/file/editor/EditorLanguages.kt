@@ -6,6 +6,7 @@ import android.util.Log
 import io.furryr.file.R
 import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.ContentKind
+import io.furryr.file.core.ContentTypes
 import io.github.rosemoe.sora.lang.EmptyLanguage
 import io.github.rosemoe.sora.lang.Language
 import io.github.rosemoe.sora.lang.completion.CompletionItem
@@ -38,24 +39,44 @@ internal object EditorLanguages {
         ".gitignore", ".gitattributes", ".editorconfig", ".env", ".bashrc", ".zshrc",
     )
 
-    private val textExtensions = setOf(
-        "txt", "md", "markdown", "log", "json", "jsonc", "yaml", "yml", "toml", "ini",
-        "cfg", "conf", "properties", "xml", "svg", "html", "htm", "css", "scss", "sass",
-        "less", "js", "jsx", "mjs", "cjs", "ts", "tsx", "vue", "svelte", "py", "pyw",
-        "java", "kt", "kts", "c", "h", "cpp", "cc", "hpp", "cxx", "rs", "go", "rb", "php",
-        "sh", "bash", "zsh", "fish", "sql", "lua", "dart", "swift", "cs", "gradle", "cmake",
-        "bat", "cmd", "ps1", "patch", "diff",
+    /**
+     * A language a plugin contributes. [grammar] must name a TextMate grammar
+     * already loaded into the editor registry; null means plain text editing.
+     */
+    data class LanguageSpec(
+        val id: String,
+        val extensions: Set<String> = emptySet(),
+        val label: String? = null,
+        val grammar: String? = null,
     )
 
+    private val registeredLanguages = linkedMapOf<String, LanguageSpec>()
+
+    /** Add a language to the picker and its file extensions to language detection. */
+    @Synchronized
+    fun registerLanguage(spec: LanguageSpec) {
+        registeredLanguages[spec.id] = spec
+    }
+
+    @Synchronized
+    fun unregisterLanguage(id: String) {
+        registeredLanguages.remove(id)
+    }
+
     /** Languages the editor can highlight, exposed by the file-type picker. */
-    val languageIds = listOf(
+    val languageIds: List<String>
+        get() = builtinLanguageIds + registeredLanguages.keys.filter { it !in builtinLanguageIds }
+
+    private val builtinLanguageIds = listOf(
         "plaintext", "kotlin", "java", "python", "javascript", "typescript", "rust",
         "c", "cpp", "csharp", "go", "ruby", "php", "swift", "dart", "shellscript",
         "json", "yaml", "ini", "xml", "html", "css", "markdown", "sql", "lua",
         "dockerfile", "makefile", "cmakelists",
     )
 
-    fun label(context: Context, id: String): String = when (id) {
+    private fun spec(id: String): LanguageSpec? = synchronized(this) { registeredLanguages[id] }
+
+    fun label(context: Context, id: String): String = spec(id)?.label ?: when (id) {
         "plaintext" -> context.getString(R.string.editor_language_plain_text)
         "dockerfile" -> "Dockerfile"
         "makefile" -> "Makefile"
@@ -80,14 +101,19 @@ internal object EditorLanguages {
     fun supports(name: String, content: ContentInfo?): Boolean {
         val lower = name.lowercase(Locale.ROOT)
         if (lower in specialNames) return true
-        if (lower.substringAfterLast('.', "") in textExtensions) return true
+        if (ContentTypes.kindOfName(lower) in setOf(ContentKind.TEXT, ContentKind.CODE)) return true
         return content?.kind == ContentKind.TEXT || content?.kind == ContentKind.CODE
     }
 
     fun id(path: String): String {
         val name = path.substringAfterLast('/').lowercase(Locale.ROOT)
         if (name in setOf("dockerfile", "makefile", "cmakelists.txt")) return name.substringBefore('.')
-        return when (name.substringAfterLast('.', "")) {
+        val extension = name.substringAfterLast('.', "")
+        val registered = synchronized(this) {
+            registeredLanguages.values.firstOrNull { extension in it.extensions }
+        }
+        if (registered != null) return registered.id
+        return when (extension) {
             "kt", "kts" -> "kotlin"
             "java" -> "java"
             "py", "pyw" -> "python"
@@ -149,7 +175,7 @@ internal object EditorLanguages {
         }
         selectTheme(dark)
         editor.colorScheme = TextMateColorScheme.create(ThemeRegistry.getInstance())
-        val grammar = when (languageId) {
+        val grammar = spec(languageId)?.grammar ?: when (languageId) {
             "plaintext" -> null
             "python", "ruby" -> "python"
             "shellscript", "dockerfile", "makefile" -> "shell"

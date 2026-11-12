@@ -8,15 +8,13 @@ import io.furryr.file.ui.screens.*
 import io.furryr.file.ui.util.*
 import io.furryr.file.ui.state.rememberLocationCollections
 import io.furryr.file.core.ContentInfo
-import io.furryr.file.core.RemoteFile
 import io.furryr.file.core.ContentTypes
 import io.furryr.file.core.Path
-import io.furryr.file.editor.EditorRendererSession
-
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonStatus
 import io.furryr.file.container.ContainerManager
 import io.furryr.file.container.ContainerBackend
+import io.furryr.file.container.ContainerUris
 import io.furryr.file.core.DirectoryCapabilities
 import io.furryr.file.agent.SessionManager
 import io.furryr.file.provider.model.LocalLocation
@@ -28,17 +26,19 @@ import io.furryr.file.core.Folder
 import io.furryr.file.core.VFolder
 import io.furryr.file.core.VNode
 import io.furryr.file.core.VFile
+import io.furryr.file.core.NodeOps
 import io.furryr.file.core.Vfs
-import io.furryr.file.render.DirectoryRenderer
-import io.furryr.file.render.HomeRenderer
-import io.furryr.file.render.LocationAddress
+import io.furryr.file.render.FolderRendererState
+import io.furryr.file.render.HomeRendererState
+import io.furryr.file.render.ListingSession
+import io.furryr.file.render.NodeAddress
 import io.furryr.file.render.RenderCapabilities
 import io.furryr.file.render.RenderHost
 import io.furryr.file.render.RendererMenuItem
 import io.furryr.file.render.RendererSession
-import io.furryr.file.render.WebRendererSession
+import io.furryr.file.render.RendererSessions
+import io.furryr.file.render.Retention
 import io.furryr.file.provider.web.WebTransfers
-import io.furryr.file.provider.web.peek
 import io.furryr.file.provider.remote.RemoteLocation
 import android.app.Activity
 import android.Manifest
@@ -50,6 +50,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -58,6 +59,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -73,10 +75,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
@@ -93,8 +93,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
@@ -102,8 +100,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableIntState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -115,9 +115,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.geometry.Rect
@@ -125,6 +127,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
@@ -136,15 +139,16 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 
-import io.furryr.file.model.CopyMoveSource
-import io.furryr.file.model.CopyMoveState
+import io.furryr.file.clipboard.ClipboardEntry
+import io.furryr.file.clipboard.ClipboardAction
+import io.furryr.file.clipboard.ClipboardStore
+import io.furryr.file.clipboard.ClipboardTransfer
 import io.furryr.file.core.DirectoryStats
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.model.FileTab
 import io.furryr.file.model.OperationProgress
 import io.furryr.file.ui.components.BottomToolbar
 import io.furryr.file.ui.components.FileDrawer
-import io.furryr.file.ui.screens.FileListScreen
 import io.furryr.file.ui.util.OperationNotification
 import io.furryr.file.ui.util.ContainerNotification
 import io.furryr.file.ui.util.formatSize
@@ -172,6 +176,27 @@ private data class LeavePrompt(
     val onCancel: () -> Unit = {},
 )
 
+/**
+ * Tabs belong to the shell's process, not to one activity instance: changing
+ * the app language recreates [MainActivity], and the open tabs must survive
+ * that rebuild. Process death still starts from Home.
+ */
+private object TabSession {
+    var tabs: SnapshotStateList<FileTab>? = null
+    var selectedIndex: MutableIntState? = null
+}
+
+/**
+ * Shell-owned host with a session back-reference.
+ *
+ * Callbacks are gated by the session object rather than a stop id: an adopted
+ * WebView moves to a new stop without losing its host, and a warm session that
+ * is no longer active cannot rename the tab it left.
+ */
+private interface ShellRenderHost : RenderHost {
+    var boundSession: RendererSession?
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun FileManagerApp(
@@ -181,38 +206,30 @@ fun FileManagerApp(
     containerErrorRequest: String? = null,
 ) {
     val context = LocalContext.current
-    val tabs = remember { mutableStateListOf(FileTab(path = HomePath)) }
-    var selectedTabIndex by remember { mutableIntStateOf(0) }
-    var currentInfo by remember { mutableStateOf(DirectoryStats()) }
-    var showInfoDialog by remember { mutableStateOf(false) }
-    var showCreateDialog by remember { mutableStateOf(false) }
+    val tabs = remember {
+        TabSession.tabs ?: mutableStateListOf(FileTab(path = HomePath)).also { TabSession.tabs = it }
+    }
+    var selectedTabIndex by remember {
+        TabSession.selectedIndex ?: mutableIntStateOf(0).also { TabSession.selectedIndex = it }
+    }
     var containerError by remember(containerErrorRequest) { mutableStateOf(containerErrorRequest) }
     var showMoreMenu by remember { mutableStateOf(false) }
     var menuChildren by remember { mutableStateOf<List<RendererMenuItem>?>(null) }
     var pendingTabIndex by remember { mutableIntStateOf(-1) }
-    var refreshTrigger by remember { mutableIntStateOf(0) }
-    var animationTrigger by remember { mutableIntStateOf(0) }
-    var sortMode by remember { mutableStateOf(SortMode.NAME) }
-    var sortReverse by remember { mutableStateOf(false) }
-    var showSortDialog by remember { mutableStateOf(false) }
-    var searchMode by remember { mutableStateOf(false) }
-    var filterText by remember { mutableStateOf("") }
+    var titleEditing by remember { mutableStateOf(false) }
 
     // Context menu & file operations state
-    var contextMenuEntry by remember { mutableStateOf<FileEntry?>(null) }
     var showDeleteConfirm by remember { mutableStateOf<List<FileEntry>?>(null) }
     var showRenameDialog by remember { mutableStateOf<FileEntry?>(null) }
     var showBatchRenameDialog by remember { mutableStateOf(false) }
     var showEntryInfo by remember { mutableStateOf<FileEntry?>(null) }
 
-    var currentEntries by remember { mutableStateOf<List<FileEntry>>(emptyList()) }
     var operationProgress by remember { mutableStateOf<OperationProgress?>(null) }
     var operationJob by remember { mutableStateOf<Job?>(null) }
     var operationTaskIds: List<Long>? = null  // kept only for notification UI reference
     var operationHidden by remember { mutableStateOf(false) }
     var highlightPath by remember { mutableStateOf<String?>(null) }
     var highlightDirectory by remember { mutableStateOf<String?>(null) }
-    var highlightRefreshToken by remember { mutableStateOf<Int?>(null) }
     var pendingScrollPath by remember { mutableStateOf<String?>(null) }
     // A file open can spend hundreds of milliseconds reading a zip index or a
     // remote probe. The list shows its existing spinner overlay after 300 ms.
@@ -237,16 +254,27 @@ fun FileManagerApp(
     // Measured so the history panel can dock above the toolbar instead of
     // sliding over it from the bottom of the window.
     var bottomBarHeightPx by remember { mutableIntStateOf(0) }
-    // One live renderer session per tab, keyed by FileTab.id. Switching tabs
-    // keeps the WebView (and its own back/forward history) alive.
-    val webSessions = remember { mutableStateMapOf<String, WebRendererSession>() }
-    // Titles the pages reported, keyed by page address. History lives in the
-    // tab stacks, which carry addresses only; this keeps the label of a page
-    // stop after its WebView is gone.
-    val pageTitles = remember { mutableStateMapOf<String, String>() }
-    // Text editors are tab-owned too: switching tabs keeps the Sora buffer,
-    // undo history and LSP session alive until the tab closes.
-    val editorSessions = remember { mutableStateMapOf<String, EditorRendererSession>() }
+    // One live renderer session per history stop, keyed by HistoryStop.id.
+    // Directory, Home, Web and editor sessions all live here; leaving a stop
+    // deactivates it, and its retention decides whether it survives.
+    val rendererSessions = remember { mutableMapOf<String, RendererSession>() }
+    // Warm sessions in activation order, oldest first. The budget is coarse on
+    // purpose: a directory is cheap and recreating it is always possible.
+    val warmSessions = remember { ArrayDeque<String>() }
+    val warmBudget = 16
+    // Stops whose renderer is being rebuilt after a history move or an
+    // activity recreate; prevents a second restore from the composition.
+    val restoringStops = remember { mutableSetOf<String>() }
+    // Assigned once renderHostFor() exists below; rendererOf() uses it to mint
+    // sessions with the same host surface every other renderer gets.
+    lateinit var hostFor: (String) -> ShellRenderHost
+    // Assigned after their local functions are declared; the host methods run
+    // only from user events, so they never need a forward declaration body.
+    lateinit var openResolvedNodeFn: (VFile, FileEntry) -> Unit
+    lateinit var openHomeEntryFn: (HomeEntry) -> Unit
+    lateinit var toggleHomeBookmarkFn: (HomeEntry) -> Unit
+    lateinit var cancelOpeningFn: () -> Unit
+    lateinit var bookmarkEntryFn: () -> HomeEntry?
     // One shared leave-confirmation dialog for every renderer. The editor
     // offers Save/Discard/Cancel; a WebView beforeunload prompt offers
     // Leave/Cancel because the page owns its own storage.
@@ -263,6 +291,11 @@ fun FileManagerApp(
     // underneath it would only be dead weight; collapse it when the terminal opens.
     LaunchedEffect(showTerminalSheet) {
         if (showTerminalSheet) showHistory = false
+        // The terminal lives at the bottom and must stay above the IME. Every
+        // other screen keeps adjustNothing, so its keyboard cannot move the
+        // bottom toolbar.
+        val window = (context as? Activity)?.window
+        window?.setSoftInputMode(terminalSoftInputMode(showTerminalSheet))
     }
     DisposableEffect(Unit) {
         val listener: () -> Unit = {
@@ -311,15 +344,10 @@ fun FileManagerApp(
         }
     }
 
-    // Copy/Move state
-    var copyMoveState by remember { mutableStateOf<CopyMoveState?>(null) }
-    var showCopyMovePlaceDialog by remember { mutableStateOf(false) }
-
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    // Typed locators resolve through the same node service the agent uses:
+    // Typed locators resolve through the shared view walker (`Vfs.node`):
     // opener registry, no format knowledge here.
-    val nodeService = remember { DefaultNodeService() }
 
     // Exit sort mode when drawer closes
     // Any tap outside the inline path editor dismisses it, like an address
@@ -328,6 +356,7 @@ fun FileManagerApp(
     // presses only.
     val focusManager = LocalFocusManager.current
     var titleBounds by remember { mutableStateOf<Rect?>(null) }
+    var topBarBounds by remember { mutableStateOf<Rect?>(null) }
     var rootCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
     LaunchedEffect(drawerState.isClosed) {
         if (drawerState.isClosed) drawerSortMode = false
@@ -340,13 +369,10 @@ fun FileManagerApp(
 
     fun currentTab(): FileTab = tabs[selectedTabIndex]
 
-    /** The live tab view, whichever renderer owns it. */
-    fun rendererOf(id: String): RendererSession? = webSessions[id] ?: editorSessions[id]
-
     fun folderLabel(folder: VFolder): String {
         // A view folder carries its own address (provider path plus view
         // levels); no format-specific formatting belongs here.
-        runCatching { LocationAddress.format(folder.path) }.getOrNull()?.let { return it }
+        runCatching { NodeAddress.format(folder.path) }.getOrNull()?.let { return it }
         val ancestry = generateSequence(folder) { it.parent }.toList().asReversed()
         val providerIndex = ancestry.indexOfFirst { it is Folder }
         if (providerIndex < 0) return ancestry.joinToString("/") { it.name }
@@ -370,19 +396,163 @@ fun FileManagerApp(
 
     fun pendingOf(tabId: String): FileTab? = pendingNavigations[tabId]
 
+    /** Release hook then close; sessions may run this only once. */
+    fun releaseSession(session: RendererSession) {
+        runCatching { session.onRelease() }
+        session.close()
+    }
+
+    /** The tab state the user sees: a pending location wins over the old one. */
+    fun activeTabState(tabId: String): FileTab? =
+        pendingNavigations[tabId] ?: tabs.firstOrNull { it.id == tabId }
+
+    fun activeStopId(tabId: String): String? = activeTabState(tabId)?.currentStop?.id
+
+    fun activeSession(tabId: String): RendererSession? {
+        val stop = activeTabState(tabId)?.currentStop ?: return null
+        return rendererSessions[stop.id]
+    }
+
+    /** True when [session] is the renderer the tab is showing right now. */
+    fun isActiveSession(tabId: String, session: RendererSession): Boolean =
+        rendererSessions[activeStopId(tabId)] === session
+
+    /** Bind a freshly created host to the session it was made for. */
+    fun bindHost(host: RenderHost, session: RendererSession) {
+        (host as? ShellRenderHost)?.boundSession = session
+    }
+
+    /** Release the oldest warm stops once the coarse budget is exceeded. */
+    fun evictWarm() {
+        val total = warmSessions.sumOf { rendererSessions[it]?.cacheCost ?: 0 }
+        if (total <= warmBudget) return
+        val protected = buildSet {
+            tabs.forEach { add(it.currentStop.id) }
+            pendingNavigations.values.forEach { add(it.currentStop.id) }
+            addAll(restoringStops)
+        }
+        var excess = total - warmBudget
+        for (stopId in warmSessions.toList()) {
+            if (excess <= 0) break
+            if (stopId in protected) continue
+            val session = rendererSessions[stopId] ?: continue
+            if (session.retention != Retention.WARM) continue
+            warmSessions.remove(stopId)
+            rendererSessions.remove(stopId)?.let(::releaseSession)
+            excess -= session.cacheCost
+        }
+    }
+
+    fun touchWarm(stopId: String) {
+        warmSessions.remove(stopId)
+        warmSessions.addLast(stopId)
+        evictWarm()
+    }
+
+    /**
+     * Deactivate the stop being left. A [Retention.WARM] session stays in the
+     * map for Back; a [Retention.NONE] one is released immediately.
+     */
+    fun deactivateStop(stopId: String?) {
+        stopId ?: return
+        val session = rendererSessions[stopId] ?: return
+        session.onDeactivate()
+        if (session.retention == Retention.NONE) {
+            rendererSessions.remove(stopId)?.let(::releaseSession)
+            warmSessions.remove(stopId)
+        }
+    }
+
+    /** Force-release every session a tab (or its pending location) owns. */
+    fun releaseStops(vararg states: FileTab?) {
+        states.filterNotNull()
+            .flatMap { it.history }
+            .distinctBy { it.id }
+            .forEach { stop ->
+                rendererSessions.remove(stop.id)?.let(::releaseSession)
+                warmSessions.remove(stop.id)
+            }
+    }
+
+    /** Drop a navigation that has not committed, releasing its extra stops. */
+    fun cancelPending(tabId: String): FileTab? {
+        val pending = pendingNavigations.remove(tabId) ?: return null
+        val active = tabs.firstOrNull { it.id == tabId }?.currentStop?.id
+        pending.history.forEach { stop ->
+            if (stop.id != active) {
+                rendererSessions.remove(stop.id)?.let(::releaseSession)
+                warmSessions.remove(stop.id)
+            }
+        }
+        return pending
+    }
+
+    /** Mint the directory/Home session for a location stop. */
+    fun newLocationSession(tab: FileTab, stop: HistoryStop): RendererSession {
+        val host = hostFor(tab.id)
+        val session = RendererSessions.location(
+            host = host,
+            scope = scope,
+            path = stop.path,
+            initialSelection = tab.selectedPaths,
+            initialSelectedIndex = tab.lastSelectedIndex,
+        )
+        bindHost(host, session)
+        rendererSessions[stop.id] = session
+        touchWarm(stop.id)
+        session.onActivate()
+        return session
+    }
+
+    /**
+     * Freeze [entries] into copy/move mode. The source rows stop being shown:
+     * from here the list only serves to pick a destination.
+     */
+    fun startClipboard(entries: List<ClipboardEntry>, action: ClipboardAction) {
+        if (entries.isEmpty()) return
+        ClipboardStore.begin(entries, action)
+        rendererSessions.values.forEach { session ->
+            (session as? ListingSession)?.clearDisplayedSelection()
+        }
+    }
+
+    /** The live tab view, whichever renderer owns it. */
+    fun rendererOf(id: String): RendererSession? {
+        val tab = activeTabState(id) ?: return null
+        val stop = tab.currentStop
+        rendererSessions[stop.id]?.let { return it }
+        // A page or an edited file is rebuilt from its stop; only a directory
+        // or Home has a session the shell can mint on demand.
+        if (stop.kind != StopKind.LOCATION) return null
+        // Background tabs keep only sessions they already built.
+        if (id != currentTab().id) return null
+        return newLocationSession(tab, stop)
+    }
+
     fun pendingForCurrent(): FileTab? = pendingNavigations[currentTab().id]
 
     fun recordHome(kind: HomeEntryKind, location: String, title: String, detail: String = "") {
         if (HomeStore.record(kind, location, title, detail)) homeVersion++
     }
 
-    var directoryCapabilities by remember {
-        mutableStateOf(DirectoryCapabilities())
-    }
-
     fun replaceTab(tab: FileTab) {
         val index = tabs.indexOfFirst { it.id == tab.id }
-        if (index >= 0) tabs[index] = tab
+        if (index < 0) return
+        val previous = tabs[index]
+        tabs[index] = tab
+        // A new navigation truncates the forward stops. Release the warm
+        // sessions those stops still held instead of waiting for LRU.
+        if (previous.history.size != tab.history.size ||
+            previous.history.lastOrNull()?.id != tab.history.lastOrNull()?.id
+        ) {
+            val kept = tab.history.mapTo(mutableSetOf()) { it.id }
+            previous.history.forEach { stop ->
+                if (stop.id !in kept) {
+                    rendererSessions.remove(stop.id)?.let(::releaseSession)
+                    warmSessions.remove(stop.id)
+                }
+            }
+        }
     }
 
     fun replaceCurrent(tab: FileTab) = replaceTab(tab)
@@ -401,183 +571,130 @@ fun FileManagerApp(
     }
 
     /**
-     * Address of the location this tab is showing.
-     *
-     * A renderer owns the tab when one is live: the page it is on, or the file
-     * it is editing. Otherwise the address is the folder/home behind it. This is
-     * what a history push records, so the edited file is a stop of its own and
-     * Back can reopen it.
+     * Display label of a web stop when it never reported a title: the document
+     * name the address carries, else its host.
      */
-    fun currentLocationAddress(tab: FileTab): String? =
-        editorSessions[tab.id]?.address
-            ?: tab.webUrl
-
-    /** Push the tab's current location onto its history before navigation. */
-    fun recordCurrentHistory(tab: FileTab): FileTab {
-        val location = currentLocationAddress(tab)
-        return tab.copy(
-            backStack = tab.backStack + (location ?: tab.path),
-            folderBackStack = tab.folderBackStack + (if (location != null) null else tab.folder),
-            forwardStack = emptyList(),
-            folderForwardStack = emptyList(),
-        )
-    }
-
-    /** Display label of a page stop: the title it reported, else its host. */
     fun pageLabel(address: String): String =
-        pageTitles[address]?.takeIf { it.isNotBlank() }
-            ?: runCatching { java.net.URI(address).host }.getOrNull()
-                ?.takeIf { it.isNotBlank() }
-            ?: address
+        BrowseAddress.displayName(address) ?: address
 
-    /** Primary line for a history stop: the folder name, or the last path segment. */
-    fun historyLabel(path: String, folder: VFolder?): String = when {
-        isHomePath(path) -> "Home"
-        folder != null -> folder.name
-        BrowseAddress.isWebUrl(path) -> pageLabel(path)
-        else -> Path.parse(path).name ?: path
+    /** Primary line for a history stop: its last title, folder or segment. */
+    fun historyLabel(stop: HistoryStop): String = when {
+        isHomePath(stop.path) -> "Home"
+        !stop.title.isNullOrBlank() -> stop.title.orEmpty()
+        stop.folder != null -> stop.folder.name
+        stop.kind == StopKind.PAGE || BrowseAddress.isWebUrl(stop.path) -> pageLabel(stop.path)
+        else -> Path.parse(stop.path).name ?: stop.path
     }
 
     /**
      * Secondary line for a history stop: the full address. Folder views keep
      * their provider path plus nested segments, web pages keep the whole URL.
      */
-    fun historyDetail(path: String, folder: VFolder?): String =
-        if (isHomePath(path)) "" else if (folder != null) folderLabel(folder) else path
+    fun historyDetail(stop: HistoryStop): String =
+        if (isHomePath(stop.path)) "" else stop.folder?.let(::folderLabel) ?: stop.path
+
+    /** The sheet's projection of the tab's one history list. */
+    fun historyRows(tab: FileTab = currentTab()): List<HistoryRow> =
+        tab.history.mapIndexed { index, stop ->
+            HistoryRow(
+                stop = stop,
+                label = historyLabel(stop),
+                detail = historyDetail(stop),
+                current = index == tab.historyIndex,
+            )
+        }
 
     /**
-     * Every stop of [tab], oldest first, with the tab's location marked.
-     *
-     * One list, one source of truth: a page visit, a folder, Home and an edited
-     * file are the same kind of stop, so Back, Forward and the panel all read
-     * this and nothing else. A live WebView has no history of its own here; it
-     * is only a cache of pages whose bytes it already holds.
+     * Dismiss the active overlay (a page or an editor) and reveal the stop
+     * behind it. A directory/Home is the tab location, not an overlay, so this
+     * is a no-op there.
      */
-    fun historyStops(tab: FileTab = currentTab()): List<HistoryStop> {
-        val stops = mutableListOf<HistoryStop>()
-        tab.backStack.forEachIndexed { index, path ->
-            val folder = tab.folderBackStack.getOrNull(index)
-            stops += HistoryStop(
-                path = path,
-                label = historyLabel(path, folder),
-                detail = historyDetail(path, folder),
-                isWeb = BrowseAddress.isWebUrl(path),
-                folder = folder,
-            )
-        }
-        val editor = editorSessions[tab.id]
-        val page = tab.webUrl
-        val location = editor?.address ?: page
-        if (location != null) {
-            // A renderer owns the tab: the page it shows, or the file it edits
-            // (drawn over its folder) is where the tab is.
-            stops += HistoryStop(
-                path = location,
-                label = historyLabel(location, null),
-                detail = location,
-                isWeb = editor == null && BrowseAddress.isWebUrl(location),
-                current = true,
-            )
-        } else {
-            stops += HistoryStop(
-                path = tab.path,
-                label = historyLabel(tab.path, tab.folder),
-                detail = historyDetail(tab.path, tab.folder),
-                isWeb = false,
-                current = true,
-                folder = tab.folder,
-            )
-        }
-        tab.forwardStack.forEachIndexed { index, path ->
-            val folder = tab.folderForwardStack.getOrNull(index)
-            stops += HistoryStop(
-                path = path,
-                label = historyLabel(path, folder),
-                detail = historyDetail(path, folder),
-                isWeb = BrowseAddress.isWebUrl(path),
-                folder = folder,
-            )
-        }
-        return stops
-    }
-
-    /**
-     * [tab] with its stacks rebuilt around stop [index] of [stops].
-     *
-     * The stacks are a window on the same list, never a second history: what
-     * lies behind the stop is the back stack, what lies ahead the forward one.
-     */
-    fun stacksAt(tab: FileTab, stops: List<HistoryStop>, index: Int): FileTab {
-        val back = stops.take(index)
-        val forward = stops.drop(index + 1)
-        return tab.copy(
-            backStack = back.map { it.path },
-            folderBackStack = back.map { it.folder },
-            forwardStack = forward.map { it.path },
-            folderForwardStack = forward.map { it.folder },
-        )
-    }
-
-    fun closeWeb(id: String) {
+    fun closeRenderer(id: String) {
+        val tab = tabs.firstOrNull { it.id == id } ?: return
+        val stop = tab.currentStop
+        if (stop.kind == StopKind.LOCATION) return
+        val session = rendererSessions[stop.id]
+        if (session?.isLocationRenderer == true) return
         clearLeavePrompt(id)
-        val session = webSessions.remove(id)
-        // A renderer without its own close hook still closes through the
-        // default implementation.
-        session?.requestClose {
-            updateTab(id) { it.copy(webUrl = null, webTitle = null) }
-        } ?: run {
-            updateTab(id) { it.copy(webUrl = null, webTitle = null) }
+        if (session != null) {
+            rendererSessions.remove(stop.id)?.let(::releaseSession)
+            warmSessions.remove(stop.id)
         }
-    }
-
-    /**
-     * Give [id] a page.
-     *
-     * When the tab already shows a live page, the existing WebView is kept and
-     * only its address changes: the route table just proved the new node is a
-     * page, so there is nothing to rebuild (and the WebView's own history
-     * survives the navigation).
-     */
-    fun showWeb(id: String, session: WebRendererSession, url: String, pushHistory: Boolean = true) {
-        clearLeavePrompt(id)
-        val existing = webSessions[id]
-        if (existing != null && existing !== session && existing.isRemote && session.isRemote) {
-            // A link inside a live page: keep its WebView and let it load the
-            // new address. The step is a history stop like any other, because
-            // the tab, not the WebView, owns the back/forward list.
-            session.close()
-            updateTab(id) {
-                val recorded = if (pushHistory) recordCurrentHistory(it) else it
-                recorded.copy(webUrl = url, webTitle = null)
-            }
-            existing.load(url)
+        val index = tab.history.indexOfFirst { it.id == stop.id }
+        if (index < 0) return
+        val stops = tab.history.toMutableList().apply { removeAt(index) }
+        if (stops.isEmpty()) {
+            replaceTab(tab.copy(history = emptyList()).appended(HistoryStop(path = tab.path, folder = tab.folder)))
             return
         }
-        // A renderer is taking the tab over: the location it is replacing — a
-        // page, an edited file, a folder or Home — stays reachable through Back.
-        if (pushHistory) updateTab(id) { recordCurrentHistory(it) }
-        webSessions.remove(id)?.close()
-        webSessions[id] = session
-        updateTab(id) { it.copy(webUrl = url, webTitle = null) }
+        val nextIndex = (index - 1).coerceIn(0, stops.lastIndex)
+        replaceTab(tab.copy(history = stops, historyIndex = nextIndex).movedTo(nextIndex))
     }
 
-    fun closeEditor(id: String) {
+    /**
+     * Give [id] a renderer.
+     *
+     * When the current renderer can adopt the new location without a rebuild
+     * (a live page navigating to another live page), it keeps its view and the
+     * session just created is closed. Otherwise the new session owns a new
+     * stop, and the location being left becomes a Back stop.
+     */
+    fun showRenderer(
+        id: String,
+        session: RendererSession,
+        host: RenderHost,
+        address: String,
+        pushHistory: Boolean = true,
+    ) {
         clearLeavePrompt(id)
-        editorSessions.remove(id)?.close()
-    }
+        cancelPending(id)
+        var tab = tabs.firstOrNull { it.id == id } ?: run {
+            releaseSession(session)
+            return
+        }
+        var current = tab.currentStop
+        val existing = rendererSessions[current.id]
+        val kind = if (session.webAddress != null || session.isLive) StopKind.PAGE else StopKind.FILE
+        val title = session.title?.removePrefix("• ")?.takeIf { it.isNotBlank() }
+        // A location can never be replaced by an overlay: even a caller that
+        // asked for no history push gets a new stop above the folder.
+        val appendStop = pushHistory || current.kind == StopKind.LOCATION
+        val target = if (appendStop) {
+            HistoryStop(path = address, kind = kind, title = title)
+        } else {
+            current.copy(path = address, kind = kind, title = title)
+        }
 
-    fun showEditor(id: String, session: EditorRendererSession, pushHistory: Boolean = true) {
-        // The editor replaces the tab's content, so whatever was on screen (a
-        // page, another file, a folder or Home) becomes the history stop Back
-        // returns to. The edited file itself is the tab's current location
-        // ([currentLocationAddress]), so leaving it pushes it as its own stop.
-        // Closing the page below is lossless: every page it visited is already a
-        // stop of the tab, not of its WebView.
-        if (pushHistory) updateTab(id) { recordCurrentHistory(it) }
-        closeEditor(id)
-        webSessions.remove(id)?.close()
-        editorSessions[id] = session
-        updateTab(id) { it.copy(webUrl = null, webTitle = session.title) }
+        // A page being left keeps the title it last reported, in its own stop.
+        if (appendStop && current.kind != StopKind.LOCATION) {
+            val titled = current.copy(
+                title = tab.webTitle?.removePrefix("• ")?.takeIf { it.isNotBlank() } ?: current.title,
+            )
+            tab = tab.replacedCurrent(titled)
+            current = tab.currentStop
+        }
+
+        if (existing != null && existing !== session && existing.adopt(address, session)) {
+            // Same live view, new stop: move its binding so callbacks still
+            // reach the tab. The session keeps the host it was created with.
+            if (current.id != target.id) {
+                rendererSessions.remove(current.id)
+                rendererSessions.remove(target.id)?.let(::releaseSession)
+                rendererSessions[target.id] = existing
+            }
+            existing.onActivate()
+            replaceTab(if (appendStop) tab.appended(target) else tab.replacedCurrent(target))
+            return
+        }
+
+        if (existing != null && existing !== session) {
+            deactivateStop(current.id)
+        }
+        rendererSessions[target.id] = session
+        bindHost(host, session)
+        session.onActivate()
+        if (session.retention == Retention.WARM) touchWarm(target.id)
+        replaceTab(if (appendStop) tab.appended(target) else tab.replacedCurrent(target))
     }
 
     /** Replace any pending prompt, cancelling the previous owner cleanly. */
@@ -590,46 +707,57 @@ fun FileManagerApp(
     }
 
     /**
-     * Run [action] after the tab's editor lets go. The session owns whether a
+     * Run [action] after the tab's renderer lets go. The session owns whether a
      * leave prompt is needed; the tab only supplies the dialog host and the
      * post-close cleanup.
      */
-    fun guardEditor(id: String, action: () -> Unit): Boolean {
-        val session = editorSessions[id] ?: return false
+    fun guardRenderer(id: String, action: () -> Unit): Boolean {
+        val stop = activeTabState(id)?.currentStop ?: return false
+        val session = rendererSessions[stop.id] ?: return false
+        if (!session.needsLeaveGuard) return false
         // A hidden tab has no visible dialog host. Its navigation is not
-        // user-driven, so release the buffer before switching that tab.
+        // user-driven, so release the renderer before switching that tab.
         if (id != currentTab().id) {
-            editorSessions.remove(id)?.close()
-            updateTab(id) { it.copy(webTitle = null) }
+            rendererSessions.remove(stop.id)?.let(::releaseSession)
             action()
             return true
         }
         session.requestClose {
-            editorSessions.remove(id)?.close()
-            updateTab(id) { it.copy(webTitle = null) }
+            rendererSessions.remove(stop.id)?.let(::releaseSession)
             action()
         }
         return true
     }
 
-    fun navigateTo(path: String, tabId: String = currentTab().id, record: Boolean = true) {
-        if (guardEditor(tabId) { navigateTo(path, tabId, record) }) return
+    /**
+     * Navigate to [path] as a plain location. [view] is a node the caller has
+     * already resolved; it is kept only when it is a view, so a provider
+     * directory is still listed through its own path (and stays writable).
+     */
+    fun navigateTo(
+        path: String,
+        tabId: String = currentTab().id,
+        record: Boolean = true,
+        view: VFolder? = null,
+        /** Append even when [path] is already the tab's location. */
+        force: Boolean = false,
+    ) {
+        if (guardRenderer(tabId) { navigateTo(path, tabId, record, view, force) }) return
         val tab = tabs.firstOrNull { it.id == tabId } ?: return
-        if (path == tab.path || pendingNavigations[tab.id] != null) return
+        if (pendingNavigations[tab.id] != null) return
+        // Re-entering the current plain location is not a step; when an overlay
+        // covers it, the same address still has to reveal the list.
+        if (!force && path == tab.path && tab.currentStop.kind == StopKind.LOCATION) return
         if (record && !isHomePath(path)) {
             recordHome(HomeEntryKind.FOLDER, path, Path.parse(path).name ?: path, path)
         }
-        val next = recordCurrentHistory(tab).copy(
-            path = path,
-            folder = null,
-            webUrl = null,
-            webTitle = null,
+        val next = tab.appended(
+            HistoryStop(path = path, folder = view, kind = StopKind.LOCATION),
         )
-        closeWeb(tab.id)
+        deactivateStop(tab.currentStop.id)
         if (tabId == currentTab().id) {
             highlightPath = null
             highlightDirectory = null
-            highlightRefreshToken = null
             pendingScrollPath = null
         }
         // Home is a landing placeholder, not a directory: entering or leaving
@@ -643,28 +771,33 @@ fun FileManagerApp(
         }
     }
 
-    fun navigateToFolder(folder: VFolder, tabId: String = currentTab().id) {
-        if (guardEditor(tabId) { navigateToFolder(folder, tabId) }) return
+    fun navigateToFolder(
+        folder: VFolder,
+        tabId: String = currentTab().id,
+        /** Replace an overlay stop with this folder instead of appending. */
+        replaceCurrent: Boolean = false,
+    ) {
+        if (guardRenderer(tabId) { navigateToFolder(folder, tabId, replaceCurrent) }) return
         val tab = tabs.firstOrNull { it.id == tabId } ?: return
         if (pendingNavigations[tab.id] != null) return
         if (folder is Folder) {
             recordHome(HomeEntryKind.FOLDER, folder.path.toString(), folder.name, folderLabel(folder))
         }
-        val next = recordCurrentHistory(tab).copy(
-            path = folder.name,
-            folder = folder,
-            webUrl = null,
-            webTitle = null,
-            selectedPaths = emptySet(),
-            lastSelectedIndex = -1,
-        )
-        closeWeb(tab.id)
+        val stop = HistoryStop(path = folder.name, folder = folder, kind = StopKind.LOCATION)
         if (tabId == currentTab().id) {
             highlightPath = null
             highlightDirectory = null
-            highlightRefreshToken = null
             pendingScrollPath = null
         }
+        // A rejected page guess is one stop, not a stop plus an archive above
+        // it: replace it in place and let the directory renderer take over.
+        if (replaceCurrent && tab.currentStop.kind != StopKind.LOCATION) {
+            deactivateStop(tab.currentStop.id)
+            replaceTab(tab.replacedCurrent(stop))
+            return
+        }
+        val next = tab.appended(stop)
+        deactivateStop(tab.currentStop.id)
         if (isHomePath(tab.path)) replaceTab(next) else pendingNavigations[next.id] = next
     }
 
@@ -680,9 +813,9 @@ fun FileManagerApp(
         outcome: AppOpenOutcome,
     ) {
         when (outcome) {
-            is AppOpenOutcome.Folder -> navigateToFolder(outcome.node, tabId)
-            is AppOpenOutcome.Web -> showWeb(tabId, outcome.session, address, pushHistory)
-            is AppOpenOutcome.Editor -> showEditor(tabId, outcome.session, pushHistory)
+            is AppOpenOutcome.Folder ->
+                navigateToFolder(outcome.node, tabId, replaceCurrent = !pushHistory)
+            is AppOpenOutcome.Renderer -> showRenderer(tabId, outcome.session, host, address, pushHistory)
             AppOpenOutcome.External -> openFile(
                 context,
                 FileEntry(
@@ -718,14 +851,15 @@ fun FileManagerApp(
      */
     fun confirmPage(
         tabId: String,
-        live: RemoteFile,
-        session: WebRendererSession,
+        live: VFile,
+        session: RendererSession,
         reopen: suspend (ContentInfo) -> Unit,
     ) {
-        val expected = session.address
+        val expected = session.address ?: return
+        val guessedStop = tabs.firstOrNull { it.id == tabId }?.currentStop?.id ?: return
         // Keep the page's body behind the loading cover until the server has
         // said what it is, so a hand-back never flashes a frame of it.
-        session.beginProbe()
+        session.beginConfirmation()
         scope.launch {
             val declared = withContext(Dispatchers.IO) { live.peek().getOrNull() }
             // Headers that name no usable type need the body sniff the eager
@@ -740,19 +874,20 @@ fun FileManagerApp(
             }
             // Something else may have taken the tab while the server answered;
             // only the page this probe belongs to may be handed back.
-            if (webSessions[tabId] !== session || session.address != expected) return@launch
+            if (!isActiveSession(tabId, session) || session.address != expected) return@launch
             if (confirmed == null ||
                 WebPagePolicy.verdict(confirmed, settled = true) != WebPagePolicy.Verdict.NOT_PAGE
             ) {
                 // A page, or an address whose type nobody named: the browser
                 // keeps it, exactly where the eager path would have put it.
-                session.settlePage()
+                session.settleConfirmation()
                 return@launch
             }
-            // Not a page: drop the guess before reopening, so the node lands in
-            // whichever opener or viewer the table picks for its real type.
-            closeWeb(tabId)
+            // Not a page: reopen the same stop with the real type. If the
+            // route hands it to an external viewer, no renderer replaced the
+            // guess and the stop is dropped here.
             reopen(confirmed)
+            if (rendererSessions[guessedStop] === session) closeRenderer(tabId)
         }
     }
 
@@ -779,8 +914,8 @@ fun FileManagerApp(
         /** A new location: the outgoing one becomes a Back stop. */
         pushHistory: Boolean = true,
     ) {
-        val live = file as? RemoteFile
-        val optimistic = contentHint == null && live != null &&
+        val live = file.liveAddress != null
+        val optimistic = contentHint == null && live &&
             WebPagePolicy.likelyPage(address)
         // An optimistic address deliberately keeps its facts unknown: that is
         // what makes the route table hand it to the browser without a request.
@@ -790,33 +925,33 @@ fun FileManagerApp(
             withContext(Dispatchers.IO) { file.describe().getOrNull() }
         }
         val outcome = withContext(Dispatchers.IO) {
-            OpenRoutes.route(file, content, OpenRouteContext(host))
+            OpenTable.route(file, content, OpenContext(host))
         }
         // Only a plain provider path becomes a home row; a view address is
         // rebuilt from its own text when it is reopened. A live resource is a
         // page row, every other node a file row — the node itself decides.
         if (recordHome && !file.path.isViewed) {
-            val kind = if (file is RemoteFile) HomeEntryKind.WEB else HomeEntryKind.FILE
+            val kind = if (file.liveAddress != null) HomeEntryKind.WEB else HomeEntryKind.FILE
             recordHome(kind, address, name, address)
         }
         applyOpen(tabId, file, address, name, content, host, pushHistory, outcome)
-        if (optimistic && outcome is AppOpenOutcome.Web) {
-            // showWeb keeps the WebView a live page already owned, so the tab —
-            // not the fresh session the outcome carries — knows which session
-            // now holds this address.
-            val page = webSessions[tabId]
-            if (page != null) confirmPage(tabId, live, page) { facts ->
+        if (optimistic) {
+            // The renderer that took the tab is the one whose address is a
+            // page; the optimistic open made it the current stop already.
+            val page = activeSession(tabId)
+            if (page?.webAddress != null) confirmPage(tabId, file, page) { facts ->
                 // The reopen carries the facts, so the table cannot guess a
                 // second time. It pushes no history and records no home row:
                 // the optimistic open already made this address the current
-                // stop and its own Home row.
+                // stop and its own Home row. A fresh host belongs to the
+                // replacement session.
                 routeVFile(
                     tabId = tabId,
                     file = file,
                     address = address,
                     name = name,
                     contentHint = facts,
-                    host = host,
+                    host = hostFor(tabId),
                     recordHome = false,
                     pushHistory = false,
                 )
@@ -824,36 +959,37 @@ fun FileManagerApp(
         }
     }
 
-    fun renderHostFor(id: String): RenderHost {
+    fun renderHostFor(id: String): ShellRenderHost {
         val hostScope = scope
-        lateinit var host: RenderHost
-        host = object : RenderHost {
+        val host = object : ShellRenderHost {
+            override var boundSession: RendererSession? = null
             override val scope: CoroutineScope get() = hostScope
 
             override fun navigate(node: io.furryr.file.core.VNode, rendererId: String?) {
                 if (node is VFolder) {
-                    clearLeavePrompt(id)
-                    webSessions.remove(id)?.close()
                     if (node is Folder) navigateTo(node.path.toString(), id)
                     else navigateToFolder(node, id)
                 }
             }
 
             override fun updateTitle(title: String?) {
-                // The editor owns the tab title while it is open; a dirty
-                // buffer prefixes the file name with a bullet.
-                if (editorSessions.containsKey(id)) {
-                    updateTab(id) { it.copy(webTitle = title) }
-                    return
+                // A late title from a renderer that no longer owns the tab must
+                // not rename the new view. Session identity, not stop id, is
+                // the ownership check: an adopted page keeps its host.
+                val session = boundSession ?: return
+                if (!isActiveSession(id, session)) return
+                val label = title?.removePrefix("• ")?.trim()?.takeIf { it.isNotBlank() }
+                updateTab(id) { tab ->
+                    val updated = if (label != null) {
+                        tab.replacedCurrent(tab.currentStop.copy(title = label))
+                    } else {
+                        tab
+                    }
+                    updated.copy(webTitle = title)
                 }
-                // A late title from a page whose tab already left the web view
-                // must not rename the directory tab.
-                val session = webSessions[id] ?: return
-                val url = session.address
-                if (title != null) pageTitles[url] = title
-                updateTab(id) { it.copy(webTitle = title) }
-                if (title != null && session.isRemote) {
-                    HomeStore.updateTitle(url, title)
+                if (title != null && session.isLive) {
+                    val address = session.address ?: return
+                    HomeStore.updateTitle(address, title)
                     homeVersion++
                 }
             }
@@ -863,42 +999,59 @@ fun FileManagerApp(
              * either lands on a stop the tab already made (the page's own
              * back/forward) or appends the step it just took.
              */
-            override fun onPageVisited(address: String) {
-                updateTab(id) { tab ->
-                    val previous = currentLocationAddress(tab)
-                    if (previous == address) return@updateTab tab
-                    // The page being left keeps its title even though its
-                    // WebView is gone.
-                    if (previous != null) {
-                        tab.webTitle?.takeIf { it.isNotBlank() }?.let { pageTitles[previous] = it }
-                    }
-                    val stops = historyStops(tab)
-                    val known = stops.indexOfLast { it.path == address && !it.current }
-                    if (known >= 0) {
-                        stacksAt(tab, stops, known).copy(
-                            webUrl = address,
-                            webTitle = pageTitles[address],
-                        )
-                    } else {
-                        recordCurrentHistory(tab).copy(webUrl = address, webTitle = null)
-                    }
+            override fun onPageVisited(address: String, replacePrevious: String?) {
+                val session = boundSession ?: return
+                if (!isActiveSession(id, session)) return
+                // A page-driven step supersedes a folder load in this tab.
+                cancelPending(id)
+                val tab = tabs.firstOrNull { it.id == id } ?: return
+                val current = tab.currentStop
+                if (current.path == address) return
+                // A redirect never rendered its source page, so its provisional
+                // stop is replaced in place, not pushed.
+                if (replacePrevious != null && current.path == replacePrevious) {
+                    val redirected = current.copy(path = address, kind = StopKind.PAGE, title = null)
+                    replaceTab(
+                        tab.replacedCurrent(redirected).copy(webUrl = address, webTitle = null),
+                    )
+                    return
                 }
+                // The page being left keeps the title it last reported.
+                val titled = tab.replacedCurrent(
+                    current.copy(
+                        title = tab.webTitle?.removePrefix("• ")?.takeIf { it.isNotBlank() }
+                            ?: current.title,
+                    ),
+                )
+                val known = titled.history.indexOfLast {
+                    it.path == address && it.kind == StopKind.PAGE && it.id != current.id
+                }
+                if (known >= 0) {
+                    val target = titled.history[known]
+                    // The same WebView now shows the target stop. Move its
+                    // binding instead of releasing it; the old stop is a cache
+                    // hit, not an owner.
+                    rendererSessions.remove(current.id)
+                    rendererSessions.remove(target.id)?.let(::releaseSession)
+                    rendererSessions[target.id] = session
+                    session.onActivate()
+                    replaceTab(
+                        titled.movedTo(known).copy(webUrl = address, webTitle = target.title),
+                    )
+                    return
+                }
+                val next = HistoryStop(path = address, kind = StopKind.PAGE)
+                rendererSessions.remove(current.id)
+                rendererSessions[next.id] = session
+                session.onActivate()
+                replaceTab(titled.appended(next))
             }
 
             override fun updateCapabilities(capabilities: RenderCapabilities) = Unit
 
             override fun refresh() {
-                refreshTrigger++
-                animationTrigger++
-            }
-
-            override fun toggleFilter() {
-                searchMode = !searchMode
-                if (!searchMode) filterText = ""
-            }
-
-            override fun openSort() {
-                showSortDialog = true
+                (activeSession(id) as? ListingSession)
+                    ?.refreshListing(animate = true)
             }
 
             override fun confirmLeave(
@@ -929,7 +1082,10 @@ fun FileManagerApp(
             override fun openFile(file: VFile, content: ContentInfo?) {
                 // The node already carries its address, view levels included.
                 // A link is a navigation inside the tab, not a document the
-                // user opened, so it does not become a home entry.
+                // user opened, so it does not become a home entry. A fresh host
+                // belongs to the target session; this one stays bound to the
+                // renderer that asked.
+                val targetHost = renderHostFor(id)
                 scope.launch {
                     routeVFile(
                         id,
@@ -937,24 +1093,23 @@ fun FileManagerApp(
                         file.path.toString(),
                         file.name,
                         content,
-                        host,
+                        targetHost,
                         recordHome = false,
                     )
                 }
             }
 
             override fun copyFile(file: VFile, content: ContentInfo?) {
-                // Enter the tab's normal copy flow with a node source: the user
-                // picks the destination by navigating, then pastes there.
-                copyMoveState = CopyMoveState(
-                    sources = listOf(
-                        CopyMoveSource(
+                // Put the node on the clipboard; the user picks the destination
+                // by switching tabs and pasting there.
+                startClipboard(
+                    listOf(
+                        ClipboardEntry(
                             node = file,
                             name = content?.name?.takeIf { it.isNotBlank() } ?: file.name,
-                        )
+                        ),
                     ),
-                    isCopy = true,
-                    targetPath = currentTab().path,
+                    ClipboardAction.COPY,
                 )
             }
 
@@ -962,16 +1117,175 @@ fun FileManagerApp(
                 io.furryr.file.ui.util.shareFile(context, file, content)
             }
 
+            override fun openEntry(entry: FileEntry, node: VNode?) {
+                if (entry.isDirectory) {
+                    when (node) {
+                        is Folder -> navigateTo(node.path.toString(), id)
+                        is VFolder -> navigateToFolder(node, id)
+                        else -> navigateTo(entry.path, id)
+                    }
+                } else {
+                    when (node) {
+                        is VFile -> openResolvedNodeFn(node, entry)
+                        else -> openFile(context, entry)
+                    }
+                }
+            }
+
+            override fun requestShare(entries: List<FileEntry>) = shareEntries(context, entries)
+
+            override fun requestDelete(entries: List<FileEntry>) {
+                showDeleteConfirm = entries
+            }
+
+            override fun requestRename(entries: List<FileEntry>) {
+                if (entries.size > 1) showBatchRenameDialog = true
+                else entries.firstOrNull()?.let { showRenameDialog = it }
+            }
+
+            override fun requestProperties(entry: FileEntry) {
+                showEntryInfo = entry
+            }
+
+            override fun putOnClipboard(entries: List<ClipboardEntry>, action: ClipboardAction) {
+                startClipboard(entries, action)
+            }
+
+            override fun onSelectionChanged(
+                paths: Set<String>,
+                lastIndex: Int,
+                entries: List<ClipboardEntry>,
+            ) {
+                val session = boundSession ?: return
+                if (!isActiveSession(id, session)) return
+                // A pending location has no tab row yet; its selection is
+                // seeded from the tab when the load commits.
+                if (pendingNavigations[id] == null) {
+                    val tabIndex = tabs.indexOfFirst { it.id == id }
+                    if (tabIndex >= 0) {
+                        tabs[tabIndex] = tabs[tabIndex].copy(
+                            selectedPaths = paths,
+                            lastSelectedIndex = lastIndex,
+                        )
+                    }
+                }
+                if (id == currentTab().id) ClipboardStore.select(entries)
+            }
+
+            override fun onFolderLoaded(path: String) {
+                val session = boundSession ?: return
+                if (!isActiveSession(id, session)) return
+                val pending = pendingNavigations[id] ?: return
+                if (pending.path != path && pending.currentStop.path != path) return
+                replaceTab(pending)
+                pendingNavigations.remove(id)
+            }
+
+            override fun onFolderCancelled() {
+                val session = boundSession ?: return
+                if (!isActiveSession(id, session)) return
+                cancelPending(id)
+                highlightPath = null
+                pendingScrollPath = null
+            }
+
+            override fun onScrollConsumed() {
+                pendingScrollPath = null
+            }
+
+            override fun onHighlightConsumed() {
+                highlightPath = null
+                highlightDirectory = null
+            }
+
+            override fun onFileDragStart() {
+                terminalDragGeneration++
+                terminalDropAccepted = false
+                showTerminalSheet = true
+            }
+
+            override fun onFileDragEnd() {
+                val generation = terminalDragGeneration
+                scope.launch {
+                    // Give the platform drop (ACTION_DROP) a chance to arrive
+                    // before deciding whether this drag was cancelled.
+                    delay(150)
+                    if (generation == terminalDragGeneration && !terminalDropAccepted) {
+                        showTerminalSheet = false
+                    }
+                }
+            }
+
+            override fun openHome(entry: HomeEntry) = openHomeEntryFn(entry)
+
+            override fun toggleBookmark(entry: HomeEntry) = toggleHomeBookmarkFn(entry)
+
+            override fun removeRecent(key: String) {
+                HomeStore.removeRecent(key)
+                homeVersion++
+            }
+
+            override fun removeBookmark(key: String) {
+                HomeStore.removeBookmark(key)
+                homeVersion++
+            }
+
+            override fun clearRecent() {
+                HomeStore.clearRecent()
+                homeVersion++
+            }
+
+            override fun clearBookmarks() {
+                HomeStore.clearBookmarks()
+                homeVersion++
+            }
+
+            override fun cancelOpening() = cancelOpeningFn()
+
+            override fun bookmarkEntry(): HomeEntry? = bookmarkEntryFn()
+
+            override fun isBookmarked(entry: HomeEntry): Boolean =
+                HomeStore.isBookmarked(entry.kind, entry.location)
+
+            override fun folderView(): FolderRendererState? {
+                val session = boundSession ?: return null
+                if (!isActiveSession(id, session)) return null
+                val tab = activeTabState(id) ?: return null
+                val committed = tabs.firstOrNull { it.id == id } ?: tab
+                return FolderRendererState(
+                    path = tab.path,
+                    committedPath = committed.path,
+                    folder = tab.folder,
+                    scrollToPath = pendingScrollPath,
+                    highlightPath = highlightPath,
+                    highlightDirectory = highlightDirectory,
+                    opening = nodeOpeningTab == id,
+                )
+            }
+
+            override fun homeView(): HomeRendererState? {
+                val session = boundSession ?: return null
+                if (!isActiveSession(id, session)) return null
+                // Reading the version subscribes this getter to HomeStore edits.
+                homeVersion
+                return HomeRendererState(
+                    recent = HomeStore.recent(),
+                    bookmarks = HomeStore.bookmarks(),
+                    opening = nodeOpeningTab == id,
+                )
+            }
+
             override fun reportError(error: Throwable) {
                 Toast.makeText(context, error.message ?: "Renderer failed", Toast.LENGTH_SHORT).show()
             }
 
             override fun requestClose() {
-                closeWeb(id)
+                closeRenderer(id)
             }
         }
         return host
     }
+    hostFor = ::renderHostFor
 
     /** Open a node the caller already resolved. */
     fun openVFile(
@@ -995,6 +1309,7 @@ fun FileManagerApp(
         nodeOpenJob = null
         nodeOpeningTab = null
     }
+    cancelOpeningFn = ::cancelNodeOpening
 
     /**
      * Run an asynchronous open under the tab's opening indicator. A remote
@@ -1024,25 +1339,27 @@ fun FileManagerApp(
             routeVFile(tabId, file, entry.path, entry.name, null, host)
         }
     }
+    openResolvedNodeFn = ::openNode
 
     fun toggleHomeBookmark(entry: HomeEntry) {
         HomeStore.toggleBookmark(entry)
         homeVersion++
     }
+    toggleHomeBookmarkFn = ::toggleHomeBookmark
 
     fun currentBookmarkEntry(): HomeEntry? {
         val tab = currentTab()
-        if (editorSessions.containsKey(tab.id)) return null
         val pending = pendingOf(tab.id)
         val path = pending?.path ?: tab.path
-        // A page is bookmarkable even when it was opened from home; only the
-        // directory branch needs a real location. The session knows whether its
-        // document is a live page or a projected file.
-        val session = webSessions[tab.id]
-        if (session != null) {
-            val address = session.address
-            val kind = if (session.isRemote) HomeEntryKind.WEB else HomeEntryKind.FILE
-            return HomeEntry(kind, address, tab.webTitle ?: address, address)
+        // A page or an opened file is bookmarkable even when it was opened
+        // from home; only the directory branch needs a real location. The
+        // session knows whether its address is live or a projected file.
+        val session = activeSession(tab.id)
+        if (session != null && session.address != null) {
+            if (session.suppressBookmark) return null
+            val address = session.address!!
+            val kind = if (session.isLive) HomeEntryKind.WEB else HomeEntryKind.FILE
+            return HomeEntry(kind, address, session.title ?: tab.webTitle ?: address, address)
         }
         if (isHomePath(path) || pending?.folder != null || tab.folder != null) return null
         return HomeEntry(
@@ -1056,6 +1373,15 @@ fun FileManagerApp(
     fun toggleCurrentBookmark() {
         currentBookmarkEntry()?.let { toggleHomeBookmark(it) }
     }
+    bookmarkEntryFn = ::currentBookmarkEntry
+
+    /** The one path→node step: address text enters the node graph here. */
+    suspend fun resolveNode(path: Path): VNode? =
+        withContext(Dispatchers.IO) { Vfs.node(path).getOrNull() }
+
+    /** The directory node for [path], reusing [hint] when the tab already has one. */
+    suspend fun folderFor(path: String, hint: VFolder? = null): VFolder? =
+        hint ?: withContext(Dispatchers.IO) { Vfs.folder(path).getOrNull() }
 
     /**
      * Go to [address] in [tabId]: the provider decides what it is.
@@ -1066,15 +1392,16 @@ fun FileManagerApp(
      * here reads a scheme, and no caller needs a second "open a URL" path.
      */
     fun openAddress(address: String, tabId: String = currentTab().id) {
-        if (guardEditor(tabId) { openAddress(address, tabId) }) return
+        if (guardRenderer(tabId) { openAddress(address, tabId) }) return
         if (tabs.none { it.id == tabId }) return
-        val parsed = LocationAddress.parse(address)
+        val parsed = NodeAddress.parse(address)
         scope.launch {
-            val node = withContext(Dispatchers.IO) { nodeService.resolve(parsed).getOrNull() }
+            val node = resolveNode(parsed)
             when (node) {
                 // A view level already resolved to a node: keep it, so an
                 // archive root is not re-opened from its path.
-                is VFolder -> if (parsed.isViewed) navigateToFolder(node, tabId) else navigateTo(address, tabId)
+                is VFolder -> if (parsed.isViewed) navigateToFolder(node, tabId)
+                else navigateTo(address, tabId, view = node.takeIf { it !is Folder })
                 is VFile -> openVFile(node, address, node.name)
                 null -> navigateTo(address, tabId, record = false)
             }
@@ -1088,21 +1415,26 @@ fun FileManagerApp(
             HomeEntryKind.WEB, HomeEntryKind.FILE -> openAddress(entry.location)
         }
     }
+    openHomeEntryFn = ::openHomeEntry
 
     /** Show the home page, even when a page opened from home is still active. */
     fun goHome() {
-        if (guardEditor(currentTab().id) { goHome() }) return
+        if (guardRenderer(currentTab().id) { goHome() }) return
         val tab = currentTab()
+        // Empty-address navigation supersedes a load still in flight.
+        cancelPending(tab.id)
         if (!isHomePath(tab.path)) {
-            // Empty-address navigation supersedes a load still in flight.
-            pendingNavigations.remove(tab.id)
-            // navigateTo records the page URL (if one is active) in history and
-            // closes its renderer before adopting the home location.
+            // The current page/file stays a Back stop.
             navigateTo(HomePath)
             return
         }
-        // A page opened from home sits on top of the home location.
-        if (webSessions.containsKey(tab.id)) closeWeb(tab.id)
+        // A renderer opened from home sits on top of the home location. The
+        // leave guard may already have removed its session, so the stop kind,
+        // not the map, decides whether there is an overlay to drop.
+        if (tab.currentStop.kind != StopKind.LOCATION) {
+            closeRenderer(tab.id)
+            return
+        }
         replaceCurrent(tab.copy(folder = null, webUrl = null, webTitle = null))
     }
 
@@ -1110,20 +1442,16 @@ fun FileManagerApp(
     fun selectInParent(parent: VFolder, address: String) {
         val tabId = currentTab().id
         if (parent.path.toString() == currentTab().path) {
-            closeWeb(tabId)
-            replaceCurrent(
-                currentTab().copy(
-                    selectedPaths = setOf(address),
-                    lastSelectedIndex = currentEntries.indexOfFirst { it.path == address },
-                ),
-            )
+            closeRenderer(tabId)
+            val listing = rendererOf(tabId) as? ListingSession
+            val index = listing?.entries?.indexOfFirst { it.path == address } ?: -1
+            listing?.setSelection(setOf(address), index)
             pendingScrollPath = address
             return
         }
         navigateTo(parent.path.toString())
         highlightPath = address
         highlightDirectory = parent.path.toString()
-        highlightRefreshToken = null
         pendingScrollPath = address
     }
 
@@ -1136,7 +1464,7 @@ fun FileManagerApp(
      * just the case where the provider answering is the live one.
      */
     fun jumpTo(raw: String) {
-        if (guardEditor(currentTab().id) { jumpTo(raw) }) return
+        if (guardRenderer(currentTab().id) { jumpTo(raw) }) return
         val input = raw.trim()
         // An empty address is the way back to the home page.
         if (input.isEmpty()) {
@@ -1147,12 +1475,13 @@ fun FileManagerApp(
         // Every `!` level is explicit, so one resolve reaches any depth: the
         // provider says what the address is and the opener registry how a file
         // is entered, so no boundary is found by probing the filesystem.
-        val address = LocationAddress.parse(input)
+        val address = NodeAddress.parse(input)
         scope.launch {
-            val node = withContext(Dispatchers.IO) { nodeService.resolve(address).getOrNull() }
+            val node = resolveNode(address)
             when (node) {
                 is VFolder -> {
-                    if (address.isViewed) navigateToFolder(node, tabId) else navigateTo(input, tabId)
+                    if (address.isViewed) navigateToFolder(node, tabId)
+                    else navigateTo(input, tabId, view = node.takeIf { it !is Folder })
                 }
                 is VFile -> {
                     // A listed file is shown selected in its own folder; a node
@@ -1168,7 +1497,7 @@ fun FileManagerApp(
                 else -> when {
                     // A missing absolute path or scheme URI is still an
                     // address: show its error state instead of searching.
-                    LocationAddress.isAddress(input) -> navigateTo(input, record = false)
+                    NodeAddress.isAddress(input) -> navigateTo(input, record = false)
                     else -> BrowseAddress.normalize(input)?.let { url -> openAddress(url) }
                         ?: openAddress(SearchSettings.searchUrl(context, input))
                 }
@@ -1177,161 +1506,187 @@ fun FileManagerApp(
     }
 
     /**
-     * Restore [tab] at [address] after a history move.
-     *
-     * The address decides: a folder is handed to the tab's loader, a file — a
-     * page, an archive, anything else — goes through the same route table a
-     * directory row uses. [folderHint] keeps a container view's node, so
-     * restoring an archive stop does not re-open the archive.
+     * Rebuild a page/file stop whose renderer is gone (Back into an editor, an
+     * activity recreate, or a page the WebView no longer caches).
      */
-    fun restoreStop(tab: FileTab, address: String, folderHint: VFolder?) {
-        if (isHomePath(address)) {
-            replaceCurrent(tab.copy(path = address, folder = null))
-            return
-        }
-        val parsed = LocationAddress.parse(address)
+    fun restoreStopNode(tabId: String, stop: HistoryStop) {
+        if (!restoringStops.add(stop.id)) return
         scope.launch {
-            val node = withContext(Dispatchers.IO) { nodeService.resolve(parsed).getOrNull() }
-            when (node) {
-                is VFolder -> pendingNavigations[tab.id] = tab.copy(
-                    path = address,
-                    // A plain provider directory needs no node hint. Keeping a
-                    // stale one would make the tab look like a read-only view
-                    // and disable copy/share after a history move.
-                    folder = if (parsed.isViewed) node
-                    else folderHint?.takeIf { it !is Folder },
-                )
-                is VFile -> {
-                    replaceCurrent(tab)
-                    openVFile(node, address, node.name, recordHome = false, pushHistory = false)
+            try {
+                val node = resolveNode(NodeAddress.parse(stop.path))
+                // The tab may have moved on while the address was resolving.
+                val current = tabs.firstOrNull { it.id == tabId }
+                if (current?.currentStop?.id != stop.id ||
+                    pendingNavigations[tabId] != null ||
+                    rendererSessions[stop.id] != null
+                ) {
+                    return@launch
                 }
-                // A miss keeps the address: the loader shows the error state.
-                null -> pendingNavigations[tab.id] = tab.copy(path = address, folder = folderHint)
+                when (node) {
+                    is VFile -> {
+                        routeVFile(
+                            tabId = tabId,
+                            file = node,
+                            address = stop.path,
+                            name = node.name,
+                            contentHint = null,
+                            host = renderHostFor(tabId),
+                            recordHome = false,
+                            pushHistory = false,
+                        )
+                        // The route may have handed the file to an external
+                        // viewer. A file/page stop with no renderer would only
+                        // draw a blank tab; reveal the location behind it.
+                        val tab = tabs.firstOrNull { it.id == tabId }
+                        if (tab?.currentStop?.id == stop.id &&
+                            tab.currentStop.kind != StopKind.LOCATION &&
+                            rendererSessions[stop.id] == null
+                        ) {
+                            closeRenderer(tabId)
+                        }
+                    }
+                    is VFolder -> updateTab(tabId) { tab ->
+                        // A stop recorded as a file/page can turn out to be a
+                        // folder after the fact; the directory renderer takes it.
+                        if (tab.currentStop.id == stop.id) {
+                            tab.replacedCurrent(
+                                stop.copy(kind = StopKind.LOCATION, folder = node, title = null),
+                            )
+                        } else {
+                            tab
+                        }
+                    }
+                    null -> Unit
+                }
+            } finally {
+                restoringStops.remove(stop.id)
             }
         }
     }
 
     /**
-     * Make stop [index] of [stops] the tab's location.
+     * Make stop [index] the tab's location.
      *
-     * The stacks are rebuilt around it, so a jump of any distance is the same
-     * operation as one step. A live page that already holds the target
-     * retraces it inside the WebView — its bytes are cached there — and
-     * anything else is restored through the route table a row uses.
+     * A live page the WebView already holds is retraced without a request; a
+     * directory reuses its warm session; every other stop is rebuilt through
+     * the same route table a directory row uses.
      */
-    fun moveToStop(tab: FileTab, stops: List<HistoryStop>, index: Int) {
-        val target = stops.getOrNull(index) ?: return
-        if (target.current) return
-        val session = webSessions[tab.id]
-        val stacks = stacksAt(tab, stops, index)
-        // Only a page address can be in the WebView's list, so a folder or an
-        // edited file misses on its own.
-        if (session != null && session.retrace(target.path)) {
-            replaceCurrent(
-                stacks.copy(webUrl = target.path, webTitle = pageTitles[target.path])
-            )
+    fun moveToStop(tab: FileTab, index: Int) {
+        if (tab.id != currentTab().id) return
+        if (pendingNavigations[tab.id] != null) return
+        if (index !in tab.history.indices || index == tab.historyIndex) return
+        val target = tab.history[index]
+        val current = tab.currentStop
+        val session = rendererSessions[current.id]
+        // A WebView is one view: moving to a page in its own cache transfers
+        // the binding instead of releasing and rebuilding it.
+        if (target.kind == StopKind.PAGE && session != null && session.retrace(target.path)) {
+            rendererSessions.remove(current.id)
+            rendererSessions.remove(target.id)?.let(::releaseSession)
+            rendererSessions[target.id] = session
+            session.onActivate()
+            replaceTab(tab.movedTo(index))
             return
         }
         clearLeavePrompt(tab.id)
-        // The WebView goes away with the location it was showing; the target
-        // decides what draws the tab from here on.
-        webSessions.remove(tab.id)?.close()
-        restoreStop(stacks.copy(webUrl = null, webTitle = null), target.path, target.folder)
+        deactivateStop(current.id)
+        val moved = tab.movedTo(index)
+        replaceTab(moved)
+        when (target.kind) {
+            StopKind.LOCATION -> rendererSessions[target.id]?.let { targetSession ->
+                targetSession.onActivate()
+                if (targetSession.retention == Retention.WARM) touchWarm(target.id)
+            }
+            StopKind.FILE, StopKind.PAGE -> {
+                // A stale binding for the target would otherwise be replaced
+                // without its release hook.
+                rendererSessions.remove(target.id)?.let(::releaseSession)
+                restoreStopNode(tab.id, target)
+            }
+        }
     }
 
     fun goBack() {
         val tab = currentTab()
-        // The editor is an overlay: Back dismisses it, and the same Back then
-        // restores the location it covered (the page it was opened from, its
-        // folder, or Home) — that location was recorded when the editor opened.
-        if (editorSessions.containsKey(tab.id)) {
-            guardEditor(tab.id) { goBack() }
-            return
-        }
         if (pendingNavigations[tab.id] != null) return
-        val stops = historyStops(tab)
-        val index = stops.indexOfFirst { it.current }
-        if (index > 0) {
-            moveToStop(tab, stops, index - 1)
+        if (!tab.canGoBack) {
+            // A trimmed list can leave an overlay without a location behind it;
+            // dismissing the overlay is still the right undo.
+            if (tab.currentStop.kind != StopKind.LOCATION &&
+                !guardRenderer(tab.id) { goBack() }
+            ) {
+                closeRenderer(tab.id)
+            }
             return
         }
-        // Nothing behind this stop. A page still has the location it was opened
-        // from underneath it: dropping the page is that undo, and the page stays
-        // reachable forward, exactly as a browser does.
-        val page = tab.webUrl ?: return
-        webSessions.remove(tab.id)?.close()
-        replaceCurrent(
-            tab.copy(
-                forwardStack = listOf(page) + tab.forwardStack,
-                folderForwardStack = listOf<VFolder?>(null) + tab.folderForwardStack,
-                webUrl = null,
-                webTitle = null,
-            )
-        )
+        if (guardRenderer(tab.id) { goBack() }) return
+        moveToStop(tab, tab.historyIndex - 1)
     }
 
     fun goForward() {
-        if (guardEditor(currentTab().id) { goForward() }) return
         val tab = currentTab()
         if (pendingNavigations[tab.id] != null) return
-        val stops = historyStops(tab)
-        val index = stops.indexOfFirst { it.current }
-        if (index < 0) return
-        moveToStop(tab, stops, index + 1)
+        if (!tab.canGoForward) return
+        if (guardRenderer(tab.id) { goForward() }) return
+        moveToStop(tab, tab.historyIndex + 1)
     }
 
     /** Select a stop in the history panel; the same move as Back or Forward. */
     fun jumpToHistory(index: Int) {
-        if (guardEditor(currentTab().id) { jumpToHistory(index) }) return
         val tab = currentTab()
-        moveToStop(tab, historyStops(tab), index)
+        if (pendingNavigations[tab.id] != null) return
+        if (index !in tab.history.indices || index == tab.historyIndex) return
+        if (guardRenderer(tab.id) { jumpToHistory(index) }) return
+        moveToStop(tab, index)
     }
 
     fun goParent() {
-        val editingTab = currentTab()
-        val editor = editorSessions[editingTab.id]
-        if (editor != null) {
+        val tab = currentTab()
+        val renderer = activeSession(tab.id)
+        val rendererParent = renderer?.parent
+        if (rendererParent != null) {
             // Up means the folder that owns the edited file, not the folder
             // the tab happened to show before the file was opened.
-            val parent = editor.parentFolder ?: return
-            if (guardEditor(editingTab.id) {
-                    // A provider folder is addressed by its path; only a view
-                    // folder needs its node kept as a hint.
-                    if (parent is Folder) navigateTo(parent.path.toString(), editingTab.id)
-                    else navigateToFolder(parent, editingTab.id)
-                }) return
-        } else if (guardEditor(editingTab.id) { goParent() }) {
+            val parentAddress = NodeAddress.format(rendererParent.path)
+            // A document opened from its own folder sits over that folder, so
+            // "up" appends the list as a new stop and keeps the document as a
+            // Back stop, rather than discarding it.
+            if (parentAddress == tab.path && tab.currentStop.kind != StopKind.LOCATION) {
+                if (rendererParent is Folder) {
+                    navigateTo(parentAddress, force = true)
+                } else {
+                    navigateToFolder(rendererParent)
+                }
+                return
+            }
+            // A provider folder is addressed by its path; only a view folder
+            // needs its node kept as a hint.
+            if (rendererParent is Folder) navigateTo(parentAddress)
+            else navigateToFolder(rendererParent)
             return
         }
-        val tab = currentTab()
-        val pending = pendingOf(tab.id)
-        val activePath = pending?.path ?: tab.path
+        val activePath = pendingOf(tab.id)?.path ?: tab.path
         if (isHomePath(activePath)) return
-        val activeFolder = pending?.folder ?: tab.folder
+        val activeFolder = pendingOf(tab.id)?.folder ?: tab.folder
         if (activeFolder != null) {
             val parent = activeFolder.parent ?: return
-            pendingNavigations.remove(tab.id)
-            highlightPath = null
-            pendingScrollPath = null
             if (parent is Folder) navigateTo(parent.path.toString()) else navigateToFolder(parent)
             return
         }
         val parent = Path.parse(activePath).parent()?.toString() ?: return
-        pendingNavigations.remove(tab.id)
-        highlightPath = null
-        pendingScrollPath = null
         navigateTo(parent)
     }
 
-    fun refreshFileList(animate: Boolean = true) {
-        refreshTrigger++
-        if (animate) animationTrigger++
+    fun refreshFileList(
+        animate: Boolean = true,
+        highlightPath: String? = null,
+        highlightDirectory: String? = null,
+    ) {
+        val listing = rendererOf(currentTab().id) as? ListingSession ?: return
+        listing.refreshListing(animate, highlightPath, highlightDirectory)
     }
 
-    /**
-     * Single refresh entry point for the toolbar/menu. The active renderer gets
-     * first refusal; the transitional directory view falls back to its token.
-     */
+    /** Single refresh entry point for the toolbar/menu. */
     fun refreshActive() {
         val renderer = rendererOf(currentTab().id)
         if (renderer?.refresh() == true) return
@@ -1341,6 +1696,7 @@ fun FileManagerApp(
     /** Capabilities of whatever owns the current tab: renderer or directory. */
     fun currentCapabilities(): RenderCapabilities {
         val tab = currentTab()
+        val state = activeTabState(tab.id) ?: tab
         val pending = pendingOf(tab.id)
         val activePath = pending?.path ?: tab.path
         val folder = pending?.folder ?: tab.folder
@@ -1349,63 +1705,60 @@ fun FileManagerApp(
             return renderer.capabilities.copy(
                 // History belongs to the tab. A renderer that can dismiss
                 // itself (a page or the editor) also makes Back available.
-                canGoBack = tab.backStack.isNotEmpty() || renderer.canDismiss,
-                canGoForward = tab.forwardStack.isNotEmpty(),
-            )
-        }
-        if (isHomePath(activePath)) {
-            return RenderCapabilities(
-                canGoBack = tab.backStack.isNotEmpty(),
-                canGoForward = tab.forwardStack.isNotEmpty(),
-                canGoParent = false,
-                canRefresh = false,
+                canGoBack = state.canGoBack || renderer.canDismiss,
+                canGoForward = state.canGoForward,
             )
         }
         val canParent = folder?.parent != null ||
             (folder == null && Path.parse(activePath).parent() != null)
         return RenderCapabilities(
-            canGoBack = tab.backStack.isNotEmpty(),
-            canGoForward = tab.forwardStack.isNotEmpty(),
+            canGoBack = state.canGoBack,
+            canGoForward = state.canGoForward,
             canGoParent = canParent,
             canRefresh = true,
-            canCreate = directoryCapabilities.canCreate,
-            canTerminal = directoryCapabilities.canOpenTerminal,
+            canCreate = false,
+            canTerminal = false,
         )
     }
 
     val handleHereRequest by rememberUpdatedState(newValue = { request: HereNavigation.Request ->
         val tab = currentTab()
         clearLeavePrompt(tab.id)
-        webSessions.remove(tab.id)?.close()
         // A here request supersedes an in-flight navigation in the current tab.
-        pendingNavigations.remove(tab.id)
-        filterText = ""
-        searchMode = false
-        contextMenuEntry = null
+        cancelPending(tab.id)
+        deactivateStop(tab.currentStop.id)
         showTerminalSheet = false
         highlightPath = request.selectedPath
         highlightDirectory = request.directory
         pendingScrollPath = request.selectedPath
-        // Re-entering the same directory is not a step; anything else is.
-        val from = if (tab.path == request.directory) tab else recordCurrentHistory(tab)
-        val destination = from.copy(
-            path = request.directory,
-            folder = null,
-            webUrl = null,
-            webTitle = null,
-            selectedPaths = emptySet(),
-            lastSelectedIndex = -1,
-        )
-        if (tab.path == request.directory) replaceCurrent(destination)
-        else pendingNavigations[destination.id] = destination
+        // Re-entering the same plain directory is not a step; an overlay over
+        // that directory still gets a new location stop behind it.
+        if (tab.currentStop.kind == StopKind.LOCATION && tab.path == request.directory) {
+            replaceCurrent(
+                tab.copy(
+                    folder = null,
+                    webUrl = null,
+                    webTitle = null,
+                    selectedPaths = emptySet(),
+                    lastSelectedIndex = -1,
+                ),
+            )
+        } else {
+            val destination = tab.appended(
+                HistoryStop(path = request.directory, kind = StopKind.LOCATION),
+            )
+            pendingNavigations[destination.id] = destination
+        }
         // Refresh even within the same directory so newly created entries can
         // be selected once the matching asynchronous listing is committed.
-        refreshFileList()
-        highlightRefreshToken = refreshTrigger
+        refreshFileList(
+            highlightPath = highlightPath,
+            highlightDirectory = highlightDirectory,
+        )
     })
     fun dispatchHere(request: HereNavigation.Request) {
         val id = currentTab().id
-        if (guardEditor(id) { pendingHereRequest = request }) return
+        if (guardRenderer(id) { pendingHereRequest = request }) return
         handleHereRequest(request)
     }
     LaunchedEffect(pendingHereRequest) {
@@ -1425,23 +1778,48 @@ fun FileManagerApp(
         }
     }
 
-    // Renderer sessions are owned per tab and survive tab switches.
+    // Renderer sessions are owned per history stop and survive tab switches.
     DisposableEffect(Unit) {
         onDispose {
-            webSessions.values.forEach { it.close() }
-            webSessions.clear()
-            editorSessions.values.forEach { it.close() }
-            editorSessions.clear()
+            rendererSessions.values.forEach { releaseSession(it) }
+            rendererSessions.clear()
+            warmSessions.clear()
         }
     }
 
     val activeRenderer = rendererOf(currentTab().id)
-    val activeEditor = editorSessions[currentTab().id]
+    // An activity recreate drops the session map but keeps the tab history.
+    // Rebuild a page/file stop when its renderer is gone; a directory mints
+    // its session on demand from rendererOf().
+    val composedStop = currentTab().currentStop
+    LaunchedEffect(composedStop.id) {
+        val tab = currentTab()
+        if (composedStop.kind == StopKind.LOCATION) return@LaunchedEffect
+        if (pendingNavigations[tab.id] != null) return@LaunchedEffect
+        if (rendererSessions[composedStop.id] != null) return@LaunchedEffect
+        restoreStopNode(tab.id, composedStop)
+    }
     // Block reads of remote HTTP(S) handles (archive index, proxy descriptor)
     // publish their progress here; the top strip below mirrors page loading.
     val remoteTransfers by WebTransfers.progress.collectAsState()
     val homeRecent = remember(homeVersion) { HomeStore.recent() }
     val homeBookmarks = remember(homeVersion) { HomeStore.bookmarks() }
+    val pathSuggestionSource = remember(homeBookmarks, homeRecent) {
+        object : PathSuggestionSource {
+            override fun local(query: String): List<PathSuggestion> =
+                PathSuggestions.local(query, homeBookmarks, homeRecent)
+
+            override suspend fun remote(query: String): List<PathSuggestion> =
+                PathSuggestions.remote(context, query)
+        }
+    }
+    fun chooseTitleSuggestion(suggestion: PathSuggestion) {
+        if (suggestion.source == SuggestionSource.INTERNET) {
+            jumpTo(suggestion.target)
+        } else {
+            openAddress(suggestion.target)
+        }
+    }
     // Home has no directory load callback to commit a pending navigation, so
     // adopt it here. Otherwise the pending tab would block the next navigate.
     // Every tab's pending home is adopted, not just the selected one: a back
@@ -1463,17 +1841,15 @@ fun FileManagerApp(
         if (tabs.size <= 1) return
         val closing = tabs.removeAt(index)
         clearLeavePrompt(closing.id)
-        webSessions.remove(closing.id)?.close()
-        editorSessions.remove(closing.id)?.close()
-        pendingNavigations.remove(closing.id)
+        releaseStops(closing, pendingNavigations.remove(closing.id))
         selectedTabIndex = selectedTabIndex.coerceAtMost(tabs.lastIndex)
     }
 
     fun closeTab(index: Int) {
         if (tabs.size <= 1) return
-        // guardEditor returns false when the tab has no editor; the close must
+        // guardRenderer returns false when the tab has no editor; the close must
         // still run in that case (web pages, home, plain directories).
-        if (!guardEditor(tabs[index].id) { closeTabNow(index) }) closeTabNow(index)
+        if (!guardRenderer(tabs[index].id) { closeTabNow(index) }) closeTabNow(index)
     }
 
     fun moveTab(from: Int, to: Int) {
@@ -1505,15 +1881,13 @@ fun FileManagerApp(
             val tab = tabs[index]
             val active = pendingNavigations[tab.id]?.path ?: tab.path
             val parsed = Path.parse(active)
-            parsed.scheme == "container" && parsed.host == name
+            parsed.scheme == ContainerUris.SCHEME && parsed.host == name
         }
         if (matches.isEmpty()) return
         matches.sortedDescending().forEach {
             val removed = tabs.removeAt(it)
             clearLeavePrompt(removed.id)
-            webSessions.remove(removed.id)?.close()
-            editorSessions.remove(removed.id)?.close()
-            pendingNavigations.remove(removed.id)
+            releaseStops(removed, pendingNavigations.remove(removed.id))
         }
         if (tabs.isEmpty()) {
             tabs.add(FileTab(path = HomePath))
@@ -1524,143 +1898,49 @@ fun FileManagerApp(
     }
 
     /** The tab's directory as a node: the one path→node step operations use. */
-    suspend fun folderOf(tab: FileTab): VFolder? =
-        tab.folder ?: withContext(Dispatchers.IO) { Vfs.folder(tab.path).getOrNull() }
+    suspend fun folderOf(tab: FileTab): VFolder? = folderFor(tab.path, tab.folder)
 
     /** A listed entry as a node of [folder]. */
     suspend fun nodeOf(folder: VFolder?, name: String): VNode? =
         if (folder == null) null else withContext(Dispatchers.IO) { folder.child(name).getOrNull() }
 
-    fun selectedEntries(): List<FileEntry> = currentEntries.filter { it.path in currentTab().selectedPaths }
+    fun currentListing(): ListingSession? =
+        rendererOf(currentTab().id) as? ListingSession
+
+    fun selectedEntries(): List<FileEntry> = currentListing()?.selectedEntries.orEmpty()
 
     fun clearSelection() {
-        replaceCurrent(currentTab().copy(selectedPaths = emptySet(), lastSelectedIndex = -1))
+        currentListing()?.clearSelection()
     }
 
-    fun toggleSelection(entry: FileEntry) {
-        val tab = currentTab()
-        val newPaths = if (entry.path in tab.selectedPaths) tab.selectedPaths - entry.path else tab.selectedPaths + entry.path
-        replaceCurrent(tab.copy(selectedPaths = newPaths, lastSelectedIndex = currentEntries.indexOfFirst { it.path == entry.path }))
-    }
-
-    fun rangeSelectTo(entry: FileEntry) {
-        val tab = currentTab()
-        val index = currentEntries.indexOfFirst { it.path == entry.path }
-        if (index < 0) return
-        val start = if (tab.lastSelectedIndex >= 0) minOf(tab.lastSelectedIndex, index) else index
-        val end = if (tab.lastSelectedIndex >= 0) maxOf(tab.lastSelectedIndex, index) else index
-        replaceCurrent(tab.copy(selectedPaths = tab.selectedPaths + currentEntries.subList(start, end + 1).map { it.path }, lastSelectedIndex = index))
-    }
-
-    /** Turn the listed entries into nodes, then open the paste flow with them. */
-    fun beginCopyMove(entries: List<FileEntry>, isCopy: Boolean) {
-        if (entries.isEmpty()) return
-        val tab = currentTab()
-        val path = tab.path
-        val hint = tab.folder
-        scope.launch {
-            val folder = hint ?: withContext(Dispatchers.IO) { Vfs.folder(path).getOrNull() }
-            val nodes = entries.mapNotNull { nodeOf(folder, it.name) }
-            if (nodes.isEmpty()) {
-                Toast.makeText(context, context.getString(R.string.toast_failed), Toast.LENGTH_SHORT).show()
-                return@launch
-            }
-            copyMoveState = CopyMoveState(
-                sources = nodes.map { CopyMoveSource(it, it.name) },
-                isCopy = isCopy,
-                targetPath = path,
-            )
+    /** Clear the pending payload and any plain selection left behind. */
+    fun clearClipboard() {
+        ClipboardStore.clear()
+        rendererSessions.values.forEach { session ->
+            (session as? ListingSession)?.clearDisplayedSelection()
         }
     }
 
-    /** Create a child node in the tab's own folder node. */
-    fun createEntry(name: String, directory: Boolean) {
-        val tab = currentTab()
-        scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val folder = folderOf(tab) ?: error("cannot create here")
-                    if (directory) folder.mkdir(name).getOrThrow() else folder.create(name).getOrThrow()
-                }
-            }
-            Toast.makeText(
-                context,
-                result.exceptionOrNull()?.message ?: context.getString(R.string.toast_created, name),
-                Toast.LENGTH_SHORT
-            ).show()
-            showCreateDialog = false
-            refreshFileList()
-        }
-    }
-
-    fun executeEntryAction(entry: FileEntry, action: String) {
-        contextMenuEntry = null
-        val batchEntries = selectedEntries().ifEmpty { listOf(entry) }
-        val currentPath = currentTab().path
-        when (action) {
-            "copy" -> beginCopyMove(batchEntries, isCopy = true)
-            "move" -> beginCopyMove(batchEntries, isCopy = false)
-            "rename" -> if (currentTab().selectedPaths.isNotEmpty()) showBatchRenameDialog = true else showRenameDialog = entry
-            "delete" -> showDeleteConfirm = batchEntries
-            "properties" -> showEntryInfo = entry
-            "share" -> shareEntries(context, batchEntries)
-        }
-    }
-
-    fun performCopyMove() {
-        val state = copyMoveState ?: return
-        val tab = currentTab()
-        val targetDir = tab.path
-        val folderHint = tab.folder
-        showCopyMovePlaceDialog = false
+    /** Run the standard clipboard list into the current renderer's sink. */
+    fun performPaste() {
+        val state = ClipboardStore.state
+        if (!state.inTransfer) return
+        val sink = rendererOf(currentTab().id)?.clipboardSink ?: return
+        if (!sink.accepts(state)) return
+        val folder = sink.destinationFolder() ?: return
+        val isCopy = state.action == ClipboardAction.COPY
         operationHidden = false
         operationJob?.cancel()
         operationJob = scope.launch {
-            // The destination is a folder node; every source is a node too.
-            val targetFolder = folderHint
-                ?: withContext(Dispatchers.IO) { Vfs.folder(targetDir).getOrNull() }
-            var failure: Throwable? = null
-            operationProgress = OperationProgress(0, 0, state.sources.firstOrNull()?.name.orEmpty(), state.isCopy)
+            operationProgress = OperationProgress(
+                0, 0, state.entries.firstOrNull()?.name.orEmpty(), isCopy,
+            )
             var lastBytes = 0L
             var lastTime = System.currentTimeMillis()
+            var failure: Throwable? = null
             try {
-                for (source in state.sources) {
-                    ensureActive()
-                    lastBytes = 0L
-                    lastTime = System.currentTimeMillis()
-                    operationProgress = OperationProgress(0, 0, source.name, state.isCopy)
-                    // The target node comes first: created in the destination
-                    // folder when missing, then handed to the copy.
-                    val targetResult = withContext(Dispatchers.IO) {
-                        runCatching {
-                            val folder = targetFolder ?: error("cannot write to $targetDir")
-                            if (source.node is VFolder) {
-                                folder.destinationFolder(source.name).getOrThrow()
-                            } else {
-                                folder.destination(source.name).getOrThrow()
-                            }
-                        }
-                    }
-                    val target = targetResult.getOrElse {
-                        failure = it
-                        null
-                    } ?: break
-                    val flow = if (state.isCopy) {
-                        Vfs.copyTo(source.node, target)
-                    } else {
-                        Vfs.moveTo(source.node, target)
-                    }
-                    flow.collect { progress ->
-                        ensureActive()
-                        if (progress.finished) {
-                            if (progress.totalBytes > 0 && progress.copiedBytes < progress.totalBytes) {
-                                failure = Exception("operation failed"); return@collect
-                            }
-                            return@collect
-                        }
-                        // Progress can arrive faster than any useful sample
-                        // window; sample on a fixed period and keep the last
-                        // measured rate in between, instead of reporting 0.
+                ClipboardTransfer.run(state, folder) { progress ->
+                    if (!progress.finished) {
                         val now = System.currentTimeMillis()
                         val elapsed = now - lastTime
                         var speed = operationProgress?.speedBytesPerSec ?: 0L
@@ -1671,47 +1951,41 @@ fun FileManagerApp(
                             lastTime = now
                         }
                         operationProgress = OperationProgress(
-                            progress.totalBytes, progress.copiedBytes,
-                            progress.currentName.ifBlank { source.name },
-                            state.isCopy, speed
+                            progress.totalBytes,
+                            progress.copiedBytes,
+                            progress.currentName.ifBlank { state.entries.first().name },
+                            isCopy,
+                            speed,
                         )
                     }
-                    if (failure != null) break
-                }
+                }.onFailure { failure = it }
             } catch (e: CancellationException) {
                 OperationNotification.cancel(context)
                 throw e
             } catch (e: Exception) {
-                // A read-only destination or a failing link must report through
-                // the progress dialog, not escape into the app scope.
                 failure = e
-            }
-            if (failure != null) {
-                // Flow was cancelled/dropped by failure handler above
             }
             OperationNotification.cancel(context)
             operationTaskIds = null
             Toast.makeText(
                 context,
-                if (failure == null)
-                    context.getString(if (state.isCopy) R.string.toast_copied else R.string.toast_moved, state.sourceName)
-                else failure?.message ?: context.getString(R.string.toast_failed),
+                if (failure == null) {
+                    context.getString(
+                        if (isCopy) R.string.toast_copied else R.string.toast_moved,
+                        state.entries.firstOrNull()?.name.orEmpty(),
+                    )
+                } else {
+                    failure?.message ?: context.getString(R.string.toast_failed)
+                },
                 Toast.LENGTH_SHORT
             ).show()
-            copyMoveState = null
+            if (failure == null) {
+                clearClipboard()
+            }
             operationProgress = null
             operationJob = null
-            if (!state.isCopy && failure == null) clearSelection()
             refreshFileList()
         }
-    }
-
-    fun cancelCopyMove() {
-        operationJob?.cancel()
-        operationJob = null
-        operationProgress = null
-        copyMoveState = null
-        showCopyMovePlaceDialog = false
     }
 
     LaunchedEffect(pendingTabIndex) {
@@ -1724,12 +1998,34 @@ fun FileManagerApp(
     var lastRefreshedTabIndex by remember { mutableIntStateOf(selectedTabIndex) }
     LaunchedEffect(selectedTabIndex) {
         if (lastRefreshedTabIndex != selectedTabIndex) {
+            // A plain selection belongs to one tab: leaving it discards the
+            // selection. A copy/move payload is frozen and allowed to cross.
+            if (ClipboardStore.state.action == ClipboardAction.NONE) {
+                val previous = tabs.getOrNull(lastRefreshedTabIndex)
+                if (previous != null && previous.id != currentTab().id) {
+                    val stopId = previous.currentStop.id
+                    val listing = (rendererSessions[stopId] as? ListingSession)
+                    if (listing != null) {
+                        listing.onDeactivate()
+                        if (listing.selectedPaths.isNotEmpty()) listing.clearSelection()
+                    } else {
+                        updateTab(previous.id) {
+                            it.copy(selectedPaths = emptySet(), lastSelectedIndex = -1)
+                        }
+                    }
+                }
+                ClipboardStore.clear()
+            }
             lastRefreshedTabIndex = selectedTabIndex
+            activeSession(currentTab().id)?.onActivate()
             highlightPath = null
             highlightDirectory = null
-            highlightRefreshToken = null
             pendingScrollPath = null
-            refreshFileList(animate = false)
+            // No refresh token here: the folder renderer reloads when its
+            // `path` changes, and bumping the token as well would queue a
+            // second load that cancels the first mid-flight. On a remote
+            // backend that cancelled command keeps writing into the shared
+            // channel and corrupts the next listing.
         }
     }
 
@@ -1778,18 +2074,15 @@ fun FileManagerApp(
     }
 
     BackHandler {
-        if (searchMode) {
-            searchMode = false
-            filterText = ""
-        } else if (currentTab().selectedPaths.isNotEmpty()) {
+        if (currentTab().selectedPaths.isNotEmpty()) {
             clearSelection()
         } else if (drawerState.isOpen) {
             scope.launch { drawerState.close() }
         } else if (pendingForCurrent() != null) {
-            pendingNavigations.remove(currentTab().id)
+            cancelPending(currentTab().id)
             highlightPath = null
             pendingScrollPath = null
-        } else if (currentTab().backStack.isNotEmpty() || activeRenderer?.canDismiss == true) {
+        } else if (currentTab().canGoBack || activeRenderer?.canDismiss == true) {
             // Back is the undo: it closes an editor, retraces a page and steps
             // out of a folder through history first. "Up" is the parent action,
             // and only exists where something has a parent.
@@ -1832,7 +2125,7 @@ fun FileManagerApp(
                     scope.launch { drawerState.close() }
                 },
                 onContainerClick = { name ->
-                    navigateTo("container://$name/")
+                    navigateTo(ContainerUris.forContainer(name) + "/")
                     scope.launch { drawerState.close() }
                 },
                 onNewContainer = {
@@ -2275,8 +2568,6 @@ fun FileManagerApp(
                 },
             topBar = {
                 val caps = currentCapabilities()
-                val menuHost = renderHostFor(currentTab().id)
-                val menuPath = pendingOf(currentTab().id)?.path ?: currentTab().path
                 val webLoading = activeRenderer?.loading == true
                 val webProgress = (activeRenderer?.progress ?: 0) / 100f
                 // Idle handles stay registered until they close, so track the
@@ -2299,8 +2590,12 @@ fun FileManagerApp(
                 } else {
                     0f
                 }
-                Column {
-                    if (copyMoveState != null) {
+                Column(
+                    modifier = Modifier.onGloballyPositioned {
+                        topBarBounds = it.boundsInWindow()
+                    },
+                ) {
+                    if (operationProgress != null && !operationHidden) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -2340,62 +2635,48 @@ fun FileManagerApp(
                     }
                     TopAppBar(
                         title = {
-                            if (searchMode) {
-                                TextField(
-                                    value = filterText,
-                                    onValueChange = { filterText = it },
-                                    singleLine = true,
-                                    placeholder = {
-                                        if (filterText.isEmpty()) {
-                                            Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp))
-                                        }
-                                    },
-                                    trailingIcon = {
-                                        IconButton(onClick = { searchMode = false; filterText = "" }) {
-                                            Icon(Icons.Default.Close, contentDescription = stringResource(R.string.cd_close_search))
-                                        }
-                                    },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    textStyle = MaterialTheme.typography.bodyLarge,
-                                    colors = TextFieldDefaults.colors(
-                                        focusedContainerColor = Color.Transparent,
-                                        unfocusedContainerColor = Color.Transparent,
-                                        focusedIndicatorColor = MaterialTheme.colorScheme.primary,
-                                        unfocusedIndicatorColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-                                    )
-                                )
+                            val titleTab = currentTab()
+                            val titlePending = pendingOf(titleTab.id)
+                            val titleSlot = activeRenderer?.titleSlot()
+                            if (titleSlot != null) {
+                                titleSlot(Modifier)
                             } else {
-                                val titleTab = currentTab()
-                                val titlePending = pendingOf(titleTab.id)
                                 val titleFolder = titlePending?.folder ?: titleTab.folder
                                 val titleRenderer = rendererOf(titleTab.id)
-                                val titleHome = titleRenderer == null &&
-                                    isHomePath(titlePending?.path ?: titleTab.path)
-                                // Renderers own their path bar: a page shows
-                                // its title over the URL, Home shows its name
-                                // but edits an empty address, and the editor
-                                // shows its file plus encoding/cursor facts.
+                                val titlePage = titlePending?.webUrl ?: titleTab.webUrl
+                                // Renderers own their path bar: Home, a page
+                                // and the editor all report their own title,
+                                // address and caption.
                                 val rendererPath = titleRenderer?.pathBar(context)
-                                    ?: if (titleHome) HomeRenderer.pathBar(context) else null
                                 val titleDisplay = rendererPath?.title
+                                    ?: titlePage?.let { pageLabel(it) }
                                     ?: titleFolder?.let { folderLabel(it) }
+                                    ?: titlePending?.path
                                     ?: titleTab.path
                                 // Any location that round-trips through the
                                 // opener route is editable; a view without an
                                 // address stays a read-only breadcrumb.
                                 val titleEditable = rendererPath?.editable ?: (titleFolder == null ||
                                     runCatching {
-                                        LocationAddress.format(titleFolder!!.path)
+                                        NodeAddress.format(titleFolder!!.path)
                                     }.getOrNull() != null)
                                 TitleBlock(
                                     path = titlePending?.path ?: titleTab.path,
-                                    info = if (titleRenderer == null && !titleHome) currentInfo else DirectoryStats(),
+                                    info = if (rendererPath == null && titlePage == null) {
+                                        titleRenderer?.locationInfo ?: DirectoryStats()
+                                    } else {
+                                        DirectoryStats()
+                                    },
                                     onNavigate = { jumpTo(it) },
                                     onBounds = { titleBounds = it },
                                     displayPath = titleDisplay,
                                     editText = rendererPath?.editText ?: titleDisplay,
                                     editable = titleEditable,
                                     detail = rendererPath?.caption,
+                                    suggestionSource = pathSuggestionSource,
+                                    suggestionAnchor = topBarBounds,
+                                    onSuggestion = ::chooseTitleSuggestion,
+                                    onEditingChange = { active -> titleEditing = active },
                                 )
                             }
                         },
@@ -2405,11 +2686,7 @@ fun FileManagerApp(
                             }
                         },
                         actions = {
-                            val menuItems = when {
-                                activeRenderer != null -> activeRenderer.menuItems(context)
-                                isHomePath(menuPath) -> HomeRenderer.menuItems(context, menuHost)
-                                else -> DirectoryRenderer.menuItems(context, menuHost, caps.canRefresh)
-                            }
+                            val menuItems = activeRenderer?.menuItems(context).orEmpty()
                             Box {
                                 IconButton(onClick = {
                                     menuChildren = null
@@ -2453,34 +2730,6 @@ fun FileManagerApp(
                                                 },
                                             )
                                         }
-                                        val bookmarkEntry = currentBookmarkEntry()
-                                        if (bookmarkEntry != null) {
-                                            val bookmarked = HomeStore.isBookmarked(
-                                                bookmarkEntry.kind,
-                                                bookmarkEntry.location,
-                                            )
-                                            DropdownMenuItem(
-                                                text = {
-                                                    Text(
-                                                        stringResource(
-                                                            if (bookmarked) R.string.bookmark_remove
-                                                            else R.string.bookmark_add,
-                                                        )
-                                                    )
-                                                },
-                                                leadingIcon = {
-                                                    Icon(
-                                                        if (bookmarked) Icons.Default.Star
-                                                        else Icons.Default.StarBorder,
-                                                        null,
-                                                    )
-                                                },
-                                                onClick = {
-                                                    toggleCurrentBookmark()
-                                                    showMoreMenu = false
-                                                }
-                                            )
-                                        }
                                         DropdownMenuItem(
                                             text = { Text(stringResource(R.string.settings)) },
                                             leadingIcon = { Icon(Icons.Default.Settings, null) },
@@ -2495,7 +2744,7 @@ fun FileManagerApp(
                                             onClick = {
                                                 val activity = context as? Activity
                                                 val finish: () -> Unit = { activity?.finish() }
-                                                if (!guardEditor(currentTab().id, finish)) finish()
+                                                if (!guardRenderer(currentTab().id, finish)) finish()
                                                 showMoreMenu = false
                                             }
                                         )
@@ -2508,13 +2757,17 @@ fun FileManagerApp(
             },
             bottomBar = {
                 val toolTab = currentTab()
-                val toolRenderer = rendererOf(toolTab.id)
-                val toolPending = pendingOf(toolTab.id)
                 val caps = currentCapabilities()
-                // Every renderer reports its own write capability: web, editor,
-                // Home and archive views all return canCreate = false, a writable
-                // directory returns true. The toolbar stays type-agnostic.
-                val canConfirmCopyMove = copyMoveState != null && toolPending == null && caps.canCreate
+                val renderer = rendererOf(toolTab.id)
+                val clipboard = ClipboardStore.state
+                val selection = (renderer as? ListingSession)
+                val selectionMode = !clipboard.inTransfer &&
+                    selection != null && selection.selectedPaths.isNotEmpty()
+                val canShare = selection != null && currentTab().folder == null &&
+                    selection.selectedEntries.all { !it.isDirectory }
+                val copyActive = clipboard.inTransfer
+                val canConfirmCopyMove = copyActive &&
+                    renderer?.clipboardSink?.accepts(clipboard) == true
                 BottomToolbar(
                     modifier = Modifier.onGloballyPositioned {
                         bottomBarHeightPx = it.size.height
@@ -2524,43 +2777,10 @@ fun FileManagerApp(
                     canGoParent = caps.canGoParent,
                     onBack = ::goBack,
                     onForward = ::goForward,
-                    onCreateFile = { if (caps.canCreate) showCreateDialog = true },
+                    onCreate = { renderer?.requestCreate() },
                     canCreate = caps.canCreate,
-                    onTerminal = {
-                        if (caps.canTerminal || hasTerminalSessions) {
-                            showTerminalSheet = true
-                        }
-                    },
-                    canOpenTerminal = caps.canTerminal || hasTerminalSessions,
+                    onTerminal = { showTerminalSheet = true },
                     onParent = ::goParent,
-                    copyMoveActive = copyMoveState != null,
-                    canConfirmCopyMove = canConfirmCopyMove,
-                    onCopyMoveConfirm = {
-                        if (canConfirmCopyMove) showCopyMovePlaceDialog = true
-                    },
-                    onCopyMoveCancel = ::cancelCopyMove,
-                    selectionMode = toolRenderer == null &&
-                        toolTab.selectedPaths.isNotEmpty(),
-                    onSelectAll = {
-                        replaceCurrent(currentTab().copy(selectedPaths = currentEntries.map { it.path }.toSet()))
-                    },
-                    onInvertSelection = {
-                        val tab = currentTab()
-                        replaceCurrent(tab.copy(selectedPaths = currentEntries.map { it.path }.filterNot { it in tab.selectedPaths }.toSet()))
-                    },
-                    onSelectSameType = {
-                        val selected = selectedEntries()
-                        if (selected.isNotEmpty()) {
-                            val hasDir = selected.any { it.isDirectory }
-                            val exts = selected.filter { !it.isDirectory }.map { it.name.substringAfterLast('.', "") }.distinct()
-                            replaceCurrent(currentTab().copy(selectedPaths = currentEntries.filter { entry ->
-                                if (entry.isDirectory) hasDir
-                                else entry.name.substringAfterLast('.', "") in exts
-                            }.map { it.path }.toSet()))
-                        }
-                    },
-                    onCancelSelection = ::clearSelection,
-                    onShare = { shareEntries(context, selectedEntries()) },
                     onHistoryDrag = { if (!showHistory) historyDragPx = it },
                     onHistoryDragEnd = { revealed ->
                         historyDragPx = 0f
@@ -2568,12 +2788,23 @@ fun FileManagerApp(
                             showHistory = true
                         }
                     },
-                    canShare = toolTab.folder == null && toolTab.selectedPaths.isNotEmpty() &&
-                        selectedEntries().all { !it.isDirectory }
+                    canOpenTerminal = caps.canTerminal || hasTerminalSessions,
+                    selectionMode = selectionMode,
+                    onSelectAll = { selection?.selectAll() },
+                    onInvertSelection = { selection?.invertSelection() },
+                    onCancelSelection = { selection?.clearSelection() },
+                    onSelectSameType = { selection?.selectSameType() },
+                    onShare = { shareEntries(context, selection?.selectedEntries.orEmpty()) },
+                    canShare = canShare,
+                    copyActive = copyActive,
+                    canConfirmCopyMove = canConfirmCopyMove,
+                    onCopyMoveConfirm = ::performPaste,
+                    onCopyMoveCancel = ::clearClipboard,
                 )
             }
         ) { padding ->
-            Column(modifier = Modifier.padding(padding)) {
+            Box(modifier = Modifier.padding(padding)) {
+                Column(modifier = Modifier.fillMaxSize()) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth()
@@ -2633,9 +2864,6 @@ fun FileManagerApp(
                 }
 
                 val tab = currentTab()
-                val listPending = pendingOf(tab.id)
-                val activePath = listPending?.path ?: tab.path
-                val activeFolder = listPending?.folder ?: tab.folder
                 when {
                     // The live renderer owns the tab view. It decides how its
                     // document/page is drawn; the shell only supplies the slot.
@@ -2643,153 +2871,46 @@ fun FileManagerApp(
                         darkTheme = darkTheme,
                         modifier = Modifier.fillMaxSize(),
                     )
-                    isHomePath(activePath) -> HomeScreen(
-                        recent = homeRecent,
-                        bookmarks = homeBookmarks,
-                        onOpen = ::openHomeEntry,
-                        onToggleBookmark = ::toggleHomeBookmark,
-                        onRemoveRecent = {
-                            HomeStore.removeRecent(it.key)
-                            homeVersion++
-                        },
-                        onRemoveBookmark = {
-                            HomeStore.removeBookmark(it.key)
-                            homeVersion++
-                        },
-                        onClearRecent = {
-                            HomeStore.clearRecent()
-                            homeVersion++
-                        },
-                        onClearBookmarks = {
-                            HomeStore.clearBookmarks()
-                            homeVersion++
-                        },
-                        filter = if (searchMode) filterText else "",
-                        opening = nodeOpeningTab == tab.id,
-                        onCancelOpening = ::cancelNodeOpening,
-                        modifier = Modifier.fillMaxSize(),
+                    // A page owns the location even before its renderer is
+                    // rebuilt; draw nothing rather than falling back to Home.
+                    tab.webUrl != null -> Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.background),
                     )
-                    else -> FileListScreen(
-                    path = activePath,
-                    committedPath = tab.path,
-                    folderOverride = activeFolder,
-                    onNavigationLoaded = { loadedPath ->
-                        pendingNavigations[tab.id]?.takeIf { it.path == loadedPath }?.let {
-                            replaceTab(it)
-                            pendingNavigations.remove(tab.id)
-                        }
-                    },
-                    onNavigationCancelled = {
-                        pendingNavigations.remove(tab.id)
-                        highlightPath = null
-                        pendingScrollPath = null
-                    },
-                    refreshToken = refreshTrigger,
-                    animationToken = animationTrigger,
-                    sortMode = sortMode,
-                    sortReverse = sortReverse,
-                    filterText = filterText,
-                    scrollToPath = pendingScrollPath,
-                    onScrollConsumed = { pendingScrollPath = null },
-                    onInfoChange = { currentInfo = it },
-                    onCapabilitiesChange = {
-                        directoryCapabilities = it
-                        if (!it.canCreate) showCreateDialog = false
-                    },
-                    onEntriesChange = entriesChanged@{ loadedPath, loadedRefreshToken, entries ->
-                        val curTab = currentTab()
-                        if (loadedPath != curTab.path) return@entriesChanged
-                        if (highlightDirectory == loadedPath &&
-                            (highlightRefreshToken ?: Int.MIN_VALUE) > loadedRefreshToken) return@entriesChanged
-                        currentEntries = entries
-                        var newPaths = curTab.selectedPaths intersect entries.map { it.path }.toSet()
-                        var selectionIndex = curTab.lastSelectedIndex
-                        if ((highlightPath != null || highlightDirectory != null) &&
-                            (highlightDirectory == null || highlightDirectory == loadedPath)) {
-                            val found = entries.any { it.path == highlightPath }
-                            if (found) {
-                                newPaths = newPaths + highlightPath!!
-                                selectionIndex = entries.indexOfFirst { it.path == highlightPath }
-                            }
-                            highlightPath = null
-                            highlightDirectory = null
-                            highlightRefreshToken = null
-                        }
-                        replaceCurrent(curTab.copy(
-                            selectedPaths = newPaths,
-                            lastSelectedIndex = selectionIndex,
-                        ))
-                    },
-                    onDirectoryClick = ::navigateTo,
-                    onFileClick = { openFile(context, it) },
-                    onDirectoryNodeClick = if (activeFolder != null) {
-                        { folder, _ -> navigateToFolder(folder) }
+                    // Every directory tab has a FolderRendererSession. This
+                    // branch only covers the frame between a location being
+                    // superseded and its next renderer being built.
+                    else -> Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.background),
+                    )
+                }
+                if (titleEditing) {
+                    // A black scrim over an AMOLED-black list is invisible, so
+                    // dark mode veils the content with light instead; the
+                    // suggestion popup then reads as the darker panel on top.
+                    val scrim = if (MaterialTheme.colorScheme.background.luminance() < 0.5f) {
+                        // Black alpha over AMOLED black changes nothing; a
+                        // low-alpha white veil is the visible equivalent.
+                        Color.White.copy(alpha = 0.12f)
                     } else {
-                        null
-                    },
-                    onFileNodeClick = { file, entry ->
-                        openNode(file, entry)
-                    },
-                    opening = nodeOpeningTab == currentTab().id,
-                    onCancelOpening = ::cancelNodeOpening,
-                    onLongPress = { contextMenuEntry = it },
-                    selectionMode = copyMoveState == null && currentTab().selectedPaths.isNotEmpty(),
-                    selectedPaths = currentTab().selectedPaths,
-                    onToggleSelection = if (copyMoveState == null) ::toggleSelection else {{}},
-                    onRangeSelect = if (copyMoveState == null) ::rangeSelectTo else {{}},
-                    onFileDragStart = {
-                        terminalDragGeneration++
-                        terminalDropAccepted = false
-                        showTerminalSheet = true
-                    },
-                    onFileDragEnd = {
-                        val generation = terminalDragGeneration
-                        scope.launch {
-                            // Give the platform drop (ACTION_DROP) a chance to arrive
-                            // before deciding whether this drag was cancelled.
-                            delay(150)
-                            if (generation == terminalDragGeneration && !terminalDropAccepted) {
-                                showTerminalSheet = false
-                            }
-                        }
-                    },
+                        Color.Black.copy(alpha = 0.32f)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(scrim)
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                            ) { focusManager.clearFocus() },
                     )
                 }
             }
+            }
         }
-    }
-
-    if (showInfoDialog) {
-        InfoDialog(
-            path = currentTab().path,
-            info = currentInfo,
-            onDismiss = { showInfoDialog = false }
-        )
-    }
-
-    if (showCreateDialog && currentCapabilities().canCreate) {
-        CreateDialog(
-            initialPath = currentTab().path,
-            onDismiss = { showCreateDialog = false },
-            onCreateFile = { name -> createEntry(name, directory = false) },
-            onCreateFolder = { name -> createEntry(name, directory = true) }
-        )
-    }
-
-    contextMenuEntry?.let { entry ->
-        val sharesForMenu = selectedEntries().ifEmpty { listOf(entry) }
-        ContextMenu(
-            entry = entry,
-            onDismiss = { contextMenuEntry = null },
-            onCopy = { executeEntryAction(entry, "copy") },
-            onMove = { executeEntryAction(entry, "move") },
-            onRename = { executeEntryAction(entry, "rename") },
-            onDelete = { executeEntryAction(entry, "delete") },
-            onProperties = { executeEntryAction(entry, "properties") },
-            onShare = { executeEntryAction(entry, "share") },
-            canShare = currentTab().folder == null && sharesForMenu.all { !it.isDirectory },
-            canModify = currentTab().folder == null
-        )
     }
 
     showDeleteConfirm?.let { entries ->
@@ -2905,36 +3026,25 @@ fun FileManagerApp(
         )
     }
 
-    if (showCopyMovePlaceDialog && copyMoveState != null) {
-        CopyMovePlaceDialog(
-            isCopy = copyMoveState!!.isCopy,
-            sourceName = copyMoveState!!.sourceName,
-            // The destination is the folder open now, which is where
-            // performCopyMove() writes; the state's targetPath is only the
-            // folder the copy started from.
-            targetPath = currentTab().path,
-            onDismiss = { showCopyMovePlaceDialog = false },
-            onConfirm = ::performCopyMove
-        )
-    }
-
     if (operationProgress != null && !operationHidden) {
-        val opState = copyMoveState
+        val clipboard = ClipboardStore.state
         OperationProgressDialog(
             progress = operationProgress!!,
-            sourceParent = opState?.sourceParent ?: "",
-            targetPath = opState?.targetPath ?: "",
+            sourceParent = clipboard.sourceParent,
+            targetPath = currentTab().path,
             onHide = {
                 operationHidden = true
-                OperationNotification.show(context, operationProgress!!.isCopy,
-                    (opState?.sourceParent ?: "").ifBlank { operationProgress!!.currentName })
+                OperationNotification.show(
+                    context,
+                    operationProgress!!.isCopy,
+                    clipboard.sourceParent.ifBlank { operationProgress!!.currentName },
+                )
             },
             onCancel = {
                 OperationNotification.cancel(context)
                 operationJob?.cancel()
                 operationJob = null
                 operationProgress = null
-                copyMoveState = null
                 refreshFileList()
             }
         )
@@ -2967,17 +3077,17 @@ fun FileManagerApp(
         )
     }
 
-    val allHistory = historyStops()
+    val allHistory = historyRows()
     // Home is a landing marker, not a navigation stop: hide it from the
     // sheet, but keep the full list for index-based history navigation.
-    val visibleHistory = allHistory.filterNot { isHomePath(it.path) }
+    val visibleHistory = allHistory.filterNot { isHomePath(it.stop.path) }
     HistorySheet(
         visible = showHistory,
         dragPx = historyDragPx,
         stops = visibleHistory,
         bottomInset = with(LocalDensity.current) { bottomBarHeightPx.toDp() },
-        onSelect = { stop ->
-            val index = allHistory.indexOfFirst { it === stop }
+        onSelect = { row ->
+            val index = currentTab().history.indexOfFirst { it.id == row.stop.id }
             if (index >= 0) jumpToHistory(index)
             showHistory = false
         },
@@ -2991,13 +3101,10 @@ fun FileManagerApp(
         onShow = { showTerminalSheet = true },
         onDropAccepted = { terminalDropAccepted = true },
         canCreateTerminal = terminalCanCreate,
-        // FIXME: editor-specific terminal cwd belongs to the renderer's generic
-        // session contract, not an activeEditor lookup in the shell.
-        // The editor opened in this tab asks for a shell in the folder that
-        // owns the file; the directory behind it is only the fallback.
-        currentPath = activeEditor
-            ?.takeIf { it.capabilities.canTerminal }
-            ?.parentAddress
+        // A renderer that needs a different shell cwd publishes it through the
+        // session contract; the directory behind it is only the fallback.
+        currentPath = rendererOf(currentTab().id)
+            ?.terminalPath
             ?: currentTab().path
     )
 
@@ -3084,19 +3191,6 @@ fun FileManagerApp(
             },
         )
     }
-
-    if (showSortDialog) {
-        SortDialog(
-            currentMode = sortMode,
-            currentReverse = sortReverse,
-            onDismiss = { showSortDialog = false },
-            onConfirm = { mode, reverse ->
-                sortMode = mode
-                sortReverse = reverse
-                showSortDialog = false
-            }
-        )
-    }
 }
 
 @Composable
@@ -3133,6 +3227,20 @@ private fun RendererMenuItemRow(
 
 /** Minimum window between two transfer-rate samples shown in the copy dialog. */
 private const val SPEED_SAMPLE_MS = 250L
+
+/**
+ * targetSdk 28 keeps the legacy soft-input contract: the terminal sheet needs
+ * adjustResize to stay above the IME, every other screen keeps adjustNothing.
+ * API 30 deprecates the constant in favour of edge-to-edge WindowInsets, which
+ * would change layout app-wide, so keep the legacy mode here.
+ */
+@Suppress("DEPRECATION")
+private fun terminalSoftInputMode(showTerminalSheet: Boolean): Int =
+    if (showTerminalSheet) {
+        WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+    } else {
+        WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+    }
 
 private fun storagePermissions(): List<String> = when {
     Build.VERSION.SDK_INT >= 29 -> listOf(Manifest.permission.READ_EXTERNAL_STORAGE)

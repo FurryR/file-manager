@@ -61,16 +61,15 @@ class Navigator(
     }
 
     /**
-     * Rebuild the current node from a persisted address. The service may
-     * descend a container one level at a time (or batch internally); history
-     * is intentionally not restored here, only the current location.
+     * Rebuild the current node from a persisted address. [Vfs.node] descends
+     * every container level; history is intentionally not restored here, only
+     * the current location.
      */
     suspend fun restore(
-        service: NodeService,
         path: Path,
         rendererId: String? = null,
     ): Result<VNode> = runCatching {
-        val node = service.resolve(path).getOrThrow()
+        val node = Vfs.node(path).getOrThrow()
         current = node
         this.rendererId = rendererId
         backStack.clear()

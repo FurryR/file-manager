@@ -7,17 +7,33 @@ import io.furryr.file.model.*
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -35,6 +51,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -43,7 +61,22 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
+import io.furryr.file.R
 import io.furryr.file.core.DirectoryStats
+import io.furryr.file.ui.util.PathSuggestion
+import io.furryr.file.ui.util.PathSuggestionSource
+import io.furryr.file.ui.util.SuggestionSource
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 /**
  * Path block in the top bar. A tap turns the path itself into an editor —
@@ -66,6 +99,14 @@ fun TitleBlock(
     editable: Boolean = true,
     /** Replaces the directory summary line, e.g. an editor's encoding/cursor. */
     detail: String? = null,
+    /** Bookmark/recent rows and remote completions for the text being typed. */
+    suggestionSource: PathSuggestionSource,
+    /** The top bar in window coordinates; the overlay spans it and starts below it. */
+    suggestionAnchor: Rect? = null,
+    /** A row was chosen; the editor has already closed. */
+    onSuggestion: (PathSuggestion) -> Unit,
+    /** Reports whether the address bar is in edit mode. */
+    onEditingChange: (Boolean) -> Unit = {},
 ) {
     val summary = detail ?: info.summary(LocalContext.current)
     var editing by rememberSaveable(path, displayPath, editText) { mutableStateOf(false) }
@@ -76,6 +117,7 @@ fun TitleBlock(
     // edit; otherwise the first unfocused callback would close it instantly.
     var focusedOnce by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
+    var remoteResult by remember { mutableStateOf<RemoteSuggestions?>(null) }
 
     fun selectAll() {
         field = field.copy(selection = TextRange(0, field.text.length))
@@ -88,8 +130,35 @@ fun TitleBlock(
         if (target != editText) onNavigate(target)
     }
 
+    val query = field.text.trim()
+    // The current address is not a query: suggestions start only after the
+    // user changes the text, so tapping the bar does not cover the content.
+    val typing = editing && query.isNotEmpty() && query != editText.trim()
+    val localRows = if (typing) suggestionSource.local(query) else emptyList()
+    val remoteRows = remoteResult?.takeIf { it.query == query }?.rows.orEmpty()
+    val rows = localRows + remoteRows
+
+    LaunchedEffect(editing, query, editText) {
+        remoteResult = null
+        if (!editing || query.isEmpty() || query == editText.trim()) return@LaunchedEffect
+        delay(180)
+        val fetched = withContext(Dispatchers.IO) {
+            runCatching { suggestionSource.remote(query) }.getOrDefault(emptyList())
+        }
+        remoteResult = RemoteSuggestions(query, fetched)
+    }
+
+    fun choose(suggestion: PathSuggestion) {
+        editing = false
+        onSuggestion(suggestion)
+    }
+
     BackHandler(enabled = editing) { editing = false }
+    DisposableEffect(Unit) {
+        onDispose { onEditingChange(false) }
+    }
     LaunchedEffect(editing) {
+        onEditingChange(editing)
         if (editing) {
             focusRequester.requestFocus()
             // Focus is applied on the next frame; re-assert the select-all and
@@ -159,7 +228,124 @@ fun TitleBlock(
             }
         }
     }
+
+    val suggestionBar = suggestionAnchor
+    if (typing && rows.isNotEmpty() && suggestionBar != null) {
+        val density = LocalDensity.current
+        val popupWidth = with(density) { suggestionBar.width.toDp() }
+        Popup(
+            popupPositionProvider = SuggestionPopupPosition(suggestionBar.bottom.toInt()),
+            properties = PopupProperties(
+                focusable = false,
+                dismissOnBackPress = false,
+                dismissOnClickOutside = false,
+                usePlatformDefaultWidth = false,
+            ),
+        ) {
+            Surface(
+                color = MaterialTheme.colorScheme.background,
+                modifier = Modifier.width(popupWidth),
+            ) {
+                Box(modifier = Modifier.heightIn(max = 360.dp)) {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                        rows.forEachIndexed { index, suggestion ->
+                            if (index == 0 || rows[index - 1].source != suggestion.source) {
+                                Text(
+                                    text = when (suggestion.source) {
+                                        SuggestionSource.BOOKMARK -> stringResource(R.string.home_bookmarks)
+                                        SuggestionSource.RECENT -> stringResource(R.string.home_recent_locations)
+                                        SuggestionSource.INTERNET -> stringResource(R.string.suggestion_internet)
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(
+                                        start = 16.dp,
+                                        end = 16.dp,
+                                        top = 6.dp,
+                                        bottom = 2.dp,
+                                    ),
+                                )
+                            }
+                            SuggestionRow(suggestion) { choose(suggestion) }
+                        }
+                    }
+                    // Hairline stays pinned to the panel edge while rows scroll.
+                    HorizontalDivider(
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.align(Alignment.TopCenter),
+                    )
+                }
+            }
+        }
+    }
 }
+
+/**
+ * Full-width dropdown that starts exactly where the top bar ends: the tab row
+ * is underneath it, while the address bar stays visible.
+ */
+private class SuggestionPopupPosition(
+    private val top: Int,
+) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset = IntOffset(0, top)
+}
+
+@Composable
+private fun SuggestionRow(
+    suggestion: PathSuggestion,
+    onClick: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 9.dp),
+    ) {
+        Icon(
+            imageVector = when (suggestion.source) {
+                SuggestionSource.BOOKMARK -> Icons.Default.Star
+                SuggestionSource.RECENT -> Icons.Default.History
+                SuggestionSource.INTERNET -> Icons.Default.Search
+            },
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp),
+        )
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 12.dp),
+        ) {
+            Text(
+                text = suggestion.title,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            if (suggestion.subtitle.isNotEmpty()) {
+                Text(
+                    text = suggestion.subtitle,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+private data class RemoteSuggestions(
+    val query: String,
+    val rows: List<PathSuggestion>,
+)
 
 /**
  * Compose has no start ellipsis. Keep the tail (the part that identifies the

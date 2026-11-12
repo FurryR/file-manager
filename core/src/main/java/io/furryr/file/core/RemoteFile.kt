@@ -19,4 +19,8 @@ package io.furryr.file.core
 interface RemoteFile : VFile {
     val address: String
     val referer: String?
+
+    override val writable: Boolean get() = false
+    override val liveAddress: String get() = address
+    override val liveReferer: String? get() = referer
 }

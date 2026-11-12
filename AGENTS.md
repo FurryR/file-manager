@@ -17,16 +17,17 @@ file-manager/
 ├── core/                # :core — pure VFS abstraction (Kotlin/JVM, no Android)
 │   └── src/main/java/io/furryr/file/core/
 │       ├── Path.kt               # Protocol-aware path parsing
-│       ├── Vfs.kt                # Scheme-strict router + filesystem operations
+│       ├── Vfs.kt                # Scheme-strict router + address→node walk (incl. `!` views)
+│       ├── ViewOpener.kt         # ViewOpener SPI + priority registry + enter
+│       ├── NodeOps.kt            # copy/move/destination over nodes
 │       ├── Folder.kt / File       # Abstract node facade returned by Vfs
 │       ├── FileProvider.kt       # Backend SPI + feature/capability types
 │       ├── Location.kt           # LocationEntry + edit/delete actions
 │       ├── ResolvedProvider.kt / Directory*.kt
 │       ├── model/                # FileEntry, ProviderStat, CopyProgress
 │       └── source/               # FileSource interface + stream/cache sources
-├── opener/              # :opener — opener SPI + container views (Kotlin/JVM, no Android)
+├── opener/              # :opener — container views + open-with table (Kotlin/JVM, no Android)
 │   └── src/main/java/io/furryr/file/opener/
-│       ├── Opener.kt           # Opener SPI + priority registry + openFolder
 │       ├── OpenRouter.kt       # generic ordered open-with table (C, R)
 │       ├── ArchiveOpener.kt    # zip-compatible file → ArchiveFolder
 │       ├── ArchiveFolder.kt    # ArchiveFolder/ArchiveFile/ArchiveSource
@@ -103,16 +104,16 @@ file-manager/
   `Folder`/`File`, `FileProvider`, location entries, models and the
   `FileSource` interface. It also owns the node/view model (`VNode`, `VFile`,
   `VFolder`, `Path` (address + view levels), `ContentInfo`, `Navigator`,
-  `NodeService`). It
+  `ViewOpener`/`ViewOpeners`). It
   must not import Android, `:uds`, `:daemon`, or any concrete provider.
-- `:opener` is the **file-to-view route** (Kotlin/JVM): `Opener`/`Openers`,
-  the generic `OpenRouter<C, R>` open-with table, concrete openers and the
+- `:opener` is the **file-to-view route** (Kotlin/JVM): the generic
+  `OpenRouter<C, R>` open-with table, concrete openers and the
   views they return (`ArchiveFolder`, `ArchiveFile`, `ArchiveSource`). It
   depends only on `:core`; the staging directory for stream-only archives is
   passed in as a `File`, never a `Context`. The router knows outcome types only
   through its caller's `R`, so `:opener` never imports app renderers or UI.
   Renderers know nothing about openers: the app resolves a file through the
-  table (`app/.../OpenRoutes.kt`) and applies the returned outcome.
+  table (`app/.../OpenTable.kt`) and applies the returned outcome.
 - `:daemon` is the **daemon protocol layer over `:uds.Transport`**: IPC,
   protobuf, `DaemonManager`, `FileService`, `ExecService`, hub callbacks. It
   depends on `:core` for neutral models and the `FileSource` contract.
@@ -174,15 +175,15 @@ file-manager/
 - **Object model, not provider strings.** `core/.../VNode.kt` defines
   `VNode`/`VFile`/`VFolder`; `VNode.path: Path` is the node's identity (there is
   no `ViewRef`/`NodeRef` any more). `VFolder.listNodes()`, `child()` and
-  `VNode.parent` are the navigation currency; only `Vfs` and `NodeService` turn
-  an address into a node, and `NodeService.resolve(path)` enters each `!` level
-  through the opener registry. `FileProvider.node(path, innerPath)` is what
+  `VNode.parent` are the navigation currency; only `Vfs.node(path)` turns
+  an address into a node, entering each `!` level through the opener registry.
+  `FileProvider.node(path, innerPath)` is what
   mints a node, so a provider whose files are not storage paths (a live
   `RemoteFile`) returns its own `VFile` implementation and no caller needs to
   know which kind it got.
 - **Archives.** `opener/.../ArchiveFolder.kt` owns `ArchiveFolder`/
   `ArchiveFile`/`ArchiveSource`; core only knows `VFile`/`VFolder` and the
-  `Openers` SPI. An archive node's identity is `backing.path.enterView(segments)`,
+  `ViewOpeners` SPI. An archive node's identity is `backing.path.enterView(segments)`,
   so nested archives extend the chain one level at a time.
   `opener/.../ZipArchiveSource.kt` reads the central directory in place
   when the outer `FileSource` is seekable (local/daemon fd or handle, SFTP/SSH,
@@ -193,32 +194,32 @@ file-manager/
   offered as an archive: `ContentTypes` maps it to the package MIME kind so it
   opens with the installer. Opening an entry externally signs its address text
   into a `ForwardFileProvider` URI; the provider resolves it through
-  `DefaultNodeService`, so a zip member never needs a synthetic VFS path.
+  `Vfs.node`, so a zip member never needs a synthetic VFS path.
 - **Content facts.** `core/.../ContentInfo.kt` defines `ContentInfo`,
   `ContentKind` and `ContentTypes` (extension map + magic sniffing).
   `ProviderStat` carries `size`. `VFile.describe()` is the only place renderer
   selection should read MIME/kind/seekable from.
 - **Navigation/history.** `core/.../Navigator.kt` owns current node,
-  back/forward and breadcrumb ancestry. `core/.../NodeService.kt` is the
-  string-free resolve/list/open facade; `app/.../DefaultNodeService.kt` applies
-  the "enter an intermediate file through `Openers`" policy.
+  back/forward and breadcrumb ancestry; `Vfs.node` is the only address walker,
+  and every operation above it takes nodes.
   A node address is its `Path` text (`/a.zip!/docs`), persisted as-is; `Address.kt` is
   the breadcrumb projection.
-- **One history.** The tab owns it: `FileTab.backStack`/`forwardStack` hold
-  every stop, and a page, a folder, Home and an edited file are the same kind of
-  stop. A live page does not keep a second list — each navigation it reports
-  (`RenderHost.onPageVisited`) is recorded like any other step, and the WebView's
-  own back/forward list is only a cache of pages it already holds
-  (`WebRendererSession.retrace`, used by `moveToStop` so a history step costs no
-  request). `historyStops(tab)` projects the two stacks into the one linear list
-  the panel, Back and Forward all read; `stacksAt` rebuilds the stacks around any
-  stop, so a jump of ten steps is the same operation as one.
+- **One history.** The tab owns it: `FileTab.history` is the one linear stop
+  list and `historyIndex` is the cursor, so a page, a folder, Home and an edited
+  file are stops of the same kind and a jump of any distance is the same
+  operation as one step. Each `HistoryStop` carries a stable `id`
+  (`kind` = `LOCATION`/`FILE`/`PAGE` plus the last title); renderer sessions are
+  keyed by that id, so Back reuses a warm directory and a live page does not keep
+  a second list. A WebView's own back/forward list is only a cache of pages it
+  already holds (`WebRendererSession.retrace`, used by `moveToStop` so a history
+  step costs no request). `RenderHost.onPageVisited` appends or moves the one
+  list; the history panel only projects it (`historyRows`).
 - **Renderers/Openers.** `app/.../render/Renderer.kt` defines
   `RenderTarget` (a node plus its facts), `RendererFactory`/`RendererSession`,
-  `RenderHost` and `Renderers`. Directory, Web and the tab-owned Sora text
-  editor are registered. `opener/.../Opener.kt` defines the format-agnostic `Opener`/
-  `Openers` route. `DirectorySession` is the shared directory controller;
-  `FileListScreen` is still its transitional view. `ArchiveOpener` turns a zip
+  `RenderHost` and `Renderers`. Directory, Web, Home and the tab-owned Sora
+  text editor all have renderer sessions. `core/.../ViewOpener.kt` defines the format-agnostic
+  `ViewOpener`/`ViewOpeners` route. `FolderRendererSession` is the directory
+  renderer; `FolderContent` is its list view. `ArchiveOpener` turns a zip
   file into an `ArchiveFolder`; it draws nothing.
 - **HTML.** `HtmlDocument`/`DocumentView`/`WebRenderer.kt` project HTML files
   and live URLs as one `DocumentView`; `WebContent` is the WebView. A projected
@@ -233,14 +234,14 @@ file-manager/
   file, copy the link text, copy the URL, share the file, share the URL. Both
   file actions take the node, never a string: `RenderHost.copyFile` enters the
   tab's normal copy flow (`CopyMoveSource(node)` → `VFolder.destination` →
-  `Vfs.copyTo(source, target)`, so the destination node streams the link in on
+  `NodeOps.copyTo(source, target)`, so the destination node streams the link in on
   demand), and `RenderHost.shareFile` hands the receiver an on-demand
   `content://` stream through the forward provider.
   Relative assets resolve through the node graph (`file.parent.child(...)`),
   so HTML inside a zip works. WebView never learns about `zip:`/`ssh:`; a
   future `_vfs` gateway + `WebAccessPolicy` is the way to expose other
   providers, not provider aliases.
-- **UI wiring.** `FileListScreen` accepts `folderOverride` and node callbacks;
+- **UI wiring.** `FolderContent` accepts `folderOverride` and node callbacks;
   `FileManagerApp` keeps `FileTab.folder` plus flat folder back/forward
   stacks, enters `ArchiveFolder` on archive open, and displays
   `WebContent` for HTML/URL renderers. A `WebRendererSession` is kept per tab
@@ -250,9 +251,9 @@ file-manager/
   takes the tab over, another location opens) loses nothing but the cache: the
   pages visited are already stops of the tab. It is still not a full per-tab
   `NavTarget`.
-- **Agent.** `AgentEnvironment.nodeService` is injected with
-  `DefaultNodeService`. `archive_list`/`archive_read`/`archive_copy` are
-  read-only and never teach the daemon or hub about archives.
+- **Agent.** Archive tools resolve through `Vfs.node` like any other caller;
+  there is no injected node service. `archive_list`/`archive_read`/`archive_copy`
+  are read-only and never teach the daemon or hub about archives.
 - **Do not** register a second provider for the same scheme to add terminal,
   browser or editor features. `Vfs` scheme routing stays strict; new features
   add services/renderers, not providers.
@@ -262,18 +263,18 @@ file-manager/
 | Task | Location | Notes |
 |------|----------|-------|
 | UI screens | `app/.../FileManagerApp.kt` | Main composable, tabs, state |
-| File listing | `app/.../ui/screens/FileListScreen.kt` | LazyColumn, pull-to-refresh |
+| File listing | `app/.../render/FolderContent.kt` | LazyColumn, pull-to-refresh; error policy from `FolderRendererSession` |
 | Settings | `app/.../ui/screens/SettingsActivity.kt` | Root/shell toggles, su path → `DaemonManager` |
 | File operations | `core/.../Vfs.kt` | Scheme-strict routing + node facade (`provider.node` mints the node); UI only calls this |
 | Node/view model | `core/.../VNode.kt` | `VNode`/`VFile`/`VFolder`; identity is `Path`, views are `!` levels |
-| Node service | `app/.../DefaultNodeService.kt` | Resolves a `Path`: provider part, then one `Openers.openFolder` per `!` level |
-| Node operations | `core/.../VNode.kt`, `core/.../Vfs.kt` | `rename`/`delete`/`create`/`mkdir`/`destination` on nodes; `Vfs.copyTo(source, target)` takes two nodes — no operation formats a path |
-| Open-with table | `opener/.../OpenRouter.kt` + `app/.../OpenRoutes.kt` | Generic `OpenRouter<C, R>` in `:opener`; app registers opener/renderer/external order (no per-scheme route) |
+| Address → node | `core/.../Vfs.kt` | `Vfs.node(Path)`: provider part, then one `ViewOpeners.enter` per `!` level |
+| Node operations | `core/.../VNode.kt`, `core/.../NodeOps.kt` | `rename`/`delete`/`create`/`mkdir`/`destination` on nodes; `NodeOps.copyTo(source, target)` takes two nodes — no operation formats a path |
+| Open-with table | `opener/.../OpenRouter.kt` + `app/.../OpenTable.kt` | `OpenRouter<C, R>`/`OpenRule<C, R>` in `:opener`; `OpenTable` registers view/renderer/external order (no per-scheme route) |
 | Archive view | `opener/.../ArchiveFolder.kt` + `opener/.../ZipArchiveSource.kt` | Opener-owned view; core knows only `VFile`/`VFolder` |
 | Renderers | `app/.../render/Renderer.kt` | `RenderTarget`, `Renderers`, `RenderHost` (Directory + Web + Editor) |
-| Openers route | `opener/.../Opener.kt` | Format-agnostic SPI + priority registry; archive implementation lives beside it |
+| Openers route | `core/.../ViewOpener.kt` | Format-agnostic SPI + priority registry; archive implementation lives in `:opener` |
 | HTML/WebView | `app/.../render/WebRenderer.kt` | `DocumentView`, `HtmlDocument`, `WebContent` |
-| Agent archive tools | `agent/.../AgentTools.kt` | `archive_list`/`archive_read`/`archive_copy` via `NodeService` |
+| Agent archive tools | `agent/.../AgentTools.kt` | `archive_list`/`archive_read`/`archive_copy` via `Vfs.node` |
 | Provider locations | `app/.../store/LocationsRepository.kt` | Location entries + actions for SAF/FTP/SFTP/local/remote |
 | Location stores | `app/.../store/LocationStores.kt` | App-owned SQLite/preferences/encrypted stores passed to providers |
 | Provider implementations | `provider/.../` | Protocol domains with internal location subinstances |
@@ -380,6 +381,12 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
 
 ## NOTES
 
+- Kotlin incremental compilation caches go stale after source files are moved or
+  deleted; the Compose compiler then dies with
+  `kotlin.NotImplementedError: An operation is not implemented: Unknown file`
+  (`IrUtilsKt.getFile` → `InferenceFunctionDeclaration.toScheme`). This is a
+  cache fault, not a code fault: rebuild with `./gradlew clean <task>` and the
+  same sources compile.
 - Target SDK 28 avoids storage restrictions needed by root features.
 - `DaemonManager.startHub()` runs the communication hub (bootstrap in
   [`hub/Hub.kt`]): an unauthenticated UDS server with a fresh random
@@ -608,3 +615,74 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
 
 - [ ] `provider/.../SftpProvider.kt`: verify SFTP preview/read across forward and backward seeks and EOF against a real server.
 - [ ] `provider/.../remote/SshExecBackend.kt`: verify `ssh://` seeks, sequential copy progress and cancellation against a real server with `tail -c +N` support.
+- [ ] `core/.../VNode.kt` + `core/.../FileProvider.kt`: verify `writable`/`liveAddress`/`liveReferer`/`peek`/`withReferer` on local, container, SAF, document, FTP, SFTP, SSH, AList, HTTP and archive nodes.
+- [ ] `core/.../ResolvedProvider.kt` + `provider/.../LocalProvider.kt`: verify bare paths and `file:///` addresses still reach the local daemon and every other provider keeps its inner-path spelling.
+- [ ] `daemon/.../process/ExecService.kt` + `hub/.../HubServer.kt`: verify hub PTY and pipe EXEC still pass descriptors, wait with the 15 min bound, resize, signal and close through run0/native clients.
+- [ ] `agent/.../AgentFileAccess.kt`: verify offset reads/writes, EOF, directory listing and glob through `FileService` on host and container targets, including cross-container copy.
+- [ ] `agent/.../SystemPrompt.kt` + `agent/.../AgentTools.kt`: verify approval reasons and target roots with `container://` addresses and `container-` hub ids.
+- [ ] `container/.../ContainerUris.kt` + `container/.../ContainerPaths.kt` + `container/.../ContainerProvider.kt`: verify here reveal, terminal drop, container root navigation and provider roots.
+- [ ] `provider/.../ProviderSchemes.kt`: verify add-location, drawer and web-location flows for `ftp`, `sftp`, `ssh`, `alist`, `http` and `https`.
+- [ ] `agent/build.gradle.kts` + `hub/build.gradle.kts`: verify the `:container` dependency does not change runtime initialization or APK packaging.
+- [ ] `core/.../Vfs.kt`: verify `Vfs.node(Path)` walks nested `!` levels (zip in zip, URL→zip, archive in container) and still resolves view-free paths through one provider lookup.
+- [ ] `core/.../Vfs.kt` + `app/.../Providers.kt`: verify an address with a view level fails clearly when no `ViewOpener` is registered, and the `ArchiveOpener` registration still reaches `Vfs` at startup.
+- [ ] `core/.../Navigator.kt`: verify history restore (`restore(path)`) lands on the same node without a service argument.
+- [ ] `app/.../forward/ForwardFileProvider.kt`: verify a zip-member `content://` still streams, and a live URL keeps its referer.
+- [ ] `agent/.../AgentTools.kt`: verify `archive_list`/`archive_read`/`archive_copy` resolve through `Vfs.node` on host and container targets.
+- [ ] `core/.../ViewOpener.kt` + `opener/.../ArchiveOpener.kt`: verify zip open/list after the `VFile`→`VFolder` signature change.
+- [ ] `core/.../NodeOps.kt`: verify copy/move across providers, same-provider rename, folder copy and link streaming still behave like the old `Vfs` code.
+- [ ] `app/.../FileManagerApp.kt`: verify `navigateTo(view=)` keeps plain provider directories writable/shareable (no `Folder` as a view hint) and typed addresses, home rows and history still open.
+- [ ] `core/.../Vfs.kt`: verify invalid address text returns `Result.failure` instead of throwing from `Vfs.node`/`folder`/`file`.
+- [ ] `core/.../Vfs.kt`: verify `folder`/`file`/`stat` now suspend and view-aware; agent read/write/list and the drawer root stats still work.
+- [ ] `app/.../forward/ForwardFileProvider.kt`: verify share/open/query after unifying `Target` (zip member, live URL referer, `getType` fallback).
+- [ ] `opener/.../OpenRouter.kt` + `app/.../OpenTable.kt`: verify rule order still yields archive folder → renderer → external, and a broken archive still reports failure instead of opening externally.
+- [ ] `app/.../FileManagerApp.kt`: verify `folderFor` copy/paste destination on plain and archive tabs.
+- [ ] `provider/.../SAFProvider.kt` + `core/.../ProviderUnavailableException.kt`: verify a stopped DocumentsProvider app produces the typed unavailable failure from `list`/`stat`/`open` instead of "not a folder", an empty folder, or "not found".
+- [ ] `provider/.../SAFProvider.kt`: verify a SAF tree root still opens as a directory while the target app is not running, and that a genuinely deleted document still reports not-found rather than unavailable.
+- [ ] `provider/.../SAFProvider.kt`: verify null-cursor classification against a provider that returns empty cursors for missing documents and against a revoked tree grant.
+- [ ] `core/.../VNode.kt` + `core/.../Folder.kt`: verify `VFolder.listWithNodes()` returns the same entries and nodes as `list()` + `listNodes()` on every provider and archive folder.
+- [ ] `opener/.../ArchiveFolder.kt`: verify `list()` and `listWithNodes()` still report nested archive entries and directory flags identically.
+- [ ] `app/.../render/FolderContent.kt`: verify a large folder lists in one listing round trip, never flashes "empty folder" during the first load, and scrolls without dropped frames.
+- [ ] `app/.../render/FolderContent.kt`: verify refresh, filter, sort and back-navigation scroll restore still work after moving sort/map work to `Dispatchers.IO`.
+- [ ] `app/.../ui/util/Formatters.kt`: verify modified time and size text still render correctly with the cached `DateFormat` after a locale change.
+- [ ] `app/.../FileManagerApp.kt`: verify selection survives refresh with selected rows and starts empty after refresh with none selected.
+- [ ] `core/.../Plugin.kt`: verify `Plugins` ordering, id replacement, `installAll` failure isolation, and that a plugin-registered provider/opener/content type behaves like a built-in.
+- [ ] `core/.../FileProvider.kt`: verify the `ProviderFeature` value class keeps toolbar create actions and `entries` parity on local, container, SAF, FTP, SFTP, SSH, AList and HTTP providers.
+- [ ] `core/.../ContentInfo.kt`: verify the new extension registrations (vue/svelte/wmv/3gp/wma/jsonc/gradle/...) and a runtime `ContentTypes.register` both reach icons, text detection and `describe()`.
+- [ ] `provider/.../ProviderSchemes.kt`: verify `registerRemote`/`registerWeb`/`unregister` change add-location parsing and drawer grouping while built-in schemes stay unchanged.
+
+## TODO - Code quality review
+
+- [ ] `agent/build.gradle.kts` + `hub/build.gradle.kts`: remove the `:container` dependency by moving `ContainerUris`/`ContainerUriResolver` to `:core` or `:daemon`; verify `:agent`/`:hub` no longer pull `:pulse`/`:wayland` at runtime.
+- [ ] `agent/.../SystemPrompt.kt` + `agent/.../AgentTools.kt` + `hub/.../HubServer.kt`: replace the three target-catalog implementations with one `:daemon` catalog; fix the existing `startsWith(CONTAINER_PREFIX)` vs `isContainerHubId()` drift.
+- [ ] `app/.../ui/components/FileDrawer.kt` + `app/.../ui/components/drawer/DialogAddLocation.kt` + `app/.../ui/components/drawer/RemoteLocationTools.kt`: replace the hardcoded ftp/sftp/ssh/alist/http dispatch and protocol-specific fields with a registered remote-protocol descriptor; verify a plugin scheme no longer falls through to local path.
+- [ ] `app/.../FileManagerApp.kt`: replace the nine `is Folder` checks with a `VFolder` capability (`isView`/`addressable`); verify plugin/custom folders navigate, bookmark and go Up like built-ins.
+- [ ] `core/.../Path.kt` + `opener/.../ArchiveFolder.kt`: represent a view root explicitly (or escape `!`); verify `a.zip!` and `a.zip` are different addresses, `child("a!b")` round-trips, and `parent()` of an entry does not collapse to the backing file.
+- [ ] `core/.../Path.kt`: lowercase scheme on parse and compare case-insensitively; verify `HTTP://host/path` reaches `HttpProvider`.
+- [ ] `core/.../Vfs.kt` + `core/.../Folder.kt` + `core/.../NodeOps.kt` + `opener/.../Archives.kt`: replace `runCatching` around suspend code with a helper that rethrows `CancellationException`; verify cancellation aborts node walks, listings and archive opens.
+- [ ] `app/.../OpenTable.kt`: stop swallowing `RendererFactory.create` failures as "unsupported"; verify a failing renderer reports `AppOpenOutcome.Failure` instead of opening externally.
+- [ ] `core/.../FileProvider.kt` + `provider/.../web/HttpProvider.kt` + `app/.../Providers.kt`: replace the single `scheme` with a `schemes` set; verify `http`/`https` register and unregister as one provider.
+- [ ] `core/.../FileProvider.kt`: remove or use the unused `authority`; make `ProviderFeature` reflect real operations and stop `LocalProvider`/`ContainerProvider` advertising `PTY`/`SYMLINK` they do not implement.
+- [ ] `core/.../ContentInfo.kt` + `opener/.../ArchiveOpener.kt`: unify the MIME table, `archiveMimes`/`codeMimes` and the opener extension whitelist; verify a plugin-registered archive/code MIME gets the right `ContentKind` and opener.
+- [ ] `core/.../Plugin.kt`: expose renderers, location kinds, open rules and `ContentKind` through `PluginHost`, or stop claiming plugin parity with built-ins; verify a plugin can add each contribution without editing app code.
+- [ ] `app/.../store/LocationsRepository.kt`: make the kind list ordered/overridable with collision checks; stop constructing new `RemoteProviders` per `records()` call and stop hand-building `saf://`/`ftp://`/`sftp://` roots.
+- [ ] `opener/.../Archives.kt`: add bounded eviction and invalidation (mtime/size) to the process-wide archive cache; verify replacing a zip does not return a stale index and fds are released.
+- [ ] `app/.../TerminalSheet.kt` + `app/.../agent/SessionManager.kt` + `app/.../ui/components/SessionManagerDialog.kt` + `app/.../util/ProcessHelper.kt`: replace `ssh://` string checks and the duplicated `SessionType.Ssh` fields with a terminal-profile service; verify SSH terminals, cwd and drops without scheme inspection in the UI.
+- [ ] `agent/.../AgentFileAccess.kt` + `agent/.../SystemPrompt.kt`: replace `contains("://")` and the `"file"`/`container` scheme special cases with `Path` parsing; verify a local file named `a://b` is not misrouted.
+- [ ] `daemon/.../DaemonManager.kt` + `container/.../ContainerPaths.kt`: expose `host`/`app` target ids as constants or a sealed type; verify no module compares raw `"host"`/`"app"` strings.
+- [ ] `container/.../ContainerProvider.kt`: stop parsing provider inner paths with `Path.parse`, stop hand-building `container://` roots, reuse `ContainerManager`'s containers directory, and make `stat("/")` succeed before the first container exists.
+- [ ] `app/.../model/LocationAddress.kt`: remove the second URI parser/builder; parse and format through `Path`; verify userinfo/IPv6/port spellings match core.
+- [ ] `provider/.../SAFProvider.kt`: normalize indentation/comments, replace manual `saf://` strings, use the location title for the root entry name, and verify `resolveDoc` uses the correct DocumentFile API.
+- [ ] `app/.../ui/util/FileOpen.kt`: make `shareEntries` resolve nodes instead of `FileEntry.path`; verify archive entries share and open without a pseudo `/docs/x` address.
+- [ ] `app/.../render/HtmlDocument.kt`: resolve absolute `/...` references from the origin root and percent-decode segments; verify `/logo.png` in `/docs/page.html` loads the provider root asset.
+- [ ] `app/.../render/FolderListing.kt`: replace the first-entry `realPath` heuristic with a folder/provider fact; verify an empty internal-storage folder still reports internal.
+- [ ] `app/.../FileManagerApp.kt`: delete the dead `folderLabel` fallback that hand-builds addresses and checks `is Folder`.
+- [ ] `app/.../FileManagerApp.kt` + `app/.../ui/components/FileDrawer.kt` + `app/.../TerminalSheet.kt` + `hub/.../HubServer.kt`: split the god objects (3261/1549/708/822 lines) into navigation, copy, dialog and terminal controllers; verify no behavior change.
+- [ ] `app/.../render/Renderer.kt`: split the 20+ method `RenderHost` into navigation/file-action/home hosts; verify web, editor, folder and Home renderers keep their used callbacks.
+- [ ] `proto/hub.proto`: split `Target.name` (exec id vs location root URI) into separate fields or a oneof; update hub/agent clients and verify `ListTargets` consumers.
+- [ ] `agent/.../AgentTools.kt` + `agent/.../SystemPrompt.kt`: replace the five scattered tool-name switches with a registered `Tool` descriptor; verify definitions, execution, approval and prompt text stay in sync.
+- [ ] `core/.../Folder.kt` + `opener/.../ArchiveFolder.kt`: deduplicate `describe()` and prefer `peek`/metadata; verify opening a remote file in the external viewer no longer downloads the whole body first.
+- [ ] `app/.../render/FolderListing.kt` + `opener/.../ArchiveOpener.kt` + `container/.../ContainerProvider.kt` + `app/.../WebPagePolicy.kt`: add `Locale.ROOT` to every `lowercase()` used for sorting, extension and MIME comparison; verify Turkish locale.
+- [ ] `core/.../Vfs.kt`: synchronize provider registration/unregistration and clear `default` when its provider is unregistered; verify plugin install/uninstall from a background thread.
+- [ ] `core/.../Path.kt` + `app/.../FileManagerApp.kt`: make `parent()` and `navigate("..")` agree at a host root (`container://alpine`, `saf://hex`); verify Up reaches the scheme root.
+- [ ] `core/.../NodeOps.kt`: stop treating every `Vfs.node` failure as "destination missing"; verify permission/transport errors surface instead of creating or overwriting a file.
+- [ ] `agent/.../SystemPrompt.kt`: stop using the hub `ReadFileRequest` proto for a local `/etc/issue` read; use the agent file API.

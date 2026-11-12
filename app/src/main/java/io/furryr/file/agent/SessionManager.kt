@@ -6,6 +6,7 @@ import android.content.Context
 import android.util.Log
 import io.furryr.file.RuntimeForegroundService
 import io.furryr.file.container.ContainerManager
+import io.furryr.file.container.ContainerUris
 import io.furryr.file.pulse.PulseManager
 import io.furryr.file.wayland.WaylandManager
 import io.furryr.file.daemon.DaemonManager
@@ -358,7 +359,7 @@ object SessionManager {
         // spawn inside TerminalSession is fast.
         withContext(Dispatchers.IO) { DaemonManager.warmNamed(containerName).getOrThrow() }
         return createTerminalSession(
-            "container://$containerName",
+            ContainerUris.command(containerName),
             context,
             customCwd = "/",
             startPath = startPath,
@@ -418,7 +419,7 @@ object SessionManager {
         val cwd = customCwd ?: context.filesDir.absolutePath
         Hub.start(context)
         val env = DEFAULT_ENV.toMutableList().apply {
-            if (shell.startsWith("container://")) {
+            if (ContainerUris.isContainer(shell)) {
                 PulseManager.environment().forEach { (key, value) -> add("$key=$value") }
                 WaylandManager.environment(context).forEach { (key, value) -> add("$key=$value") }
                 startPath?.let { add("CONTAINER_START_PATH=$it") }

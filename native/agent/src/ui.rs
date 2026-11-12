@@ -15,8 +15,11 @@ const MIN_INPUT_TEXT_ROWS: u16 = 3;
 const MAX_INPUT_TEXT_ROWS: u16 = 8;
 const INPUT_TOP_PADDING: u16 = 1;
 const APPROVAL_ROWS: u16 = 5;
-const POPUP_PAD_X: u16 = 3;
-const POPUP_PAD_Y: u16 = 1;
+const POPUP_PAD_X: u16 = 4;
+const POPUP_PAD_Y: u16 = 2;
+const COMMAND_PAD_X: u16 = 3;
+const COMMAND_PAD_Y: u16 = 1;
+const COMMAND_MAX_ROWS: u16 = 8;
 const MODE: &str = "Build";
 
 #[derive(Default)]
@@ -400,41 +403,45 @@ fn draw_command_overlay(frame: &mut Frame, app: &App, input_area: Rect, area: Re
         return;
     }
     let matches = app.command_matches();
-    let height = (matches.len().max(1) as u16 + 2).min(8);
-    let natural = matches
-        .iter()
-        .map(|(command, hint)| command.len() + hint.len() + 4)
-        .max()
-        .unwrap_or("no matching command".len());
-    let width = ((natural as u16) + POPUP_PAD_X * 2)
-        .clamp(28, 72)
-        .min(area.width.saturating_sub(2));
+    // The completion bar is a continuation of the input block: same left edge,
+    // same width.
+    let width = input_area.width;
+    let space_above = input_area.y.saturating_sub(area.y);
+    let height = (matches.len().max(1) as u16 + COMMAND_PAD_Y * 2)
+        .min(space_above.max(1))
+        .min(COMMAND_MAX_ROWS + COMMAND_PAD_Y * 2);
+    let content_rows = height.saturating_sub(COMMAND_PAD_Y * 2).max(1);
+    let pad_y = COMMAND_PAD_Y.min(height.saturating_sub(content_rows) / 2);
     let box_area = Rect {
-        x: input_area.x + (input_area.width.saturating_sub(width)) / 2,
+        x: input_area.x,
         y: input_area.y.saturating_sub(height),
         width,
         height,
     };
     frame.render_widget(Clear, box_area);
     frame.buffer_mut().set_style(box_area, theme::popup_bg());
+    let inner_x = box_area.x + COMMAND_PAD_X;
+    let inner_width = box_area.width.saturating_sub(COMMAND_PAD_X * 2);
     if matches.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled("no matching command", theme::muted())),
             Rect {
-                x: box_area.x + POPUP_PAD_X,
-                y: box_area.y + POPUP_PAD_Y,
-                width: box_area.width.saturating_sub(POPUP_PAD_X * 2),
+                x: inner_x,
+                y: box_area.y + pad_y,
+                width: inner_width,
                 height: 1,
             },
         );
         return;
     }
-    let rows = height.saturating_sub(2) as usize;
-    let start = app.command_selection().saturating_sub(rows.saturating_sub(1));
+    let rows = content_rows as usize;
+    let start = app
+        .command_selection()
+        .saturating_sub(rows.saturating_sub(1));
     for (offset, (command, hint)) in matches.iter().skip(start).take(rows).enumerate() {
         let index = start + offset;
         let selected = index == app.command_selection();
-        let y = box_area.y + 1 + offset as u16;
+        let y = box_area.y + pad_y + offset as u16;
         frame.buffer_mut().set_style(
             Rect {
                 x: box_area.x,
@@ -453,15 +460,18 @@ fn draw_command_overlay(frame: &mut Frame, app: &App, input_area: Rect, area: Re
         } else {
             theme::text()
         };
+        let used = UnicodeWidthStr::width(*command) + UnicodeWidthStr::width(*hint);
+        let gap = (inner_width as usize).saturating_sub(used);
+        let gap = if gap > 1 { gap } else { 2 };
+        let mut spans = vec![Span::styled((*command).to_owned(), style)];
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled((*hint).to_owned(), theme::muted()));
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled((*command).to_owned(), style),
-                Span::styled(format!("  {hint}"), theme::muted()),
-            ])),
+            Paragraph::new(Line::from(spans)),
             Rect {
-                x: box_area.x + POPUP_PAD_X,
+                x: inner_x,
                 y,
-                width: box_area.width.saturating_sub(POPUP_PAD_X * 2),
+                width: inner_width,
                 height: 1,
             },
         );
@@ -479,6 +489,7 @@ fn format_tokens(tokens: u64) -> String {
 }
 
 enum PopupRow {
+    Blank,
     Group(String),
     Item(usize),
 }
@@ -499,6 +510,9 @@ fn draw_popup(frame: &mut Frame, popup: &Popup, area: Rect) {
         };
         if item.group.is_some() && item.group != seen {
             seen = item.group.clone();
+            if !rows.is_empty() {
+                rows.push(PopupRow::Blank);
+            }
             rows.push(PopupRow::Group(item.group.clone().unwrap_or_default()));
         }
         rows.push(PopupRow::Item(*index));
@@ -520,12 +534,13 @@ fn draw_popup(frame: &mut Frame, popup: &Popup, area: Rect) {
         .unwrap_or(0)
         .max(UnicodeWidthStr::width(popup.title));
     let width = ((natural as u16).saturating_add(POPUP_PAD_X * 2))
-        .clamp(30, 78)
+        .clamp(34, 84)
         .min(area.width.saturating_sub(4));
+    let chrome = POPUP_PAD_Y * 2 + 2 + u16::from(popup.searchable);
     let content_rows = (rows.len() as u16)
-        .min(area.height.saturating_sub(7))
+        .min(area.height.saturating_sub(chrome))
         .max(1);
-    let height = content_rows + POPUP_PAD_Y * 2 + 2 + u16::from(popup.searchable);
+    let height = content_rows + chrome;
     let box_area = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -564,7 +579,8 @@ fn draw_popup(frame: &mut Frame, popup: &Popup, area: Rect) {
         );
     }
 
-    let list_y = title_y + 1 + u16::from(popup.searchable);
+    // One blank row separates the title/search from the list.
+    let list_y = title_y + 2 + u16::from(popup.searchable);
     let visible_target = content_rows as usize;
     let selected_row = rows
         .iter()
@@ -574,6 +590,7 @@ fn draw_popup(frame: &mut Frame, popup: &Popup, area: Rect) {
     for (offset, row) in rows.iter().skip(start).take(visible_target).enumerate() {
         let y = list_y + offset as u16;
         match row {
+            PopupRow::Blank => {}
             PopupRow::Group(group) => {
                 frame.render_widget(
                     Paragraph::new(Span::styled(

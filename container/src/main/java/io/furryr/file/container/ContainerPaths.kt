@@ -4,6 +4,7 @@ import android.content.Context
 import android.system.Os
 import android.system.OsConstants
 import android.system.StructStat
+import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.HubCallerRoot
 import java.io.File
 
@@ -12,7 +13,7 @@ object ContainerPaths {
     /** Resolve an authenticated hub container id to the caller's filesystem root. */
     fun callerRoot(context: Context, containerId: String): HubCallerRoot {
         if (containerId == "host" || containerId == "app") return HubCallerRoot(null, "/")
-        val name = containerId.removePrefix(CONTAINER_PREFIX)
+        val name = containerId.removePrefix(DaemonManager.CONTAINER_PREFIX)
         require(name != containerId && name.isNotEmpty()) { "invalid container id '$containerId'" }
         val container = ContainerManager.getContainer(context, name)
             ?: error("container '$name' not found")
@@ -29,7 +30,7 @@ object ContainerPaths {
             val mappings = mappings(context, caller)
             val mapping = effectiveMapping(mappings, guest)
             // A private mount has no host pathname; keep the caller's view.
-            if (mapping.host == null) return "container://${caller.name}$guest"
+            if (mapping.host == null) return ContainerUris.forContainer(caller.name, guest)
             hostPath(mappings, guest, followFinal = false)
         } else {
             guest
@@ -44,15 +45,15 @@ object ContainerPaths {
                 .sortedByDescending { File(it.rootfsPath).canonicalPath.length }
                 .firstNotNullOfOrNull { container ->
                     guestPath(context, container, host, stat, privateOnly = true)
-                        ?.let { "container://${container.name}$it" }
+                        ?.let { ContainerUris.forContainer(container.name, it) }
                 }
             if (other != null) return other
-            return "container://${caller.name}$guest"
+            return ContainerUris.forContainer(caller.name, guest)
         }
         for (container in containers.sortedByDescending { File(it.rootfsPath).canonicalPath.length }) {
             val containerPath = guestPath(context, container, host, stat, privateOnly = true)
                 ?: continue
-            return "container://${container.name}$containerPath"
+            return ContainerUris.forContainer(container.name, containerPath)
         }
         return host
     }
@@ -69,7 +70,7 @@ object ContainerPaths {
         } else {
             guest
         }
-        if (root.containerName != null && target == "$CONTAINER_PREFIX${root.containerName}") return guest
+        if (root.containerName != null && target == "${DaemonManager.CONTAINER_PREFIX}${root.containerName}") return guest
         if (target == "host" || target == "app") return host
         val container = containerForTarget(context, target)
         return guestPath(context, container, host)
@@ -83,7 +84,7 @@ object ContainerPaths {
                 ?: error("container '$it' not found")
         }
         var sourceRoot: String? = null
-        val host = if (path.startsWith("container://")) {
+        val host = if (ContainerUris.isContainer(path)) {
             val source = ContainerUriResolver.resolveContainerUri(path).getOrThrow()
             val name = requireNotNull(source.containerName) { "select a container entry" }
             if (name == targetContainer?.name) return source.containerPath
@@ -107,7 +108,8 @@ object ContainerPaths {
 
     private fun containerNameForTarget(target: String): String? = when {
         target == "host" || target == "app" -> null
-        target.startsWith(CONTAINER_PREFIX) -> target.removePrefix(CONTAINER_PREFIX)
+        target.startsWith(DaemonManager.CONTAINER_PREFIX) ->
+            target.removePrefix(DaemonManager.CONTAINER_PREFIX)
         else -> target
     }
 
@@ -204,6 +206,4 @@ object ContainerPaths {
     }
 
     private data class Mapping(val host: String?, val guest: String, val privateToContainer: Boolean)
-
-    private const val CONTAINER_PREFIX = "container-"
 }

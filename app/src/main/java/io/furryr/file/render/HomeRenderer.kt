@@ -6,9 +6,9 @@ import androidx.compose.material.icons.filled.FilterAlt
 import io.furryr.file.R
 
 /**
- * Home is a view, not a file, so it has no [RendererSession]. It still owns a
- * renderer menu so the overflow sheet is assembled from the active view rather
- * than from a fixed list in the activity.
+ * Shared Home path bar and overflow menu. The live view is a
+ * [HomeRendererSession]; these pieces stay here so every Home session reports
+ * the same title and filter action.
  */
 object HomeRenderer {
     /**
@@ -22,13 +22,13 @@ object HomeRenderer {
 
     fun menuItems(
         context: Context,
-        host: RenderHost,
+        onToggleFilter: () -> Unit,
     ): List<RendererMenuItem> = listOf(
         RendererMenuItem(
             title = context.getString(R.string.filter_title),
             icon = Icons.Default.FilterAlt,
         ) {
-            host.toggleFilter()
+            onToggleFilter()
         },
     )
 }

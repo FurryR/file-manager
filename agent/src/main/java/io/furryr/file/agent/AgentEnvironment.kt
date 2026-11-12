@@ -1,7 +1,5 @@
 package io.furryr.file.agent
 
-import io.furryr.file.core.NodeService
-
 /**
  * App-owned services the agent needs. The app installs every callback at
  * startup; the agent never reads Android preferences directly.
@@ -72,13 +70,6 @@ object AgentEnvironment {
      */
     @Volatile
     var modelContextWindow: ((String) -> Long?)? = null
-
-    /**
-     * Kotlin-side node access for archive entries. The app installs this; the
-     * agent never parses a zip itself and never teaches the daemon about one.
-     */
-    @Volatile
-    var nodeService: NodeService? = null
 }
 
 data class AgentAiConfig(
@@ -101,6 +92,8 @@ data class AgentAiProvider(
     val kind: String = AGENT_PROVIDER_COMPATIBLE,
     /** User-configured or previously fetched model metadata. */
     val models: List<AgentModelConfig> = emptyList(),
+    /** A fixed-endpoint preset, safe to price from the shared model database. */
+    val wellKnown: Boolean = false,
 )
 
 /** Per-model limits, prices and capabilities shown in the app settings. */

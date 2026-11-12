@@ -159,6 +159,7 @@ private fun SettingsMainPage(
     var showColorSchemeDialog by remember { mutableStateOf(false) }
     var showSearchEngineDialog by remember { mutableStateOf(false) }
     var searchEngine by remember { mutableStateOf(SearchSettings.current(context)) }
+    var searchSuggestions by remember { mutableStateOf(SearchSettings.suggestionsEnabled(context)) }
     var amoledBlack by remember { mutableStateOf(PaletteStore.amoled(context)) }
     var showAboutDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -265,6 +266,16 @@ private fun SettingsMainPage(
                 title = stringResource(R.string.settings_search_engine),
                 value = searchEngine.label,
                 onClick = { showSearchEngineDialog = true },
+            )
+            SettingsDivider()
+            SettingsToggleRow(
+                title = stringResource(R.string.settings_search_suggestions),
+                description = stringResource(R.string.settings_search_suggestions_desc),
+                checked = searchSuggestions,
+                onCheckedChange = { enabled ->
+                    searchSuggestions = enabled
+                    SearchSettings.setSuggestionsEnabled(context, enabled)
+                },
             )
             SettingsDivider()
 

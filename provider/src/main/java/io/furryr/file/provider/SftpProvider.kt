@@ -35,9 +35,10 @@ import java.util.Vector
  * transfers do not share a single channel's I/O thread.
  */
 object SftpProvider : FileProvider {
-    override val scheme: String get() = "sftp"
+    override val scheme: String get() = ProviderSchemes.SFTP
     override val authority: String? get() = null
     override val label: String get() = "SFTP Location"
+    override val writable: Boolean get() = false
     override val features: Set<ProviderFeature> get() = setOf(
         ProviderFeature.LIST, ProviderFeature.STAT,
         ProviderFeature.CREATE_FILE, ProviderFeature.CREATE_DIR,

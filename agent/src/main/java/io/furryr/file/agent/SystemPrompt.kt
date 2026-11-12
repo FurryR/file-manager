@@ -1,5 +1,6 @@
 package io.furryr.file.agent
 
+import io.furryr.file.container.ContainerUris
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.daemon.HubActions
@@ -59,7 +60,8 @@ internal object SystemPrompt {
             val elevated = if (endpoint?.elevated == true) ", elevated" else ""
             val root = when {
                 name == "host" -> " file:///"
-                name.startsWith("container-") -> " container://${name.removePrefix("container-")}"
+                name.startsWith(DaemonManager.CONTAINER_PREFIX) ->
+                    " " + ContainerUris.forContainer(DaemonManager.hubDisplayName(name))
                 else -> ""
             }
             val marker = if (name == current) "current, " else ""
@@ -72,7 +74,7 @@ internal object SystemPrompt {
         return entries.joinToString(", ")
     }
 
-    private fun displayTarget(name: String): String = name.removePrefix("container-")
+    private fun displayTarget(name: String): String = DaemonManager.hubDisplayName(name)
 }
 
 /**
@@ -129,7 +131,7 @@ internal object AgentPolicy {
             }
             when {
                 requested != null && requested != targetName ->
-                    "exec in another target: ${requested.removePrefix("container-")}"
+                    "exec in another target: ${DaemonManager.hubDisplayName(requested)}"
                 outsideCwd != null -> "exec outside the workspace: $outsideCwd"
                 else -> null
             }
@@ -149,13 +151,13 @@ internal object AgentPolicy {
             // container://name/...) can still be inside the workspace or /tmp;
             // every other protocol is a separate domain and always asks.
             val scheme = path.substringBefore("://")
-            if (scheme != "file" && scheme != "container") return path
+            if (scheme != "file" && scheme != ContainerUris.SCHEME) return path
             val rest = path.substringAfter("://")
             val slash = rest.indexOf('/')
             if (slash < 0) return path
-            if (scheme == "container") {
-                val container = rest.substring(0, slash).removePrefix("container-")
-                if (container != targetName.removePrefix("container-")) return path
+            if (scheme == ContainerUris.SCHEME) {
+                val container = ContainerUris.containerName(path) ?: return path
+                if (container != DaemonManager.hubDisplayName(targetName)) return path
             }
             rest.substring(slash)
         } else {

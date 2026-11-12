@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.annotation.StringRes
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -23,11 +24,15 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -46,6 +51,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -82,55 +88,83 @@ class AgentProvidersActivity : ComponentActivity() {
 }
 
 private data class ProviderPreset(
-    val label: String,
-    val providerName: String,
+    val id: String,
+    @StringRes val label: Int,
+    @StringRes val hint: Int,
     val baseUrl: String,
     val kind: String,
-    val hint: String,
+    val fixedUrl: Boolean,
+    val generic: Boolean = false,
+    val legacyBaseUrls: List<String> = emptyList(),
 )
 
 private val PRESETS = listOf(
     ProviderPreset(
-        "OpenCode",
-        "OpenCode",
-        "https://opencode.ai/zen/v1",
-        AGENT_PROVIDER_COMPATIBLE,
-        "OpenCode Zen (Chat Completions)",
+        id = "opencode_go",
+        label = R.string.agent_provider_type_opencode_go,
+        hint = R.string.agent_provider_hint_opencode_go,
+        baseUrl = "https://opencode.ai/inference/go/openai/v1",
+        kind = AGENT_PROVIDER_COMPATIBLE,
+        fixedUrl = true,
     ),
     ProviderPreset(
-        "OpenRouter",
-        "OpenRouter",
-        "https://openrouter.ai/api/v1",
-        AGENT_PROVIDER_COMPATIBLE,
-        "OpenRouter aggregated models",
+        id = "opencode_zen",
+        label = R.string.agent_provider_type_opencode_zen,
+        hint = R.string.agent_provider_hint_opencode_zen,
+        baseUrl = "https://opencode.ai/inference/openai/v1",
+        kind = AGENT_PROVIDER_COMPATIBLE,
+        fixedUrl = true,
+        legacyBaseUrls = listOf("https://opencode.ai/zen/v1"),
     ),
     ProviderPreset(
-        "GLM",
-        "GLM",
-        "https://open.bigmodel.cn/api/paas/v4",
-        AGENT_PROVIDER_COMPATIBLE,
-        "Zhipu GLM",
+        id = "new_api",
+        label = R.string.agent_provider_type_new_api,
+        hint = R.string.agent_provider_hint_new_api,
+        baseUrl = "",
+        kind = AGENT_PROVIDER_COMPATIBLE,
+        fixedUrl = false,
     ),
     ProviderPreset(
-        "DeepSeek",
-        "DeepSeek",
-        "https://api.deepseek.com/v1",
-        AGENT_PROVIDER_COMPATIBLE,
-        "DeepSeek platform",
+        id = "openrouter",
+        label = R.string.agent_provider_type_openrouter,
+        hint = R.string.agent_provider_hint_openrouter,
+        baseUrl = "https://openrouter.ai/api/v1",
+        kind = AGENT_PROVIDER_COMPATIBLE,
+        fixedUrl = true,
     ),
     ProviderPreset(
-        "OpenAI Compatible",
-        "OpenAI Compatible",
-        "https://api.openai.com/v1",
-        AGENT_PROVIDER_COMPATIBLE,
-        "Chat Completions endpoint",
+        id = "glm",
+        label = R.string.agent_provider_type_glm,
+        hint = R.string.agent_provider_hint_glm,
+        baseUrl = "https://open.bigmodel.cn/api/paas/v4",
+        kind = AGENT_PROVIDER_COMPATIBLE,
+        fixedUrl = true,
     ),
     ProviderPreset(
-        "OpenAI Responses",
-        "OpenAI Responses",
-        "https://api.openai.com/v1",
-        AGENT_PROVIDER_RESPONSES,
-        "Responses API endpoint",
+        id = "deepseek",
+        label = R.string.agent_provider_type_deepseek,
+        hint = R.string.agent_provider_hint_deepseek,
+        baseUrl = "https://api.deepseek.com/v1",
+        kind = AGENT_PROVIDER_COMPATIBLE,
+        fixedUrl = true,
+    ),
+    ProviderPreset(
+        id = "compatible",
+        label = R.string.agent_provider_type_compatible,
+        hint = R.string.agent_provider_hint_compatible,
+        baseUrl = "https://api.openai.com/v1",
+        kind = AGENT_PROVIDER_COMPATIBLE,
+        fixedUrl = false,
+        generic = true,
+    ),
+    ProviderPreset(
+        id = "responses",
+        label = R.string.agent_provider_type_responses,
+        hint = R.string.agent_provider_hint_responses,
+        baseUrl = "https://api.openai.com/v1",
+        kind = AGENT_PROVIDER_RESPONSES,
+        fixedUrl = false,
+        generic = true,
     ),
 )
 
@@ -269,7 +303,7 @@ private fun ProvidersPage(onBack: () -> Unit) {
                 .padding(padding)
                 .verticalScroll(rememberScrollState()),
         ) {
-            SectionLabel("Title model")
+            SectionLabel(stringResource(R.string.agent_title_model))
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
@@ -294,7 +328,7 @@ private fun ProvidersPage(onBack: () -> Unit) {
                 }
             }
             HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-            SectionLabel("AI Provider")
+            SectionLabel(stringResource(R.string.agent_providers))
             if (providers.isEmpty()) {
                 Text(
                     stringResource(R.string.agent_provider_empty),
@@ -322,13 +356,15 @@ private fun ProvidersPage(onBack: () -> Unit) {
                     )
                     Column(modifier = Modifier.weight(1f).padding(start = 8.dp)) {
                         Text(provider.name, style = MaterialTheme.typography.bodyLarge)
+                        if (!providerUsesFixedUrl(provider)) {
+                            Text(
+                                provider.baseUrl,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                         Text(
-                            provider.baseUrl,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text(
-                            presetFor(provider).hint,
+                            stringResource(presetFor(provider).hint),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -353,16 +389,28 @@ private fun ProvidersPage(onBack: () -> Unit) {
                             .padding(horizontal = 20.dp, vertical = 4.dp),
                     ) {
                         Text(
-                            if (refreshing == provider.id) "Loading models…"
-                            else "${provider.models.size} model(s)",
+                            if (refreshing == provider.id) {
+                                stringResource(R.string.agent_title_model_loading)
+                            } else {
+                                pluralStringResource(
+                                    R.plurals.agent_provider_models_count,
+                                    provider.models.size,
+                                    provider.models.size,
+                                )
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.weight(1f),
                         )
                         TextButton(
+                            onClick = {
+                                configuring = Triple(provider.id, AgentModelConfig(id = ""), true)
+                            },
+                        ) { Text(stringResource(R.string.agent_model_add)) }
+                        TextButton(
                             enabled = refreshing == null,
                             onClick = { refreshModels(provider) },
-                        ) { Text("Refresh") }
+                        ) { Text(stringResource(R.string.refresh)) }
                     }
                     refreshError?.let {
                         if (refreshing == null) {
@@ -375,6 +423,24 @@ private fun ProvidersPage(onBack: () -> Unit) {
                         }
                     }
                     for (model in provider.models.sortedBy { it.id }) {
+                        val summary = listOfNotNull(
+                            if (model.contextWindow > 0) {
+                                stringResource(R.string.agent_model_summary_context, model.contextWindow)
+                            } else null,
+                            if (model.maxOutput > 0) {
+                                stringResource(R.string.agent_model_summary_output, model.maxOutput)
+                            } else null,
+                            if (model.inputPerMillion > 0.0 || model.outputPerMillion > 0.0) {
+                                stringResource(
+                                    R.string.agent_model_summary_price,
+                                    formatPrice(model.inputPerMillion),
+                                    formatPrice(model.outputPerMillion),
+                                )
+                            } else null,
+                            if (model.thinking) stringResource(R.string.agent_model_thinking) else null,
+                            if (model.vision) stringResource(R.string.agent_model_vision) else null,
+                        ).joinToString(" · ")
+                        val notConfigured = stringResource(R.string.agent_model_not_configured)
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
@@ -387,22 +453,14 @@ private fun ProvidersPage(onBack: () -> Unit) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(model.id, style = MaterialTheme.typography.bodyMedium)
                                 Text(
-                                    buildString {
-                                        if (model.contextWindow > 0) append("ctx ${model.contextWindow}")
-                                        if (model.maxOutput > 0) {
-                                            if (isNotEmpty()) append(" · ")
-                                            append("out ${model.maxOutput}")
-                                        }
-                                        if (model.thinking) append(" · thinking")
-                                        if (model.vision) append(" · vision")
-                                    }.ifBlank { "Not configured" },
+                                    summary.ifBlank { notConfigured },
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                             TextButton(
-                                onClick = { configuring = Triple(provider.id, model, true) },
-                            ) { Text("Edit") }
+                                onClick = { configuring = Triple(provider.id, model, false) },
+                            ) { Text(stringResource(R.string.agent_provider_edit)) }
                         }
                     }
                 }
@@ -427,10 +485,11 @@ private fun ProvidersPage(onBack: () -> Unit) {
             },
         )
     }
-    configuring?.let { (providerId, model, _) ->
+    configuring?.let { (providerId, model, isNew) ->
         val provider = providers.firstOrNull { it.id == providerId } ?: return@let
         ModelConfigDialog(
             model = model,
+            isNew = isNew,
             onDismiss = { configuring = null },
             onSave = { updated ->
                 val models = provider.models.toMutableList()
@@ -469,10 +528,27 @@ private fun SectionLabel(text: String) {
     )
 }
 
+/** Compact dollars-per-million text: 0.15, 3, 1.2345. */
+private fun formatPrice(value: Double): String {
+    if (value <= 0.0) return "0"
+    val scaled = kotlin.math.round(value * 10000.0).toLong()
+    val fraction = (scaled % 10000).toString().padStart(4, '0').trimEnd('0')
+    return if (fraction.isEmpty()) "${scaled / 10000}" else "${scaled / 10000}.$fraction"
+}
+
 private fun presetFor(provider: AgentSettings.Provider): ProviderPreset =
-    PRESETS.firstOrNull {
-        it.providerName == provider.name && it.kind == provider.kind
-    } ?: PRESETS.firstOrNull { it.kind == provider.kind } ?: PRESETS.last()
+    PRESETS.firstOrNull { provider.type.isNotBlank() && it.id == provider.type }
+        ?: PRESETS.firstOrNull {
+            it.kind == provider.kind &&
+                (it.baseUrl == provider.baseUrl || provider.baseUrl in it.legacyBaseUrls)
+        }
+        ?: PRESETS.firstOrNull { it.kind == provider.kind && it.generic }
+        ?: PRESETS.firstOrNull { it.kind == provider.kind }
+        ?: PRESETS.first()
+
+/** Fixed-endpoint providers never expose their URL: it is not editable. */
+internal fun providerUsesFixedUrl(provider: AgentSettings.Provider): Boolean =
+    presetFor(provider).fixedUrl
 
 @Composable
 private fun TitleModelDialog(
@@ -505,7 +581,7 @@ private fun TitleModelDialog(
                     value = query,
                     onValueChange = { query = it },
                     singleLine = true,
-                    label = { Text("Search models") },
+                    label = { Text(stringResource(R.string.agent_title_model_search)) },
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                 )
                 Row(
@@ -528,14 +604,14 @@ private fun TitleModelDialog(
                         modifier = Modifier.padding(top = 8.dp),
                     )
                     error != null -> Text(
-                        stringResource(R.string.agent_title_model_empty),
+                        error,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.padding(top = 8.dp),
                     )
                     filtered.isEmpty() -> Text(
                         if (query.isBlank()) stringResource(R.string.agent_title_model_empty)
-                        else "No matching model",
+                        else stringResource(R.string.agent_title_model_no_match),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 8.dp),
@@ -583,9 +659,11 @@ private fun TitleModelDialog(
 @Composable
 private fun ModelConfigDialog(
     model: AgentModelConfig,
+    isNew: Boolean,
     onDismiss: () -> Unit,
     onSave: (AgentModelConfig) -> Unit,
 ) {
+    var id by remember { mutableStateOf(model.id) }
     var context by remember { mutableStateOf(model.contextWindow.takeIf { it > 0 }?.toString().orEmpty()) }
     var output by remember { mutableStateOf(model.maxOutput.takeIf { it > 0 }?.toString().orEmpty()) }
     var input by remember { mutableStateOf(model.inputPerMillion.takeIf { it > 0.0 }?.toString().orEmpty()) }
@@ -598,30 +676,84 @@ private fun ModelConfigDialog(
     var efforts by remember { mutableStateOf(model.efforts.joinToString(", ")) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(model.id) },
+        title = {
+            Text(
+                if (isNew) stringResource(R.string.agent_model_add)
+                else model.id,
+            )
+        },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                 Text(
-                    "Limits, billing and capabilities. Empty means unknown.",
+                    stringResource(R.string.agent_model_config_desc),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                NumberField(context, { context = it }, "Context window", Modifier.fillMaxWidth())
-                NumberField(output, { output = it }, "Max output tokens", Modifier.fillMaxWidth())
-                NumberField(input, { input = it }, "Input $ / 1M", Modifier.fillMaxWidth())
-                NumberField(outputPrice, { outputPrice = it }, "Output $ / 1M", Modifier.fillMaxWidth())
-                NumberField(cacheRead, { cacheRead = it }, "Cache read $ / 1M", Modifier.fillMaxWidth())
-                NumberField(cacheWrite, { cacheWrite = it }, "Cache write $ / 1M", Modifier.fillMaxWidth())
+                if (isNew) {
+                    OutlinedTextField(
+                        value = id,
+                        onValueChange = { id = it },
+                        singleLine = true,
+                        label = { Text(stringResource(R.string.agent_model_id)) },
+                        placeholder = { Text(stringResource(R.string.agent_model_id_hint)) },
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    )
+                }
+                NumberField(
+                    context,
+                    { context = it },
+                    stringResource(R.string.agent_model_context_window),
+                    Modifier.fillMaxWidth(),
+                )
+                NumberField(
+                    output,
+                    { output = it },
+                    stringResource(R.string.agent_model_max_output),
+                    Modifier.fillMaxWidth(),
+                )
+                NumberField(
+                    input,
+                    { input = it },
+                    stringResource(R.string.agent_model_input_price),
+                    Modifier.fillMaxWidth(),
+                )
+                NumberField(
+                    outputPrice,
+                    { outputPrice = it },
+                    stringResource(R.string.agent_model_output_price),
+                    Modifier.fillMaxWidth(),
+                )
+                NumberField(
+                    cacheRead,
+                    { cacheRead = it },
+                    stringResource(R.string.agent_model_cache_read_price),
+                    Modifier.fillMaxWidth(),
+                )
+                NumberField(
+                    cacheWrite,
+                    { cacheWrite = it },
+                    stringResource(R.string.agent_model_cache_write_price),
+                    Modifier.fillMaxWidth(),
+                )
                 OutlinedTextField(
                     value = efforts,
                     onValueChange = { efforts = it },
                     singleLine = true,
-                    label = { Text("Reasoning efforts (comma separated)") },
+                    label = { Text(stringResource(R.string.agent_model_efforts)) },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                CapabilityRow("Thinking", thinking) { thinking = it }
-                CapabilityRow("Tool call", toolCall) { toolCall = it }
-                CapabilityRow("Vision", vision) { vision = it }
+                CapabilityRow(
+                    stringResource(R.string.agent_model_thinking),
+                    thinking,
+                ) { thinking = it }
+                CapabilityRow(
+                    stringResource(R.string.agent_model_tool_call),
+                    toolCall,
+                ) { toolCall = it }
+                CapabilityRow(
+                    stringResource(R.string.agent_model_vision),
+                    vision,
+                ) { vision = it }
             }
         },
         dismissButton = {
@@ -629,9 +761,11 @@ private fun ModelConfigDialog(
         },
         confirmButton = {
             TextButton(
+                enabled = !isNew || id.isNotBlank(),
                 onClick = {
                     onSave(
                         model.copy(
+                            id = if (isNew) id.trim() else model.id,
                             contextWindow = context.toLongOrNull()?.coerceAtLeast(0) ?: 0,
                             maxOutput = output.toLongOrNull()?.coerceAtLeast(0) ?: 0,
                             inputPerMillion = input.toDoubleOrNull()?.coerceAtLeast(0.0) ?: 0.0,
@@ -679,19 +813,27 @@ private fun CapabilityRow(label: String, checked: Boolean, onChange: (Boolean) -
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ProviderDialog(
     initial: AgentSettings.Provider?,
     onDismiss: () -> Unit,
     onSave: (AgentSettings.Provider) -> Unit,
 ) {
-    var preset by remember {
-        mutableStateOf(initial?.let { presetFor(it) })
-    }
+    val context = LocalContext.current
+    val initialPreset = remember(initial) { initial?.let { presetFor(it) } }
+    var preset by remember { mutableStateOf(initialPreset) }
     var name by remember { mutableStateOf(initial?.name.orEmpty()) }
-    var baseUrl by remember { mutableStateOf(initial?.baseUrl.orEmpty()) }
+    var baseUrl by remember {
+        mutableStateOf(
+            initialPreset?.takeIf { it.fixedUrl }?.baseUrl
+                ?: initial?.baseUrl.orEmpty(),
+        )
+    }
     var apiKey by remember { mutableStateOf(initial?.apiKey.orEmpty()) }
-    val valid = name.isNotBlank() && AgentSettings.validEndpoint(baseUrl)
+    var typeExpanded by remember { mutableStateOf(false) }
+    val valid = preset != null && name.isNotBlank() &&
+        (preset?.fixedUrl == true || AgentSettings.validEndpoint(baseUrl))
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -703,59 +845,82 @@ private fun ProviderDialog(
         },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                if (preset == null) {
-                    Text(
-                        "Choose a provider type",
-                        style = MaterialTheme.typography.bodySmall,
+                ExposedDropdownMenuBox(
+                    expanded = typeExpanded,
+                    onExpandedChange = { typeExpanded = it },
+                ) {
+                    OutlinedTextField(
+                        value = preset?.let { context.getString(it.label) }.orEmpty(),
+                        onValueChange = {},
+                        readOnly = true,
+                        singleLine = true,
+                        label = { Text(stringResource(R.string.agent_provider_type)) },
+                        placeholder = { Text(stringResource(R.string.agent_provider_type_select)) },
+                        trailingIcon = {
+                            ExposedDropdownMenuDefaults.TrailingIcon(expanded = typeExpanded)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(MenuAnchorType.PrimaryNotEditable),
                     )
-                    for (item in PRESETS) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    preset = item
-                                    name = item.providerName
-                                    baseUrl = item.baseUrl
-                                }
-                                .padding(vertical = 6.dp),
-                        ) {
-                            RadioButton(selected = false, onClick = {
-                                preset = item
-                                name = item.providerName
-                                baseUrl = item.baseUrl
-                            })
-                            Column(modifier = Modifier.padding(start = 4.dp)) {
-                                Text(item.label, style = MaterialTheme.typography.bodyLarge)
-                                Text(
-                                    item.hint,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
+                    ExposedDropdownMenu(
+                        expanded = typeExpanded,
+                        onDismissRequest = { typeExpanded = false },
+                    ) {
+                        for (item in PRESETS) {
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(
+                                            stringResource(item.label),
+                                            style = MaterialTheme.typography.bodyLarge,
+                                        )
+                                        Text(
+                                            stringResource(item.hint),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    if (preset != item) {
+                                        preset = item
+                                        name = context.getString(item.label)
+                                        baseUrl = item.baseUrl
+                                    }
+                                    typeExpanded = false
+                                },
+                            )
                         }
                     }
-                } else {
+                }
+                val selected = preset
+                if (selected == null) {
                     Text(
-                        "Provider type: ${preset?.label}",
+                        stringResource(R.string.agent_provider_type_hint),
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
                     )
+                } else {
                     OutlinedTextField(
                         value = name,
                         onValueChange = { name = it },
                         singleLine = true,
                         label = { Text(stringResource(R.string.agent_provider_name)) },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                     )
-                    OutlinedTextField(
-                        value = baseUrl,
-                        onValueChange = { baseUrl = it },
-                        singleLine = true,
-                        label = { Text(stringResource(R.string.agent_base_url)) },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    if (!selected.fixedUrl) {
+                        OutlinedTextField(
+                            value = baseUrl,
+                            onValueChange = { baseUrl = it },
+                            singleLine = true,
+                            label = { Text(stringResource(R.string.agent_base_url)) },
+                            placeholder = { Text(stringResource(R.string.agent_base_url_hint)) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        )
+                    }
                     OutlinedTextField(
                         value = apiKey,
                         onValueChange = { apiKey = it },
@@ -763,17 +928,8 @@ private fun ProviderDialog(
                         label = { Text(stringResource(R.string.agent_api_key)) },
                         visualTransformation = PasswordVisualTransformation(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                     )
-                    if (initial == null) {
-                        TextButton(
-                            onClick = {
-                                preset = null
-                                name = ""
-                                baseUrl = ""
-                            },
-                        ) { Text("Change type") }
-                    }
                 }
             }
         },
@@ -788,10 +944,11 @@ private fun ProviderDialog(
                         AgentSettings.Provider(
                             id = initial?.id.orEmpty(),
                             name = name.trim(),
-                            baseUrl = baseUrl.trim(),
+                            baseUrl = (preset?.takeIf { it.fixedUrl }?.baseUrl ?: baseUrl).trim(),
                             apiKey = apiKey.trim(),
                             kind = preset?.kind ?: initial?.kind ?: AGENT_PROVIDER_COMPATIBLE,
                             models = initial?.models.orEmpty(),
+                            type = preset?.id.orEmpty(),
                         ),
                     )
                 },

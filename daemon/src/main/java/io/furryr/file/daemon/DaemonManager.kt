@@ -168,17 +168,25 @@ object DaemonManager {
         }
         named.forEach { (name, connection) ->
             if (connection.isAlive()) {
-                list.add(DaemonEndpoint("container-$name", connection.socketName, false))
+                list.add(DaemonEndpoint("${CONTAINER_PREFIX}$name", connection.socketName, false))
             }
         }
         list
     }
 
+    /** Hub id prefix for a named (container) daemon. */
+    const val CONTAINER_PREFIX = "container-"
+
+    /** Display name of a hub id: `container-foo` becomes `foo`. */
+    fun hubDisplayName(id: String): String = id.removePrefix(CONTAINER_PREFIX)
+
+    fun isContainerHubId(id: String): Boolean = id.startsWith(CONTAINER_PREFIX)
+
     /** Stable hub id for a target: `host`, `app`, or `container-<name>`. */
     fun hubId(target: DaemonTarget): String = when (target) {
         DaemonTarget.Host -> "host"
         DaemonTarget.App -> "app"
-        is DaemonTarget.Named -> "container-${target.name}"
+        is DaemonTarget.Named -> "$CONTAINER_PREFIX${target.name}"
     }
 
     /** Resolve the per-daemon key to a live target, if any. */
@@ -415,7 +423,7 @@ object DaemonManager {
     private fun startNamedDaemon(name: String): DaemonConnection {
         // Prefix the id so container names can never collide with the reserved
         // primary ids (privileged/app).
-        val identity = DaemonIdentity("container-$name")
+        val identity = DaemonIdentity("$CONTAINER_PREFIX$name")
         val activeLauncher = launcher
             ?: throw IllegalStateException("No DaemonLauncher registered for '$name'")
         val request = DaemonLaunchRequest(

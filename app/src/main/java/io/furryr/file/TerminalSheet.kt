@@ -87,6 +87,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.termux.terminal.TerminalSession
 import io.furryr.file.agent.SessionManager
+import io.furryr.file.container.ContainerUris
 import io.furryr.file.container.ContainerUriResolver
 import io.furryr.file.container.ContainerPaths
 import io.furryr.file.core.model.FileEntry
@@ -335,7 +336,7 @@ fun TerminalSheet(
             val location = SshTerminals.find(inner.substringBefore('/'))
             val remotePath = if ('/' in inner) "/" + inner.substringAfter('/').trimStart('/') else "/"
             SessionManager.SessionType.Ssh(location.id, location.name, remotePath, location.pathAuthority) to location.name
-        } else if (path.startsWith("container://")) {
+        } else if (ContainerUris.isContainer(path)) {
             val resolved = ContainerUriResolver.resolveContainerUri(path).getOrThrow()
             val name = resolved.containerName
             if (name != null) {

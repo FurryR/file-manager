@@ -35,35 +35,11 @@ internal class HttpFile(
 
     override suspend fun describe(): Result<ContentInfo> = HttpProvider.describe(address, referer)
 
+    override suspend fun peek(): Result<ContentInfo> = HttpProvider.peek(address, referer)
+
+    override fun withReferer(referer: String?): VFile =
+        if (referer.isNullOrBlank() || referer == this.referer) this else HttpFile(address, referer)
+
     override suspend fun open(mode: OpenMode): Result<FileSource> =
         HttpProvider.source(address, referer, mode)
 }
-
-/**
- * The node for a live [address].
- *
- * Two callers know the page a link came from — the browser renderer (a link
- * hit test) and the forward provider (a shared link) — so they mint the node
- * here instead of rebuilding the address text. Every other entry point goes
- * through `Vfs.node(address)` and gets the same node without a referer.
- */
-fun httpFile(address: String, referer: String? = null): RemoteFile = HttpFile(address, referer)
-
-/**
- * [this] as a node that replays [referer].
- *
- * Only a live file has a request context; a storage file is returned unchanged,
- * so a caller can carry a page's identity through a share without asking what
- * kind of address it holds.
- */
-fun VFile.withReferer(referer: String?): VFile =
-    if (referer.isNullOrBlank() || this !is RemoteFile) this else httpFile(address, referer)
-
-/**
- * The type the server declares, from a HEAD only.
- *
- * The browser renderer may already be loading [address]; this answers "is that
- * really a page?" without spending a body request on it, and without the
- * magic-byte probe [describe] falls back to.
- */
-suspend fun RemoteFile.peek(): Result<ContentInfo> = HttpProvider.peek(address, referer)

@@ -1,10 +1,12 @@
 package io.furryr.file.store
 
 import android.content.Context
+import android.util.Log
 import io.furryr.file.core.FileProvider
 import io.furryr.file.core.LocationActions
 import io.furryr.file.core.LocationEntry
 import io.furryr.file.provider.FtpProvider
+import io.furryr.file.provider.ProviderSchemes
 import io.furryr.file.provider.SAFProvider
 import io.furryr.file.provider.SftpProvider
 import io.furryr.file.provider.model.FtpServer
@@ -17,129 +19,69 @@ import io.furryr.file.provider.remote.RemoteLocation
 import io.furryr.file.provider.remote.RemoteProviders
 
 /**
- * App-facing facade over the provider location stores (SAF trees, FTP/SFTP
- * servers, encrypted AList/SSH connections), so the UI layer never touches
- * provider singletons or their stores directly.
+ * App-facing facade over every persisted location (local paths, SAF trees,
+ * FTP/SFTP servers, encrypted AList/SSH connections), so the UI never touches a
+ * provider singleton or a store directly.
  *
- * Requires [LocationStores] and [Vfs][io.furryr.file.core.Vfs] providers to
+ * One [LocationKind] table drives drawer entries and their rename/delete
+ * actions: the built-in families and plugin-contributed families take the same
+ * path. Typed accessors stay for the editors, which need the concrete model.
+ *
+ * Requires [LocationStores], [LocalLocationStore] and the `:core` providers to
  * have been installed by the app.
  */
 object LocationsRepository {
+    private const val TAG = "LocationsRepository"
 
-    /** Unified gallery entries; actions are implemented by this library. */
-    fun locations(context: Context, localProvider: FileProvider): List<LocationEntry> {
-        val entries = mutableListOf<LocationEntry>()
+    private val extraKinds = linkedMapOf<String, LocationKind>()
 
-        localLocations().forEach { location ->
-            entries += LocationEntry(
-                id = location.id,
-                title = location.name.ifBlank { location.path },
-                subtitle = location.path,
-                root = location.path,
-                provider = localProvider,
-                kind = "local",
-                actions = object : LocationActions {
-                    override suspend fun rename(name: String): Result<Unit> =
-                        runCatching { renameLocal(location.id, name) }
-
-                    override suspend fun delete(): Result<Unit> =
-                        runCatching { deleteLocal(location.id) }
-                },
-            )
-        }
-
-        safLocations().forEach { location ->
-            entries += LocationEntry(
-                id = location.hexId,
-                title = location.name,
-                subtitle = location.treeUri,
-                root = "saf://${location.hexId}",
-                provider = SAFProvider,
-                kind = "saf",
-                actions = object : LocationActions {
-                    override suspend fun rename(name: String): Result<Unit> =
-                        runCatching { renameSaf(location.hexId, name) }
-
-                    override suspend fun delete(): Result<Unit> =
-                        runCatching { deleteSaf(location.hexId) }
-                },
-            )
-        }
-
-        ftpServers().forEach { server ->
-            entries += LocationEntry(
-                id = server.host,
-                title = server.name,
-                subtitle = "ftp://${server.host}:${server.port}",
-                root = "ftp://${server.host}",
-                provider = FtpProvider,
-                kind = "ftp",
-                actions = object : LocationActions {
-                    override suspend fun rename(name: String): Result<Unit> = runCatching {
-                        updateFtp(server.host, server.host, name, server.port, server.username, server.password)
-                    }
-
-                    override suspend fun delete(): Result<Unit> =
-                        runCatching { deleteFtp(server.host) }
-                },
-            )
-        }
-
-        sftpServers().forEach { server ->
-            entries += LocationEntry(
-                id = server.host,
-                title = server.name,
-                subtitle = "sftp://${server.host}:${server.port}",
-                root = "sftp://${server.host}",
-                provider = SftpProvider,
-                kind = "sftp",
-                actions = object : LocationActions {
-                    override suspend fun rename(name: String): Result<Unit> = runCatching {
-                        updateSftp(server.host, server.host, name, server.port, server.username, server.password)
-                    }
-
-                    override suspend fun delete(): Result<Unit> =
-                        runCatching { deleteSftp(server.host) }
-                },
-            )
-        }
-
-        val remoteProviders = RemoteProviders.providers(context.cacheDir, LocationStores)
-        remoteLocations().forEach { location ->
-            val provider = remoteProviders.firstOrNull { it.scheme == location.kind.scheme }
-                ?: return@forEach
-            entries += LocationEntry(
-                id = location.id,
-                title = location.name,
-                subtitle = if (location.kind == RemoteKind.SSH) "ssh://${location.pathAuthority}"
-                else "${location.kind.scheme}://${location.endpoint}",
-                root = location.entryUri,
-                provider = provider,
-                kind = location.kind.scheme,
-                actions = object : LocationActions {
-                    override suspend fun rename(name: String): Result<Unit> =
-                        runCatching { updateRemote(location.copy(name = name)) }
-
-                    override suspend fun delete(): Result<Unit> =
-                        runCatching { deleteRemote(location.id) }
-                },
-            )
-        }
-
-        return entries
+    /** Add a location family (a plugin) to the drawer. */
+    @Synchronized
+    fun registerKind(kind: LocationKind) {
+        extraKinds[kind.id] = kind
     }
 
-    // ── SAF ─────────────────────────────────────────────────────────
+    @Synchronized
+    fun unregisterKind(id: String) {
+        extraKinds.remove(id)
+    }
 
-    fun safLocations(): List<SafLocation> = LocationStores.safLocations()
+    private fun kinds(localProvider: FileProvider): List<LocationKind> {
+        val plugins = synchronized(this) { extraKinds.values.toList() }
+        return listOf(
+            LocalKind(localProvider),
+            SafKind,
+            FtpKind,
+            SftpKind,
+            EncryptedRemoteKind(),
+        ) + plugins
+    }
 
-    fun insertSaf(treeUri: String): String = LocationStores.saf.insert(treeUri)
+    /** Unified gallery entries; actions are implemented by each [LocationKind]. */
+    fun locations(context: Context, localProvider: FileProvider): List<LocationEntry> =
+        kinds(localProvider).flatMap { kind ->
+            runCatching { kind.records(context) }
+                .onFailure { Log.w(TAG, "Location kind '${kind.id}' failed", it) }
+                .getOrDefault(emptyList())
+                .map { it.entry(kind) }
+        }
 
-    fun renameSaf(hexId: String, name: String) = LocationStores.saf.rename(hexId, name)
+    private fun LocationRecord.entry(kind: LocationKind): LocationEntry {
+        val record = this
+        return LocationEntry(
+            id = record.id,
+            title = record.title,
+            subtitle = record.subtitle,
+            root = record.root,
+            provider = record.provider,
+            kind = record.kind,
+            actions = object : LocationActions {
+                override suspend fun rename(name: String): Result<Unit> = kind.rename(record.id, name)
 
-    fun deleteSaf(hexId: String) = LocationStores.saf.delete(hexId)
-
-    fun reorderSaf(hexIds: List<String>) = LocationStores.saf.reorder(hexIds)
+                override suspend fun delete(): Result<Unit> = kind.delete(record.id)
+            },
+        )
+    }
 
     // ── Local paths ─────────────────────────────────────────────────
 
@@ -152,6 +94,18 @@ object LocationsRepository {
     fun deleteLocal(id: String) = LocalLocationStore.delete(id)
 
     fun reorderLocal(ids: List<String>) = LocalLocationStore.reorder(ids)
+
+    // ── SAF ─────────────────────────────────────────────────────────
+
+    fun safLocations(): List<SafLocation> = LocationStores.safLocations()
+
+    fun insertSaf(treeUri: String): String = LocationStores.saf.insert(treeUri)
+
+    fun renameSaf(hexId: String, name: String) = LocationStores.saf.rename(hexId, name)
+
+    fun deleteSaf(hexId: String) = LocationStores.saf.delete(hexId)
+
+    fun reorderSaf(hexIds: List<String>) = LocationStores.saf.reorder(hexIds)
 
     // ── Web links (drawer network group) ────────────────────────────
 
@@ -214,4 +168,136 @@ object LocationsRepository {
     fun reorderRemote(ids: List<String>) = RemoteLocationStore.reorder(ids)
 
     suspend fun verifyRemote(location: RemoteLocation): Result<Unit> = RemoteProviders.verify(location)
+
+    // ── Built-in kinds ──────────────────────────────────────────────
+
+    private class LocalKind(private val provider: FileProvider) : LocationKind {
+        override val id: String = "local"
+
+        override fun records(context: Context): List<LocationRecord> =
+            LocalLocationStore.all().map { location ->
+                LocationRecord(
+                    id = location.id,
+                    title = location.name.ifBlank { location.path },
+                    subtitle = location.path,
+                    root = location.path,
+                    kind = id,
+                    provider = provider,
+                )
+            }
+
+        override fun rename(id: String, name: String): Result<Unit> =
+            runCatching { LocalLocationStore.rename(id, name) }
+
+        override fun delete(id: String): Result<Unit> = runCatching { LocalLocationStore.delete(id) }
+
+        override fun reorder(ids: List<String>): Result<Unit> =
+            runCatching { LocalLocationStore.reorder(ids) }
+    }
+
+    private object SafKind : LocationKind {
+        override val id: String = "saf"
+
+        override fun records(context: Context): List<LocationRecord> =
+            LocationStores.safLocations().map { location ->
+                LocationRecord(
+                    id = location.hexId,
+                    title = location.name,
+                    subtitle = location.treeUri,
+                    root = "saf://${location.hexId}",
+                    kind = id,
+                    provider = SAFProvider,
+                )
+            }
+
+        override fun rename(id: String, name: String): Result<Unit> =
+            runCatching { LocationStores.saf.rename(id, name) }
+
+        override fun delete(id: String): Result<Unit> = runCatching { LocationStores.saf.delete(id) }
+
+        override fun reorder(ids: List<String>): Result<Unit> =
+            runCatching { LocationStores.saf.reorder(ids) }
+    }
+
+    private object FtpKind : LocationKind {
+        override val id: String = ProviderSchemes.FTP
+
+        override fun records(context: Context): List<LocationRecord> =
+            LocationStores.ftpServers().map { server ->
+                LocationRecord(
+                    id = server.host,
+                    title = server.name,
+                    subtitle = "ftp://${server.host}:${server.port}",
+                    root = "ftp://${server.host}",
+                    kind = id,
+                    provider = FtpProvider,
+                )
+            }
+
+        override fun rename(id: String, name: String): Result<Unit> =
+            runCatching { LocationStores.ftp.rename(id, name) }
+
+        override fun delete(id: String): Result<Unit> = runCatching { LocationStores.ftp.delete(id) }
+
+        override fun reorder(ids: List<String>): Result<Unit> =
+            runCatching { LocationStores.ftp.reorder(ids) }
+    }
+
+    private object SftpKind : LocationKind {
+        override val id: String = ProviderSchemes.SFTP
+
+        override fun records(context: Context): List<LocationRecord> =
+            LocationStores.sftpServers().map { server ->
+                LocationRecord(
+                    id = server.host,
+                    title = server.name,
+                    subtitle = "sftp://${server.host}:${server.port}",
+                    root = "sftp://${server.host}",
+                    kind = id,
+                    provider = SftpProvider,
+                )
+            }
+
+        override fun rename(id: String, name: String): Result<Unit> =
+            runCatching { LocationStores.sftp.rename(id, name) }
+
+        override fun delete(id: String): Result<Unit> = runCatching { LocationStores.sftp.delete(id) }
+
+        override fun reorder(ids: List<String>): Result<Unit> =
+            runCatching { LocationStores.sftp.reorder(ids) }
+    }
+
+    private class EncryptedRemoteKind : LocationKind {
+        override val id: String = "remote"
+
+        override fun records(context: Context): List<LocationRecord> {
+            val providers = RemoteProviders.providers(context.cacheDir, LocationStores)
+            return RemoteLocationStore.all().mapNotNull { location ->
+                val provider = providers.firstOrNull { it.scheme == location.kind.scheme }
+                    ?: return@mapNotNull null
+                LocationRecord(
+                    id = location.id,
+                    title = location.name,
+                    subtitle = if (location.kind == io.furryr.file.provider.remote.RemoteKind.SSH) {
+                        "ssh://${location.pathAuthority}"
+                    } else {
+                        "${location.kind.scheme}://${location.endpoint}"
+                    },
+                    root = location.entryUri,
+                    kind = location.kind.scheme,
+                    provider = provider,
+                )
+            }
+        }
+
+        override fun rename(id: String, name: String): Result<Unit> = runCatching {
+            val location = RemoteLocationStore.find(id)
+            updateRemote(location.copy(name = name))
+        }
+
+        override fun delete(id: String): Result<Unit> = runCatching { deleteRemote(id) }
+
+        override fun reorder(ids: List<String>): Result<Unit> =
+            runCatching { RemoteLocationStore.reorder(ids) }
+    }
 }

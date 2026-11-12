@@ -4,7 +4,7 @@ import io.furryr.file.ui.screens.*
 import io.furryr.file.ui.components.*
 import io.furryr.file.ui.util.*
 import io.furryr.file.model.*
-import io.furryr.file.ui.screens.SortMode
+import io.furryr.file.render.SortMode
 import io.furryr.file.R
 
 import androidx.compose.foundation.clickable
@@ -414,85 +414,4 @@ fun CopyMovePlaceDialog(
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun SortDialog(
-    currentMode: SortMode,
-    currentReverse: Boolean,
-    onDismiss: () -> Unit,
-    onConfirm: (SortMode, Boolean) -> Unit
-) {
-    var selectedMode by remember { mutableStateOf(currentMode) }
-    var reverse by remember { mutableStateOf(currentReverse) }
-    var expanded by remember { mutableStateOf(false) }
 
-    val modes = listOf(
-        SortMode.NAME to stringResource(R.string.sort_name),
-        SortMode.DATE to stringResource(R.string.sort_date),
-        SortMode.SIZE to stringResource(R.string.sort_size),
-        SortMode.TYPE to stringResource(R.string.sort_type)
-    )
-    val selectedLabel = modes.first { it.first == selectedMode }.second
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.sort_title)) },
-        text = {
-            Column {
-                Text(
-                    text = stringResource(R.string.sort_subtitle),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(12.dp))
-                ExposedDropdownMenuBox(
-                    expanded = expanded,
-                    onExpandedChange = { expanded = it }
-                ) {
-                    OutlinedTextField(
-                        value = selectedLabel,
-                        onValueChange = {},
-                        readOnly = true,
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .menuAnchor(MenuAnchorType.PrimaryNotEditable)
-                    )
-                    ExposedDropdownMenu(
-                        expanded = expanded,
-                        onDismissRequest = { expanded = false }
-                    ) {
-                        modes.forEach { (mode, label) ->
-                            DropdownMenuItem(
-                                text = { Text(label) },
-                                onClick = {
-                                    selectedMode = mode
-                                    expanded = false
-                                }
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(12.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { reverse = !reverse }
-                ) {
-                    Checkbox(checked = reverse, onCheckedChange = { reverse = it })
-                    Spacer(Modifier.width(8.dp))
-                    Text(stringResource(R.string.reverse_order))
-                }
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
-        },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(selectedMode, reverse) }) {
-                Text(stringResource(R.string.confirm))
-            }
-        }
-    )
-}

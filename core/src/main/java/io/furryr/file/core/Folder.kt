@@ -25,6 +25,9 @@ class Folder internal constructor(
     override suspend fun listNodes(): Result<List<VNode>> =
         list().map { entries -> entries.map(::nodeFor) }
 
+    override suspend fun listWithNodes(): Result<Pair<List<FileEntry>, List<VNode>>> =
+        list().map { entries -> entries to entries.map(::nodeFor) }
+
     override suspend fun stat(): Result<ProviderStat> = provider.stat(innerPath)
 
     override suspend fun capabilities(): DirectoryCapabilities =
@@ -41,13 +44,8 @@ class Folder internal constructor(
     override suspend fun child(name: String): Result<VNode> = runCatching {
         requireValidName(name)
         val childPath = path.child(name)
-        val childInner = innerPathFor(childPath)
-        val stat = provider.stat(childInner).getOrThrow()
-        if (stat.isDirectory) {
-            Folder(childPath, provider, childInner)
-        } else {
-            File(childPath, provider, childInner)
-        }
+        val stat = provider.stat(innerPathFor(childPath)).getOrThrow()
+        nodeAt(childPath, stat.isDirectory)
     }
 
     override suspend fun folder(name: String): Result<VFolder> = child(name).mapCatching { node ->
@@ -84,14 +82,11 @@ class Folder internal constructor(
 
     override suspend fun delete(): Result<Unit> = provider.delete(innerPath)
 
-    private fun nodeFor(entry: FileEntry): VNode {
-        val childPath = path.child(entry.name)
+    private fun nodeFor(entry: FileEntry): VNode = nodeAt(path.child(entry.name), entry.isDirectory)
+
+    private fun nodeAt(childPath: Path, isDirectory: Boolean): VNode {
         val childInner = innerPathFor(childPath)
-        return if (entry.isDirectory) {
-            Folder(childPath, provider, childInner)
-        } else {
-            File(childPath, provider, childInner)
-        }
+        return if (isDirectory) Folder(childPath, provider, childInner) else File(childPath, provider, childInner)
     }
 
     private fun innerPathFor(nodePath: Path): String =
@@ -108,7 +103,7 @@ private fun requireValidName(name: String) {
 /** Provider-backed file node. */
 class File internal constructor(
     override val path: Path,
-    // Internal, not private: Vfs.copyTo/moveTo hand the provider pair straight
+    // Internal, not private: NodeOps.copyTo/moveTo hand the provider pair straight
     // to the provider copy without ever formatting a path.
     internal val provider: FileProvider,
     internal val innerPath: String,
@@ -117,6 +112,8 @@ class File internal constructor(
 
     override val parent: VFolder?
         get() = path.parent()?.let { Folder(it, provider, innerPathFor(it)) }
+
+    override val writable: Boolean get() = provider.writable
 
     override suspend fun stat(): Result<ProviderStat> = provider.stat(innerPath)
 

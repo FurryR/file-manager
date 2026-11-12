@@ -32,8 +32,9 @@ internal fun AgentSettingsItem() {
     ) {
         Text(stringResource(R.string.agent_settings), style = MaterialTheme.typography.bodyLarge)
         Text(
-            provider?.let { "${it.name} · ${it.baseUrl}" }
-                ?: stringResource(R.string.agent_settings_desc),
+            provider?.let {
+                if (providerUsesFixedUrl(it)) it.name else "${it.name} · ${it.baseUrl}"
+            } ?: stringResource(R.string.agent_settings_desc),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

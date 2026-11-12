@@ -45,7 +45,7 @@ object ContainerProvider : FileProvider {
                 id = container.name,
                 title = container.name,
                 subtitle = container.backend.name.lowercase(),
-                root = "container://${container.name}",
+                root = ContainerUris.forContainer(container.name),
                 provider = this,
                 kind = "container",
                 actions = object : LocationActions {

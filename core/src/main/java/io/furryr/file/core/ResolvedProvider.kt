@@ -7,9 +7,5 @@ data class ResolvedProvider(
 ) {
     /** Provider-facing address for calling provider methods. */
     val innerPath: String
-        get() = when {
-            provider.fullUriPaths -> path.toFullUri()
-            path.scheme == "file" || path.scheme == null -> path.toLocalPath()
-            else -> path.toInnerPath()
-        }
+        get() = provider.innerPath(path)
 }

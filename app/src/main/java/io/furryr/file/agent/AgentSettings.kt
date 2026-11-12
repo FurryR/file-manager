@@ -37,6 +37,7 @@ object AgentSettings {
         val apiKey: String,
         val kind: String = AGENT_PROVIDER_COMPATIBLE,
         val models: List<AgentModelConfig> = emptyList(),
+        val type: String = "",
     )
 
     /** A remote (Streamable HTTP) MCP server. Local stdio servers are configured
@@ -82,6 +83,7 @@ object AgentSettings {
                         apiKey = item.apiKey,
                         kind = item.kind,
                         models = item.models,
+                        wellKnown = catalogPricing(item),
                     )
                 },
             )
@@ -155,6 +157,7 @@ object AgentSettings {
                     ?.let { runCatching { decrypt(it) }.getOrDefault("") }.orEmpty(),
                 kind = item.optString("kind").ifBlank { AGENT_PROVIDER_COMPATIBLE },
                 models = readModels(item.optJSONArray("models")),
+                type = item.optString("type"),
             )
         }
     }
@@ -485,6 +488,27 @@ object AgentSettings {
             uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null
     }.getOrDefault(false)
 
+    /**
+     * Only fixed-endpoint presets may take billing data from the shared model
+     * catalogue: a generic provider can point at a gateway with its own rates.
+     * Blank types are pre-preset entries, matched by their original endpoint.
+     */
+    private fun catalogPricing(provider: Provider): Boolean = when (provider.type) {
+        "opencode_go", "opencode_zen", "openrouter", "glm", "deepseek" -> true
+        "" -> provider.baseUrl in LEGACY_CATALOG_ENDPOINTS
+        else -> false
+    }
+
+    private val LEGACY_CATALOG_ENDPOINTS = setOf(
+        "https://opencode.ai/inference/go/openai/v1",
+        "https://opencode.ai/inference/openai/v1",
+        "https://opencode.ai/zen/v1",
+        "https://openrouter.ai/api/v1",
+        "https://open.bigmodel.cn/api/paas/v4",
+        "https://api.deepseek.com/v1",
+        "https://api.deepseek.com",
+    )
+
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -497,6 +521,7 @@ object AgentSettings {
                     .put("name", provider.name)
                     .put("base_url", provider.baseUrl)
                     .put("kind", provider.kind)
+                    .put("type", provider.type)
                     .put("models", writeModels(provider.models))
                     .put(
                         "api_key",

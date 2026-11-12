@@ -45,6 +45,11 @@ interface PipeChannel : Closeable {
     val stderr: InputStream
     /** Write end of the child's stdin; a null sink when it was not piped. */
     val output: OutputStream
+
+    /** Descriptors for a transport that hands the pipes to another process. */
+    val stdoutFd: FileDescriptor
+    val stderrFd: FileDescriptor
+
     suspend fun waitFor(): Result<Int>
     suspend fun closeProcess()
 }
@@ -154,6 +159,8 @@ private class PipeProcessChannel(
     override val pid: Int = stream.childPid
     override val stdout: InputStream = FileInputStream(stream.stdout)
     override val stderr: InputStream = FileInputStream(stream.stderr)
+    override val stdoutFd: FileDescriptor = stream.stdout
+    override val stderrFd: FileDescriptor = stream.stderr
     override val output: OutputStream = stream.stdin?.let(::FileOutputStream)
         ?: object : OutputStream() {
             override fun write(b: Int) = Unit

@@ -3,6 +3,7 @@ package io.furryr.file
 import android.content.Context
 import io.furryr.file.container.ContainerManager
 import io.furryr.file.container.ContainerPaths
+import io.furryr.file.container.ContainerUris
 import io.furryr.file.agent.SessionManager
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
@@ -35,7 +36,8 @@ object HereNavigation {
             val path = Path.parse(selected)
             val request = when {
                 selected == "/" -> Request("/", null)
-                path.scheme == "container" && path.isRoot -> Request("container:///", "container://${path.host}")
+                path.scheme == ContainerUris.SCHEME && path.isRoot ->
+                    Request(ContainerUris.root(), ContainerUris.forContainer(requireNotNull(path.host)))
                 else -> Request(requireNotNull(path.parent()).toFullUri(), selected)
             }
             check(pending.trySend(request).isSuccess) { "file navigation is unavailable" }

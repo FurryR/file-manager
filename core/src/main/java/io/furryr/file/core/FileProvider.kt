@@ -31,6 +31,26 @@ interface FileProvider {
      */
     val fullUriPaths: Boolean get() = false
 
+    /** Whether [open] accepts a write mode for files of this provider. */
+    val writable: Boolean get() = true
+
+    /**
+     * Provider-facing address for [path].
+     *
+     * A provider that addresses files by full URI receives the URI intact; a
+     * storage provider receives the inner path. The local provider overrides
+     * this because a bare filesystem path is its native spelling.
+     */
+    fun innerPath(path: Path): String =
+        if (fullUriPaths) path.toFullUri() else path.toInnerPath()
+
+    /**
+     * The node for a live [address], or null when this provider serves no live
+     * resources. A live node is still a [VFile]; [referer] is the page it was
+     * reached from.
+     */
+    fun liveFile(address: String, referer: String? = null): VFile? = null
+
     suspend fun list(path: String): Result<List<FileEntry>>
     suspend fun stat(path: String): Result<ProviderStat>
 
@@ -86,8 +106,32 @@ interface FileProvider {
     suspend fun disconnect()
 }
 
-enum class ProviderFeature {
-    LIST, STAT, CREATE_FILE, CREATE_DIR, DELETE,
-    RENAME, STREAM_COPY, PTY, SYMLINK,
-    OPEN,
+/**
+ * One capability a provider may advertise.
+ *
+ * This is an open value type, not an enum: a plugin provider can name a
+ * capability the app has never heard of without a core release. The companion
+ * constants are the ones the app itself reads; anything else is preserved and
+ * ignored by callers that do not understand it.
+ */
+@JvmInline
+value class ProviderFeature(val id: String) {
+    companion object {
+        val LIST = ProviderFeature("LIST")
+        val STAT = ProviderFeature("STAT")
+        val CREATE_FILE = ProviderFeature("CREATE_FILE")
+        val CREATE_DIR = ProviderFeature("CREATE_DIR")
+        val DELETE = ProviderFeature("DELETE")
+        val RENAME = ProviderFeature("RENAME")
+        val STREAM_COPY = ProviderFeature("STREAM_COPY")
+        val PTY = ProviderFeature("PTY")
+        val SYMLINK = ProviderFeature("SYMLINK")
+        val OPEN = ProviderFeature("OPEN")
+
+        /** Every built-in capability, for providers that support all of them. */
+        val entries: List<ProviderFeature> = listOf(
+            LIST, STAT, CREATE_FILE, CREATE_DIR, DELETE,
+            RENAME, STREAM_COPY, PTY, SYMLINK, OPEN,
+        )
+    }
 }

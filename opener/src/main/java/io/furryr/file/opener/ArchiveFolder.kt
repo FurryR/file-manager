@@ -58,20 +58,25 @@ class ArchiveFolder(
         }
 
     override suspend fun list(): Result<List<FileEntry>> = listNodes().map { nodes ->
-        nodes.map { node ->
-            val entry = when (node) {
-                is ArchiveFolder -> ArchiveEntry(node.name, true)
-                is ArchiveFile -> node.entry
-                else -> ArchiveEntry(node.name, false)
-            }
-            FileEntry(
-                name = entry.name,
-                path = displayPath(segments + entry.name),
-                isDirectory = entry.isDirectory,
-                modifiedAt = entry.modifiedAt,
-                size = entry.size,
-            )
+        nodes.map(::entryOf)
+    }
+
+    override suspend fun listWithNodes(): Result<Pair<List<FileEntry>, List<VNode>>> =
+        listNodes().map { nodes -> nodes.map(::entryOf) to nodes }
+
+    private fun entryOf(node: VNode): FileEntry {
+        val entry = when (node) {
+            is ArchiveFolder -> ArchiveEntry(node.name, true)
+            is ArchiveFile -> node.entry
+            else -> ArchiveEntry(node.name, false)
         }
+        return FileEntry(
+            name = entry.name,
+            path = displayPath(segments + entry.name),
+            isDirectory = entry.isDirectory,
+            modifiedAt = entry.modifiedAt,
+            size = entry.size,
+        )
     }
 
     override suspend fun listNodes(): Result<List<VNode>> =
@@ -155,6 +160,9 @@ class ArchiveFile(
         }
         return source.open(segments, mode)
     }
+
+    /** Archive entries never accept a write handle. */
+    override val writable: Boolean get() = false
 
     override suspend fun describe(): Result<ContentInfo> = runCatching {
         val opened = open(OpenMode.READ).getOrNull()

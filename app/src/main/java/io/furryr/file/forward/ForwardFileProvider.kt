@@ -16,12 +16,9 @@ import android.system.OsConstants
 import android.util.Log
 import android.webkit.MimeTypeMap
 import io.furryr.file.ForwardProviderAuthority
-import io.furryr.file.DefaultNodeService
 import io.furryr.file.core.ContentTypes
 import io.furryr.file.core.Path
-import io.furryr.file.core.RemoteFile
 import io.furryr.file.core.VFile
-import io.furryr.file.provider.web.withReferer
 import io.furryr.file.core.Vfs
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
@@ -59,7 +56,7 @@ class ForwardFacts(
  * route: a live file node's handle is a [FileSource] like any other, so a URL
  * becomes a `content://` file instead of a browser intent. Archive entries and
  * container files are addressed by their `Path` text, re-resolved through
- * [DefaultNodeService], so opening a zip member never fabricates a VFS path.
+ * [Vfs.node], so opening a zip member never fabricates a VFS path.
  *
  * Every resource is one [FileSource] handle, and the descriptor follows the
  * handle's capabilities:
@@ -121,14 +118,10 @@ class ForwardFileProvider : ContentProvider() {
     override fun getType(uri: Uri): String? {
         val resolved = targetOf(uri) ?: return null
         val facts = cachedFacts(resolved.token)
-        return when (val target = resolved.target) {
-            is Target.Path -> facts?.mime
-                ?: ContentTypes.fromName(facts?.name ?: target.displayName())
-                ?: mimeTypeOf(target.path)
-            is Target.Node -> facts?.mime
-                ?: ContentTypes.fromName(facts?.name ?: target.displayName())
-                ?: "*/*"
-        }
+        val target = resolved.target
+        return facts?.mime
+            ?: ContentTypes.fromName(facts?.name ?: target.displayName())
+            ?: mimeTypeOf(target.path.toString())
     }
 
     override fun query(
@@ -169,13 +162,8 @@ class ForwardFileProvider : ContentProvider() {
 
     // ── Internals ───────────────────────────────────────────────────
 
-    private sealed interface Target {
-        /** A provider path or a URL, kept as text so the referer can ride along. */
-        data class Path(val path: String, val referer: String?) : Target
-
-        /** Any address, including `!` view levels; resolved through the node service. */
-        data class Node(val path: io.furryr.file.core.Path) : Target
-    }
+    /** A parsed address, with the page a live URL was reached from. */
+    private data class Target(val path: Path, val referer: String? = null)
 
     /**
      * Expose a seekable [source] as a file descriptor. Reads arrive on a
@@ -264,30 +252,17 @@ class ForwardFileProvider : ContentProvider() {
         return readEnd
     }
 
-    private suspend fun openSource(target: Target): FileSource = when (target) {
-        // One provider lookup whatever the address is. The signed referer only
-        // changes anything for a live file, which is a capability of the node.
-        is Target.Path -> {
-            val node = Vfs.node(target.path).getOrThrow()
-            val file = node as? VFile ?: throw FileNotFoundException("not a file: ${target.path}")
-            file.withReferer(target.referer).open(OpenMode.READ).getOrThrow()
-        }
-        is Target.Node -> {
-            val node = DefaultNodeService().resolve(target.path).getOrThrow()
-            val file = node as? VFile ?: throw FileNotFoundException("not a file: ${target.path}")
-            file.open(OpenMode.READ).getOrThrow()
-        }
+    // One provider lookup whatever the address is. The signed referer only
+    // changes anything for a live file, which is a capability of the node.
+    private suspend fun openSource(target: Target): FileSource {
+        val node = Vfs.node(target.path).getOrThrow()
+        val file = node as? VFile ?: throw FileNotFoundException("not a file: ${target.path}")
+        return file.withReferer(target.referer).open(OpenMode.READ).getOrThrow()
     }
 
-    private fun Target.label(): String = when (this) {
-        is Target.Path -> path
-        is Target.Node -> path.toString()
-    }
+    private fun Target.label(): String = path.toString()
 
-    private fun Target.displayName(): String = when (this) {
-        is Target.Path -> Path.parse(path).name ?: path
-        is Target.Node -> path.name ?: path.toString()
-    }
+    private fun Target.displayName(): String = path.name ?: path.toString()
 
     private fun pump(source: FileSource, writeEnd: ParcelFileDescriptor) {
         val out = ParcelFileDescriptor.AutoCloseOutputStream(writeEnd)
@@ -403,9 +378,9 @@ class ForwardFileProvider : ContentProvider() {
          * route instead of being flattened into a provider path.
          */
         fun buildUri(file: VFile, facts: ForwardFacts? = null): Uri {
-            val remote = file as? RemoteFile
-            return if (remote != null) {
-                buildUri(remote.address, remote.referer, facts)
+            val live = file.liveAddress
+            return if (live != null) {
+                buildUri(live, file.liveReferer, facts)
             } else {
                 buildUri(file.path, facts)
             }
@@ -450,14 +425,14 @@ class ForwardFileProvider : ContentProvider() {
             val encoded = uri.getQueryParameter(QUERY_REF)
             if (encoded != null) {
                 if (!ShareToken.verify(refPayload(encoded), expires, token)) return null
-                val path = runCatching { io.furryr.file.core.Path.parse(encoded) }.getOrNull()
-                    ?: return null
-                return ResolvedTarget(Target.Node(path), token)
+                val path = runCatching { Path.parse(encoded) }.getOrNull() ?: return null
+                return ResolvedTarget(Target(path), token)
             }
-            val path = uri.getQueryParameter(QUERY_PATH) ?: return null
+            val address = uri.getQueryParameter(QUERY_PATH) ?: return null
             val referer = uri.getQueryParameter(QUERY_REFERER)
-            if (!ShareToken.verify(payload(path, referer), expires, token)) return null
-            return ResolvedTarget(Target.Path(path, referer), token)
+            if (!ShareToken.verify(payload(address, referer), expires, token)) return null
+            val path = runCatching { Path.parse(address) }.getOrNull() ?: return null
+            return ResolvedTarget(Target(path, referer), token)
         }
 
         private fun payload(path: String, referer: String?): String =

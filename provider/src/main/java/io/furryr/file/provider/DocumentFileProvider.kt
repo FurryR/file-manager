@@ -41,6 +41,7 @@ object DocumentFileProvider : FileProvider {
     override val scheme: String get() = SCHEME
     override val authority: String? get() = null
     override val label: String get() = "Document Provider"
+    override val writable: Boolean get() = false
     override val features: Set<ProviderFeature> get() = setOf(
         ProviderFeature.LIST, ProviderFeature.STAT,
         ProviderFeature.CREATE_FILE, ProviderFeature.CREATE_DIR,

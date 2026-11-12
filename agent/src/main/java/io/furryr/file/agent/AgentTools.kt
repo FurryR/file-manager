@@ -1,11 +1,13 @@
 package io.furryr.file.agent
 
+import io.furryr.file.core.NodeOps
 import io.furryr.file.core.Path
 import io.furryr.file.core.VFile
 import io.furryr.file.core.VFolder
 import io.furryr.file.core.Vfs
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.source.OpenMode
+import io.furryr.file.container.ContainerUris
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.daemon.process.CommandSpec
@@ -374,9 +376,10 @@ internal object AgentTools {
     }
 
     private suspend fun archiveList(args: JSONObject, context: ToolContext): String {
-        val service = AgentEnvironment.nodeService ?: error("archive access is unavailable")
         val ref = archiveRef(args, context)
-        val all = service.list(ref).getOrThrow()
+        val folder = Vfs.node(ref).getOrThrow() as? VFolder
+            ?: error("not a folder in archive: ${args.optString("path")}")
+        val all = folder.listNodes().getOrThrow()
         val nodes = all.take(MAX_ARCHIVE_ENTRIES)
         val total = all.size
         return buildString {
@@ -401,9 +404,8 @@ internal object AgentTools {
     }
 
     private suspend fun archiveRead(args: JSONObject, context: ToolContext): String {
-        val service = AgentEnvironment.nodeService ?: error("archive access is unavailable")
         val ref = archiveRef(args, context)
-        val file = service.resolve(ref).getOrThrow() as? VFile
+        val file = Vfs.node(ref).getOrThrow() as? VFile
             ?: error("not a file in archive: ${args.optString("path")}")
         val offset = args.optLong("offset", 0L).coerceAtLeast(0L)
         val requested = args.optInt("length", 0).let {
@@ -435,15 +437,14 @@ internal object AgentTools {
     }
 
     private suspend fun archiveCopy(args: JSONObject, context: ToolContext): String {
-        val service = AgentEnvironment.nodeService ?: error("archive access is unavailable")
         val ref = archiveRef(args, context)
-        val file = service.resolve(ref).getOrThrow() as? VFile
+        val file = Vfs.node(ref).getOrThrow() as? VFile
             ?: error("not a file in archive: ${args.optString("path")}")
         val destination = callerPath(context.target, stringArg(args, "to"), "copy destination")
         // Address text ends here: the copy itself is node → node.
-        val target = Vfs.destination(destination).getOrThrow()
+        val target = NodeOps.destination(destination).getOrThrow()
         var copied = 0L
-        Vfs.copyTo(file, target).collect { progress ->
+        NodeOps.copyTo(file, target).collect { progress ->
             if (progress.finished) copied = progress.copiedBytes
         }
         return "Copied $copied bytes from ${refLabel(args)} to $destination"
@@ -473,7 +474,8 @@ internal object AgentTools {
             val current = if (name == context.targetName) "current, " else ""
             val root = when {
                 name == "host" -> " file:///"
-                name.startsWith("container-") -> " container://${name.removePrefix("container-")}"
+                DaemonManager.isContainerHubId(name) ->
+                    " " + ContainerUris.forContainer(DaemonManager.hubDisplayName(name))
                 else -> ""
             }
             val label = displayTarget(name)
@@ -497,10 +499,10 @@ internal object AgentTools {
     private fun daemonTarget(name: String): DaemonTarget = when (name) {
         "host" -> DaemonTarget.Host
         "app" -> DaemonTarget.App
-        else -> DaemonTarget.Named(name.removePrefix("container-"))
+        else -> DaemonTarget.Named(DaemonManager.hubDisplayName(name))
     }
 
-    private fun displayTarget(name: String): String = name.removePrefix("container-")
+    private fun displayTarget(name: String): String = DaemonManager.hubDisplayName(name)
 
     private fun stringArg(args: JSONObject, name: String): String =
         args.optString(name).takeIf { it.isNotEmpty() } ?: error("missing '$name'")

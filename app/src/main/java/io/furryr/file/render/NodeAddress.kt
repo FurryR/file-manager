@@ -11,7 +11,7 @@ import io.furryr.file.core.Path
  * inverses, so an address never has to be guessed back by probing the
  * filesystem — the boundary is written in the text.
  */
-object LocationAddress {
+object NodeAddress {
     fun format(path: Path): String = path.toString()
 
     fun parse(text: String): Path = Path.parse(text)

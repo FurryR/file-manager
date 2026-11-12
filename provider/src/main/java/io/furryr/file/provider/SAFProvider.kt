@@ -4,6 +4,7 @@ import io.furryr.file.core.*
 
 import io.furryr.file.provider.model.SafLocation
 import android.content.Context
+import android.database.Cursor
 import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
@@ -28,6 +29,7 @@ object SAFProvider : FileProvider {
     override val scheme: String get() = "saf"
     override val authority: String? get() = null
     override val label: String get() = "SAF Location"
+    override val writable: Boolean get() = false
     override val features: Set<ProviderFeature> get() = setOf(
         ProviderFeature.LIST, ProviderFeature.STAT,
         ProviderFeature.CREATE_FILE, ProviderFeature.CREATE_DIR, ProviderFeature.DELETE,
@@ -79,7 +81,8 @@ object SAFProvider : FileProvider {
 
                 val entries = mutableListOf<FileEntry>()
                 val baseUri = "saf://${loc.hexId}/${relPath.trimEnd('/')}"
-                appContext.contentResolver.query(
+                queryOrThrow(
+                    treeUri,
                     childrenUri,
                     arrayOf(
                         DocumentsContract.Document.COLUMN_DISPLAY_NAME,
@@ -88,8 +91,7 @@ object SAFProvider : FileProvider {
                         DocumentsContract.Document.COLUMN_SIZE,
                         DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                     ),
-                    null, null, null
-                )?.use { cursor ->
+                ).use { cursor ->
                     val nameIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
                     val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
                     val modIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
@@ -116,11 +118,18 @@ object SAFProvider : FileProvider {
                 if (path == "/") return@runCatching ProviderStat(exists = true, isDirectory = true)
                     val (loc, relPath) = resolveLocation(path)
                     val treeUri = Uri.parse(loc.treeUri)
+                    // A tree root is a directory by definition. Asking a provider
+                    // that has not started for its MIME type is what used to turn
+                    // the location into a file and surface "not a folder".
+                    if (relPath.isEmpty()) {
+                        return@runCatching ProviderStat(exists = true, isDirectory = true)
+                    }
                     val docUri = resolveDocUri(treeUri, relPath)
                     if (docUri == null) {
                         ProviderStat(exists = false, isDirectory = false)
                     } else {
-                        val mime = queryMimeType(docUri)
+                        val mime = queryMimeType(treeUri, docUri)
+                            ?: throw ProviderUnavailableException(endpoint(treeUri))
                         ProviderStat(exists = true, isDirectory = mime == DocumentsContract.Document.MIME_TYPE_DIR)
                     }
             }
@@ -172,7 +181,7 @@ object SAFProvider : FileProvider {
                     ?: throw FileNotFoundException("Not found: $path")
                 val stream = appContext.contentResolver.openInputStream(docUri)
                     ?: throw FileNotFoundException("Cannot open: $path")
-                val size = querySize(docUri)
+                val size = querySize(treeUri, docUri)
                 StreamFileSource(inputStream = stream, size = size, absolutePath = null)
             }
 
@@ -185,7 +194,7 @@ object SAFProvider : FileProvider {
                 val dstTreeUri = Uri.parse(toLoc.treeUri)
                 val dstParentRelPath = toRelPath.substringBeforeLast('/', "")
                 val dstName = toRelPath.substringAfterLast('/')
-                val srcSize = querySize(srcUri)
+                val srcSize = querySize(srcTreeUri, srcUri)
 
                 if (fromLoc.hexId == toLoc.hexId) {
                     val dstParentDocId = resolveDocId(dstTreeUri, dstParentRelPath)
@@ -301,7 +310,7 @@ object SAFProvider : FileProvider {
                     val docId = segments.fold(rootDocId) { acc, seg -> "$acc/$seg" }
                     val candidate = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
                     // 验证是否存在（一次快速 query）
-                    return if (queryExists(candidate)) candidate else null
+                    return if (queryExists(treeUri, candidate)) candidate else null
                 }
 
                 /**
@@ -318,23 +327,43 @@ object SAFProvider : FileProvider {
                     return DocumentFile.fromSingleUri(appContext, parentDocUri)?.findFile(name)
                 }
 
-                private fun queryExists(uri: Uri): Boolean {
-                    appContext.contentResolver.query(
-                        uri,
-                        arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID),
-                                                     null, null, null
-                    )?.use { cursor ->
-                        return cursor.moveToFirst()
-                    }
-                    return false
+                private fun endpoint(treeUri: Uri): String =
+                    treeUri.authority ?: treeUri.toString()
+
+                /**
+                 * ContentResolver answers an unreachable provider with a null
+                 * cursor. That is the only "service not started" signal the
+                 * platform exposes, so it becomes the typed failure the renderer
+                 * can present.
+                 */
+                private fun queryOrThrow(
+                    treeUri: Uri,
+                    uri: Uri,
+                    projection: Array<String>,
+                ): Cursor {
+                    // FIXME: a provider that returns null for a racing deletion
+                    // is misreported as an unavailable service. If that shows up,
+                    // re-check the tree grant before widening this heuristic.
+                    return appContext.contentResolver.query(uri, projection, null, null, null)
+                        ?: throw ProviderUnavailableException(endpoint(treeUri))
                 }
 
-                private fun queryMimeType(uri: Uri): String? {
-                    appContext.contentResolver.query(
+                private fun queryExists(treeUri: Uri, uri: Uri): Boolean {
+                    queryOrThrow(
+                        treeUri,
+                        uri,
+                        arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID),
+                    ).use { cursor ->
+                        return cursor.moveToFirst()
+                    }
+                }
+
+                private fun queryMimeType(treeUri: Uri, uri: Uri): String? {
+                    queryOrThrow(
+                        treeUri,
                         uri,
                         arrayOf(DocumentsContract.Document.COLUMN_MIME_TYPE),
-                                                     null, null, null
-                    )?.use { cursor ->
+                    ).use { cursor ->
                         if (cursor.moveToFirst()) {
                             return cursor.getString(0)
                         }
@@ -342,12 +371,12 @@ object SAFProvider : FileProvider {
                     return null
                 }
 
-                private fun querySize(uri: Uri): Long {
-                    appContext.contentResolver.query(
+                private fun querySize(treeUri: Uri, uri: Uri): Long {
+                    queryOrThrow(
+                        treeUri,
                         uri,
                         arrayOf(DocumentsContract.Document.COLUMN_SIZE),
-                                                     null, null, null
-                    )?.use { cursor ->
+                    ).use { cursor ->
                         if (cursor.moveToFirst()) {
                             return cursor.getLong(0)
                         }

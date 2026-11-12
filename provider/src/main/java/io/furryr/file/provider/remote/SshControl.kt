@@ -37,7 +37,11 @@ internal class SshControl(private val location: RemoteLocation) {
         val token = UUID.randomUUID().toString()
         stderrSink.reset()
         discardPending(stdout)
-        val command = "(\n$script\n); printf '\\n__FME:$token:%d__\\n' \"$?\"\n"
+        // No newline after the marker: the reply reader stops at the final
+        // underscore, so anything after it would prepend the next command's
+        // output. The trailing newline that used to sit there was only drained
+        // opportunistically by discardPending().
+        val command = "(\n$script\n); printf '\\n__FME:$token:%d__' \"$?\"\n"
         try {
             sink.write(command.toByteArray(Charsets.UTF_8))
             sink.flush()
@@ -45,7 +49,19 @@ internal class SshControl(private val location: RemoteLocation) {
             closeLocked()
             throw IOException("SSH control channel failed; retry the operation", failure)
         }
-        val reply = readReply(stdout, token)
+        val reply = try {
+            readReply(stdout, token)
+        } catch (failure: Throwable) {
+            // A cancelled command keeps running in the shared shell after its
+            // reader is interrupted (leaving a directory tab cancels its
+            // listing). Its output then arrives ahead of the next command's and
+            // parses as that command's data: duplicate entries, or "invalid SSH
+            // metadata response" when the cut lands mid-record. Framing cannot
+            // be trusted again, so drop the shell; the next run dials a fresh
+            // one.
+            closeLocked()
+            throw failure
+        }
         if (reply.status != 0) {
             // stderr may still be in flight when the marker arrives.
             Thread.sleep(10)

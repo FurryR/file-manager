@@ -51,6 +51,23 @@ object ContentTypes {
         register("text/x-c", "c", "h")
         register("text/x-cpp", "cpp", "cc", "cxx", "hpp")
         register("text/x-shellscript", "sh", "bash", "zsh")
+        register("text/x-fish", "fish")
+        register("text/x-ruby", "rb")
+        register("text/x-php", "php")
+        register("text/x-lua", "lua")
+        register("text/x-dart", "dart")
+        register("text/x-swift", "swift")
+        register("text/x-csharp", "cs")
+        register("text/x-scss", "scss", "sass", "less")
+        register("text/x-vue", "vue")
+        register("text/x-svelte", "svelte")
+        register("text/x-jsonc", "jsonc")
+        register("text/x-gradle", "gradle")
+        register("text/x-cmake", "cmake")
+        register("text/x-powershell", "ps1")
+        register("text/x-batch", "bat", "cmd")
+        register("text/x-diff", "patch", "diff")
+        register("text/x-properties", "properties", "env")
         register("application/x-yaml", "yaml", "yml")
         register("application/toml", "toml")
         register("application/sql", "sql")
@@ -69,11 +86,15 @@ object ContentTypes {
         register("audio/aac", "aac")
         register("audio/ogg", "ogg", "opus")
         register("audio/mp4", "m4a")
+        register("audio/x-ms-wma", "wma")
         register("video/mp4", "mp4", "m4v")
         register("video/x-matroska", "mkv")
         register("video/webm", "webm")
         register("video/quicktime", "mov")
         register("video/x-msvideo", "avi")
+        register("video/x-ms-wmv", "wmv")
+        register("video/x-flv", "flv")
+        register("video/3gpp", "3gp")
         register("video/mpeg", "mpg", "mpeg")
         register("application/pdf", "pdf")
         register("application/zip", "zip", "jar", "epub")
@@ -105,6 +126,23 @@ object ContentTypes {
         "text/x-c",
         "text/x-cpp",
         "text/x-shellscript",
+        "text/x-fish",
+        "text/x-ruby",
+        "text/x-php",
+        "text/x-lua",
+        "text/x-dart",
+        "text/x-swift",
+        "text/x-csharp",
+        "text/x-scss",
+        "text/x-vue",
+        "text/x-svelte",
+        "text/x-jsonc",
+        "text/x-gradle",
+        "text/x-cmake",
+        "text/x-powershell",
+        "text/x-batch",
+        "text/x-diff",
+        "text/x-properties",
     )
 
     private val archiveMimes = setOf(
@@ -117,11 +155,35 @@ object ContentTypes {
         "application/x-bzip2",
     )
 
+    /**
+     * Extensions contributed at runtime (built-in modules and plugins). Kept
+     * apart from the baked-in table so an extension can be replaced without
+     * rebuilding the map.
+     */
+    private val registered = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** Teach the table one extension; later registrations win. */
+    fun register(extension: String, mime: String) {
+        registered[extension.trimStart('.').lowercase(Locale.ROOT)] = mime
+    }
+
+    fun register(mime: String, vararg extensions: String) {
+        for (extension in extensions) register(extension, mime)
+    }
+
+    fun unregister(extension: String) {
+        registered.remove(extension.trimStart('.').lowercase(Locale.ROOT))
+    }
+
     fun fromName(name: String): String? {
         val dot = name.lastIndexOf('.')
         if (dot < 0 || dot == name.lastIndex) return null
-        return mimeByExtension[name.substring(dot + 1).lowercase(Locale.ROOT)]
+        val extension = name.substring(dot + 1).lowercase(Locale.ROOT)
+        return registered[extension] ?: mimeByExtension[extension]
     }
+
+    /** The kind implied by the name alone, or null when the extension is unknown. */
+    fun kindOfName(name: String): ContentKind? = fromName(name)?.let { kindOf(it, name) }
 
     /** True for the types a browser must render as a page, not save as a file. */
     fun isHtmlMime(mime: String?): Boolean {

@@ -16,6 +16,10 @@ import android.view.inputmethod.InputConnection
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -23,7 +27,9 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
@@ -56,6 +62,23 @@ fun TerminalViewComposable(
     val terminalPalette = TerminalSchemeStore.current(context).palette()
     val backgroundColor = terminalPalette.background
     val density = LocalDensity.current
+
+    // TerminalView paints black itself while it has no emulator, which ignores
+    // its background colour. A session that is still connecting is drawn as a
+    // placeholder in the terminal scheme instead.
+    if (session == null) {
+        Box(
+            modifier = modifier.background(Color(backgroundColor)),
+            contentAlignment = Alignment.Center,
+        ) {
+            CircularProgressIndicator(
+                color = Color(terminalPalette.foreground),
+                strokeWidth = 2.dp,
+                modifier = Modifier.size(24.dp),
+            )
+        }
+        return
+    }
 
     val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
     var fontSizeDp by remember { mutableIntStateOf(prefs.getInt("terminal_font_size", 9).coerceIn(8, 128)) }

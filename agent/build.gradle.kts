@@ -24,6 +24,7 @@ android {
 dependencies {
     api(project(":core"))
     api(project(":daemon"))
+    implementation(project(":container"))
     implementation("com.google.protobuf:protobuf-javalite:4.28.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }

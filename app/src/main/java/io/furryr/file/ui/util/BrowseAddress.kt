@@ -33,6 +33,20 @@ object BrowseAddress {
         val lower = text.lowercase()
         return lower.startsWith("http://") || lower.startsWith("https://")
     }
+
+    /**
+     * Human name of a web address before the page reports its own title: the
+     * last path segment (`.../CMakeLists.txt` → `CMakeLists.txt`), decoded by
+     * [java.net.URI], or the host when the address names no file (`https://github.com/`).
+     * A page opened from such an address must not be labelled by its domain
+     * while it loads, and a text file never gets a WebView title at all.
+     */
+    fun displayName(address: String): String? = runCatching {
+        val uri = java.net.URI(address)
+        uri.path.orEmpty().trimEnd('/').substringAfterLast('/')
+            .takeIf { it.isNotBlank() }
+            ?: uri.host?.takeIf { it.isNotBlank() }
+    }.getOrNull()
 }
 
 enum class SearchEngine(val label: String, val template: String) {
@@ -45,6 +59,7 @@ enum class SearchEngine(val label: String, val template: String) {
 object SearchSettings {
     private const val PREFS = "settings"
     private const val KEY = "search_engine"
+    private const val SUGGESTIONS_KEY = "search_suggestions"
 
     fun current(context: Context): SearchEngine {
         val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null)
@@ -54,6 +69,16 @@ object SearchSettings {
     fun select(context: Context, engine: SearchEngine) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putString(KEY, engine.name).apply()
+    }
+
+    /** Internet suggestions are on unless the user turns them off. */
+    fun suggestionsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(SUGGESTIONS_KEY, true)
+
+    fun setSuggestionsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(SUGGESTIONS_KEY, enabled).apply()
     }
 
     fun searchUrl(context: Context, query: String): String {

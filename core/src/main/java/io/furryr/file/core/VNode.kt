@@ -47,11 +47,36 @@ interface VFile : VNode {
     suspend fun open(mode: OpenMode): Result<FileSource>
 
     /**
+     * Whether [open] accepts a write mode. Read-only views and live resources
+     * answer false; the caller never inspects a provider or a scheme.
+     */
+    val writable: Boolean get() = true
+
+    /**
+     * Absolute address a document renderer loads itself (so the platform can
+     * resolve the page's subresources against its origin), or null when this
+     * file is stored bytes.
+     */
+    val liveAddress: String? get() = null
+
+    /** The page a live resource was reached from, or null. */
+    val liveReferer: String? get() = null
+
+    /**
      * Content facts for renderer selection. Providers may refine the MIME
      * type; the default implementation falls back to name/extension and a
      * small magic-byte sniff.
      */
     suspend fun describe(): Result<ContentInfo>
+
+    /**
+     * Facts without transferring the body. The default is [describe]; a live
+     * provider that can answer from headers overrides it.
+     */
+    suspend fun peek(): Result<ContentInfo> = describe()
+
+    /** [this] with the page a live request came from; stored files ignore it. */
+    fun withReferer(referer: String?): VFile = this
 }
 
 /** A directory node. */
@@ -61,6 +86,15 @@ interface VFolder : VNode {
 
     /** Object listing used by navigation and renderers. */
     suspend fun listNodes(): Result<List<VNode>>
+
+    /**
+     * Entries and their nodes from one listing.
+     *
+     * Renderers need both; backends that build nodes from the entries they
+     * already read override this so a folder is never listed twice.
+     */
+    suspend fun listWithNodes(): Result<Pair<List<FileEntry>, List<VNode>>> =
+        list().mapCatching { entries -> entries to listNodes().getOrThrow() }
 
     suspend fun stat(): Result<ProviderStat>
     suspend fun capabilities(): DirectoryCapabilities
@@ -84,7 +118,7 @@ interface VFolder : VNode {
      * The child file [name], created when this folder does not have it yet.
      *
      * Copy destinations are nodes: the caller resolves one of these first and
-     * hands it to [Vfs.copyTo], so a provider path is never formatted for an
+     * hands it to [NodeOps.copyTo], so a provider path is never formatted for an
      * operation.
      */
     suspend fun destination(name: String): Result<VFile> =

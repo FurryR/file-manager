@@ -35,9 +35,10 @@ import java.io.InputStream
  * ```
  */
 object FtpProvider : FileProvider {
-    override val scheme: String get() = "ftp"
+    override val scheme: String get() = ProviderSchemes.FTP
     override val authority: String? get() = null
     override val label: String get() = "FTP Location"
+    override val writable: Boolean get() = false
     override val features: Set<ProviderFeature> get() = setOf(
         ProviderFeature.LIST, ProviderFeature.STAT,
         ProviderFeature.CREATE_FILE, ProviderFeature.CREATE_DIR,

@@ -24,6 +24,8 @@ class LocalProvider : FileProvider {
     override val label: String get() = "Local Storage"
     override val features: Set<ProviderFeature> get() = ProviderFeature.entries.toSet()
 
+    override fun innerPath(path: Path): String = path.toLocalPath()
+
     override fun isAvailable(): Boolean = true
 
     override suspend fun connect(): Result<Unit> = DaemonManager.warmUp()

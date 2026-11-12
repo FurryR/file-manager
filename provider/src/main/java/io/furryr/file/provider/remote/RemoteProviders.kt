@@ -48,6 +48,7 @@ private class RemoteProvider(
     override val scheme get() = kind.scheme
     override val authority: String? = null
     override val label get() = if (kind == RemoteKind.ALIST) "AList" else "SSH commands"
+    override val writable get() = false
     override val features = setOf(ProviderFeature.LIST, ProviderFeature.STAT, ProviderFeature.OPEN,
         ProviderFeature.CREATE_FILE, ProviderFeature.CREATE_DIR, ProviderFeature.DELETE, ProviderFeature.RENAME, ProviderFeature.STREAM_COPY)
     override fun isAvailable() = true

@@ -56,10 +56,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import io.furryr.file.R
 import io.furryr.file.core.DirectoryCapabilities
 import io.furryr.file.core.Path
-import io.furryr.file.core.RemoteFile
 import io.furryr.file.core.VFile
 import io.furryr.file.core.VFolder
-import io.furryr.file.render.LocationAddress
+import io.furryr.file.render.NodeAddress
 import io.furryr.file.render.RenderCapabilities
 import io.furryr.file.render.RenderHost
 import io.furryr.file.render.RenderTarget
@@ -67,6 +66,7 @@ import io.furryr.file.render.RendererFactory
 import io.furryr.file.render.RendererMenuItem
 import io.furryr.file.render.RendererPath
 import io.furryr.file.render.RendererSession
+import io.furryr.file.render.bookmarkMenuItem
 import io.github.rosemoe.sora.event.ContentChangeEvent
 import io.github.rosemoe.sora.event.EditorKeyEvent
 import io.github.rosemoe.sora.event.PublishSearchResultEvent
@@ -96,7 +96,7 @@ import kotlin.coroutines.resume
  */
 class EditorRendererSession(
     val file: VFile,
-    val address: String,
+    override val address: String,
     private val host: RenderHost,
 ) : RendererSession {
     var document by mutableStateOf<TextDocument?>(null)
@@ -150,9 +150,15 @@ class EditorRendererSession(
     /** Address of [parentFolder] in the same form the file bar uses. */
     val parentAddress: String?
         get() = parentFolder?.let { folder ->
-            runCatching { LocationAddress.format(folder.path) }.getOrNull()
+            runCatching { NodeAddress.format(folder.path) }.getOrNull()
         }
-    val title: String get() = (if (dirty) "• " else "") + file.name
+    override val parent: VFolder? get() = parentFolder
+    override val terminalPath: String?
+        get() = if (capabilities.canTerminal) parentAddress else null
+    override val suppressBookmark: Boolean get() = true
+    override val isOverlay: Boolean get() = true
+    override val needsLeaveGuard: Boolean get() = true
+    override val title: String get() = (if (dirty) "• " else "") + file.name
 
     /**
      * A live resource and a view cannot commit bytes, and so can the providers
@@ -161,8 +167,7 @@ class EditorRendererSession(
      */
     val readOnly: Boolean =
         file.path.isViewed ||
-            file is RemoteFile ||
-            file.path.scheme in setOf("saf", "ftp", "document")
+            !file.writable
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var appContext: Context? = null
@@ -318,6 +323,7 @@ class EditorRendererSession(
                 checked = completionsEnabled,
             ) { toggleCompletions(context) },
         )
+        host.bookmarkMenuItem(context)?.let(::add)
     }
 
     suspend fun load(): Result<Unit> = runCatching {
@@ -745,7 +751,7 @@ class EditorRendererFactory : RendererFactory {
     ): Result<RendererSession> = runCatching {
         val node = target.node as? VFile
             ?: error("editor renderer requires a file")
-        val address = runCatching { LocationAddress.format(node.path) }.getOrNull() ?: node.name
+        val address = runCatching { NodeAddress.format(node.path) }.getOrNull() ?: node.name
         EditorRendererSession(node, address, host).also { it.load().getOrThrow() }
     }
 }

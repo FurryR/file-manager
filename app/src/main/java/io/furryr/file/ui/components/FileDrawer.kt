@@ -88,6 +88,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.furryr.file.container.ContainerManager
 import io.furryr.file.store.LocationsRepository
+import io.furryr.file.provider.ProviderSchemes
 import io.furryr.file.provider.remote.RemoteKind
 import io.furryr.file.provider.remote.RemoteLocation
 import io.furryr.file.provider.remote.SshHostKeyApprovalRequired
@@ -1535,11 +1536,11 @@ fun FileDrawer(
             onConfirm = { address ->
                 showAddLocationDialog = false
                 when (address.scheme) {
-                    "ftp" -> onAddFtp(address.host, address.name.ifBlank { address.host }, address.port ?: 21, address.username, address.password)
-                    "sftp" -> onAddSftp(address.host, address.name.ifBlank { address.host }, address.port ?: 22, address.username, address.password)
-                    "ssh" -> onAddRemote(remoteLocationFrom(address, RemoteKind.SSH))
-                    "alist" -> onAddRemote(remoteLocationFrom(address, RemoteKind.ALIST))
-                    "http", "https" -> onAddWeb(address.toUrl(), address.name)
+                    ProviderSchemes.FTP -> onAddFtp(address.host, address.name.ifBlank { address.host }, address.port ?: 21, address.username, address.password)
+                    ProviderSchemes.SFTP -> onAddSftp(address.host, address.name.ifBlank { address.host }, address.port ?: 22, address.username, address.password)
+                    RemoteKind.SSH.scheme -> onAddRemote(remoteLocationFrom(address, RemoteKind.SSH))
+                    RemoteKind.ALIST.scheme -> onAddRemote(remoteLocationFrom(address, RemoteKind.ALIST))
+                    ProviderSchemes.HTTP, ProviderSchemes.HTTPS -> onAddWeb(address.toUrl(), address.name)
                     else -> onAddLocalPath(address.path)
                 }
             },

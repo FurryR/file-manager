@@ -1,5 +1,7 @@
 package io.furryr.file.model
 
+import io.furryr.file.provider.ProviderSchemes
+
 data class LocationAddress(
     val scheme: String? = null,
     val name: String = "",
@@ -32,8 +34,8 @@ data class LocationAddress(
     }
 }
 
-private val RemoteSchemes = setOf("ftp", "sftp", "ssh", "alist")
-private val WebSchemes = setOf("http", "https")
+private val RemoteSchemes: Set<String> get() = ProviderSchemes.remote
+private val WebSchemes: Set<String> get() = ProviderSchemes.web
 
 object LocationAddressParser {
     fun parse(raw: String): LocationAddress? {

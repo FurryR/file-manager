@@ -15,6 +15,7 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.zip.GZIPInputStream
 
 /**
  * OpenAI-compatible chat gateway. Provider credentials stay in the app; the
@@ -23,6 +24,16 @@ import java.net.URL
  */
 object AiService {
     private const val MAX_METADATA = 4 * 1024 * 1024
+
+    // models.dev is the open model database the OpenCode clients use. It maps a
+    // provider's API base URL to per-model limits, prices and capabilities, so
+    // well-known providers get billing data without scraping their doc pages.
+    private const val MODELS_DEV_URL = "https://models.dev/api.json"
+    private const val MODELS_DEV_TTL = 6 * 60 * 60 * 1000L
+    private const val MAX_MODELS_DEV = 16 * 1024 * 1024
+
+    @Volatile
+    private var modelsDevCache: Pair<Long, JSONObject>? = null
 
     private data class Resolved(
         val provider: AgentAiProvider,
@@ -266,6 +277,9 @@ object AiService {
             )
         }
         val catalog = Catalog()
+        // Generic providers are deliberately excluded: an editable endpoint can
+        // be a gateway whose prices differ from the upstream provider's list.
+        val modelsDev = if (providers.any { it.wellKnown }) modelsDevProviders() else emptyMap()
         for (provider in providers) {
             val chatUrl = runCatching { endpoint(provider.baseUrl) }.getOrNull()
             if (chatUrl != null && provider.kind != AGENT_PROVIDER_RESPONSES) {
@@ -279,7 +293,12 @@ object AiService {
                 ?.let { getJson(it, provider.apiKey) }
                 ?.let(::modelEntries)
                 .orEmpty()
-            catalog.applyProvider(provider, live)
+            val reference = if (provider.wellKnown) {
+                normalizedApi(provider.baseUrl)?.let(modelsDev::get)
+            } else {
+                null
+            }
+            catalog.applyProvider(provider, live, reference)
         }
         if (catalog.models.isEmpty()) {
             catalog.models.addAll(catalog.info.keys.sorted())
@@ -580,21 +599,65 @@ object AiService {
         return URL(url.protocol, url.host, url.port, "$path/models".replace("//", "/")).toString()
     }
 
-    private fun getJson(address: String, key: String): JSONObject? {
+    /**
+     * Provider catalogue keyed by normalized API base URL. One process-wide
+     * fetch serves every provider; a stale copy is kept when refresh fails.
+     */
+    private fun modelsDevProviders(): Map<String, JSONObject> {
+        val root = modelsDevCatalog() ?: return emptyMap()
+        val providers = HashMap<String, JSONObject>()
+        for (key in root.keys()) {
+            val provider = root.optJSONObject(key) ?: continue
+            val api = normalizedApi(provider.optString("api")) ?: continue
+            providers.putIfAbsent(api, provider)
+        }
+        return providers
+    }
+
+    @Synchronized
+    private fun modelsDevCatalog(): JSONObject? {
+        val now = System.currentTimeMillis()
+        modelsDevCache?.let { (cachedAt, cached) ->
+            if (now - cachedAt < MODELS_DEV_TTL) return cached
+        }
+        val fetched = getJson(MODELS_DEV_URL, "", MAX_MODELS_DEV)
+        if (fetched != null) modelsDevCache = now to fetched
+        return fetched ?: modelsDevCache?.second
+    }
+
+    /** `https://api.deepseek.com` and `.../v1` name the same provider. */
+    private fun normalizedApi(value: String): String? = runCatching {
+        val url = URL(value.trim())
+        var path = url.path.trimEnd('/')
+        path = path.removeSuffix("/chat/completions")
+            .removeSuffix("/responses")
+            .trimEnd('/')
+        if (path.endsWith("/v1")) path = path.removeSuffix("/v1")
+        val port = if (url.port > 0 && url.port != url.defaultPort) ":${url.port}" else ""
+        "${url.host.lowercase()}$port${path.lowercase()}"
+    }.getOrNull()
+
+    private fun getJson(address: String, key: String, maxBytes: Int = MAX_METADATA): JSONObject? {
         val connection = (URL(address).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             instanceFollowRedirects = false
             connectTimeout = 20_000
             readTimeout = 30_000
             setRequestProperty("Accept", "application/json")
+            setRequestProperty("Accept-Encoding", "gzip")
             if (key.isNotEmpty()) setRequestProperty("Authorization", "Bearer $key")
         }
         return try {
             if (connection.responseCode !in 200..299) return null
             val length = connection.contentLengthLong
-            if (length > MAX_METADATA) return null
-            val text = connection.inputStream.bufferedReader().use { it.readText() }
-            if (text.toByteArray().size > MAX_METADATA) null else runCatching { JSONObject(text) }.getOrNull()
+            if (length > maxBytes) return null
+            val stream = if (connection.contentEncoding.equals("gzip", ignoreCase = true)) {
+                GZIPInputStream(connection.inputStream)
+            } else {
+                connection.inputStream
+            }
+            val text = stream.bufferedReader().use { it.readText() }
+            if (text.toByteArray().size > maxBytes) null else runCatching { JSONObject(text) }.getOrNull()
         } catch (_: Exception) {
             null
         } finally {
@@ -774,17 +837,28 @@ object AiService {
         /**
          * Merge live `/models` entries with the models configured in the app.
          * Configured limits and prices win; capabilities and efforts are filled
-         * in when the API or the model family exposes them.
+         * in when the API or the shared model database exposes them.
          */
-        fun applyProvider(provider: AgentAiProvider, live: List<JSONObject>) {
+        fun applyProvider(
+            provider: AgentAiProvider,
+            live: List<JSONObject>,
+            reference: JSONObject?,
+        ) {
             val configured = provider.models.associateBy { it.id }
+            val referenceModels = reference?.optJSONObject("models")
             for (model in provider.models) {
-                add(provider, model.id, model, live.firstOrNull { idOf(it) == model.id })
+                add(
+                    provider,
+                    model.id,
+                    model,
+                    live.firstOrNull { idOf(it) == model.id },
+                    referenceModels?.optJSONObject(model.id),
+                )
             }
             for (entry in live) {
                 val id = idOf(entry) ?: continue
                 if (configured.containsKey(id)) continue
-                add(provider, id, null, entry)
+                add(provider, id, null, entry, referenceModels?.optJSONObject(id))
             }
         }
 
@@ -793,16 +867,21 @@ object AiService {
             id: String,
             configured: AgentModelConfig?,
             live: JSONObject?,
+            reference: JSONObject?,
         ) {
             val qualified = "${provider.name}/$id"
             if (qualified !in models) models.add(qualified)
             val info = info.getOrPut(qualified) { baseInfo(provider.name) }
-            val context = configured?.contextWindow?.takeIf { it > 0 } ?: live?.let(::contextOf)
+            val limit = reference?.optJSONObject("limit")
+            val context = configured?.contextWindow?.takeIf { it > 0 }
+                ?: live?.let(::contextOf)
+                ?: positiveLong(limit?.opt("context"))
             if (context != null && !info.has("context_window")) {
                 info.put("context_window", context)
             }
             val maxOutput = configured?.maxOutput?.takeIf { it > 0 }
                 ?: live?.let(::maxOutputOf)
+                ?: positiveLong(limit?.opt("output"))
             if (maxOutput != null && !info.has("max_output")) info.put("max_output", maxOutput)
             if (configured != null) {
                 if (configured.inputPerMillion > 0.0 && !info.has("input_per_million")) {
@@ -837,16 +916,22 @@ object AiService {
                     info.put("cache_write_per_million", cacheWrite * 1_000_000.0)
                 }
             }
+            // OpenCode-style cost tables and the shared catalogue's flat costs.
+            live?.optJSONObject("cost")?.let { putPrices(info, pricesOf(it)) }
+            reference?.optJSONObject("cost")?.let { putPrices(info, pricesOf(it)) }
             // Capabilities come from the configured model or the provider's
             // own metadata. Never infer them from a model-name table.
             val thinking = configured?.thinking
                 ?: live?.let { capability(it, "thinking", "reasoning") }
+                ?: flagOf(reference, "reasoning")
                 ?: false
             val vision = configured?.vision
                 ?: live?.let { capability(it, "vision") }
+                ?: reference?.let(::referenceVision)
                 ?: false
             val toolCall = configured?.toolCall
                 ?: live?.let { capability(it, "tool_call", "tools", "function_calling") }
+                ?: flagOf(reference, "tool_call")
                 ?: true
             info.put("thinking", thinking)
             info.put("vision", vision)
@@ -859,8 +944,71 @@ object AiService {
                 val efforts = configured?.efforts?.filter { it.isNotBlank() }
                     ?.takeIf { it.isNotEmpty() }
                     ?: live?.let(::effortsOf)
+                    ?: reference?.let(::effortsOf)
                     ?: emptyList()
                 info.put("efforts", JSONArray().apply { efforts.forEach(::put) })
+            }
+        }
+
+        private data class Prices(
+            val input: Double = 0.0,
+            val output: Double = 0.0,
+            val cacheRead: Double = 0.0,
+            val cacheWrite: Double = 0.0,
+        )
+
+        private fun putPrices(info: JSONObject, prices: Prices) {
+            if (prices.input > 0.0 && !info.has("input_per_million")) {
+                info.put("input_per_million", prices.input)
+            }
+            if (prices.output > 0.0 && !info.has("output_per_million")) {
+                info.put("output_per_million", prices.output)
+            }
+            if (prices.cacheRead > 0.0 && !info.has("cache_read_per_million")) {
+                info.put("cache_read_per_million", prices.cacheRead)
+            }
+            if (prices.cacheWrite > 0.0 && !info.has("cache_write_per_million")) {
+                info.put("cache_write_per_million", prices.cacheWrite)
+            }
+        }
+
+        /**
+         * Both shapes are dollars per million tokens: flat `input`/`output`
+         * keys (models.dev) and `text.input.price` tables (OpenCode).
+         */
+        private fun pricesOf(cost: JSONObject): Prices {
+            val flat = Prices(
+                input = priceOf(cost.opt("input")),
+                output = priceOf(cost.opt("output")),
+                cacheRead = priceOf(cost.opt("cache_read")),
+                cacheWrite = priceOf(cost.opt("cache_write")),
+            )
+            if (flat != Prices()) return flat
+            val text = cost.optJSONObject("text") ?: return flat
+            val input = text.optJSONObject("input") ?: return flat
+            val cache = input.optJSONObject("cache")
+            return Prices(
+                input = priceOf(input.opt("price")),
+                output = priceOf(text.optJSONObject("output")?.opt("price")),
+                cacheRead = priceOf(cache?.opt("read")),
+                cacheWrite = priceOf(cache?.opt("write")),
+            )
+        }
+
+        private fun priceOf(value: Any?): Double = when (value) {
+            is Number -> value.toDouble()
+            is String -> value.toDoubleOrNull() ?: 0.0
+            is JSONObject -> value.keys().asSequence()
+                .map { priceOf(value.opt(it)) }
+                .firstOrNull { it > 0.0 } ?: 0.0
+            else -> 0.0
+        }
+
+        private fun referenceVision(value: JSONObject): Boolean {
+            if (value.optBoolean("attachment", false)) return true
+            val input = value.optJSONObject("modalities")?.optJSONArray("input") ?: return false
+            return (0 until input.length()).any {
+                input.optString(it).startsWith("image", ignoreCase = true)
             }
         }
 
@@ -883,14 +1031,14 @@ object AiService {
 
         private fun contextOf(value: JSONObject): Long? {
             val keys = listOf(
-                "context_length", "max_prompt_tokens", "max_model_len",
+                "context", "context_length", "max_prompt_tokens", "max_model_len",
                 "context_window", "max_context_length", "max_input_tokens",
                 "input_token_limit", "context_size",
             )
             for (key in keys) {
                 positiveLong(value.opt(key))?.let { return it }
             }
-            for (key in listOf("meta", "metadata", "top_provider", "limits", "capabilities")) {
+            for (key in listOf("meta", "metadata", "top_provider", "limits", "limit", "capabilities")) {
                 value.optJSONObject(key)?.let { nested ->
                     contextOf(nested)?.let { return it }
                 }
@@ -900,13 +1048,13 @@ object AiService {
 
         private fun maxOutputOf(value: JSONObject): Long? {
             val keys = listOf(
-                "max_output_tokens", "max_completion_tokens", "output_token_limit",
+                "output", "max_output_tokens", "max_completion_tokens", "output_token_limit",
                 "max_tokens",
             )
             for (key in keys) {
                 positiveLong(value.opt(key))?.let { return it }
             }
-            for (key in listOf("top_provider", "limits")) {
+            for (key in listOf("top_provider", "limits", "limit")) {
                 value.optJSONObject(key)?.let { nested ->
                     maxOutputOf(nested)?.let { return it }
                 }
@@ -925,6 +1073,18 @@ object AiService {
     }
 
     private fun effortsOf(entry: JSONObject): List<String> {
+        // models.dev lists `reasoning_options` as typed option objects.
+        entry.optJSONArray("reasoning_options")?.let { options ->
+            val values = (0 until options.length()).flatMap { index ->
+                val option = options.optJSONObject(index) ?: return@flatMap emptyList()
+                if (option.optString("type") != "effort") return@flatMap emptyList()
+                val effortValues = option.optJSONArray("values") ?: return@flatMap emptyList()
+                (0 until effortValues.length()).mapNotNull {
+                    effortValues.optString(it).trim().takeIf(String::isNotEmpty)
+                }
+            }
+            if (values.isNotEmpty()) return values
+        }
         val keys = listOf(
             "reasoning_efforts", "reasoning_effort", "supported_efforts",
             "effort_levels", "efforts",
@@ -944,17 +1104,34 @@ object AiService {
         return emptyList()
     }
 
-    /** Read a capability flag from flat fields or a nested capabilities object. */
-    private fun capability(entry: JSONObject, vararg names: String): Boolean {
+    private fun flagOf(entry: JSONObject?, key: String): Boolean? =
+        if (entry != null && entry.has(key)) entry.optBoolean(key) else null
+
+    /**
+     * Read a capability flag from flat fields or a nested capabilities object.
+     * Null means the endpoint said nothing, so another source may still fill it.
+     */
+    private fun capability(entry: JSONObject, vararg names: String): Boolean? {
         for (name in names) {
             if (entry.has(name)) return entry.optBoolean(name)
             for (container in listOf("capabilities", "metadata", "meta")) {
                 val nested = entry.optJSONObject(container) ?: continue
-                if (nested.has(name)) return nested.optBoolean(name)
+                if (nested.has(name)) {
+                    // OpenCode nests a `{ supported: true }` object per feature.
+                    val feature = nested.optJSONObject(name)
+                    return feature?.optBoolean("supported", true)
+                        ?: nested.optBoolean(name)
+                }
             }
         }
-        // OpenRouter exposes modalities and supported parameters as lists.
-        entry.optJSONObject("architecture")?.optJSONArray("input_modalities")?.let { values ->
+        // OpenRouter and OpenCode describe modalities as input lists.
+        var modalitiesDeclared = false
+        for (container in listOf("architecture", "modalities")) {
+            val description = entry.optJSONObject(container) ?: continue
+            val values = description.optJSONArray("input_modalities")
+                ?: description.optJSONArray("input")
+                ?: continue
+            modalitiesDeclared = true
             for (index in 0 until values.length()) {
                 val value = values.optString(index)
                 if (names.any { value.contains(it, ignoreCase = true) } ||
@@ -964,13 +1141,15 @@ object AiService {
                 }
             }
         }
+        if (modalitiesDeclared && names.any { it == "vision" }) return false
         entry.optJSONArray("supported_parameters")?.let { values ->
             for (index in 0 until values.length()) {
                 val value = values.optString(index)
                 if (names.any { value.contains(it, ignoreCase = true) }) return true
             }
+            return false
         }
-        return false
+        return null
     }
     data class ChatResult(
         val content: String,

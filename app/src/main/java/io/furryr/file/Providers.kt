@@ -1,6 +1,7 @@
 package io.furryr.file
 
 import android.content.Context
+import android.util.Log
 import io.furryr.file.agent.AgentEnvironment
 import io.furryr.file.agent.AgentSettings
 import io.furryr.file.agent.SessionManager
@@ -17,12 +18,12 @@ import io.furryr.file.provider.FtpProvider
 import io.furryr.file.provider.SAFProvider
 import io.furryr.file.provider.SftpProvider
 import io.furryr.file.core.Vfs
+import io.furryr.file.core.Plugins
 import io.furryr.file.provider.remote.RemoteProviders
 import io.furryr.file.provider.remote.SshTerminals
 import io.furryr.file.opener.ArchiveOpener
 import io.furryr.file.editor.EditorRendererFactory
-import io.furryr.file.render.DirectoryRendererFactory
-import io.furryr.file.opener.Openers
+import io.furryr.file.core.ViewOpeners
 import io.furryr.file.render.Renderers
 import io.furryr.file.render.WebRendererFactory
 import io.furryr.file.render.WebTransferService
@@ -107,12 +108,15 @@ fun installFileProviders(context: Context) {
     }
     SshTerminals.configure(LocationStores)
     // Container openers and renderers are Kotlin-side; they never touch a
-    // daemon API. The list screen is the shared directory renderer.
-    Openers.register(100, ArchiveOpener(appContext.cacheDir))
-    Renderers.register(10, DirectoryRendererFactory())
+    // daemon API. Directory tabs are shell-owned location renderers, so the
+    // open-with table only handles files.
+    ViewOpeners.register(100, ArchiveOpener(appContext.cacheDir))
     Renderers.register(15, EditorRendererFactory())
     Renderers.register(20, WebRendererFactory())
-    OpenRoutes.install()
-    AgentEnvironment.nodeService = DefaultNodeService()
+    OpenTable.install()
+    // Plugin contributions go through the same registries as the built-ins.
+    Plugins.installAll().forEach { failure ->
+        Log.w("Plugins", "Plugin '${failure.id}' failed to install", failure.cause)
+    }
     fileProvidersInstalled = true
 }

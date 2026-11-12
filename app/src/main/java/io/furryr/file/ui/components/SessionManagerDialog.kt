@@ -46,6 +46,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import io.furryr.file.R
+import io.furryr.file.container.ContainerUris
 import io.furryr.file.model.FileTab
 
 /** Assumed two-line row pitch, used to give the list a bounded height. */
@@ -55,7 +56,7 @@ private val MaxListHeight = 340.dp
 /** Leading icon for a tab, mirroring what kind of location it shows. */
 private fun sessionIcon(tab: FileTab): ImageVector = when {
     tab.webUrl != null -> Icons.Default.Language
-    tab.path.startsWith("container://") -> Icons.Default.DesktopWindows
+    ContainerUris.isContainer(tab.path) -> Icons.Default.DesktopWindows
     tab.path.startsWith("ssh://") -> Icons.Default.Cloud
     else -> Icons.Default.Folder
 }

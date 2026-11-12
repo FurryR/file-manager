@@ -1,14 +1,6 @@
 package io.furryr.file.core
 
-import io.furryr.file.core.model.CopyProgress
-import io.furryr.file.core.model.FileEntry
-import io.furryr.file.core.source.FileSource
-import io.furryr.file.core.source.OpenMode
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.runBlocking
+import io.furryr.file.core.model.ProviderStat
 
 /**
  * Virtual filesystem router.
@@ -17,6 +9,9 @@ import kotlinx.coroutines.runBlocking
  * every filesystem operation through the provider contract. Bare paths use the
  * registered default provider. This layer is platform- and UI-independent:
  * callers (UI, hub, CLI bridges) only deal in paths and opaque providers.
+ *
+ * [node] is the single address→node boundary; everything above it takes nodes
+ * (see [NodeOps] for copy/move).
  */
 object Vfs {
     private val providers = mutableMapOf<String, FileProvider>()
@@ -58,152 +53,85 @@ object Vfs {
     }
 
     /** Address-text boundary: parse once, then stay on [Path]. */
-    fun resolve(uri: String): Result<ResolvedProvider> {
-        val path = runCatching { Path.parse(uri) }.getOrElse { error ->
-            return Result.failure(IllegalArgumentException("Cannot parse path: $uri", error))
-        }
-        return resolve(path)
+    fun resolve(uri: String): Result<ResolvedProvider> = parsed(uri) { resolve(it) }
+
+    suspend fun folder(path: Path): Result<VFolder> = node(path).mapCatching { node ->
+        node as? VFolder ?: error("not a folder: $path")
     }
 
-    fun folder(path: Path): Result<Folder> {
-        val resolved = resolve(path).getOrElse { return Result.failure(it) }
-        return Result.success(Folder(resolved.path, resolved.provider, resolved.innerPath))
+    suspend fun folder(path: String): Result<VFolder> = parsed(path) { folder(it) }
+
+    suspend fun file(path: Path): Result<VFile> = node(path).mapCatching { node ->
+        node as? VFile ?: error("not a file: $path")
     }
 
-    fun folder(path: String): Result<Folder> = folder(Path.parse(path))
-
-    fun file(path: Path): Result<File> {
-        val resolved = resolve(path).getOrElse { return Result.failure(it) }
-        return Result.success(File(resolved.path, resolved.provider, resolved.innerPath))
-    }
-
-    fun file(path: String): Result<File> = file(Path.parse(path))
+    suspend fun file(path: String): Result<VFile> = parsed(path) { file(it) }
 
     /**
-     * The node at [path]. The provider mints it: a storage provider answers with
-     * a [Folder]/[File], a live one with its own [VNode] implementation, and the
-     * caller never has to know which.
+     * The node at [path]. The provider mints the provider part: a storage
+     * provider answers with a [Folder]/[File], a live one with its own [VNode]
+     * implementation, and the caller never has to know which. Each `!` view
+     * level after it is entered through [ViewOpeners], so a file that is also a
+     * container is just a longer chain. This is the only place an address
+     * becomes a node.
      */
-    suspend fun node(path: Path): Result<VNode> {
+    suspend fun node(path: Path): Result<VNode> = runCatching {
+        var node = root(path.providerPath()).getOrThrow()
+        for (view in path.views) {
+            val file = node as? VFile ?: error("view requires a file: ${node.path}")
+            val content = file.describe().getOrThrow()
+            val opener = ViewOpeners.resolve(file, content)
+                ?: error("no opener supports ${file.name}")
+            node = ViewOpeners.enter(file, opener).getOrThrow()
+        }
+        node
+    }
+
+    suspend fun node(path: String): Result<VNode> = parsed(path) { node(it) }
+
+    /**
+     * The live node for [address], carrying [referer] as its request context.
+     * Callers ask the route table, not a provider, so a link or share never
+     * rebuilds an address.
+     */
+    fun liveFile(address: String, referer: String? = null): Result<VFile> = parsed(address) { path ->
+        val scheme = path.scheme
+            ?: return@parsed Result.failure(IllegalArgumentException("Not a live address: $address"))
+        val resolved = resolve(path).getOrElse { return@parsed Result.failure(it) }
+        runCatching {
+            resolved.provider.liveFile(address, referer)
+                ?: error("Scheme '$scheme' has no live resources")
+        }
+    }
+
+    // ── Simple operations ──────────────────────────────────────────
+
+    suspend fun stat(path: Path): Result<ProviderStat> = node(path).mapCatching { node ->
+        when (node) {
+            is VFile -> node.stat().getOrThrow()
+            is VFolder -> node.stat().getOrThrow()
+            else -> error("unsupported node: ${node.path}")
+        }
+    }
+
+    suspend fun stat(path: String): Result<ProviderStat> = parsed(path) { stat(it) }
+
+    // ── Internal ────────────────────────────────────────────────────
+
+    /** The provider-visible address: one lookup, whatever the scheme is. */
+    private suspend fun root(path: Path): Result<VNode> {
         val resolved = resolve(path).getOrElse { return Result.failure(it) }
         return resolved.provider.node(resolved.path, resolved.innerPath)
     }
 
-    suspend fun node(path: String): Result<VNode> = node(Path.parse(path))
-
-    // ── Simple operations ──────────────────────────────────────────
-
-    fun stat(path: String) = dispatch(path) { provider, inner -> runBlocking { provider.stat(inner) } }
-
-    // ── Node operations ────────────────────────────────────────────
-    //
-    // Everything below takes nodes, never paths. A caller that has a path
-    // resolved it once through [node]/[folder]/[file] (or [destination]), and
-    // stays on nodes afterwards; only provider implementations and the
-    // address parser still see strings.
-
-    /**
-     * Copy [source] onto [target]. Both nodes already exist: the caller takes
-     * the destination from [VFolder.destination] / [VFolder.destinationFolder]
-     * (or resolved it), so an operation never formats a provider path. A page
-     * link (`WebUrlFile`) is a [VFile] like any other and streams straight into
-     * the destination node.
-     */
-    fun copyTo(source: VNode, target: VNode): Flow<CopyProgress> =
-        copyNode(source, target, isCopy = true)
-
-    /** Move [source] onto [target], renaming when both live in one provider. */
-    fun moveTo(source: VNode, target: VNode): Flow<CopyProgress> = flow {
-        if (source is File && target is File && source.provider === target.provider) {
-            source.provider.copy(source.innerPath, target.innerPath, isCopy = false)
-                .collect { emit(it) }
-            return@flow
+    /** Parse an address into a [Path] without throwing out of a `Result` API. */
+    private inline fun <T> parsed(uri: String, block: (Path) -> Result<T>): Result<T> {
+        val path = try {
+            Path.parse(uri)
+        } catch (error: Exception) {
+            return Result.failure(IllegalArgumentException("Cannot parse path: $uri", error))
         }
-        // Folder children keep the provider rename when they share one, so a
-        // move inside a provider never moves bytes.
-        copyNode(source, target, isCopy = false).collect { emit(it) }
-        source.delete().getOrThrow()
-    }.flowOn(Dispatchers.IO)
-
-    /**
-     * The file node at [path] for writing: the existing node, or a new one in
-     * its parent folder. This is the string→node boundary for callers that are
-     * handed a path from outside (agent tool input, restored state).
-     */
-    suspend fun destination(path: String): Result<VFile> = runCatching {
-        (node(path).getOrNull() as? VFile)?.let { return@runCatching it }
-        val parsed = Path.parse(path)
-        val name = parsed.name ?: error("no file name in $path")
-        val parent = parsed.parent() ?: error("no parent folder for $path")
-        folder(parent).getOrThrow().destination(name).getOrThrow()
+        return block(path)
     }
 
-    private fun copyNode(source: VNode, target: VNode, isCopy: Boolean): Flow<CopyProgress> = flow {
-        when {
-            source is VFolder && target is VFolder ->
-                copyFolder(source, target, isCopy).collect { emit(it) }
-            source is VFile && target is VFile ->
-                copyFile(source, target, isCopy).collect { emit(it) }
-            else -> error("copy needs a file→file or folder→folder pair: ${source.path} → ${target.path}")
-        }
-    }.flowOn(Dispatchers.IO)
-
-    private fun copyFolder(
-        source: VFolder,
-        target: VFolder,
-        isCopy: Boolean,
-    ): Flow<CopyProgress> = flow {
-        for (child in source.listNodes().getOrThrow()) {
-            val destination = when (child) {
-                is VFolder -> target.destinationFolder(child.name).getOrThrow()
-                is VFile -> target.destination(child.name).getOrThrow()
-                else -> continue
-            }
-            copyNode(child, destination, isCopy).collect { emit(it) }
-        }
-    }.flowOn(Dispatchers.IO)
-
-    private fun copyFile(source: VFile, target: VFile, isCopy: Boolean): Flow<CopyProgress> = flow {
-        // Same provider on both sides: the provider moves or copies natively.
-        if (source is File && target is File && source.provider === target.provider) {
-            source.provider.copy(source.innerPath, target.innerPath, isCopy).collect { emit(it) }
-            return@flow
-        }
-        // Otherwise stream through the destination node. The source may be a
-        // URL, an archive entry or a remote backend with no kernel handle.
-        val input = source.open(OpenMode.READ).getOrThrow()
-        try {
-            val output = target.open(OpenMode.WRITE).getOrThrow()
-            try {
-                var offset = 0L
-                emit(CopyProgress(input.size, 0L, target.name, finished = false, isCopy = isCopy))
-                while (true) {
-                    val chunk = input.readChunk(offset, COPY_CHUNK)
-                    if (chunk.isEmpty()) break
-                    output.writeAt(offset, chunk)
-                    offset += chunk.size
-                    emit(CopyProgress(input.size, offset, target.name, finished = false, isCopy = isCopy))
-                }
-                // The destination may be longer than the source.
-                runCatching { output.truncate(offset) }
-                emit(CopyProgress(input.size, offset, target.name, finished = true, isCopy = isCopy))
-            } finally {
-                runCatching { output.close() }
-            }
-        } finally {
-            runCatching { input.close() }
-        }
-    }.flowOn(Dispatchers.IO)
-
-    private const val COPY_CHUNK = 256 * 1024
-
-    // ── Internal ────────────────────────────────────────────────────
-
-    private inline fun <T> dispatch(
-        path: String,
-        block: (FileProvider, String) -> Result<T>,
-    ): Result<T> {
-        val resolved = resolve(path).getOrElse { return Result.failure(it) }
-        return block(resolved.provider, resolved.innerPath)
-    }
 }

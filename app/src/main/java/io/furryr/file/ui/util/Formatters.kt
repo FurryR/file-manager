@@ -12,22 +12,26 @@ import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
 
+private val modifiedTimeFormat: DateFormat =
+    DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+private val sizeUnits = listOf("KiB", "MiB", "GiB", "TiB")
+private val trailingZeros = Regex("\\.?0+$")
+
 fun formatModifiedTime(timeMillis: Long): String =
-    DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(timeMillis.coerceAtLeast(0L)))
+    modifiedTimeFormat.format(Date(timeMillis.coerceAtLeast(0L)))
 
 fun formatSize(bytes: Long): String {
     if (bytes < 1024) return "${bytes}B"
-    val units = listOf("KiB", "MiB", "GiB", "TiB")
     var value = bytes.toDouble()
     var unit = "B"
-    for (u in units) {
+    for (u in sizeUnits) {
         value /= 1024.0
-        if (value < 1024.0 || u == units.last()) {
+        if (value < 1024.0 || u == sizeUnits.last()) {
             unit = u
             break
         }
     }
-    val stripped = "%.2f".format(Locale.ROOT, value).replace(Regex("\\.?0+$"), "")
+    val stripped = "%.2f".format(Locale.ROOT, value).replace(trailingZeros, "")
     return "$stripped$unit"
 }
 

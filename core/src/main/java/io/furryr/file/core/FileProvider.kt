@@ -11,12 +11,17 @@ import kotlinx.coroutines.flow.Flow
  * Unified interface for file system operations, abstracting over
  * different backends: local daemon, containers, SAF, remote, etc.
  *
- * Each provider is identified by its [scheme] and optional [authority],
- * enabling URI-based routing like `container://alpine/home/`.
+ * Each provider is identified by its [schemes], enabling URI-based routing
+ * like `container://alpine/home/`.
  */
 interface FileProvider {
-    val scheme: String
-    val authority: String?
+    /**
+     * Every scheme this provider answers. Most providers own one; a live web
+     * provider owns `http` and `https` as one backend, so registering or
+     * unregistering it never halves the routes.
+     */
+    val schemes: Set<String>
+
     val label: String
     val features: Set<ProviderFeature>
 
@@ -69,7 +74,7 @@ interface FileProvider {
         // `exists = false` has no node at this address, and the caller must be
         // able to tell: a typed address that no provider owns falls through to
         // the search/browser fallback instead of becoming a phantom file.
-        if (!stat.exists) error("no such file or folder: $path")
+        if (!stat.exists) throw NodeNotFoundException("no such file or folder: $path")
         if (stat.isDirectory) Folder(path, this, innerPath) else File(path, this, innerPath)
     }
     suspend fun directoryCapabilities(path: String): DirectoryCapabilities {

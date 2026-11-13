@@ -4,7 +4,8 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.Log
 import io.furryr.file.container.ContainerDaemonLauncher
-import io.furryr.file.container.ContainerUris
+import io.furryr.file.terminal.TerminalProfiles
+import io.furryr.file.core.ContainerUris
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.hub.Hub
@@ -39,7 +40,6 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 object ProcessHelper {
     private const val TAG = "ProcessHelper"
-    private const val SSH_PREFIX = "ssh://"
 
     private val fdToChannel = HashMap<Int, ProcessChannel>()
     private val pidToChannel = HashMap<Int, ProcessChannel>()
@@ -60,9 +60,9 @@ object ProcessHelper {
             if (eq >= 0) it.substring(0, eq) to it.substring(eq + 1) else it to ""
         } ?: emptyMap()
 
-        if (cmd.startsWith(SSH_PREFIX)) {
+        if (TerminalProfiles.isSsh(cmd)) {
             return@onIoThread createSshSubprocess(
-                cmd.removePrefix(SSH_PREFIX), env, rows, columns, processId,
+                TerminalProfiles.sshAuthority(cmd) ?: "", env, rows, columns, processId,
             )
         }
 

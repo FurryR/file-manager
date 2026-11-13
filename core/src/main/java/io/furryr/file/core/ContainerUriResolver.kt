@@ -1,4 +1,4 @@
-package io.furryr.file.container
+package io.furryr.file.core
 
 /**
  * Pure URI-parsing resolver for `container:///` URIs.
@@ -20,8 +20,6 @@ object ContainerUriResolver {
     /** Alphanumeric characters and hyphens are allowed; name must start with an alphanumeric character. */
     private val VALID_CONTAINER_NAME_REGEX = Regex("^[a-zA-Z0-9][a-zA-Z0-9-]*$")
 
-    // ── URI resolution ────────────────────────────────────────────────
-
     /**
      * Parses a `container:///` URI, extracts and validates the container
      * name (non-empty, alphanumeric + hyphens) and the container path.
@@ -41,7 +39,7 @@ object ContainerUriResolver {
         }
 
         val scheme = uri.substring(0, schemeEnd)
-        if (scheme != CONTAINER_SCHEME) {
+        if (scheme.lowercase(java.util.Locale.ROOT) != CONTAINER_SCHEME) {
             return Result.failure(
                 IllegalArgumentException("Unsupported URI scheme: $scheme")
             )
@@ -104,8 +102,6 @@ object ContainerUriResolver {
             )
         )
     }
-
-    // ── Validation ────────────────────────────────────────────────────
 
     /**
      * Returns `true` if [name] is a valid container name:

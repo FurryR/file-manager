@@ -11,6 +11,7 @@ import androidx.documentfile.provider.DocumentFile
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
+import io.furryr.file.core.source.SeekableCacheFileSource
 import io.furryr.file.core.source.StreamFileSource
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
@@ -18,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import java.io.File
 import java.io.FileNotFoundException
 
 /**
@@ -26,10 +28,9 @@ import java.io.FileNotFoundException
  * `saf:///` lists all registered locations.
  */
 object SAFProvider : FileProvider {
-    override val scheme: String get() = "saf"
-    override val authority: String? get() = null
+    override val schemes: Set<String> get() = setOf("saf")
     override val label: String get() = "SAF Location"
-    override val writable: Boolean get() = false
+    override val writable: Boolean get() = true
     override val features: Set<ProviderFeature> get() = setOf(
         ProviderFeature.LIST, ProviderFeature.STAT,
         ProviderFeature.CREATE_FILE, ProviderFeature.CREATE_DIR, ProviderFeature.DELETE,
@@ -59,8 +60,8 @@ object SAFProvider : FileProvider {
                 if (path == "/") {
                     return@runCatching locations.safLocations().map { loc ->
                         FileEntry(
-                            name = loc.hexId,
-                            path = "saf://${loc.hexId}/",
+                            name = loc.name.ifBlank { loc.hexId },
+                            path = Path.of("saf", host = loc.hexId).toString(),
                             isDirectory = true,
                             modifiedAt = 0,
                             size = 0,
@@ -80,7 +81,11 @@ object SAFProvider : FileProvider {
                 )
 
                 val entries = mutableListOf<FileEntry>()
-                val baseUri = "saf://${loc.hexId}/${relPath.trimEnd('/')}"
+                val baseUri = Path.of(
+                    "saf",
+                    host = loc.hexId,
+                    segments = relPath.split('/').filter { it.isNotEmpty() },
+                ).toString().trimEnd('/')
                 queryOrThrow(
                     treeUri,
                     childrenUri,
@@ -174,15 +179,44 @@ object SAFProvider : FileProvider {
             }
 
             override suspend fun open(path: String, mode: OpenMode): Result<FileSource> = runCatching {
-                if (mode != OpenMode.READ) throw UnsupportedOperationException("SAFProvider supports READ only")
                 val (loc, relPath) = resolveLocation(path)
                 val treeUri = Uri.parse(loc.treeUri)
                 val docUri = resolveDocUri(treeUri, relPath)
                     ?: throw FileNotFoundException("Not found: $path")
-                val stream = appContext.contentResolver.openInputStream(docUri)
-                    ?: throw FileNotFoundException("Cannot open: $path")
-                val size = querySize(treeUri, docUri)
-                StreamFileSource(inputStream = stream, size = size, absolutePath = null)
+                if (mode == OpenMode.READ) {
+                    val stream = appContext.contentResolver.openInputStream(docUri)
+                        ?: throw FileNotFoundException("Cannot open: $path")
+                    val size = querySize(treeUri, docUri)
+                    return@runCatching StreamFileSource(inputStream = stream, size = size, absolutePath = null)
+                }
+                val staged = File.createTempFile("saf-", ".stage", appContext.cacheDir)
+                if (mode == OpenMode.READ_WRITE) {
+                    try {
+                        val input = appContext.contentResolver.openInputStream(docUri)
+                            ?: throw FileNotFoundException("Cannot open: $path")
+                        input.use { source -> staged.outputStream().use { source.copyTo(it) } }
+                    } catch (failure: Throwable) {
+                        staged.delete()
+                        throw failure
+                    }
+                }
+                try {
+                    SeekableCacheFileSource(
+                        staged,
+                        mode,
+                        "saf://${loc.hexId}/$relPath",
+                        commit = { file ->
+                            // "wt" truncates first; a plain "w" may append in
+                            // providers that ignore ContentResolver's mode.
+                            val output = appContext.contentResolver.openOutputStream(docUri, "wt")
+                                ?: throw IllegalStateException("Cannot open for writing: $path")
+                            output.use { sink -> file.inputStream().use { it.copyTo(sink) } }
+                        },
+                    )
+                } catch (failure: Throwable) {
+                    staged.delete()
+                    throw failure
+                }
             }
 
             override fun copy(from: String, to: String, isCopy: Boolean): Flow<CopyProgress> = flow {
@@ -318,13 +352,11 @@ object SAFProvider : FileProvider {
                  * 但 delete/rename 已改用 DocumentsContract，create 仍需要 DocumentFile。
                  */
                 private fun resolveDoc(treeUri: Uri, relPath: String): DocumentFile? {
-                    if (relPath.isEmpty()) {
-                        return DocumentFile.fromTreeUri(appContext, treeUri)
+                    var doc = DocumentFile.fromTreeUri(appContext, treeUri) ?: return null
+                    for (segment in relPath.split('/').filter { it.isNotEmpty() }) {
+                        doc = doc.findFile(segment) ?: return null
                     }
-                    val name = relPath.substringAfterLast('/')
-                    val parentPath = relPath.substringBeforeLast('/', "")
-                    val parentDocUri = resolveDocUri(treeUri, parentPath) ?: return null
-                    return DocumentFile.fromSingleUri(appContext, parentDocUri)?.findFile(name)
+                    return doc
                 }
 
                 private fun endpoint(treeUri: Uri): String =

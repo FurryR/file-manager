@@ -204,22 +204,36 @@ file-manager/
   and every operation above it takes nodes.
   A node address is its `Path` text (`/a.zip!/docs`), persisted as-is; `Address.kt` is
   the breadcrumb projection.
-- **One history.** The tab owns it: `FileTab.history` is the one linear stop
-  list and `historyIndex` is the cursor, so a page, a folder, Home and an edited
-  file are stops of the same kind and a jump of any distance is the same
-  operation as one step. Each `HistoryStop` carries a stable `id`
-  (`kind` = `LOCATION`/`FILE`/`PAGE` plus the last title); renderer sessions are
-  keyed by that id, so Back reuses a warm directory and a live page does not keep
-  a second list. A WebView's own back/forward list is only a cache of pages it
-  already holds (`WebRendererSession.retrace`, used by `moveToStop` so a history
-  step costs no request). `RenderHost.onPageVisited` appends or moves the one
-  list; the history panel only projects it (`historyRows`).
+- **One history.** The tab owns it: `FileTab.pages` is the one linear page list
+  and `pageIndex` is the cursor, so a page, a folder, Home and an edited file are
+  pages of the same kind and a jump of any distance is the same operation as one
+  step. Each `Page` carries a stable `id` (`kind` = `LOCATION`/`FILE`/`PAGE` plus
+  the last title) and owns its `PageRenderer`. The renderer owns a private
+  session, so there is no shell-wide renderer map: Back reuses the page's
+  renderer and a live page does not keep a second list. A WebView's own
+  back/forward list is only a cache of pages it already holds
+  (`WebRendererSession.retrace`, used by `moveToStop` so a history step costs no
+  request). `RenderHost.onPageVisited` appends or moves the one list; the
+  page panel only projects it (`pageRows`). On Activity dispose every
+  page calls `renderer.reset()`, which drops views while keeping session state;
+  the next render rebuilds the view.
 - **Renderers/Openers.** `app/.../render/Renderer.kt` defines
-  `RenderTarget` (a node plus its facts), `RendererFactory`/`RendererSession`,
-  `RenderHost` and `Renderers`. Directory, Web, Home and the tab-owned Sora
-  text editor all have renderer sessions. `core/.../ViewOpener.kt` defines the format-agnostic
+  `RenderTarget`, `RendererSession` (state-only contract), `RenderHost`,
+  `RendererFactory`, and the `NodeOpener`/`Opened` opener contract.
+  `app/.../render/RendererBase.kt` is the renderer base: optional `PageState`,
+  private session, lazy view; `WebSessionRenderer`, `EditorSessionRenderer`,
+  `FolderSessionRenderer` and `HomeSessionRenderer` are its four implementations.
+  `OpenTable` implements `NodeOpener`; a renderer asks `host.opener` for a
+  `RendererBase` and calls `host.open(renderer)`, which queues it as a pending
+  renderer. The pending view is not added to pages yet; each concrete renderer
+  loads/times in `enter(host)` and then calls `host.commit { ... }` with its
+  Composable content. Only then does the shell add the Page, switch title/path
+  and dispose the outgoing view. This also keeps a platform hand-off out of
+  history: `ExternalRenderer` opens the chooser and calls `host.requestClose()`,
+  which clears only the pending renderer.
+  `core/.../ViewOpener.kt` defines the format-agnostic
   `ViewOpener`/`ViewOpeners` route. `FolderRendererSession` is the directory
-  renderer; `FolderContent` is its list view. `ArchiveOpener` turns a zip
+  session; `FolderContent` is its list view. `ArchiveOpener` turns a zip
   file into an `ArchiveFolder`; it draws nothing.
 - **HTML.** `HtmlDocument`/`DocumentView`/`WebRenderer.kt` project HTML files
   and live URLs as one `DocumentView`; `WebContent` is the WebView. A projected
@@ -317,7 +331,7 @@ file-manager/
 
 - **No DI framework** — `DaemonManager`, `Vfs`, `LocationsRepository`
   are singleton `object`s. Manual wiring in `app/.../Providers.kt`.
-- **No ViewModel** — State lives in `FileManagerApp.kt` as `remember`/`mutableStateOf`. Single-activity.
+- **No ViewModel** — State lives in `:app` as `remember`/`mutableStateOf`. Single-activity.
 - **All daemon I/O is blocking** — Kotlin wraps in `Dispatchers.IO`; Rust uses `current_thread` tokio.
 - **Proto lives in `:daemon`** — the `app`/`:core` modules must not enable the protobuf plugin.
 - **Container-visible names stay generic** — never expose `file-manager` in
@@ -613,7 +627,17 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
 
 ## TODO - Bug checks
 
+- [ ] `core/.../ContentInfo.kt`: verify a text file whose 8 KiB sniff prefix splits a UTF-8 code point still reports `ContentKind.TEXT`, and genuinely non-UTF-8 bytes still report binary.
 - [ ] `provider/.../SftpProvider.kt`: verify SFTP preview/read across forward and backward seeks and EOF against a real server.
+- [ ] `provider/.../remote/RemoteProviders.kt`: verify an `ssh://` file reports `writable = true` in the editor and a saved edit uploads through the staging `SeekableCacheFileSource`, while `alist` files behave the same.
+- [ ] `provider/.../SftpProvider.kt`: verify listing, stat, create, delete, rename and open still work after moving the blocking JSch calls onto `Dispatchers.IO`.
+- [ ] `core/.../ContentInfo.kt`: verify `describe()` still sniffs the first 8 KiB and cancellation while reading that head no longer blocks the caller's dispatcher.
+- [ ] `agent/.../AgentFileAccess.kt`: verify `readFile`, `readVfsFile`, `writeFile` and `readText` still return the same bytes with the blocking handle I/O moved to `Dispatchers.IO`.
+- [ ] `provider/.../remote/SshExecBackend.kt`: verify a cancelled SSH read stops between chunks instead of reading the whole requested range.
+- [ ] `provider/.../SAFProvider.kt`: verify SAF editor saves through the staged `SeekableCacheFileSource` and `openOutputStream(..., "wt")` for a read-write tree, a read-only document and a rate-limited cloud provider.
+- [ ] `provider/.../SftpProvider.kt`: verify SFTP saves (new, overwrite, empty, READ_WRITE staging) upload through `ch.put` and the temp file is removed on failure.
+- [ ] `provider/.../FtpProvider.kt`: verify FTP saves (new, overwrite, empty, READ_WRITE staging) store through `storeFile` and the temp file is removed on failure.
+- [ ] `app/.../Providers.kt`: verify `FtpProvider.init`/`SftpProvider.init` still register both providers with the app cache directory.
 - [ ] `provider/.../remote/SshExecBackend.kt`: verify `ssh://` seeks, sequential copy progress and cancellation against a real server with `tail -c +N` support.
 - [ ] `core/.../VNode.kt` + `core/.../FileProvider.kt`: verify `writable`/`liveAddress`/`liveReferer`/`peek`/`withReferer` on local, container, SAF, document, FTP, SFTP, SSH, AList, HTTP and archive nodes.
 - [ ] `core/.../ResolvedProvider.kt` + `provider/.../LocalProvider.kt`: verify bare paths and `file:///` addresses still reach the local daemon and every other provider keeps its inner-path spelling.
@@ -649,6 +673,18 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
 - [ ] `core/.../FileProvider.kt`: verify the `ProviderFeature` value class keeps toolbar create actions and `entries` parity on local, container, SAF, FTP, SFTP, SSH, AList and HTTP providers.
 - [ ] `core/.../ContentInfo.kt`: verify the new extension registrations (vue/svelte/wmv/3gp/wma/jsonc/gradle/...) and a runtime `ContentTypes.register` both reach icons, text detection and `describe()`.
 - [ ] `provider/.../ProviderSchemes.kt`: verify `registerRemote`/`registerWeb`/`unregister` change add-location parsing and drawer grouping while built-in schemes stay unchanged.
+- [ ] `core/.../Path.kt`: verify `a.zip!` is a distinct view root, `a.zip!/x` parent is `a.zip!`, `a.zip!` parent is `a.zip`, and names containing `!` round-trip through `!!`.
+- [ ] `core/.../Path.kt` + `core/.../Vfs.kt`: verify `HTTP://host/path` routes to the web provider, `schemes` register/unregister both `http` and `https`, and unregistering a provider clears the default.
+- [ ] `core/.../NodeOps.kt` + `core/.../NodeNotFoundException.kt`: verify a permission/transport failure on the destination surfaces while a missing destination is still created.
+- [ ] `core/.../Cancellation.kt` + `core/.../Vfs.kt` + `core/.../Folder.kt` + `opener/.../Archives.kt`: verify cancelling a node walk, listing or archive open aborts instead of returning a failure.
+- [ ] `core/.../ContentInfo.kt` + `opener/.../ArchiveOpener.kt`: verify archive MIME/extension detection still opens zip/jar/epub and never opens an APK.
+- [ ] `opener/.../Archives.kt`: verify replacing a zip invalidates the cached mount, the fifth archive evicts the least recently used, and evicted fds close.
+- [ ] `container/.../ContainerProvider.kt` + `container/.../ContainerPaths.kt`: verify inner paths containing `!` are not treated as views, `stat("/")` succeeds before any container exists, and host/app ids come from `DaemonManager`.
+- [ ] `daemon/.../DaemonManager.kt` + `daemon/.../ipc/DaemonFileOps.kt` + `native/src/list.rs`: verify `targetCatalog()` ordering, `targetForId`, and the new `modified_at_ms` stat field survive a daemon round trip.
+- [ ] `agent/.../AgentFileAccess.kt` + `agent/.../SystemPrompt.kt`: verify a local file named `a://b` is not routed as a VFS URI and `/etc/issue` is read through the file API.
+- [ ] `agent/.../AgentTools.kt`: verify read/write/copy/glob/exec/list_targets and the three archive tools still execute through the registered tool table.
+- [ ] `hub/.../HubServer.kt` + `hub/.../HubTargets.kt` + `proto/hub.proto`: verify every `Target` consumer reads `id` and exec/location targets still list correctly.
+- [ ] `hub/.../HubAgentOps.kt` + `hub/.../HubExecOps.kt`: verify all non-streaming request categories still return the same replies and descriptors after the dispatch split.
 
 ## TODO - Code quality review
 
@@ -666,7 +702,7 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
 - [ ] `core/.../Plugin.kt`: expose renderers, location kinds, open rules and `ContentKind` through `PluginHost`, or stop claiming plugin parity with built-ins; verify a plugin can add each contribution without editing app code.
 - [ ] `app/.../store/LocationsRepository.kt`: make the kind list ordered/overridable with collision checks; stop constructing new `RemoteProviders` per `records()` call and stop hand-building `saf://`/`ftp://`/`sftp://` roots.
 - [ ] `opener/.../Archives.kt`: add bounded eviction and invalidation (mtime/size) to the process-wide archive cache; verify replacing a zip does not return a stale index and fds are released.
-- [ ] `app/.../TerminalSheet.kt` + `app/.../agent/SessionManager.kt` + `app/.../ui/components/SessionManagerDialog.kt` + `app/.../util/ProcessHelper.kt`: replace `ssh://` string checks and the duplicated `SessionType.Ssh` fields with a terminal-profile service; verify SSH terminals, cwd and drops without scheme inspection in the UI.
+- [ ] `app/.../terminal/TerminalSheet.kt` + `app/.../terminal/SessionManager.kt` + `app/.../ui/components/SessionManagerDialog.kt` + `app/.../util/ProcessHelper.kt`: replace `ssh://` string checks and the duplicated `SessionType.Ssh` fields with a terminal-profile service; verify SSH terminals, cwd and drops without scheme inspection in the UI.
 - [ ] `agent/.../AgentFileAccess.kt` + `agent/.../SystemPrompt.kt`: replace `contains("://")` and the `"file"`/`container` scheme special cases with `Path` parsing; verify a local file named `a://b` is not misrouted.
 - [ ] `daemon/.../DaemonManager.kt` + `container/.../ContainerPaths.kt`: expose `host`/`app` target ids as constants or a sealed type; verify no module compares raw `"host"`/`"app"` strings.
 - [ ] `container/.../ContainerProvider.kt`: stop parsing provider inner paths with `Path.parse`, stop hand-building `container://` roots, reuse `ContainerManager`'s containers directory, and make `stat("/")` succeed before the first container exists.
@@ -676,7 +712,177 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
 - [ ] `app/.../render/HtmlDocument.kt`: resolve absolute `/...` references from the origin root and percent-decode segments; verify `/logo.png` in `/docs/page.html` loads the provider root asset.
 - [ ] `app/.../render/FolderListing.kt`: replace the first-entry `realPath` heuristic with a folder/provider fact; verify an empty internal-storage folder still reports internal.
 - [ ] `app/.../FileManagerApp.kt`: delete the dead `folderLabel` fallback that hand-builds addresses and checks `is Folder`.
-- [ ] `app/.../FileManagerApp.kt` + `app/.../ui/components/FileDrawer.kt` + `app/.../TerminalSheet.kt` + `hub/.../HubServer.kt`: split the god objects (3261/1549/708/822 lines) into navigation, copy, dialog and terminal controllers; verify no behavior change.
+- [ ] `app/.../FileManagerApp.kt` + `app/.../ui/components/FileDrawer.kt` + `app/.../terminal/TerminalSheet.kt` + `hub/.../HubServer.kt`: split the god objects (3261/1549/708/822 lines) into navigation, copy, dialog and terminal controllers; verify no behavior change.
+- [ ] `app/.../FileManagerApp.kt` phased refactor: finish phases 2–6 below; keep state in `:app`, no ViewModel, no DI, no StateFlow, explicit params/callbacks, manual testing only.
+
+### FileManagerApp phased refactor
+
+Phase 1 is complete: `FileManagerApp.kt` went from 3353 to 2436 lines. The tab
+strip, top/bottom bars, content host, drawer host, dialogs, overlays and
+clipboard now live in `app/.../shell/` and `app/.../ui/shell/`. Largest
+resulting file: `FileDrawerHost.kt`, 421 lines.
+
+Philosophy for every remaining phase:
+
+- State stays in `:app`, preferably one owner in `app/.../shell/FileShellState.kt`.
+- No `androidx.lifecycle.ViewModel`, no `SavedStateHandle`, no DI framework,
+  no `StateFlow`/`LiveData`, no Redux/MVI library.
+- Controllers are plain classes or functions that receive state and callbacks.
+  They do not create lifecycle scopes, Android contexts or new state owners.
+- UI composables stay controlled: values in, callbacks out.
+- `LaunchedEffect`, `DisposableEffect`, `BackHandler`, `rememberLauncherForActivityResult`
+  and other composition-lifecycle hooks stay in `FileManagerApp.kt`.
+- Do not add unit tests or test-only dependencies. Verify by compilation plus
+  the manual matrix at the end.
+
+- [ ] **Phase 2a — extract `FileShellState`.**
+  - New file: `app/.../shell/FileShellState.kt`.
+  - Move the remaining shell state out of `FileManagerApp.kt`: `tabs`,
+    `activeTabId`, `containerError`, `pendingTabIndex`, `titleEditing`,
+    delete/rename/batch/info dialog holders, `operationProgress`,
+    `operationJob`, `operationTaskIds`, `operationHidden`, `highlightPath`,
+    `highlightDirectory`, `pendingScrollPath`, `nodeOpeningTab`,
+    `nodeOpenJob`, `nodeOpenGeneration`, `showTerminalSheet`,
+    `hasTerminalSessions`, `terminalDropAccepted`, `terminalDragGeneration`,
+    `showSessionManager`, `showPages`, `pendingHereRequest`, `pagesDragPx`,
+    `bottomBarHeightPx`, `leavePrompt`, `leaveSaving`, `homeVersion`,
+    `containerRefreshKey`, `drawerSortMode`, `containerNameOrder`,
+    `lastRefreshDaemonGen`, `titleBounds`, `topBarBounds`, `rootCoordinates`,
+    `pendingNavigations`, `pageContents`.
+  - Use `@Stable class FileShellState` with `var x by mutableStateOf(...)`.
+    Create it with `remember { FileShellState(...) }`; do not make it a
+    singleton and do not give it a lifecycle.
+  - Keep `FileTabs` as the process-scoped cache so activity recreation still
+    restores tabs. `FileShellState` reads/writes it on creation only.
+  - Keep the values that are pure UI composition state local when they never
+    leave the composable (`transferLinger` in `ShellTopBar`, dropdown state).
+  - Acceptance: `FileManagerApp.kt` contains no `var ... by remember` for the
+    listed fields; no field is duplicated in both the class and the composable;
+    tab close/open, activity recreate and process death still match current
+    behavior.
+
+- [ ] **Phase 2b — extract `PageSessionController`.**
+  - New file: `app/.../shell/PageSessionController.kt`.
+  - Move `releaseSession`, `activeTabState`, `activePageId`, `allPages`,
+    `pageOf`, `activeSession`, `isActiveSession`, `isActivePage`,
+    `releasePage`, `leavePage`, `releaseStops`, `releasePendingPages`,
+    `cancelPending`, `newLocationSession`, `rendererOf`, `pendingForCurrent`,
+    `replaceTab`, `replaceCurrent`, `commitPending`, `updateTab`,
+    `clearLeavePrompt`, `closeRenderer`, `showRenderer`, `requestLeave`,
+    `guardRenderer`.
+  - Preserve the page-id gating rules exactly: a pending tab is not committed
+    until `commit()`, `commit()` only promotes its own pending page, and a
+    released renderer never receives later host callbacks.
+  - `close()`/`onRelease()` ordering stays: `onRelease` once, then `close`,
+    then remove from `pageContents`.
+  - Acceptance: page lifecycle, tab close veto, editor dirty prompt and WebView
+    hand-back still use the same call order; no renderer is released twice.
+
+- [ ] **Phase 2c — extract `OpenController`.**
+  - New file: `app/.../shell/OpenController.kt`.
+  - Move `navigateTo`, `navigateToFolder`, `applyOpen`, `confirmPage`,
+    `openVFile`, `cancelNodeOpening`, `trackNodeOpen`, `openAddress`,
+    `openHomeEntry`, `restorePageNode`.
+  - Keep `Vfs.node` as the only address walker and `OpenTable` as the only
+    open-with route. Do not introduce scheme checks or a second resolver.
+  - Preserve `nodeOpenGeneration`, the 300 ms loading overlay, optimistic
+    address handling, Home-row recording and the “hand back to browser”
+    behavior for non-pages.
+  - Acceptance: folder rows, archive roots/entries, HTML files, live URLs,
+    editor files, home rows, history restore and typed addresses all take the
+    same paths as before; Cancel aborts the pending resolve.
+
+- [ ] **Phase 2d — extract `Navigator`.**
+  - New file: `app/.../shell/Navigator.kt`.
+  - Move `jumpTo`, `moveToPage`, `goBack`, `goForward`, `jumpToPage`,
+    `goParent`, `refreshFileList`, `currentCapabilities`,
+    `currentCanGoParent`, `dispatchHere` and the `handleHereRequest` flow.
+  - Keep the tab-owned page list and `pageIndex` cursor as the only history;
+    Back/Forward/Up/PageSheet must keep using the same `FileTab` transitions.
+  - Preserve the pending-navigation guard and the rule that a page-driven step
+    supersedes a folder load.
+  - Acceptance: Back closes overlays before stepping history; Up reaches the
+    renderer parent, then the folder parent, then stops at Home/scheme root;
+    here-navigation still focuses the selected tab and highlights the path.
+
+- [ ] **Phase 2e — extract `TabController`.**
+  - New file: `app/.../shell/TabController.kt`.
+  - Move `closeTabNow`, `closeTab`, `moveTab`, `moveTabBy`,
+    `closeTabsForContainer` and the “last tab closed → open Home” fallback.
+  - Preserve the per-page close veto order, pending release on close, stable
+    tab ids across reorder, and selection reset on tab switch.
+  - Acceptance: close/move/reorder, close during a dirty editor prompt, close
+    a tab with a pending navigation, and container kill all behave as before.
+  - Phase 2 completion target: `FileManagerApp.kt` ≤ 600 lines; only state
+    creation, composition effects, drawer/scaffold assembly and dialog/sheet
+    calls remain. Compile and run the manual matrix.
+
+- [ ] **Phase 3 — split the renderer host.**
+  - New file: `app/.../shell/RendererHost.kt` (move `rendererContextFor` out
+    of `FileManagerApp.kt`).
+  - Implement `NavigationHost` in `Navigator`, `FileActionHost` in a new
+    `FileActionController`, and `HomeHost` in a new `HomeController`, or keep
+    forwarding methods in the host until each controller exists. The host must
+    stop being one 44-method anonymous object.
+  - Host-local state stays limited to `boundPageId` and the
+    pending/committed checks (`boundPending`, `boundCommitted`). All other
+    behavior delegates.
+  - Preserve `focus()`, `submitPath()`, `submitTitle()`, `open()`,
+    `onPageVisited()`, `commit()`, `requestClose()` and `updateTitle()`
+    identity checks exactly.
+  - Create a fresh host per page and per render call; never cache one host
+    across tabs/pages.
+  - Acceptance: every renderer (folder, Home, Web, editor, external, archive)
+    still opens, commits, retraces, shows its menu and closes; no stale page
+    receives a title/path/callback.
+  - Phase 3 target: `FileManagerApp.kt` ≤ 350 lines.
+
+- [ ] **Phase 4 — remove the remaining shell scaffolding.**
+  - Reduce `FileManagerApp.kt` to the entry composable: state creation,
+    effects, `BackHandler`, `ModalNavigationDrawer`, `Scaffold`, overlays and
+    sheets. Target ≤ 250 lines.
+  - Delete pass-through local functions that only forward to a controller,
+    unused imports, unused state (`operationTaskIds` if still write-only), and
+    stale comments that still describe the old single-file layout.
+  - Keep `FileTabs` process persistence and all lifecycle hooks in the
+    composable. Do not move `LaunchedEffect`/`DisposableEffect` into plain
+    classes.
+  - Update `app/.../AGENTS.md` structure table and `WHERE TO LOOK` entries for
+    `shell/` and `ui/shell/`.
+  - Acceptance: `FileManagerApp.kt` is a readable assembly file; no behavior
+    change; no dead code or unused imports remain.
+
+- [ ] **Phase 5 — optional drawer/action cleanup.**
+  - `FileDrawerHost.kt` is 421 lines; if it still feels too large, split it
+    into `ContainerActions`, `LocalActions`, `SafActions`, `RemoteActions` and
+    `WebActions` in `app/.../ui/shell/drawer/`, keeping one `FileDrawerHost`
+    composition point.
+  - Alternatively introduce a `FileDrawerActions` value holder and change
+    `FileDrawer` to accept it, replacing its 43 direct callback parameters.
+    There is exactly one call site (`FileManagerApp.kt`), so this is a
+    mechanical change.
+  - Do not add a DI container or a generic action bus. Keep explicit
+    callbacks and per-protocol stores.
+  - Acceptance: drawer create/rename/delete/reorder, container create/rename/
+    delete/kill, settings, add-SAF and navigation still work; `FileDrawerHost`
+    ≤ 200 lines if split.
+
+- [ ] **Phase 6 — final verification and docs.**
+  - Compile `./gradlew :app:compileDebugKotlin` once after the last code
+    change; do not re-run to “confirm”.
+  - Manual matrix: tab add/close/move/reorder; home/root/container navigation;
+    drawer CRUD for local/SAF/FTP/SFTP/remote/web; container create/rename/
+    delete/kill; archive open/list/read; HTML/URL open and hand-back; editor
+    save/discard/leave prompt; copy/move progress/cancel; page sheet, terminal
+    sheet and session manager; Up/Back/Forward; activity recreate and process
+    death; language change.
+  - Update the corresponding bug-check entries in
+    `app/.../AGENTS.md` and remove any that the refactor makes obsolete.
+  - Record any intentional behavior change in `AGENTS.md`; there should be
+    none.
+
+### Other code quality reviews
+
 - [ ] `app/.../render/Renderer.kt`: split the 20+ method `RenderHost` into navigation/file-action/home hosts; verify web, editor, folder and Home renderers keep their used callbacks.
 - [ ] `proto/hub.proto`: split `Target.name` (exec id vs location root URI) into separate fields or a oneof; update hub/agent clients and verify `ListTargets` consumers.
 - [ ] `agent/.../AgentTools.kt` + `agent/.../SystemPrompt.kt`: replace the five scattered tool-name switches with a registered `Tool` descriptor; verify definitions, execution, approval and prompt text stay in sync.

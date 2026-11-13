@@ -34,13 +34,7 @@ import kotlinx.coroutines.withContext
  * error instead of inventing an empty directory.
  */
 object HttpProvider : FileProvider {
-    override val scheme: String get() = ProviderSchemes.HTTP
-
-    /** Both schemes reach the same origin; `https` is not a second backend. */
-    val schemes: Set<String> get() = ProviderSchemes.web
-
-    /** No authority: the host is part of the URL, not a provider namespace. */
-    override val authority: String? get() = null
+    override val schemes: Set<String> get() = ProviderSchemes.web
 
     override val label: String get() = "Web"
 

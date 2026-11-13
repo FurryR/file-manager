@@ -81,6 +81,12 @@ interface VFile : VNode {
 
 /** A directory node. */
 interface VFolder : VNode {
+    /** True when this folder is a view (archive/document) rather than a provider directory. */
+    val isView: Boolean get() = path.isViewed
+
+    /** True when this folder is addressed directly by its path string. */
+    val addressable: Boolean get() = !isView
+
     /** Raw listing DTOs, kept for existing callers and interop. */
     suspend fun list(): Result<List<FileEntry>>
 

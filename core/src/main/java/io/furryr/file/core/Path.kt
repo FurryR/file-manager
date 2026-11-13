@@ -1,5 +1,7 @@
 package io.furryr.file.core
 
+import java.util.Locale
+
 /**
  * Protocol-aware path with support for full URIs and bare filesystem paths.
  *
@@ -9,13 +11,12 @@ package io.furryr.file.core
  *
  * ```
  * /storage/a.zip!/docs/page.html          one view level
+ * /storage/a.zip!                         the root of that view
  * /storage/a.zip!/inner.zip!/x.txt        two levels: zip inside a zip
  * https://host/a.zip!/x.txt               a URL owns the bytes, the view does not
  * ```
  *
- * Every provider-facing accessor ([toFullUri], [toInnerPath], [toLocalPath],
- * [segmentList], [parent], [child], [name], [navigate]) sees only the part
- * before the first `!`; only [views] and [toString] know about the rest.
+ * A literal `!` in a file name is written `!!`, so every address round-trips.
  *
  * Supported formats:
  * - [container://alpine/home/test]  → scheme=container, host=alpine, segments=[home, test]
@@ -42,6 +43,18 @@ class Path private constructor(
     companion object {
         private val ROOT = Path(null, null, null, null, emptyList())
 
+        /** Build an address without formatting and re-parsing a string. */
+        fun of(
+            scheme: String?,
+            userInfo: String? = null,
+            host: String? = null,
+            port: Int? = null,
+            segments: List<String> = emptyList(),
+        ): Path = Path(
+            scheme?.lowercase(Locale.ROOT), userInfo, host, port,
+            segments.filter { it.isNotEmpty() },
+        )
+
         /**
          * Parse a URI string or bare filesystem path into a [Path].
          *
@@ -50,21 +63,59 @@ class Path private constructor(
          * Path.parse("container://alpine/home/test")  // scheme=container, host=alpine
          * Path.parse("/storage/emulated/0")            // bare path
          * Path.parse("container:///")                  // scheme root, host=null
+         * Path.parse("a.zip!")                         // view root inside a.zip
          * ```
          */
         fun parse(raw: String): Path {
             // `!` is reserved for view levels: the provider only ever sees the
-            // text before the first one.
-            val bang = raw.indexOf('!')
-            if (bang >= 0) {
-                val views = raw.substring(bang + 1)
-                    .split('!')
-                    .map(::parseSegments)
-                    .filter { it.isNotEmpty() }
-                return parse(raw.substring(0, bang)).enterViews(views)
+            // text before the first unescaped one. `!!` is a literal `!`.
+            val delimiter = firstDelimiter(raw)
+            if (delimiter < 0) {
+                return parseProviderPath(decode(raw))
             }
-            return parseProviderPath(raw)
+            val provider = decode(raw.substring(0, delimiter))
+            val viewText = raw.substring(delimiter + 1)
+            val views = splitViews(viewText)
+            return parseProviderPath(provider).enterViews(views)
         }
+
+        private fun firstDelimiter(text: String): Int {
+            var index = 0
+            while (index < text.length) {
+                if (text[index] == '!') {
+                    if (index + 1 < text.length && text[index + 1] == '!') {
+                        index += 2
+                        continue
+                    }
+                    return index
+                }
+                index++
+            }
+            return -1
+        }
+
+        private fun splitViews(text: String): List<List<String>> {
+            val levels = mutableListOf<List<String>>()
+            var start = 0
+            var index = 0
+            while (index < text.length) {
+                if (text[index] == '!') {
+                    if (index + 1 < text.length && text[index + 1] == '!') {
+                        index += 2
+                        continue
+                    }
+                    levels += parseSegments(decode(text.substring(start, index)))
+                    start = index + 1
+                }
+                index++
+            }
+            levels += parseSegments(decode(text.substring(start)))
+            return levels
+        }
+
+        private fun decode(text: String): String = text.replace("!!", "!")
+
+        private fun encode(text: String): String = text.replace("!", "!!")
 
         private fun parseProviderPath(raw: String): Path {
             // Absolute paths and provider URIs are exact filesystem names:
@@ -79,7 +130,9 @@ class Path private constructor(
                 return parseBarePath(trimmed)
             }
 
-            val scheme = trimmed.substring(0, schemeEnd).takeIf { it.isNotEmpty() }
+            val scheme = trimmed.substring(0, schemeEnd)
+                .takeIf { it.isNotEmpty() }
+                ?.lowercase(Locale.ROOT)
             val afterScheme = trimmed.substring(schemeEnd + 3)
 
             if (afterScheme.isEmpty()) {
@@ -136,7 +189,7 @@ class Path private constructor(
     /** Root of the current scheme/host context (segments is empty). */
     val isRoot: Boolean get() = segments.isEmpty()
 
-    /** Root path for this scheme/host (drops all segments). */
+    /** Root path for this scheme/host (drops all segments and views). */
     val root: Path get() = Path(scheme, userInfo, host, port, emptyList())
 
     /** Last path segment, or host if no segments (for container:// URIs). */
@@ -152,7 +205,10 @@ class Path private constructor(
     val isViewed: Boolean get() = views.isNotEmpty()
 
     /** This path plus one more view level; the provider part is untouched. */
-    fun enterView(view: List<String>): Path = if (view.isEmpty()) this else enterViews(listOf(view))
+    fun enterView(view: List<String>): Path = enterViews(listOf(view))
+
+    /** Enter the root of a view (the `a.zip!` address). */
+    fun enterViewRoot(): Path = enterView(emptyList())
 
     private fun enterViews(extra: List<List<String>>): Path =
         Path(scheme, userInfo, host, port, segments, views + extra)
@@ -169,14 +225,22 @@ class Path private constructor(
      * ```
      * Path.parse("container://alpine/home/test").parent()  // => container://alpine/home
      * Path.parse("/a/b").parent()                           // => /a
+     * Path.parse("/a.zip!/x").parent()                      // => /a.zip!
+     * Path.parse("/a.zip!").parent()                        // => /a.zip
      * Path.parse("/").parent()                              // null
      * ```
      */
     fun parent(): Path? {
         if (views.isNotEmpty()) {
-            // One level up inside the innermost view; an emptied level closes.
-            val last = views.last().dropLast(1)
-            val remaining = if (last.isEmpty()) views.dropLast(1) else views.dropLast(1) + listOf(last)
+            val last = views.last()
+            if (last.isEmpty()) {
+                // The view root's parent is the backing file, never itself.
+                val remaining = views.dropLast(1)
+                return Path(scheme, userInfo, host, port, segments, remaining)
+            }
+            // One level up inside the innermost view; an emptied level stays
+            // as that view's root instead of collapsing to the backing file.
+            val remaining = views.dropLast(1) + listOf(last.dropLast(1))
             return Path(scheme, userInfo, host, port, segments, remaining)
         }
         if (segments.isEmpty()) return null
@@ -193,7 +257,11 @@ class Path private constructor(
     fun child(name: String): Path {
         require(name.isNotEmpty()) { "child name must not be empty" }
         require('/' !in name) { "child name must not contain '/': $name" }
-        return Path(scheme, userInfo, host, port, segments + name)
+        if (views.isEmpty()) {
+            return Path(scheme, userInfo, host, port, segments + name)
+        }
+        val last = views.last() + name
+        return Path(scheme, userInfo, host, port, segments, views.dropLast(1) + listOf(last))
     }
 
     /**
@@ -209,7 +277,7 @@ class Path private constructor(
      */
     fun navigate(path: String): Path {
         val target = parse(path)
-        if (target.scheme != null || target.host != null) {
+        if (target.scheme != null || target.host != null || target.isViewed) {
             return target
         }
         // Resolve relative segments
@@ -226,23 +294,28 @@ class Path private constructor(
                 else -> resolved.add(seg)
             }
         }
-        return Path(scheme, userInfo, host, port, resolved)
+        return Path(scheme, userInfo, host, port, resolved, views)
     }
 
     // ── String representations ──────────────────────────────────────────
 
     /**
-     * Canonical path string for daemon communication (Rust backend).
-     *
-     * For bare paths: `"/storage/emulated/0"`, `"/"`
-     * For URIs: `"container://alpine/home/test"`
-     *
-     * Trailing slashes are never present (except for root `"/"`).
+     * Canonical address string. `!` inside a name is escaped as `!!`, and an
+     * empty view level is a visible view root (`a.zip!`).
      */
     override fun toString(): String {
         val base = toFullUri()
         if (views.isEmpty()) return base
-        return base + views.joinToString("") { view -> "!/" + view.joinToString("/") }
+        return buildString {
+            append(base)
+            for (view in views) {
+                append('!')
+                if (view.isNotEmpty()) {
+                    append('/')
+                    append(view.joinToString("/") { encode(it) })
+                }
+            }
+        }
     }
 
     /**
@@ -260,13 +333,13 @@ class Path private constructor(
         if (host != null) sb.append(host)
         if (port != null) sb.append(':').append(port)
         sb.append('/')
-        sb.append(segments.joinToString("/"))
+        sb.append(segments.joinToString("/") { encode(it) })
         return sb.toString()
     }
 
     /**
      * Inner path for provider routing — includes user info, host and port as
-     * the first segment.
+     * the first segment. Names are raw (a filename's `!` is not escaped here).
      *
      * ```
      * Path.parse("container://alpine/home/test").toInnerPath()  // => "/alpine/home/test"

@@ -38,8 +38,16 @@ object NodeOps {
      * its parent folder. This is the string→node boundary for callers that are
      * handed a path from outside (agent tool input, restored state).
      */
-    suspend fun destination(path: String): Result<VFile> = runCatching {
-        (Vfs.node(path).getOrNull() as? VFile)?.let { return@runCatching it }
+    suspend fun destination(path: String): Result<VFile> = runCatchingCancellable {
+        val existing = Vfs.node(path)
+        val node = existing.getOrNull()
+        if (node is VFile) return@runCatchingCancellable node
+        // Only a genuinely missing destination may be created. A permission,
+        // transport or provider failure must surface, never become a new file.
+        existing.exceptionOrNull()?.let { error ->
+            if (error !is NodeNotFoundException) throw error
+        }
+        if (node != null) error("destination is a folder: $path")
         val parsed = Path.parse(path)
         val name = parsed.name ?: error("no file name in $path")
         val parent = parsed.parent() ?: error("no parent folder for $path")

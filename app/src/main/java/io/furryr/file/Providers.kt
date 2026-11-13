@@ -4,7 +4,7 @@ import android.content.Context
 import android.util.Log
 import io.furryr.file.agent.AgentEnvironment
 import io.furryr.file.agent.AgentSettings
-import io.furryr.file.agent.SessionManager
+import io.furryr.file.terminal.SessionManager
 import io.furryr.file.container.ContainerDaemonLauncher
 import io.furryr.file.container.ContainerProvider
 import io.furryr.file.container.ContainerRuntime
@@ -86,17 +86,16 @@ fun installFileProviders(context: Context) {
     ContainerProvider.init(appContext)
     Vfs.register(ContainerProvider)
     DocumentFileProvider.init(appContext, LocationStores)
-    Vfs.register("document", DocumentFileProvider)
+    Vfs.register(DocumentFileProvider)
     SAFProvider.init(appContext, LocationStores)
-    Vfs.register("saf", SAFProvider)
-    FtpProvider.init(LocationStores)
-    Vfs.register("ftp", FtpProvider)
-    SftpProvider.init(LocationStores)
-    Vfs.register("sftp", SftpProvider)
+    Vfs.register(SAFProvider)
+    FtpProvider.init(LocationStores, appContext.cacheDir)
+    Vfs.register(FtpProvider)
+    SftpProvider.init(LocationStores, appContext.cacheDir)
+    Vfs.register(SftpProvider)
     // A URL is an address like any other: both schemes reach the same
     // read-only provider, and nothing above it inspects the scheme.
-    Vfs.register("http", HttpProvider)
-    Vfs.register("https", HttpProvider)
+    Vfs.register(HttpProvider)
     HereNavigation.install(appContext)
     HubActions.locationTargets = {
         LocationsRepository.locations(appContext, local)
@@ -104,7 +103,7 @@ fun installFileProviders(context: Context) {
             .map { HubLocation(kind = it.kind, label = it.title, root = it.root) }
     }
     RemoteProviders.providers(appContext.cacheDir, LocationStores).forEach {
-        Vfs.register(it.scheme, it)
+        Vfs.register(it)
     }
     SshTerminals.configure(LocationStores)
     // Container openers and renderers are Kotlin-side; they never touch a

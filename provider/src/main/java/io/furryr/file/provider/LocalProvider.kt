@@ -19,10 +19,13 @@ import kotlinx.coroutines.flow.Flow
 class LocalProvider : FileProvider {
     private val files: FileService get() = DaemonManager.fileService(DaemonTarget.Host)
 
-    override val scheme: String get() = "file"
-    override val authority: String? get() = null
+    override val schemes: Set<String> get() = setOf("file")
     override val label: String get() = "Local Storage"
-    override val features: Set<ProviderFeature> get() = ProviderFeature.entries.toSet()
+    override val features: Set<ProviderFeature> get() = setOf(
+        ProviderFeature.LIST, ProviderFeature.STAT, ProviderFeature.CREATE_FILE,
+        ProviderFeature.CREATE_DIR, ProviderFeature.DELETE, ProviderFeature.RENAME,
+        ProviderFeature.STREAM_COPY, ProviderFeature.OPEN,
+    )
 
     override fun innerPath(path: Path): String = path.toLocalPath()
 

@@ -1,4 +1,4 @@
-package io.furryr.file.container
+package io.furryr.file.core
 
 /**
  * Text form of a container address.
@@ -12,7 +12,7 @@ object ContainerUris {
     const val PREFIX = "container://"
 
     /** The provider root that lists the app-local set of containers. */
-    fun root(): String = "container:///"
+    fun root(): String = "$PREFIX/"
 
     /** `container://<name>` for the root, `container://<name>/<path>` below it. */
     fun forContainer(name: String, path: String = "/"): String {

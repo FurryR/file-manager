@@ -9,4 +9,5 @@ data class ProviderStat(
     val canCreateChildren: Boolean = false,
     val canEnter: Boolean = false,
     val size: Long = 0L,
+    val modifiedAt: Long = 0L,
 )

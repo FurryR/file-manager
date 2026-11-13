@@ -1,7 +1,7 @@
 package io.furryr.file.editor
 
 import android.content.Context
-import io.furryr.file.container.ContainerUriResolver
+import io.furryr.file.core.ContainerUriResolver
 
 data class LspSettings(val container: String, val command: String, val root: String, val documentPath: String) {
     val valid: Boolean get() = ContainerUriResolver.isValidContainerName(container) && command.isNotBlank() &&

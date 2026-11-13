@@ -67,7 +67,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import io.furryr.file.R
 import io.furryr.file.AppLocale
-import io.furryr.file.agent.SessionManager
+import io.furryr.file.terminal.SessionManager
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.container.ContainerManager
 import io.furryr.file.editor.EditorLanguages

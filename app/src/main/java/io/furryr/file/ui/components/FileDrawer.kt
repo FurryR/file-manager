@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
@@ -176,64 +177,43 @@ fun FileDrawer(
     var homeStat by remember { mutableStateOf<ProviderStat?>(null) }
     var containers by remember { mutableStateOf<List<Container>>(emptyList()) }
     var showDrawerMenu by remember { mutableStateOf(false) }
-    var showContainerDialog by remember { mutableStateOf(false) }
-    var showAddLocationDialog by remember { mutableStateOf(false) }
     var contextMenuTarget by remember { mutableStateOf<Container?>(null) }
-    var dialogTargetName by remember { mutableStateOf<String?>(null) }
-    var showDeleteDialog by remember { mutableStateOf(false) }
-    var showRenameDialog by remember { mutableStateOf(false) }
-    var renameText by remember { mutableStateOf("") }
     var draggedContainerName by remember { mutableStateOf<String?>(null) }
     var dragOffsetDp by remember { mutableStateOf(0f) }
 
     // SAF dialog states
     var safContextMenuTarget by remember { mutableStateOf<String?>(null) }
-    var safDeleteTarget by remember { mutableStateOf<String?>(null) }
-    var safRenameTarget by remember { mutableStateOf<String?>(null) }
-    var safRenameText by remember { mutableStateOf("") }
     var draggedSafHex by remember { mutableStateOf<String?>(null) }
     var safDragOffsetDp by remember { mutableStateOf(0f) }
 
     // Local path dialog states
     var localContextMenuTarget by remember { mutableStateOf<String?>(null) }
-    var localDeleteTarget by remember { mutableStateOf<String?>(null) }
-    var localRenameTarget by remember { mutableStateOf<String?>(null) }
-    var localRenameText by remember { mutableStateOf("") }
     var draggedLocalId by remember { mutableStateOf<String?>(null) }
     var localDragOffsetDp by remember { mutableStateOf(0f) }
 
     // FTP dialog states
-    var showAddFtpDialog by remember { mutableStateOf(false) }
     var ftpContextMenuTarget by remember { mutableStateOf<String?>(null) }
-    var ftpEditTarget by remember { mutableStateOf<String?>(null) }
-    var ftpDeleteTarget by remember { mutableStateOf<String?>(null) }
     var draggedFtpHost by remember { mutableStateOf<String?>(null) }
     var ftpDragOffsetDp by remember { mutableStateOf(0f) }
 
     // SFTP dialog states
-    var showAddSftpDialog by remember { mutableStateOf(false) }
     var sftpContextMenuTarget by remember { mutableStateOf<String?>(null) }
-    var sftpEditTarget by remember { mutableStateOf<String?>(null) }
-    var sftpDeleteTarget by remember { mutableStateOf<String?>(null) }
     var draggedSftpHost by remember { mutableStateOf<String?>(null) }
     var sftpDragOffsetDp by remember { mutableStateOf(0f) }
 
     // Remote (AList / SSH) dialog states
     val scope = rememberCoroutineScope()
-    var remoteEditTarget by remember { mutableStateOf<String?>(null) }
-    var remoteDeleteTarget by remember { mutableStateOf<String?>(null) }
     var remoteContextMenuTarget by remember { mutableStateOf<String?>(null) }
-    var remoteApproval by remember { mutableStateOf<RemoteHostApproval?>(null) }
     var draggedRemoteId by remember { mutableStateOf<String?>(null) }
     var remoteDragOffsetDp by remember { mutableStateOf(0f) }
 
     // Web link dialog states
     var webContextMenuTarget by remember { mutableStateOf<String?>(null) }
-    var webDeleteTarget by remember { mutableStateOf<String?>(null) }
-    var webRenameTarget by remember { mutableStateOf<String?>(null) }
-    var webRenameText by remember { mutableStateOf("") }
     var draggedWebId by remember { mutableStateOf<String?>(null) }
     var webDragOffsetDp by remember { mutableStateOf(0f) }
+
+    val dialogs = remember { DrawerDialogState() }
+    with(dialogs) {
 
     // Display order for pinned local paths
     val displayLocalLocations = remember(localLocations, localOrder, sortMode) {
@@ -353,10 +333,9 @@ fun FileDrawer(
     }
 
     ModalDrawerSheet(modifier = Modifier.width((configuration.screenWidthDp * 0.80).dp)) {
-        LazyColumn {
-            // ── Header row ───────────────────────────────────────────────
-            item {
-                Row(
+        Column(Modifier.fillMaxSize()) {
+            // ── Fixed header row ─────────────────────────────────────────
+            Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -432,10 +411,9 @@ fun FileDrawer(
                         }
                     }
                 }
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 12.dp))
-                Spacer(Modifier.height(4.dp))
-            }
-
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 12.dp))
+            Spacer(Modifier.height(4.dp))
+            LazyColumn(Modifier.weight(1f)) {
             // ── Group: 本地 (0) ─────────────────────────────────────────
             item {
                 GroupHeader(
@@ -1086,464 +1064,42 @@ fun FileDrawer(
 
             // ── Bottom spacer ──────────────────────────────────────────
             item { Spacer(Modifier.height(8.dp)) }
+            }
         }
     }
 
-    // ── Container delete confirmation dialog ────────────────────────────────
-    if (showDeleteDialog) {
-        AlertDialog(
-            onDismissRequest = {
-                showDeleteDialog = false
-                dialogTargetName = null
-            },
-            title = { Text(stringResource(R.string.delete_container_title)) },
-            text = { Text(stringResource(R.string.delete_container_confirm, dialogTargetName ?: "")) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        dialogTargetName?.let { onContainerDelete(it) }
-                        showDeleteDialog = false
-                        dialogTargetName = null
-                    }
-                ) { Text(stringResource(R.string.delete)) }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    showDeleteDialog = false
-                    dialogTargetName = null
-                }) { Text(stringResource(R.string.cancel)) }
-            },
-        )
-    }
-
-    // ── Container rename dialog ─────────────────────────────────────────────
-    if (showRenameDialog) {
-        AlertDialog(
-            onDismissRequest = {
-                showRenameDialog = false
-                dialogTargetName = null
-            },
-            title = { Text(stringResource(R.string.rename_container_title)) },
-            text = {
-                OutlinedTextField(
-                    value = renameText,
-                    onValueChange = { renameText = it },
-                    singleLine = true,
-                    label = { Text(stringResource(R.string.name_label)) },
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        dialogTargetName?.let { oldName ->
-                            onContainerRename(oldName, renameText.ifBlank { oldName })
-                        }
-                        showRenameDialog = false
-                        renameText = ""
-                        dialogTargetName = null
-                    }
-                ) { Text(stringResource(R.string.ok)) }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    showRenameDialog = false
-                    dialogTargetName = null
-                }) { Text(stringResource(R.string.cancel)) }
-            },
-        )
-    }
-
-    // ── Local path delete dialog ────────────────────────────────────────────
-    if (localDeleteTarget != null) {
-        val id = localDeleteTarget
-        AlertDialog(
-            onDismissRequest = { localDeleteTarget = null },
-            title = { Text(stringResource(R.string.delete_location_title)) },
-            text = { Text(stringResource(R.string.delete_location_confirm)) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        id?.let { onLocalDelete(it) }
-                        localDeleteTarget = null
-                    }
-                ) { Text(stringResource(R.string.delete)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { localDeleteTarget = null }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-        )
-    }
-
-    // ── Local path rename dialog ─────────────────────────────────────────────
-    if (localRenameTarget != null) {
-        val id = localRenameTarget
-        val current = localLocations.find { it.id == id }
-        AlertDialog(
-            onDismissRequest = { localRenameTarget = null },
-            title = { Text(stringResource(R.string.rename_location_title)) },
-            text = {
-                OutlinedTextField(
-                    value = localRenameText,
-                    onValueChange = { localRenameText = it },
-                    singleLine = true,
-                    label = { Text(stringResource(R.string.name_label)) },
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        id?.let { onLocalRename(it, localRenameText.ifBlank { current?.name ?: it }) }
-                        localRenameTarget = null
-                    }
-                ) { Text(stringResource(R.string.ok)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { localRenameTarget = null }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-        )
-    }
-
-    // ── SAF delete dialog ───────────────────────────────────────────────────
-    if (safDeleteTarget != null) {
-        val hex = safDeleteTarget
-        AlertDialog(
-            onDismissRequest = { safDeleteTarget = null },
-            title = { Text(stringResource(R.string.delete_location_title)) },
-            text = { Text(stringResource(R.string.delete_location_confirm)) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        hex?.let { onSafDelete(it) }
-                        safDeleteTarget = null
-                    }
-                ) { Text(stringResource(R.string.delete)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { safDeleteTarget = null }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-        )
-    }
-
-    // ── SAF rename dialog ───────────────────────────────────────────────────
-    if (safRenameTarget != null) {
-        val hex = safRenameTarget
-        AlertDialog(
-            onDismissRequest = { safRenameTarget = null },
-            title = { Text(stringResource(R.string.rename_location_title)) },
-            text = {
-                OutlinedTextField(
-                    value = safRenameText,
-                    onValueChange = { safRenameText = it },
-                    singleLine = true,
-                    label = { Text(stringResource(R.string.name_label)) },
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        hex?.let { onSafRename(it, safRenameText.ifBlank { it }) }
-                        safRenameTarget = null
-                    }
-                ) { Text(stringResource(R.string.ok)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { safRenameTarget = null }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-        )
-    }
-
-    // ── FTP add dialog ────────────────────────────────────────────────────
-    if (showAddFtpDialog) {
-        RemoteServerDialog(
-            initialPort = 21,
-            title = stringResource(R.string.ftp_add_title),
-            onDismiss = { showAddFtpDialog = false },
-            onConfirm = { host, name, port, username, password ->
-                onAddFtp(host, name, port, username, password)
-                showAddFtpDialog = false
-            },
-        )
-    }
-
-    // ── FTP edit dialog ───────────────────────────────────────────────────
-    ftpEditTarget?.let { oldHost ->
-        val server = ftpLocations.find { it.host == oldHost }
-        if (server != null) {
-            RemoteServerDialog(
-                initialName = server.name,
-                initialHost = server.host,
-                initialPort = server.port,
-                initialUsername = server.username,
-                initialPassword = server.password,
-                title = stringResource(R.string.ftp_edit_title),
-                onDismiss = { ftpEditTarget = null },
-                onConfirm = { host, name, port, username, password ->
-                    onFtpSave(oldHost, host, name, port, username, password)
-                    ftpEditTarget = null
-                },
-            )
-        }
-    }
-
-    // ── FTP delete dialog ─────────────────────────────────────────────────
-    if (ftpDeleteTarget != null) {
-        val host = ftpDeleteTarget
-        val server = ftpLocations.find { it.host == host }
-        AlertDialog(
-            onDismissRequest = { ftpDeleteTarget = null },
-            title = { Text(stringResource(R.string.drawer_delete)) },
-            text = { Text(stringResource(R.string.delete_ftp_confirm, server?.name ?: host ?: "")) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        host?.let { onFtpDelete(it) }
-                        ftpDeleteTarget = null
-                    }
-                ) { Text(stringResource(R.string.delete)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { ftpDeleteTarget = null }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-        )
-    }
-
-    // ── SFTP add dialog ───────────────────────────────────────────────────
-    if (showAddSftpDialog) {
-        RemoteServerDialog(
-            initialPort = 22,
-            title = stringResource(R.string.sftp_add_title),
-            onDismiss = { showAddSftpDialog = false },
-            onConfirm = { host, name, port, username, password ->
-                onAddSftp(host, name, port, username, password)
-                showAddSftpDialog = false
-            },
-        )
-    }
-
-    // ── SFTP edit dialog ──────────────────────────────────────────────────
-    sftpEditTarget?.let { oldHost ->
-        val server = sftpLocations.find { it.host == oldHost }
-        if (server != null) {
-            RemoteServerDialog(
-                initialName = server.name,
-                initialHost = server.host,
-                initialPort = server.port,
-                initialUsername = server.username,
-                initialPassword = server.password,
-                title = stringResource(R.string.sftp_edit_title),
-                onDismiss = { sftpEditTarget = null },
-                onConfirm = { host, name, port, username, password ->
-                    onSftpSave(oldHost, host, name, port, username, password)
-                    sftpEditTarget = null
-                },
-            )
-        }
-    }
-
-    // ── SFTP delete dialog ────────────────────────────────────────────────
-    if (sftpDeleteTarget != null) {
-        val host = sftpDeleteTarget
-        val server = sftpLocations.find { it.host == host }
-        AlertDialog(
-            onDismissRequest = { sftpDeleteTarget = null },
-            title = { Text(stringResource(R.string.drawer_delete)) },
-            text = { Text(stringResource(R.string.delete_sftp_confirm, server?.name ?: host ?: "")) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        host?.let { onSftpDelete(it) }
-                        sftpDeleteTarget = null
-                    }
-                ) { Text(stringResource(R.string.delete)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { sftpDeleteTarget = null }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-        )
-    }
-
-    // ── Remote edit dialog ─────────────────────────────────────────────────
-    remoteEditTarget?.let { id ->
-        remoteLocations.find { it.id == id }?.let { location ->
-            RemoteLocationDialog(
-                initial = location,
-                title = stringResource(R.string.remote_edit),
-                onDismiss = { remoteEditTarget = null },
-                onConfirm = { updated ->
-                    onRemoteSave(updated)
-                    remoteEditTarget = null
-                },
-            )
-        }
-    }
-
-    // ── Remote delete dialog ───────────────────────────────────────────────
-    remoteDeleteTarget?.let { id ->
-        val location = remoteLocations.find { it.id == id }
-        AlertDialog(
-            onDismissRequest = { remoteDeleteTarget = null },
-            title = { Text(stringResource(R.string.drawer_delete)) },
-            text = {
-                Text(
-                    stringResource(
-                        R.string.remote_remove_confirm,
-                        location?.name ?: id,
-                    ),
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        onRemoteDelete(id)
-                        remoteDeleteTarget = null
-                    },
-                ) { Text(stringResource(R.string.delete)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { remoteDeleteTarget = null }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-        )
-    }
-
-    // ── Web link rename dialog ─────────────────────────────────────────────
-    if (webRenameTarget != null) {
-        val id = webRenameTarget
-        AlertDialog(
-            onDismissRequest = { webRenameTarget = null },
-            title = { Text(stringResource(R.string.rename_location_title)) },
-            text = {
-                OutlinedTextField(
-                    value = webRenameText,
-                    onValueChange = { webRenameText = it },
-                    singleLine = true,
-                    label = { Text(stringResource(R.string.name_label)) },
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        id?.let { onWebRename(it, webRenameText.ifBlank { webLocations.find { w -> w.id == it }?.name ?: it }) }
-                        webRenameTarget = null
-                    }
-                ) { Text(stringResource(R.string.ok)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { webRenameTarget = null }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-        )
-    }
-
-    // ── Web link delete dialog ─────────────────────────────────────────────
-    if (webDeleteTarget != null) {
-        val id = webDeleteTarget
-        AlertDialog(
-            onDismissRequest = { webDeleteTarget = null },
-            title = { Text(stringResource(R.string.delete_location_title)) },
-            text = { Text(stringResource(R.string.delete_location_confirm)) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        id?.let { onWebDelete(it) }
-                        webDeleteTarget = null
-                    }
-                ) { Text(stringResource(R.string.delete)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { webDeleteTarget = null }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-        )
-    }
-
-    // ── SSH host key verification ──────────────────────────────────────────
-    remoteApproval?.let { pending ->
-        AlertDialog(
-            onDismissRequest = { remoteApproval = null },
-            title = { Text(stringResource(R.string.remote_host_title)) },
-            text = {
-                Text(
-                    context.getString(
-                        R.string.remote_host_confirm,
-                        "${pending.location.host}:${pending.location.port}",
-                        pending.key.algorithm,
-                        pending.key.fingerprint,
-                    ),
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val trusted = pending.location.copy(hostKey = pending.key.keyBase64)
-                        remoteApproval = null
-                        scope.launch {
-                            val saved = withContext(Dispatchers.IO) {
-                                runCatching { LocationsRepository.updateRemote(trusted) }
-                            }
-                            saved.onSuccess { openRemote(trusted) }.onFailure {
-                                Toast.makeText(
-                                    context,
-                                    it.message ?: context.getString(R.string.remote_store_error),
-                                    Toast.LENGTH_LONG,
-                                ).show()
-                            }
-                        }
-                    },
-                ) { Text(stringResource(R.string.remote_trust)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { remoteApproval = null }) {
-                    Text(stringResource(R.string.cancel))
-                }
-            },
-        )
-    }
-
-    if (showContainerDialog) {
-        ContainerCreateDialog(
-            rootAvailable = rootAvailable,
-            onDismiss = { showContainerDialog = false },
-            onConfirm = { name, image, backend ->
-                showContainerDialog = false
-                onCreateContainer(name, image, backend)
-            },
-        )
-    }
-
-    if (showAddLocationDialog) {
-        AddLocationDialog(
-            onDismiss = { showAddLocationDialog = false },
-            onUseExternalStorage = {
-                showAddLocationDialog = false
-                onUseExternalStorage()
-            },
-            onConfirm = { address ->
-                showAddLocationDialog = false
-                when (address.scheme) {
-                    ProviderSchemes.FTP -> onAddFtp(address.host, address.name.ifBlank { address.host }, address.port ?: 21, address.username, address.password)
-                    ProviderSchemes.SFTP -> onAddSftp(address.host, address.name.ifBlank { address.host }, address.port ?: 22, address.username, address.password)
-                    RemoteKind.SSH.scheme -> onAddRemote(remoteLocationFrom(address, RemoteKind.SSH))
-                    RemoteKind.ALIST.scheme -> onAddRemote(remoteLocationFrom(address, RemoteKind.ALIST))
-                    ProviderSchemes.HTTP, ProviderSchemes.HTTPS -> onAddWeb(address.toUrl(), address.name)
-                    else -> onAddLocalPath(address.path)
-                }
-            },
-        )
+    DrawerDialogs(
+        state = dialogs,
+        context = context,
+        scope = scope,
+        rootAvailable = rootAvailable,
+        localLocations = localLocations,
+        ftpLocations = ftpLocations,
+        sftpLocations = sftpLocations,
+        remoteLocations = remoteLocations,
+        webLocations = webLocations,
+        openRemote = ::openRemote,
+        onContainerRename = onContainerRename,
+        onContainerDelete = onContainerDelete,
+        onCreateContainer = onCreateContainer,
+        onUseExternalStorage = onUseExternalStorage,
+        onLocalDelete = onLocalDelete,
+        onLocalRename = onLocalRename,
+        onSafDelete = onSafDelete,
+        onSafRename = onSafRename,
+        onAddFtp = onAddFtp,
+        onFtpSave = onFtpSave,
+        onFtpDelete = onFtpDelete,
+        onAddSftp = onAddSftp,
+        onSftpSave = onSftpSave,
+        onSftpDelete = onSftpDelete,
+        onRemoteSave = onRemoteSave,
+        onRemoteDelete = onRemoteDelete,
+        onAddRemote = onAddRemote,
+        onAddWeb = onAddWeb,
+        onWebRename = onWebRename,
+        onWebDelete = onWebDelete,
+        onAddLocalPath = onAddLocalPath,
+    )
     }
 }

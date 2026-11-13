@@ -1,5 +1,8 @@
 package io.furryr.file.core
 
+import io.furryr.file.core.source.FileSource
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 enum class ContentKind {
@@ -286,7 +289,13 @@ object ContentTypes {
         }
         if (control > bytes.size / 20) return false
         val text = String(bytes, Charsets.UTF_8)
-        if (text.contains('\uFFFD')) return null
+        if (text.contains('\uFFFD')) {
+            // The probe is a bounded prefix: a multi-byte code point split at
+            // the tail is inconclusive, not binary. Any earlier replacement
+            // character still means the bytes are not UTF-8 text.
+            val first = text.indexOf('\uFFFD')
+            return first >= text.length - 3 && text.indexOf('\uFFFD', first + 1) < 0
+        }
         return true
     }
 
@@ -317,5 +326,26 @@ object ContentTypes {
             kind = kind,
             seekable = seekable,
         )
+    }
+
+    /** True when [mime] is one of the archive types this app understands. */
+    fun isArchiveMime(mime: String?): Boolean =
+        mime?.substringBefore(';')?.trim()?.lowercase(Locale.ROOT) in archiveMimes
+
+    /**
+     * The one content probe shared by stored files and archive entries: a
+     * bounded prefix read, never a whole-body transfer.
+     */
+    suspend fun describe(name: String, size: Long, source: FileSource?): ContentInfo {
+        val actualSize = source?.size ?: size
+        val head = if (source != null && actualSize > 0L) {
+            val length = minOf(actualSize, SNIFF_BYTES.toLong()).toInt()
+            withContext(Dispatchers.IO) {
+                runCatchingCancellable { source.readAt(0L, length) }.getOrDefault(ByteArray(0))
+            }
+        } else {
+            ByteArray(0)
+        }
+        return describe(name, actualSize, head, source?.seekable ?: false)
     }
 }

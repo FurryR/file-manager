@@ -10,6 +10,7 @@ import io.furryr.file.core.VFolder
 import io.furryr.file.core.VNode
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
+import io.furryr.file.core.runCatchingCancellable
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
 
@@ -72,7 +73,7 @@ class ArchiveFolder(
         }
         return FileEntry(
             name = entry.name,
-            path = displayPath(segments + entry.name),
+            path = node.path.toString(),
             isDirectory = entry.isDirectory,
             modifiedAt = entry.modifiedAt,
             size = entry.size,
@@ -104,7 +105,7 @@ class ArchiveFolder(
 
     override suspend fun info(): DirectoryStats = DirectoryStats()
 
-    override suspend fun child(name: String): Result<VNode> = runCatching {
+    override suspend fun child(name: String): Result<VNode> = runCatchingCancellable {
         require(name.isNotEmpty() && name != "." && name != ".." && '/' !in name) {
             "invalid child name: $name"
         }
@@ -164,18 +165,13 @@ class ArchiveFile(
     /** Archive entries never accept a write handle. */
     override val writable: Boolean get() = false
 
-    override suspend fun describe(): Result<ContentInfo> = runCatching {
+    override suspend fun describe(): Result<ContentInfo> = runCatchingCancellable {
         val opened = open(OpenMode.READ).getOrNull()
-        val size = opened?.size ?: entry.size
-        val head = if (opened != null && size > 0L) {
-            val length = minOf(size, ContentTypes.SNIFF_BYTES.toLong()).toInt()
-            runCatching { opened.readAt(0L, length) }.getOrDefault(ByteArray(0))
-        } else {
-            ByteArray(0)
+        try {
+            ContentTypes.describe(entry.name, entry.size, opened)
+        } finally {
+            opened?.close()
         }
-        val seekable = opened?.seekable ?: false
-        runCatching { opened?.close() }
-        ContentTypes.describe(entry.name, size, head, seekable)
     }
 
     override fun toString(): String = "ArchiveFile($path)"

@@ -1,8 +1,9 @@
 package io.furryr.file.agent
 
 import com.google.protobuf.ByteString
-import io.furryr.file.container.ContainerUris
+import io.furryr.file.core.ContainerUris
 import io.furryr.file.core.NodeOps
+import io.furryr.file.core.Path
 import io.furryr.file.core.Vfs
 import io.furryr.file.core.source.OpenMode
 import io.furryr.file.daemon.DaemonManager
@@ -18,6 +19,8 @@ import io.furryr.file.proto.hub.ReadFileRequest
 import io.furryr.file.proto.hub.ReadFileResponse
 import io.furryr.file.proto.hub.WriteFileRequest
 import io.furryr.file.proto.hub.WriteFileResponse
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 
 private const val DEFAULT_READ_SIZE = 64L * 1024
@@ -33,42 +36,43 @@ private const val MAX_DIRECTORY_ENTRIES = 2_000
 // can keep a `**` walk running for minutes.
 private val GLOB_SKIP_DIRS = setOf("/proc", "/sys", "/dev")
 
-public suspend fun readFile(request: ReadFileRequest, target: DaemonTarget): ReadFileResponse {
-    require(request.path.isNotBlank()) { "read requires a path" }
-    if (isVfsPath(request.path)) return readVfsFile(request)
-    val file = DaemonManager.fileService(target).open(request.path, OpenMode.READ).getOrThrow()
-    try {
-        val size = file.size
-        val offset = request.offset.coerceAtMost(size)
-        val limit = if (request.length <= 0) DEFAULT_READ_SIZE
-        else request.length.toLong().coerceAtMost(MAX_READ_SIZE)
-        val output = ByteArrayOutputStream()
-        var position = offset
-        var eof = position >= size
-        while (!eof && output.size() < limit) {
-            val remaining = (limit - output.size()).coerceAtMost(CHUNK_SIZE.toLong()).toInt()
-            val data = file.readAt(position, remaining)
-            if (data.isEmpty()) {
-                eof = true
-                break
+public suspend fun readFile(request: ReadFileRequest, target: DaemonTarget): ReadFileResponse =
+    withContext(Dispatchers.IO) {
+        require(request.path.isNotBlank()) { "read requires a path" }
+        if (isVfsPath(request.path)) return@withContext readVfsFile(request)
+        val file = DaemonManager.fileService(target).open(request.path, OpenMode.READ).getOrThrow()
+        try {
+            val size = file.size
+            val offset = request.offset.coerceAtMost(size)
+            val limit = if (request.length <= 0) DEFAULT_READ_SIZE
+            else request.length.toLong().coerceAtMost(MAX_READ_SIZE)
+            val output = ByteArrayOutputStream()
+            var position = offset
+            var eof = position >= size
+            while (!eof && output.size() < limit) {
+                val remaining = (limit - output.size()).coerceAtMost(CHUNK_SIZE.toLong()).toInt()
+                val data = file.readAt(position, remaining)
+                if (data.isEmpty()) {
+                    eof = true
+                    break
+                }
+                output.write(data)
+                position += data.size
+                eof = position >= size
             }
-            output.write(data)
-            position += data.size
-            eof = position >= size
+            ReadFileResponse.newBuilder()
+                .setData(ByteString.copyFrom(output.toByteArray()))
+                .setSize(size)
+                .setEof(eof)
+                .build()
+        } finally {
+            file.close()
         }
-        return ReadFileResponse.newBuilder()
-            .setData(ByteString.copyFrom(output.toByteArray()))
-            .setSize(size)
-            .setEof(eof)
-            .build()
-    } finally {
-        file.close()
     }
-}
 
-public suspend fun readVfsFile(request: ReadFileRequest): ReadFileResponse {
+public suspend fun readVfsFile(request: ReadFileRequest): ReadFileResponse = withContext(Dispatchers.IO) {
     val source = Vfs.file(request.path).getOrThrow().open(OpenMode.READ).getOrThrow()
-    return source.use {
+    source.use {
         val size = source.size
         val offset = request.offset.coerceAtMost(size)
         val limit = if (request.length <= 0) DEFAULT_READ_SIZE
@@ -126,27 +130,28 @@ public suspend fun listDirectory(
         .build()
 }
 
-public suspend fun writeFile(request: WriteFileRequest, target: DaemonTarget): WriteFileResponse {
-    require(request.path.isNotBlank()) { "write requires a path" }
-    val data = request.data.toByteArray()
-    if (isVfsPath(request.path)) {
-        Vfs.file(request.path).getOrThrow().open(OpenMode.WRITE).getOrThrow().use { source ->
-            if (data.isNotEmpty()) source.writeAt(0, data)
-            if (source.seekable) source.truncate(data.size.toLong())
+public suspend fun writeFile(request: WriteFileRequest, target: DaemonTarget): WriteFileResponse =
+    withContext(Dispatchers.IO) {
+        require(request.path.isNotBlank()) { "write requires a path" }
+        val data = request.data.toByteArray()
+        if (isVfsPath(request.path)) {
+            Vfs.file(request.path).getOrThrow().open(OpenMode.WRITE).getOrThrow().use { source ->
+                if (data.isNotEmpty()) source.writeAt(0, data)
+                if (source.seekable) source.truncate(data.size.toLong())
+            }
+            return@withContext WriteFileResponse.newBuilder().setBytesWritten(data.size.toLong()).build()
         }
-        return WriteFileResponse.newBuilder().setBytesWritten(data.size.toLong()).build()
-    }
-    val file = DaemonManager.fileService(target).open(request.path, OpenMode.WRITE).getOrThrow()
-    try {
-        if (data.isNotEmpty()) {
-            file.writeAt(0, data)
+        val file = DaemonManager.fileService(target).open(request.path, OpenMode.WRITE).getOrThrow()
+        try {
+            if (data.isNotEmpty()) {
+                file.writeAt(0, data)
+            }
+            if (file.seekable) file.truncate(data.size.toLong())
+            WriteFileResponse.newBuilder().setBytesWritten(data.size.toLong()).build()
+        } finally {
+            file.close()
         }
-        if (file.seekable) file.truncate(data.size.toLong())
-        return WriteFileResponse.newBuilder().setBytesWritten(data.size.toLong()).build()
-    } finally {
-        file.close()
     }
-}
 
 public suspend fun copyFile(request: CopyFileRequest, target: DaemonTarget): CopyFileResponse {
     val from = callerPath(target, request.from, "copy source")
@@ -285,7 +290,17 @@ private suspend fun walkGlob(
     return GlobResponse.newBuilder().addAllPaths(paths).setTruncated(truncated).build()
 }
 
-public fun isVfsPath(path: String): Boolean = path.contains("://")
+public fun isVfsPath(path: String): Boolean =
+    !path.startsWith('/') && Path.parse(path).scheme != null
+
+/** Read a small text file (distribution identity) through the agent file API. */
+public suspend fun readText(target: DaemonTarget, path: String, limit: Int = 4096): String =
+    withContext(Dispatchers.IO) {
+        val file = DaemonManager.fileService(target).open(path, OpenMode.READ).getOrThrow()
+        file.use {
+            String(it.readAt(0L, minOf(it.size, limit.toLong()).toInt()), Charsets.UTF_8)
+        }
+    }
 
 // The VFS root of the caller's own scope, resolved from the Hello handshake.
 public fun ownScopeRoot(target: DaemonTarget): String? = when (target) {

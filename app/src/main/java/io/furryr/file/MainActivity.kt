@@ -3,6 +3,7 @@ package io.furryr.file
 import android.content.Context
 import android.os.Bundle
 import android.util.Log
+import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.activity.compose.setContent
@@ -68,6 +69,9 @@ class MainActivity : ComponentActivity() {
         if (intent?.action == ACTION_OPEN_TERMINAL) terminalOpenRequest++
 
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        // chrome://inspect over adb; the in-app terminal tab uses the console
+        // bridge instead, this keeps the full Chrome DevTools available.
+        WebView.setWebContentsDebuggingEnabled(true)
         installFileProviders(this)
 
         // Bind the resident PulseAudio listener as early as possible. It binds its

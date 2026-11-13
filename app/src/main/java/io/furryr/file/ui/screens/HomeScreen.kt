@@ -73,9 +73,10 @@ fun HomeScreen(
             entry.location.contains(query, ignoreCase = true)
     val visibleBookmarks = bookmarks.filter(::matches)
     val bookmarked = bookmarks.map { it.key }.toSet()
-    val recentFiles = recent.filter { it.kind == HomeEntryKind.FILE && matches(it) }
-    val recentLocations = recent.filter { it.kind != HomeEntryKind.FILE && matches(it) }
-    val empty = visibleBookmarks.isEmpty() && recentFiles.isEmpty() && recentLocations.isEmpty()
+    // HomeStore already keeps files and locations in one visit order; splitting
+    // them here would hide that order behind two headings.
+    val recentEntries = recent.filter(::matches)
+    val empty = visibleBookmarks.isEmpty() && recentEntries.isEmpty()
 
     Box(modifier = modifier.fillMaxSize()) {
         if (empty) {
@@ -115,33 +116,15 @@ fun HomeScreen(
                         )
                     }
                 }
-                if (recentFiles.isNotEmpty()) {
-                    item(key = "recent_files_header") {
+                if (recentEntries.isNotEmpty()) {
+                    item(key = "recent_header") {
                         SectionHeader(
-                            title = stringResource(R.string.home_recent_files),
+                            title = stringResource(R.string.home_recent),
                             action = stringResource(R.string.home_clear),
                             onAction = onClearRecent,
                         )
                     }
-                    items(recentFiles, key = { "file:${it.key}" }) { entry ->
-                        SwipeableHomeRow(
-                            entry = entry,
-                            bookmarked = entry.key in bookmarked,
-                            onOpen = { onOpen(entry) },
-                            onToggleBookmark = { onToggleBookmark(entry) },
-                            onRemove = { onRemoveRecent(entry) },
-                        )
-                    }
-                }
-                if (recentLocations.isNotEmpty()) {
-                    item(key = "recent_locations_header") {
-                        SectionHeader(
-                            title = stringResource(R.string.home_recent_locations),
-                            action = stringResource(R.string.home_clear),
-                            onAction = onClearRecent,
-                        )
-                    }
-                    items(recentLocations, key = { "location:${it.key}" }) { entry ->
+                    items(recentEntries, key = { "recent:${it.key}" }) { entry ->
                         SwipeableHomeRow(
                             entry = entry,
                             bookmarked = entry.key in bookmarked,

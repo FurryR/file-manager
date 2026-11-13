@@ -6,6 +6,7 @@ import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.util.Log
+import io.furryr.file.core.ContainerUriResolver
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.daemon.process.CommandSpec
@@ -336,6 +337,9 @@ object ContainerManager {
     // ══════════════════════════════════════════════════════════════════════
     //  Internal helpers — directory layout
     // ══════════════════════════════════════════════════════════════════════
+
+    /** The shared containers directory (rootfs parents live here). */
+    fun containersDir(context: Context): File = getContainersDir(context)
 
     private fun getContainersDir(context: Context): File =
         File(context.filesDir, CONTAINERS_DIR)

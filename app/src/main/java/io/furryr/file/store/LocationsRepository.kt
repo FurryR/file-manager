@@ -5,6 +5,8 @@ import android.util.Log
 import io.furryr.file.core.FileProvider
 import io.furryr.file.core.LocationActions
 import io.furryr.file.core.LocationEntry
+import io.furryr.file.core.Path
+import io.furryr.file.core.Vfs
 import io.furryr.file.provider.FtpProvider
 import io.furryr.file.provider.ProviderSchemes
 import io.furryr.file.provider.SAFProvider
@@ -35,9 +37,12 @@ object LocationsRepository {
 
     private val extraKinds = linkedMapOf<String, LocationKind>()
 
-    /** Add a location family (a plugin) to the drawer. */
+    private val builtinIds = setOf("local", "saf", ProviderSchemes.FTP, ProviderSchemes.SFTP, "remote")
+
+    /** Add a location family (a plugin) to the drawer; insertion order is drawer order. */
     @Synchronized
     fun registerKind(kind: LocationKind) {
+        require(kind.id !in builtinIds) { "Location kind '${kind.id}' collides with a built-in kind" }
         extraKinds[kind.id] = kind
     }
 
@@ -204,7 +209,7 @@ object LocationsRepository {
                     id = location.hexId,
                     title = location.name,
                     subtitle = location.treeUri,
-                    root = "saf://${location.hexId}",
+                    root = Path.of("saf", host = location.hexId).toString(),
                     kind = id,
                     provider = SAFProvider,
                 )
@@ -228,7 +233,7 @@ object LocationsRepository {
                     id = server.host,
                     title = server.name,
                     subtitle = "ftp://${server.host}:${server.port}",
-                    root = "ftp://${server.host}",
+                    root = Path.of(ProviderSchemes.FTP, host = server.host).toString(),
                     kind = id,
                     provider = FtpProvider,
                 )
@@ -252,7 +257,7 @@ object LocationsRepository {
                     id = server.host,
                     title = server.name,
                     subtitle = "sftp://${server.host}:${server.port}",
-                    root = "sftp://${server.host}",
+                    root = Path.of(ProviderSchemes.SFTP, host = server.host).toString(),
                     kind = id,
                     provider = SftpProvider,
                 )
@@ -271,9 +276,8 @@ object LocationsRepository {
         override val id: String = "remote"
 
         override fun records(context: Context): List<LocationRecord> {
-            val providers = RemoteProviders.providers(context.cacheDir, LocationStores)
             return RemoteLocationStore.all().mapNotNull { location ->
-                val provider = providers.firstOrNull { it.scheme == location.kind.scheme }
+                val provider = Vfs.provider(location.kind.scheme)
                     ?: return@mapNotNull null
                 LocationRecord(
                     id = location.id,

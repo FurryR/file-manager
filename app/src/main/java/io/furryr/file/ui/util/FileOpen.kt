@@ -87,11 +87,19 @@ fun shareFile(context: Context, file: VFile, content: ContentInfo? = null) {
     }
 }
 
-fun shareEntries(context: Context, entries: List<FileEntry>) {
+suspend fun shareEntries(context: Context, entries: List<FileEntry>) {
     val files = entries.filterNot { it.isDirectory }
     if (files.isEmpty()) return
-    val uris = files.mapNotNull {
-        shareableUri(context, it.path, ForwardFacts(name = it.name, size = it.size))
+    val resolved = files.mapNotNull { entry -> io.furryr.file.core.Vfs.file(entry.path).getOrNull() }
+    if (resolved.isEmpty()) {
+        Toast.makeText(context, context.getString(R.string.toast_failed), Toast.LENGTH_SHORT).show()
+        return
+    }
+    val uris = resolved.map { file ->
+        ForwardFileProvider.buildUri(
+            file,
+            ForwardFacts(name = file.name, size = file.stat().getOrNull()?.size ?: -1L),
+        )
     }
     if (uris.isEmpty()) {
         Toast.makeText(context, context.getString(R.string.toast_failed), Toast.LENGTH_SHORT).show()

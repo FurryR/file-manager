@@ -1,4 +1,4 @@
-package io.furryr.file.agent
+package io.furryr.file.terminal
 
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -6,7 +6,7 @@ import android.content.Context
 import android.util.Log
 import io.furryr.file.RuntimeForegroundService
 import io.furryr.file.container.ContainerManager
-import io.furryr.file.container.ContainerUris
+import io.furryr.file.core.ContainerUris
 import io.furryr.file.pulse.PulseManager
 import io.furryr.file.wayland.WaylandManager
 import io.furryr.file.daemon.DaemonManager
@@ -31,8 +31,58 @@ import java.io.Closeable
  *
  * Thread safety is provided via [synchronized] on [mutex] for all map access.
  *
- * Used by [io.furryr.file.TerminalSheet] to drive terminal sessions.
+ * Used by [TermuxTerminalTab] to create and destroy the PTY behind a tab.
  */
+/** Terminal-address profiles: the one place that formats/parses SSH shell markers. */
+object TerminalProfiles {
+    fun sshAddress(profile: SessionManager.SshProfile): String =
+        io.furryr.file.core.Path.of(
+            scheme = "ssh",
+            host = profile.authority.ifEmpty { profile.locationId },
+        ).toString()
+
+    fun isSsh(address: String): Boolean =
+        runCatching { io.furryr.file.core.Path.parse(address).scheme }.getOrNull() == "ssh"
+
+    /** The authority/id carried by an SSH shell marker, or null. */
+    fun sshAuthority(address: String): String? {
+        val parsed = runCatching { io.furryr.file.core.Path.parse(address) }.getOrNull() ?: return null
+        if (parsed.scheme != "ssh") return null
+        return authorityOf(parsed)
+    }
+
+    /** `user@host[:port]`, matching [io.furryr.file.provider.remote.RemoteLocation.pathAuthority]. */
+    private fun authorityOf(parsed: io.furryr.file.core.Path): String? {
+        val host = parsed.host?.removeSurrounding("[", "]") ?: return null
+        return buildString {
+            parsed.userInfo?.takeIf { it.isNotEmpty() }?.let { append(it).append('@') }
+            if (':' in host) append('[').append(host).append(']') else append(host)
+            val port = parsed.port
+            if (port != null && port != 22) append(':').append(port)
+        }
+    }
+
+    /** The root address of an SSH shell marker. */
+    fun sshRoot(authority: String): String =
+        io.furryr.file.core.Path.of(scheme = "ssh", host = authority).toString()
+
+    /** Resolve a file path into the SSH terminal session type it needs. */
+    fun resolve(path: String): Pair<SessionManager.SessionType, String>? {
+        val parsed = runCatching { io.furryr.file.core.Path.parse(path) }.getOrNull() ?: return null
+        if (parsed.scheme != "ssh") return null
+        val authority = authorityOf(parsed) ?: return null
+        val location = SshTerminals.find(authority)
+        val remotePath = "/" + parsed.segmentList.joinToString("/")
+        val profile = SessionManager.SshProfile(
+            locationId = location.id,
+            locationName = location.name,
+            startPath = remotePath,
+            authority = location.pathAuthority,
+        )
+        return SessionManager.SessionType.Ssh(profile) to location.name
+    }
+}
+
 object SessionManager {
     private const val TAG = "SessionManager"
 
@@ -84,15 +134,18 @@ object SessionManager {
         ) : SessionType()
 
         /** Interactive shell on a saved SSH remote connection. */
-        data class Ssh(
-            val locationId: String,
-            val locationName: String,
-            /** Remote directory to enter after the shell starts. */
-            val startPath: String? = null,
-            /** Readable `user@host` authority used in file paths: `[host]` for IPv6, `:port` when not 22. */
-            val authority: String = "",
-        ) : SessionType()
+        data class Ssh(val profile: SshProfile) : SessionType()
     }
+
+    /** One SSH terminal profile; the single home for duplicated connection fields. */
+    data class SshProfile(
+        val locationId: String,
+        val locationName: String,
+        /** Remote directory to enter after the shell starts. */
+        val startPath: String? = null,
+        /** Readable `user@host` authority used in file paths: `[host]` for IPv6, `:port` when not 22. */
+        val authority: String = "",
+    )
 
     /**
      * Full descriptor for an active session.
@@ -266,6 +319,11 @@ object SessionManager {
         sessions[sessionId]?.session
     }
 
+    /** Id of an active [session], for callers that only hold the Termux object. */
+    fun sessionIdOf(session: TerminalSession): String? = synchronized(mutex) {
+        sessions.entries.firstOrNull { it.value.session === session }?.key
+    }
+
     /**
      * Return a snapshot of all active terminal sessions.
      *
@@ -301,7 +359,7 @@ object SessionManager {
     fun terminalTarget(sessionId: String): String = synchronized(mutex) {
         terminalTargets[sessionId]?.lastOrNull()?.second ?: when (val type = sessions[sessionId]?.type) {
             is SessionType.Container -> "container-${type.containerName}"
-            is SessionType.Ssh -> "ssh://${type.authority.ifEmpty { type.locationId }}"
+            is SessionType.Ssh -> TerminalProfiles.sshAddress(type.profile)
             else -> "app"
         }
     }
@@ -383,16 +441,16 @@ object SessionManager {
         // channel errors reach createSession instead of the UI thread. The rows
         // and columns are corrected once Termux reports its real size.
         val shell = withContext(Dispatchers.IO) {
-            val location = SshTerminals.find(type.locationId)
-            SshTerminals.open(location, type.startPath, 24, 80)
+            val location = SshTerminals.find(type.profile.locationId)
+            SshTerminals.open(location, type.profile.startPath, 24, 80)
         }
         ProcessHelper.prepareSshTerminal(terminalId, shell)
         return try {
             createTerminalSession(
-                "ssh://${type.authority.ifEmpty { type.locationId }}",
+                TerminalProfiles.sshAddress(type.profile),
                 context,
                 customCwd = "/",
-                startPath = type.startPath,
+                startPath = type.profile.startPath,
                 terminalId = terminalId,
             )
         } catch (failure: Exception) {
@@ -424,7 +482,7 @@ object SessionManager {
                 WaylandManager.environment(context).forEach { (key, value) -> add("$key=$value") }
                 startPath?.let { add("CONTAINER_START_PATH=$it") }
             }
-            if (shell.startsWith("ssh://")) {
+            if (TerminalProfiles.isSsh(shell)) {
                 add("SSH_TERMINAL_ID=$terminalId")
                 startPath?.let { add("SSH_START_PATH=$it") }
             }

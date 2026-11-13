@@ -28,10 +28,13 @@ import java.io.File
 object ContainerProvider : FileProvider {
     private lateinit var appContext: Context
 
-    override val scheme: String get() = "container"
-    override val authority: String? get() = null
+    override val schemes: Set<String> get() = setOf(ContainerUris.SCHEME)
     override val label: String get() = "Containers"
-    override val features: Set<ProviderFeature> get() = ProviderFeature.entries.toSet()
+    override val features: Set<ProviderFeature> get() = setOf(
+        ProviderFeature.LIST, ProviderFeature.STAT, ProviderFeature.CREATE_FILE,
+        ProviderFeature.CREATE_DIR, ProviderFeature.DELETE, ProviderFeature.RENAME,
+        ProviderFeature.STREAM_COPY, ProviderFeature.OPEN,
+    )
 
     fun init(context: Context) {
         appContext = context.applicationContext
@@ -44,7 +47,7 @@ object ContainerProvider : FileProvider {
             LocationEntry(
                 id = container.name,
                 title = container.name,
-                subtitle = container.backend.name.lowercase(),
+                subtitle = container.backend.name.lowercase(java.util.Locale.ROOT),
                 root = ContainerUris.forContainer(container.name),
                 provider = this,
                 kind = "container",
@@ -82,7 +85,7 @@ object ContainerProvider : FileProvider {
     override suspend fun disconnect() = DaemonManager.closeNamedConnections()
 
     override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
-        val segments = Path.parse(path).segmentList
+        val segments = containerSegmentsOrEmpty(path)
         if (segments.isEmpty()) return DirectoryCapabilities()
         val directory = stat(path).getOrNull() ?: return DirectoryCapabilities()
         return DirectoryCapabilities(
@@ -92,26 +95,27 @@ object ContainerProvider : FileProvider {
     }
 
     override suspend fun list(path: String): Result<List<FileEntry>> = runCatching {
-        val segments = Path.parse(path).segmentList
+        val segments = containerSegmentsOrEmpty(path)
         if (segments.isEmpty()) {
             listContainerRoot()
         } else {
-            val baseUri = innerPathToUri(path)
+            val baseUri = ContainerUris.forContainer(segments.first())
             files(segments.first()).list(daemonPath(segments)).getOrThrow().map { entry ->
                 entry.copy(path = "$baseUri/${entry.name}")
-            }.sortedWith(compareByDescending<FileEntry> { it.isDirectory }.thenBy { it.name.lowercase() })
+            }.sortedWith(compareByDescending<FileEntry> { it.isDirectory }.thenBy { it.name.lowercase(java.util.Locale.ROOT) })
         }
     }
 
     override suspend fun stat(path: String): Result<ProviderStat> = runCatching {
-        val segments = Path.parse(path).segmentList
+        val segments = containerSegmentsOrEmpty(path)
         if (segments.isEmpty()) {
             // Container root listing is app-local; no per-container daemon exists
             // to stat it (a chroot daemon requires a container name).
-            val dir = File(appContext.filesDir, "containers")
+            val dir = ContainerManager.containersDir(appContext)
+            dir.mkdirs()
             ProviderStat(
                 usableBytes = dir.freeSpace, totalBytes = dir.totalSpace,
-                exists = dir.exists(), isDirectory = dir.isDirectory,
+                exists = true, isDirectory = true,
             )
         } else {
             files(segments.first()).stat(daemonPath(segments)).getOrThrow()
@@ -183,24 +187,26 @@ object ContainerProvider : FileProvider {
     }
 
     private fun containerSegments(raw: String): List<String> {
-        val segments = Path.parse(raw).segmentList
+        val segments = containerSegmentsOrEmpty(raw)
         if (segments.isEmpty()) throw IllegalStateException("Cannot operate at container root")
         return segments
     }
 
+    /** Provider-facing inner paths are already parsed; split them, never re-parse. */
+    private fun containerSegmentsOrEmpty(raw: String): List<String> =
+        raw.trim('/').split('/').filter { it.isNotEmpty() }
+
     private fun listContainerRoot(): List<FileEntry> {
         return ContainerManager.listContainers(appContext).getOrDefault(emptyList()).map { container ->
+            val root = ContainerUris.forContainer(container.name)
             FileEntry(
                 name = container.name,
-                path = "$scheme://${container.name}",
+                path = root,
                 isDirectory = true,
                 modifiedAt = container.createdAt,
-                realPath = "$scheme://${container.name}",
+                realPath = root,
                 mode = 0x41ED, // drwxr-xr-x
             )
-        }.sortedBy { it.name.lowercase() }
+        }.sortedBy { it.name.lowercase(java.util.Locale.ROOT) }
     }
-
-    private fun innerPathToUri(innerPath: String): String =
-        "${scheme}://${innerPath.trimStart('/')}"
 }

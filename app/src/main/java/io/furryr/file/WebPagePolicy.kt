@@ -54,7 +54,7 @@ object WebPagePolicy {
         val mime = content?.mime
             ?.substringBefore(';')
             ?.trim()
-            ?.lowercase()
+            ?.lowercase(java.util.Locale.ROOT)
             ?.takeIf { it.isNotEmpty() }
         if (ContentTypes.isHtmlMime(mime)) return Verdict.PAGE
         // No usable type, a generic one, or the classic mislabelling of a page
@@ -70,7 +70,7 @@ object WebPagePolicy {
     private val pageSuffixes = listOf(".html", ".htm", ".xhtml")
 
     private fun isPageName(name: String?): Boolean {
-        val value = name?.trim()?.lowercase() ?: return false
+        val value = name?.trim()?.lowercase(java.util.Locale.ROOT) ?: return false
         return pageSuffixes.any { value.endsWith(it) }
     }
 

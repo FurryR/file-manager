@@ -85,6 +85,13 @@ pub fn stat_path(path: &str) -> io::Result<Stat> {
     let p = Path::new(path);
     let exists = p.exists();
     let is_directory = if exists { p.is_dir() } else { false };
+    let modified_at_ms = p
+        .metadata()
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
     // Creation availability follows listing; actual mutations remain authoritative.
     let can_list = std::fs::read_dir(path).is_ok();
     Ok(Stat {
@@ -94,6 +101,7 @@ pub fn stat_path(path: &str) -> io::Result<Stat> {
         is_directory,
         can_create_children: can_list,
         can_enter: true,
+        modified_at_ms,
     })
 }
 

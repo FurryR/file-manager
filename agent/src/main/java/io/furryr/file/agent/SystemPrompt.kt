@@ -1,21 +1,16 @@
 package io.furryr.file.agent
 
-import io.furryr.file.container.ContainerUris
+import io.furryr.file.core.ContainerUris
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.daemon.HubActions
-import io.furryr.file.proto.hub.ReadFileRequest
 import org.json.JSONObject
 
 /** Prompt construction. The model sees the same context the old Rust loop built. */
 internal object SystemPrompt {
     suspend fun build(target: DaemonTarget, targetName: String, cwd: String): String {
         val distribution = runCatching {
-            val response = readFile(
-                ReadFileRequest.newBuilder().setPath("/etc/issue").setLength(4096).build(),
-                target,
-            )
-            response.data.toStringUtf8()
+            readText(target, "/etc/issue")
                 .replace("\r", "").replace("\n", "")
                 .replace("\\r", "").replace("\\n", "")
                 .trim()
@@ -38,33 +33,17 @@ internal object SystemPrompt {
     }
 
     private fun targetSummary(current: String): String {
-        val live = DaemonManager.liveEndpoints().associateBy { it.name }
-        val names = LinkedHashSet<String>()
-        names.add("host")
-        names.add("app")
-        names.addAll(live.keys)
-        names.addAll(
-            runCatching { HubActions.containerIds?.invoke().orEmpty() }.getOrDefault(emptyList()),
-        )
-        val ordered = names.filter { it == "host" || it == "app" } +
-            names.filterNot { it == "host" || it == "app" }.sorted()
         val entries = ArrayList<String>()
-        for (name in ordered) {
-            val endpoint = live[name]
-            val label = displayTarget(name)
-            if (name == "app") {
+        for (target in DaemonManager.targetCatalog()) {
+            val label = target.label
+            if (target.id == DaemonManager.APP_ID) {
                 entries.add("$label (app, files)")
                 continue
             }
-            val state = if (endpoint != null) "running" else "stopped"
-            val elevated = if (endpoint?.elevated == true) ", elevated" else ""
-            val root = when {
-                name == "host" -> " file:///"
-                name.startsWith(DaemonManager.CONTAINER_PREFIX) ->
-                    " " + ContainerUris.forContainer(DaemonManager.hubDisplayName(name))
-                else -> ""
-            }
-            val marker = if (name == current) "current, " else ""
+            val state = if (target.running) "running" else "stopped"
+            val elevated = if (target.elevated) ", elevated" else ""
+            val root = if (target.root.isNotEmpty()) " ${target.root}" else ""
+            val marker = if (target.id == current) "current, " else ""
             entries.add("$label ($marker$state$elevated, exec)$root")
         }
         for (location in runCatching { HubActions.locationTargets?.invoke().orEmpty() }

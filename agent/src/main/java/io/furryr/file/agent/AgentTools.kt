@@ -7,7 +7,7 @@ import io.furryr.file.core.VFolder
 import io.furryr.file.core.Vfs
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.source.OpenMode
-import io.furryr.file.container.ContainerUris
+import io.furryr.file.core.ContainerUris
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.daemon.process.CommandSpec
@@ -68,43 +68,53 @@ internal data class ToolContext(
 )
 
 internal object AgentTools {
+    /** One registered tool: definition, display hint and execution in one place. */
+    private class Tool(
+        val name: String,
+        val definition: JSONObject,
+        val info: (JSONObject) -> ToolInfo,
+        val run: suspend (JSONObject, ToolContext) -> String,
+    )
+
+    private val tools: List<Tool> = listOf(
+        Tool("read", readDefinition(), { args -> simpleInfo(args.optString("path", "?"), "→") }, ::read),
+        Tool("write", writeDefinition(), { args -> simpleInfo(args.optString("path", "?"), "←") }, ::write),
+        Tool("copy", copyDefinition(), { args ->
+            simpleInfo("${args.optString("from", "?")} -> ${args.optString("to", "?")}")
+        }, ::copy),
+        Tool("glob", globDefinition(), { args -> simpleInfo(args.optString("pattern", "?"), "→") }, ::glob),
+        Tool("exec", execDefinition(), { args ->
+            val command = args.optString("command", "?")
+            val container = args.optString("container_id").takeIf { it.isNotBlank() }
+            ToolInfo(
+                detail = if (container != null) "$command @${displayTarget(container)}" else command,
+                description = args.optString("description").trim().takeIf { it.isNotEmpty() },
+                command = command,
+                arrow = "←",
+            )
+        }, ::exec),
+        Tool("list_targets", listTargetsDefinition(), { ToolInfo("", arrow = "→") }, { _, context ->
+            listTargets(context)
+        }),
+        Tool("archive_list", archiveListDefinition(), { args ->
+            simpleInfo("${args.optString("archive", "?")}!/${args.optString("path", "")}")
+        }, ::archiveList),
+        Tool("archive_read", archiveReadDefinition(), { args ->
+            simpleInfo("${args.optString("archive", "?")}!/${args.optString("path", "?")}", "→")
+        }, ::archiveRead),
+        Tool("archive_copy", archiveCopyDefinition(), { args ->
+            simpleInfo("${args.optString("archive", "?")}!/${args.optString("path", "?")} -> ${args.optString("to", "?")}")
+        }, ::archiveCopy),
+    )
+
     val definitions: JSONArray = JSONArray().apply {
-        put(readDefinition())
-        put(writeDefinition())
-        put(copyDefinition())
-        put(globDefinition())
-        put(execDefinition())
-        put(listTargetsDefinition())
-        put(archiveListDefinition())
-        put(archiveReadDefinition())
-        put(archiveCopyDefinition())
+        tools.forEach { put(it.definition) }
     }
 
     fun info(name: String, arguments: String): ToolInfo {
         val args = runCatching { JSONObject(arguments.ifBlank { "{}" }) }.getOrNull()
             ?: return simpleInfo(arguments)
-        return when (name) {
-            "read" -> simpleInfo(args.optString("path", "?"), "→")
-            "write" -> simpleInfo(args.optString("path", "?"), "←")
-            "glob" -> simpleInfo(args.optString("pattern", "?"), "→")
-            "copy" -> simpleInfo("${args.optString("from", "?")} -> ${args.optString("to", "?")}")
-            "archive_list" -> simpleInfo("${args.optString("archive", "?")}!/${args.optString("path", "")}")
-            "archive_read" -> simpleInfo("${args.optString("archive", "?")}!/${args.optString("path", "?")}", "→")
-            "archive_copy" -> simpleInfo("${args.optString("archive", "?")}!/${args.optString("path", "?")} -> ${args.optString("to", "?")}")
-            "exec" -> {
-                val command = args.optString("command", "?")
-                val container = args.optString("container_id").takeIf { it.isNotBlank() }
-                val detail = if (container != null) "$command @${displayTarget(container)}" else command
-                ToolInfo(
-                    detail = detail,
-                    description = args.optString("description").trim().takeIf { it.isNotEmpty() },
-                    command = command,
-                    arrow = "←",
-                )
-            }
-            "list_targets" -> ToolInfo("", arrow = "→")
-            else -> simpleInfo(arguments)
-        }
+        return tools.firstOrNull { it.name == name }?.info?.invoke(args) ?: simpleInfo(arguments)
     }
 
     suspend fun execute(
@@ -115,20 +125,10 @@ internal object AgentTools {
         val args = runCatching {
             JSONObject(arguments.ifBlank { "{}" })
         }.getOrElse { return ToolResult(false, "invalid tool arguments: ${it.message}") }
+        val tool = tools.firstOrNull { it.name == name }
+            ?: return ToolResult(false, "unknown tool '$name'")
         return try {
-            val content = when (name) {
-                "read" -> read(args, context)
-                "write" -> write(args, context)
-                "copy" -> copy(args, context)
-                "glob" -> glob(args, context)
-                "exec" -> exec(args, context)
-                "list_targets" -> listTargets(context)
-                "archive_list" -> archiveList(args, context)
-                "archive_read" -> archiveRead(args, context)
-                "archive_copy" -> archiveCopy(args, context)
-                else -> error("unknown tool '$name'")
-            }
-            ToolResult(true, bound(content))
+            ToolResult(true, bound(tool.run(args, context)))
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -457,29 +457,13 @@ internal object AgentTools {
     }
 
     private suspend fun listTargets(context: ToolContext): String {
-        val live = DaemonManager.liveEndpoints().associateBy { it.name }
-        val names = LinkedHashSet<String>()
-        names.add("host")
-        names.add("app")
-        names.addAll(live.keys)
-        names.addAll(runCatching { io.furryr.file.daemon.HubActions.containerIds?.invoke().orEmpty() }
-            .getOrDefault(emptyList()))
-        val ordered = names.filter { it == "host" || it == "app" } +
-            names.filterNot { it == "host" || it == "app" }.sorted()
         val lines = ArrayList<String>()
-        for (name in ordered) {
-            val endpoint = live[name]
-            val state = if (endpoint != null) "running" else "stopped"
-            val elevated = if (endpoint?.elevated == true) ", elevated" else ""
-            val current = if (name == context.targetName) "current, " else ""
-            val root = when {
-                name == "host" -> " file:///"
-                DaemonManager.isContainerHubId(name) ->
-                    " " + ContainerUris.forContainer(DaemonManager.hubDisplayName(name))
-                else -> ""
-            }
-            val label = displayTarget(name)
-            lines.add("$label ($current$state$elevated, exec)$root")
+        for (target in DaemonManager.targetCatalog()) {
+            val current = if (target.id == context.targetName) "current, " else ""
+            val state = if (target.running) "running" else "stopped"
+            val elevated = if (target.elevated) ", elevated" else ""
+            val root = if (target.root.isNotEmpty()) " ${target.root}" else ""
+            lines.add("${target.label} ($current$state$elevated, exec)$root")
         }
         val locations = runCatching {
             io.furryr.file.daemon.HubActions.locationTargets?.invoke().orEmpty()
@@ -496,11 +480,7 @@ internal object AgentTools {
         return mapOf("HUB_SOCKET" to "$name@$key", "HUB_TERMINAL" to terminalId)
     }
 
-    private fun daemonTarget(name: String): DaemonTarget = when (name) {
-        "host" -> DaemonTarget.Host
-        "app" -> DaemonTarget.App
-        else -> DaemonTarget.Named(DaemonManager.hubDisplayName(name))
-    }
+    private fun daemonTarget(name: String): DaemonTarget = DaemonManager.targetForId(name)
 
     private fun displayTarget(name: String): String = DaemonManager.hubDisplayName(name)
 

@@ -305,6 +305,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
             val buffer = ByteArray(wanted)
             var read = 0
             while (read < wanted) {
+                interrupted()
                 val count = input.read(buffer, read, wanted - read)
                 if (count < 0) throw IOException("Incomplete SSH file response")
                 read += count

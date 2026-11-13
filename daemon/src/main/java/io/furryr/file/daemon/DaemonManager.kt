@@ -161,10 +161,10 @@ object DaemonManager {
     fun liveEndpoints(): List<DaemonEndpoint> = synchronized(lock) {
         val list = ArrayList<DaemonEndpoint>()
         primary?.takeIf { it.isAlive() }?.let {
-            list.add(DaemonEndpoint("host", it.socketName, rootActive))
+            list.add(DaemonEndpoint(HOST_ID, it.socketName, rootActive))
         }
         app?.takeIf { it.isAlive() }?.let {
-            list.add(DaemonEndpoint("app", it.socketName, false))
+            list.add(DaemonEndpoint(APP_ID, it.socketName, false))
         }
         named.forEach { (name, connection) ->
             if (connection.isAlive()) {
@@ -177,6 +177,70 @@ object DaemonManager {
     /** Hub id prefix for a named (container) daemon. */
     const val CONTAINER_PREFIX = "container-"
 
+    /** Hub id of the host daemon (root when available, else app UID). */
+    const val HOST_ID = "host"
+
+    /** Hub id of the app-UID daemon. */
+    const val APP_ID = "app"
+
+    /** One execution target as every consumer (agent, hub, prompt) sees it. */
+    data class TargetInfo(
+        val id: String,
+        val label: String,
+        val root: String,
+        val container: Boolean,
+        val running: Boolean,
+        val elevated: Boolean,
+    )
+
+    /**
+     * The one target catalog: host, app, live daemons and known containers,
+     * ordered the same way in the agent prompt, the tools and the hub.
+     */
+    fun targetCatalog(): List<TargetInfo> {
+        val live = liveEndpoints().associateBy { it.name }
+        val names = LinkedHashSet<String>()
+        names.add(HOST_ID)
+        names.add(APP_ID)
+        names.addAll(live.keys)
+        runCatching { HubActions.containerIds?.invoke().orEmpty() }
+            .getOrDefault(emptyList())
+            .let(names::addAll)
+        val ordered = names.filter { it == HOST_ID || it == APP_ID } +
+            names.filterNot { it == HOST_ID || it == APP_ID }.sorted()
+        return ordered.map { name ->
+            val endpoint = live[name]
+            TargetInfo(
+                id = name,
+                label = hubDisplayName(name),
+                root = targetRoot(name),
+                container = isContainerHubId(name),
+                running = endpoint != null,
+                elevated = endpoint?.elevated == true,
+            )
+        }
+    }
+
+    /** The VFS root that addresses [id]'s filesystem; app has no separate root. */
+    fun targetRoot(id: String): String = when {
+        id == HOST_ID -> "file:///"
+        isContainerHubId(id) -> io.furryr.file.core.Path.of(
+            "container",
+            host = hubDisplayName(id),
+        ).toString()
+        else -> ""
+    }
+
+    /** Resolve a hub id back to its daemon target. */
+    fun targetForId(id: String): DaemonTarget = when (id) {
+        HOST_ID -> DaemonTarget.Host
+        APP_ID -> DaemonTarget.App
+        else -> {
+            require(isContainerHubId(id)) { "invalid target id '$id'" }
+            DaemonTarget.Named(hubDisplayName(id))
+        }
+    }
+
     /** Display name of a hub id: `container-foo` becomes `foo`. */
     fun hubDisplayName(id: String): String = id.removePrefix(CONTAINER_PREFIX)
 
@@ -184,8 +248,8 @@ object DaemonManager {
 
     /** Stable hub id for a target: `host`, `app`, or `container-<name>`. */
     fun hubId(target: DaemonTarget): String = when (target) {
-        DaemonTarget.Host -> "host"
-        DaemonTarget.App -> "app"
+        DaemonTarget.Host -> HOST_ID
+        DaemonTarget.App -> APP_ID
         is DaemonTarget.Named -> "$CONTAINER_PREFIX${target.name}"
     }
 

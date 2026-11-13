@@ -56,10 +56,10 @@ fun BottomToolbar(
     onCreate: () -> Unit,
     onTerminal: () -> Unit,
     onParent: () -> Unit,
-    /** Revealed pixels while the history drawer is dragged up from the bar. */
-    onHistoryDrag: (Float) -> Unit = {},
+    /** Revealed pixels while the page panel is dragged up from the bar. */
+    onPagesDrag: (Float) -> Unit = {},
     /** Final revealed pixels when the drag ends; the caller decides to open. */
-    onHistoryDragEnd: (Float) -> Unit = {},
+    onPagesDragEnd: (Float) -> Unit = {},
     canOpenTerminal: Boolean = true,
     canCreate: Boolean = true,
     selectionMode: Boolean = false,
@@ -138,14 +138,14 @@ fun BottomToolbar(
                             onVerticalDrag = { change, amount ->
                                 revealed = (revealed - amount).coerceAtLeast(0f)
                                 change.consume()
-                                onHistoryDrag(revealed)
+                                onPagesDrag(revealed)
                             },
                             onDragEnd = {
-                                onHistoryDragEnd(revealed)
+                                onPagesDragEnd(revealed)
                                 revealed = 0f
                             },
                             onDragCancel = {
-                                onHistoryDragEnd(0f)
+                                onPagesDragEnd(0f)
                                 revealed = 0f
                             },
                         )

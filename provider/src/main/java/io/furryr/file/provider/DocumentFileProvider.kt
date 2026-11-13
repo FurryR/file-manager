@@ -38,8 +38,7 @@ object DocumentFileProvider : FileProvider {
     private lateinit var appContext: Context
     private lateinit var trees: DocumentTreeSource
 
-    override val scheme: String get() = SCHEME
-    override val authority: String? get() = null
+    override val schemes: Set<String> get() = setOf(SCHEME)
     override val label: String get() = "Document Provider"
     override val writable: Boolean get() = false
     override val features: Set<ProviderFeature> get() = setOf(
@@ -64,7 +63,7 @@ object DocumentFileProvider : FileProvider {
     override suspend fun list(path: String): Result<List<FileEntry>> = runCatching {
         val docFile = resolve(path) ?: throw FileNotFoundException("Not found: $path")
         val children = docFile.listFiles()
-        val baseUri = "${scheme}://${path.trimStart('/')}"
+        val baseUri = "${schemes.first()}://${path.trimStart('/')}"
         children.map { child ->
             FileEntry(
                 name = child.name ?: "unknown",

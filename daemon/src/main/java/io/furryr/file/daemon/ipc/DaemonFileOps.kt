@@ -55,7 +55,8 @@ fun DaemonConnection.stat(path: String): Result<ProviderStat> = runCatching {
     ProviderStat(
         usableBytes = resp.stat.usableBytes, totalBytes = resp.stat.totalBytes,
         exists = resp.stat.exists, isDirectory = resp.stat.isDirectory,
-        canCreateChildren = resp.stat.canCreateChildren, canEnter = resp.stat.canEnter
+        canCreateChildren = resp.stat.canCreateChildren, canEnter = resp.stat.canEnter,
+        modifiedAt = resp.stat.modifiedAtMs
     )
 }
 

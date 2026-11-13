@@ -47,15 +47,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.furryr.file.R
-import io.furryr.file.model.HistoryStop
-import io.furryr.file.model.StopKind
+import io.furryr.file.model.Page
+import io.furryr.file.model.PageKind
 
 /**
- * One rendered row of the per-tab history sheet. The history model carries
- * identity and kind; labels and the current marker are the sheet's view of it.
+ * One rendered row of the per-tab page sheet. The page model carries identity
+ * and kind; labels and the current marker are the sheet's view of it.
  */
-data class HistoryRow(
-    val stop: HistoryStop,
+data class PageRow(
+    val page: Page,
     /** Primary line: folder name or page title. */
     val label: String,
     /** Secondary line: the full path or URL this entry points at. */
@@ -64,7 +64,7 @@ data class HistoryRow(
 )
 
 /**
- * Per-tab history panel.
+ * Per-tab page panel.
  *
  * The panel sits above the bottom toolbar ([bottomInset] is that toolbar's
  * height) and is revealed *by the drag itself*: [dragPx] is how far the reveal
@@ -72,12 +72,12 @@ data class HistoryRow(
  * open. Releasing decides [visible]; the remaining distance is animated.
  */
 @Composable
-fun HistorySheet(
+fun PageSheet(
     visible: Boolean,
     dragPx: Float,
-    stops: List<HistoryRow>,
+    pages: List<PageRow>,
     bottomInset: Dp,
-    onSelect: (HistoryRow) -> Unit,
+    onSelect: (PageRow) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var panelHeightPx by remember { mutableFloatStateOf(0f) }
@@ -153,50 +153,50 @@ fun HistorySheet(
                         )
                     }
                     Text(
-                        text = stringResource(R.string.history_title),
+                        text = stringResource(R.string.pages_title),
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 8.dp),
                     )
-                    if (stops.isEmpty()) {
+                    if (pages.isEmpty()) {
                         Text(
-                            text = stringResource(R.string.history_empty),
+                            text = stringResource(R.string.pages_empty),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp),
                         )
                     } else {
                         LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp)) {
-                            itemsIndexed(stops) { _, stop ->
+                            itemsIndexed(pages) { _, row ->
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable { onSelect(stop) }
+                                        .clickable { onSelect(row) }
                                         .padding(horizontal = 20.dp, vertical = 12.dp),
                                 ) {
                                     Icon(
                                         imageVector = when {
-                                            stop.current -> Icons.Default.Check
-                                            stop.stop.kind == StopKind.PAGE -> Icons.Default.Language
-                                            stop.stop.kind == StopKind.FILE -> Icons.Default.Description
+                                            row.current -> Icons.Default.Check
+                                            row.page.kind == PageKind.PAGE -> Icons.Default.Language
+                                            row.page.kind == PageKind.FILE -> Icons.Default.Description
                                             else -> Icons.Default.Folder
                                         },
                                         contentDescription = null,
-                                        tint = if (stop.current) MaterialTheme.colorScheme.primary
+                                        tint = if (row.current) MaterialTheme.colorScheme.primary
                                         else MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                     Spacer(Modifier.width(14.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            text = stop.label,
+                                            text = row.label,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
-                                            color = if (stop.current) MaterialTheme.colorScheme.primary
+                                            color = if (row.current) MaterialTheme.colorScheme.primary
                                             else MaterialTheme.colorScheme.onSurface,
                                         )
-                                        if (stop.detail.isNotEmpty()) {
+                                        if (row.detail.isNotEmpty()) {
                                             Text(
-                                                text = stop.detail,
+                                                text = row.detail,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
                                                 style = MaterialTheme.typography.bodySmall,

@@ -138,4 +138,5 @@ NDK does not ship).
 - [ ] `wayland/src/lib.rs`: verify a client launched from a container connects to `/dev/wayland/wayland-0` (foot: `failed to connect to wayland`), including after an app restart leaves an old socket file behind.
 - [ ] `agent/src/terminal.rs`: verify an `agent` running in a **chroot** container (proot sessions cannot escape, so they are out of scope) exits within one poll interval after the pty master closes (kill the daemon or the app while the UI is open), and that no `agent-input` thread keeps accumulating CPU time afterwards.
 - [ ] `native/build-proot.sh`: run a clean cross build to confirm the patch from `native/patches/proot/` applies to the pinned `v5.1.107.79` clone and that the resulting `libproot.so` still provides the `--cgroup` emulation.
+- [ ] `native/src/list.rs`: verify `stat_path` reports `modified_at_ms` for files/directories and 0 for a missing path, and that the daemon proto field round-trips.
 

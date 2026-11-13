@@ -4,8 +4,9 @@ package io.furryr.file.core
  * One installable unit of extension.
  *
  * A plugin never receives a private back door: [PluginHost] exposes exactly the
- * registries the built-in modules use, so anything a plugin registers behaves
- * like a built-in provider, opener or content type.
+ * core registries the built-in modules use — providers, view openers and
+ * content types. App-level contributions (renderers, location kinds, open
+ * rules) are wired by the app itself and are not plugin surfaces.
  */
 interface Plugin {
     /** Stable identity; re-registering the same [id] replaces the old entry. */

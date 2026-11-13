@@ -170,7 +170,7 @@ internal fun AddLocationDialog(
                         address.host,
                         { updateRemote(address.copy(host = it)) },
                         label = {
-                            Text(stringResource(if (address.scheme == RemoteKind.ALIST.scheme) R.string.remote_endpoint else R.string.ftp_host_label))
+                            Text(stringResource(RemoteProtocols.of(address.scheme)?.endpointLabel ?: R.string.ftp_host_label))
                         },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
@@ -179,11 +179,11 @@ internal fun AddLocationDialog(
                     OutlinedTextField(address.username, { updateRemote(address.copy(username = it)) }, label = { Text(stringResource(R.string.ftp_username_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(address.password, { updateRemote(address.copy(password = it)) }, label = { Text(stringResource(R.string.ftp_password_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(address.path, { updateRemote(address.copy(path = it)) }, label = { Text(stringResource(R.string.remote_base_path)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    if (address.scheme == RemoteKind.ALIST.scheme) {
+                    if (RemoteProtocols.of(address.scheme)?.showsToken == true) {
                         OutlinedTextField(address.token, { updateRemote(address.copy(token = it)) }, label = { Text(stringResource(R.string.remote_token)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                         OutlinedTextField(address.directoryPassword, { updateRemote(address.copy(directoryPassword = it)) }, label = { Text(stringResource(R.string.remote_directory_password)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     }
-                    if (address.scheme == RemoteKind.SSH.scheme) {
+                    if (RemoteProtocols.of(address.scheme)?.showsPrivateKey == true) {
                         OutlinedTextField(
                             address.privateKey,
                             { updateRemote(address.copy(privateKey = it)) },
@@ -212,7 +212,7 @@ internal fun AddLocationDialog(
                 TextButton(onClick = {
                     val parsed = LocationAddressParser.parse(path)
                     val missingHost = parsed != null && (parsed.isRemote || parsed.isWeb) && parsed.host.isBlank()
-                    val missingSshUser = parsed?.scheme == RemoteKind.SSH.scheme && parsed.username.isBlank()
+                    val missingSshUser = parsed != null && RemoteProtocols.of(parsed.scheme)?.requiresUsername == true && parsed.username.isBlank()
                     if (parsed == null || missingHost || missingSshUser) invalid = true else onConfirm(parsed)
                 }) { Text(stringResource(R.string.confirm)) }
             }

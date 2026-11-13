@@ -4,6 +4,8 @@ import android.content.Context
 import android.system.Os
 import android.system.OsConstants
 import android.system.StructStat
+import io.furryr.file.core.ContainerUris
+import io.furryr.file.core.ContainerUriResolver
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.HubCallerRoot
 import java.io.File
@@ -12,7 +14,9 @@ import java.io.File
 object ContainerPaths {
     /** Resolve an authenticated hub container id to the caller's filesystem root. */
     fun callerRoot(context: Context, containerId: String): HubCallerRoot {
-        if (containerId == "host" || containerId == "app") return HubCallerRoot(null, "/")
+        if (containerId == DaemonManager.HOST_ID || containerId == DaemonManager.APP_ID) {
+            return HubCallerRoot(null, "/")
+        }
         val name = containerId.removePrefix(DaemonManager.CONTAINER_PREFIX)
         require(name != containerId && name.isNotEmpty()) { "invalid container id '$containerId'" }
         val container = ContainerManager.getContainer(context, name)
@@ -71,7 +75,7 @@ object ContainerPaths {
             guest
         }
         if (root.containerName != null && target == "${DaemonManager.CONTAINER_PREFIX}${root.containerName}") return guest
-        if (target == "host" || target == "app") return host
+        if (target == DaemonManager.HOST_ID || target == DaemonManager.APP_ID) return host
         val container = containerForTarget(context, target)
         return guestPath(context, container, host)
             ?: error("cwd is not reachable in container '${container.name}'")
@@ -103,11 +107,11 @@ object ContainerPaths {
         if (targetContainer == null) return host
         return guestPath(context, targetContainer, host)
             ?: sourceRoot?.let { guestPath(context, targetContainer, it) }
-            ?: error("path is not reachable in container '${targetContainer.name}'")
+            ?: throw PathUnavailableException(targetContainer.name)
     }
 
     private fun containerNameForTarget(target: String): String? = when {
-        target == "host" || target == "app" -> null
+        target == DaemonManager.HOST_ID || target == DaemonManager.APP_ID -> null
         target.startsWith(DaemonManager.CONTAINER_PREFIX) ->
             target.removePrefix(DaemonManager.CONTAINER_PREFIX)
         else -> target

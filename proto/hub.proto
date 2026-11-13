@@ -97,8 +97,9 @@ message ListTargetsResponse {
 
 message Target {
   // Execution target id (`host`, `app`, `container-<name>`) or the canonical
-  // root URI of a file location (`ftp://host`, `saf://id`, ...).
-  string name = 1;
+  // root URI of a file location (`ftp://host`, `saf://id`, ...). This is the
+  // routing key, never a display name.
+  string id = 1;
   bool elevated = 2;
   // Whether an execution target has a live daemon. File locations are always
   // available.

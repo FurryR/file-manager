@@ -13,7 +13,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
-import io.furryr.file.agent.SessionManager
+import io.furryr.file.terminal.SessionManager
 import io.furryr.file.daemon.DaemonManager
 
 /**

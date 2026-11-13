@@ -6,6 +6,7 @@ import io.furryr.file.provider.model.FtpServer
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
+import io.furryr.file.core.source.SeekableCacheFileSource
 import io.furryr.file.core.source.StreamFileSource
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
@@ -16,7 +17,9 @@ import kotlinx.coroutines.flow.flowOn
 import org.apache.commons.net.ftp.FTP
 import org.apache.commons.net.ftp.FTPClient
 import org.apache.commons.net.ftp.FTPFile
+import java.io.File
 import java.io.FileNotFoundException
+import java.io.FileOutputStream
 import java.io.FilterInputStream
 import java.io.InputStream
 
@@ -35,10 +38,9 @@ import java.io.InputStream
  * ```
  */
 object FtpProvider : FileProvider {
-    override val scheme: String get() = ProviderSchemes.FTP
-    override val authority: String? get() = null
+    override val schemes: Set<String> get() = setOf(ProviderSchemes.FTP)
     override val label: String get() = "FTP Location"
-    override val writable: Boolean get() = false
+    override val writable: Boolean get() = true
     override val features: Set<ProviderFeature> get() = setOf(
         ProviderFeature.LIST, ProviderFeature.STAT,
         ProviderFeature.CREATE_FILE, ProviderFeature.CREATE_DIR,
@@ -50,12 +52,14 @@ object FtpProvider : FileProvider {
     private const val COPY_BUFFER_SIZE = 256 * 1024
 
     private lateinit var servers: FtpServerSource
+    private lateinit var cacheDir: File
 
     private val connLock = Any()
     private val clients = mutableMapOf<String, FTPClient>()
 
-    fun init(servers: FtpServerSource) {
+    fun init(servers: FtpServerSource, cacheDir: File) {
         this.servers = servers
+        this.cacheDir = cacheDir
     }
 
     override fun isAvailable(): Boolean = true
@@ -160,22 +164,48 @@ object FtpProvider : FileProvider {
     }
 
     override suspend fun open(path: String, mode: OpenMode): Result<FileSource> = runCatching {
-        if (mode != OpenMode.READ) throw UnsupportedOperationException("FtpProvider supports READ only")
         val (server, remotePath) = resolveServerPath(path)
         val ftp = client(server)
-        val size = mlistFile(ftp, remotePath)?.takeUnless { it.isDirectory }?.size ?: 0L
-        val raw = ftp.retrieveFileStream(remotePath)
-            ?: throw FileNotFoundException("Not found: $path")
-        val wrapped = object : FilterInputStream(raw) {
-            override fun close() {
-                try {
-                    super.close()
-                } finally {
-                    runCatching { ftp.completePendingCommand() }
+        if (mode == OpenMode.READ) {
+            val size = mlistFile(ftp, remotePath)?.takeUnless { it.isDirectory }?.size ?: 0L
+            val raw = ftp.retrieveFileStream(remotePath)
+                ?: throw FileNotFoundException("Not found: $path")
+            val wrapped = object : FilterInputStream(raw) {
+                override fun close() {
+                    try {
+                        super.close()
+                    } finally {
+                        runCatching { ftp.completePendingCommand() }
+                    }
                 }
             }
+            return@runCatching StreamFileSource(inputStream = wrapped, size = size, absolutePath = null)
         }
-        StreamFileSource(inputStream = wrapped, size = size, absolutePath = null)
+        val staged = File.createTempFile("ftp-", ".stage", cacheDir)
+        if (mode == OpenMode.READ_WRITE) {
+            try {
+                if (!ftp.retrieveFile(remotePath, FileOutputStream(staged))) {
+                    throw FileNotFoundException("Not found: $path")
+                }
+            } catch (failure: Throwable) {
+                staged.delete()
+                throw failure
+            }
+        }
+        try {
+            SeekableCacheFileSource(
+                staged,
+                mode,
+                "ftp://${server.host}$remotePath",
+                commit = { file ->
+                    val stored = file.inputStream().use { ftp.storeFile(remotePath, it) }
+                    if (!stored) throw IllegalStateException("Failed to write: $path")
+                },
+            )
+        } catch (failure: Throwable) {
+            staged.delete()
+            throw failure
+        }
     }
 
     override fun copy(from: String, to: String, isCopy: Boolean): Flow<CopyProgress> {

@@ -58,14 +58,20 @@ import io.furryr.file.core.DirectoryCapabilities
 import io.furryr.file.core.Path
 import io.furryr.file.core.VFile
 import io.furryr.file.core.VFolder
+import io.furryr.file.render.DetachedRendererContext
+import io.furryr.file.render.EditorSessionRenderer
 import io.furryr.file.render.NodeAddress
+import io.furryr.file.render.RendererBase
+import io.furryr.file.render.PageSession
+import io.furryr.file.render.PageState
 import io.furryr.file.render.RenderCapabilities
-import io.furryr.file.render.RenderHost
+import io.furryr.file.render.RendererContext
 import io.furryr.file.render.RenderTarget
 import io.furryr.file.render.RendererFactory
 import io.furryr.file.render.RendererMenuItem
 import io.furryr.file.render.RendererPath
 import io.furryr.file.render.RendererSession
+import io.furryr.file.render.SessionView
 import io.furryr.file.render.bookmarkMenuItem
 import io.github.rosemoe.sora.event.ContentChangeEvent
 import io.github.rosemoe.sora.event.EditorKeyEvent
@@ -94,15 +100,45 @@ import kotlin.coroutines.resume
  * first composition and kept across tab switches, so undo history, cursor and
  * scroll position survive navigation exactly like the WebView does.
  */
+class EditorPageState(
+    initialLanguageId: String,
+    initialText: String? = null,
+    initialDirty: Boolean = false,
+    initialCursorLine: Int = 0,
+    initialCursorColumn: Int = 0,
+    initialWrap: Boolean = false,
+) : PageState() {
+    var text: String? = initialText
+    var dirty: Boolean = initialDirty
+    var cursorLine: Int = initialCursorLine
+    var cursorColumn: Int = initialCursorColumn
+    var wrap: Boolean = initialWrap
+    var languageId: String = initialLanguageId
+}
+
 class EditorRendererSession(
     val file: VFile,
     override val address: String,
-    private val host: RenderHost,
-) : RendererSession {
-    var document by mutableStateOf<TextDocument?>(null)
-        private set
-    var dirty by mutableStateOf(false)
-        private set
+    initialState: EditorPageState? = null,
+) : PageSession<EditorPageState>(initialState) {
+    private var host: RendererContext = DetachedRendererContext
+    override val state: EditorPageState =
+        seedState ?: EditorPageState(EditorLanguages.id(file.name))
+
+    private var documentState by mutableStateOf<TextDocument?>(null)
+    var document: TextDocument?
+        get() = documentState
+        private set(value) {
+            documentState = value
+            state.text = value?.text?.toString()
+        }
+    private var dirtyState by mutableStateOf(state.dirty)
+    var dirty: Boolean
+        get() = dirtyState
+        private set(value) {
+            dirtyState = value
+            state.dirty = value
+        }
     var saving by mutableStateOf(false)
         private set
     override var loading by mutableStateOf(true)
@@ -128,12 +164,27 @@ class EditorRendererSession(
         private set
     var diagnostics by mutableStateOf<List<LspDiagnostic>>(emptyList())
         private set
-    var cursorLine by mutableIntStateOf(0)
-        private set
-    var cursorColumn by mutableIntStateOf(0)
-        private set
-    var wrap by mutableStateOf(false)
-        private set
+    private var cursorLineState by mutableIntStateOf(state.cursorLine)
+    var cursorLine: Int
+        get() = cursorLineState
+        private set(value) {
+            cursorLineState = value
+            state.cursorLine = value
+        }
+    private var cursorColumnState by mutableIntStateOf(state.cursorColumn)
+    var cursorColumn: Int
+        get() = cursorColumnState
+        private set(value) {
+            cursorColumnState = value
+            state.cursorColumn = value
+        }
+    private var wrapState by mutableStateOf(state.wrap)
+    var wrap: Boolean
+        get() = wrapState
+        private set(value) {
+            wrapState = value
+            state.wrap = value
+        }
     var completionsEnabled by mutableStateOf(true)
         private set
     /** Directory actions (terminal) depend on the folder that owns the file. */
@@ -143,8 +194,13 @@ class EditorRendererSession(
     var revision by mutableIntStateOf(0)
         private set
 
-    var languageId by mutableStateOf(EditorLanguages.id(file.name))
-        private set
+    private var languageIdState by mutableStateOf(state.languageId)
+    var languageId: String
+        get() = languageIdState
+        private set(value) {
+            languageIdState = value
+            state.languageId = value
+        }
     /** Folder that owns this file; Up and the terminal action use it. */
     val parentFolder: VFolder? get() = file.parent
     /** Address of [parentFolder] in the same form the file bar uses. */
@@ -154,7 +210,7 @@ class EditorRendererSession(
         }
     override val parent: VFolder? get() = parentFolder
     override val terminalPath: String?
-        get() = if (capabilities.canTerminal) parentAddress else null
+        get() = if (parentCapabilities.canOpenTerminal) parentAddress else null
     override val suppressBookmark: Boolean get() = true
     override val isOverlay: Boolean get() = true
     override val needsLeaveGuard: Boolean get() = true
@@ -188,11 +244,9 @@ class EditorRendererSession(
             revision
             val view = editorView
             return RenderCapabilities(
-                canGoParent = parentFolder != null,
                 canSave = dirty && !saving && document != null && !readOnly,
                 canUndo = view != null && !view.isReleased && view.text.canUndo(),
                 canEdit = document != null && !saving && !readOnly,
-                canTerminal = parentCapabilities.canOpenTerminal,
             )
         }
 
@@ -200,12 +254,11 @@ class EditorRendererSession(
     override val canDismiss: Boolean get() = true
     override val modalActive: Boolean get() = conflict
 
-    @Composable
-    override fun Content(darkTheme: Boolean, modifier: Modifier) {
-        EditorContent(this, darkTheme, modifier)
+    internal fun useHost(host: RendererContext) {
+        this.host = host
     }
 
-    override fun requestClose(action: () -> Unit) {
+    override fun requestClose(context: RendererContext, action: () -> Unit) {
         if (saving) {
             appContext?.let { error = it.getString(R.string.editor_saving_wait) }
             return
@@ -215,10 +268,10 @@ class EditorRendererSession(
             action()
             return
         }
-        host.confirmLeave(
+        context.confirmLeave(
             message = null,
             canSave = capabilities.canSave,
-            onSave = { saveForLeave() },
+            onSave = { saveForLeave(context) },
             onLeave = {
                 close()
                 action()
@@ -228,8 +281,6 @@ class EditorRendererSession(
     }
 
     override fun canClose(): Boolean = !dirty && !saving
-
-    override fun refresh(): Boolean = true
 
     override fun pathBar(context: Context): RendererPath = RendererPath(
         title = address,
@@ -327,6 +378,20 @@ class EditorRendererSession(
     }
 
     suspend fun load(): Result<Unit> = runCatching {
+        val snapshot = state.text
+        if (snapshot != null && document == null) {
+            document = TextDocument(
+                text = snapshot,
+                charset = Charsets.UTF_8,
+                bom = ByteArray(0),
+                lineEnding = "\n",
+                mixedLineEndings = false,
+                originalBytes = snapshot.toByteArray(),
+            )
+            loading = false
+            observeParentCapabilities()
+            return@runCatching
+        }
         val bytes = EditorFiles.read(file)
         document = withContext(Dispatchers.IO) { TextDocument.decode(bytes) }
         loading = false
@@ -445,7 +510,9 @@ class EditorRendererSession(
 
     private fun updateState() {
         val editor = editorView ?: return
-        dirty = document?.let { editor.text.toString() != it.text } ?: false
+        val text = editor.text.toString()
+        state.text = text
+        dirty = document?.let { text != it.text } ?: false
         cursorLine = editor.cursor.leftLine
         cursorColumn = editor.cursor.leftColumn
         revision++
@@ -523,9 +590,12 @@ class EditorRendererSession(
      * Save as part of leaving the editor. A conflict keeps this suspended until
      * the renderer's own conflict dialog is resolved.
      */
-    suspend fun saveForLeave(): Result<Unit> {
+    suspend fun saveForLeave(context: RendererContext): Result<Unit> {
         val result = save()
         if (result.isSuccess || !conflict) return result
+        // The conflict dialog lives in this page's own composition; ask the
+        // shell to show it before the leave prompt is dismissed.
+        context.focus()
         return suspendCancellableCoroutine { continuation ->
             pendingSave = { success ->
                 if (success) {
@@ -716,26 +786,43 @@ class EditorRendererSession(
         showDiagnostics = false
     }
 
+    override fun reset() {
+        host = DetachedRendererContext
+        changeJob?.cancel()
+        changeJob = null
+        editorView?.let { editor ->
+            if (!editor.isReleased) editor.release()
+        }
+        editorView = null
+    }
+
     override fun close() {
         if (closed) return
         closed = true
         pendingSave?.invoke(false)
         pendingSave = null
-        changeJob?.cancel()
+        reset()
         lspGeneration++
         lspJob?.cancel()
         lspJob = null
         lsp?.close()
         lsp = null
         scope.cancel()
-        editorView?.let { editor ->
-            if (!editor.isReleased) editor.release()
-        }
-        editorView = null
     }
 }
 
 internal class EditorConflictException : Exception("The file changed outside the editor")
+
+/** View half of an editor session; the session owns the document and view. */
+internal class EditorSessionView(
+    private val session: EditorRendererSession,
+) : SessionView {
+    @Composable
+    override fun Content(host: RendererContext, darkTheme: Boolean, modifier: Modifier) {
+        session.useHost(host)
+        EditorContent(session, darkTheme, modifier)
+    }
+}
 
 class EditorRendererFactory : RendererFactory {
     override val id: String = "editor"
@@ -747,12 +834,14 @@ class EditorRendererFactory : RendererFactory {
 
     override suspend fun create(
         target: RenderTarget,
-        host: RenderHost,
-    ): Result<RendererSession> = runCatching {
+        host: RendererContext,
+    ): Result<RendererBase<*>> = runCatching {
         val node = target.node as? VFile
             ?: error("editor renderer requires a file")
         val address = runCatching { NodeAddress.format(node.path) }.getOrNull() ?: node.name
-        EditorRendererSession(node, address, host).also { it.load().getOrThrow() }
+        val renderer = EditorSessionRenderer(node, address)
+        (renderer.ensureSession() as EditorRendererSession).load()
+        renderer
     }
 }
 

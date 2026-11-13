@@ -140,8 +140,11 @@ class FolderListing(
         if (!selectionMutable()) return
         val index = entries.indexOfFirst { it.path == entry.path }
         if (index < 0) return
-        val start = if (lastSelectedIndex >= 0) minOf(lastSelectedIndex, index) else index
-        val end = if (lastSelectedIndex >= 0) maxOf(lastSelectedIndex, index) else index
+        // A refresh can replace the list without clearing the anchor; an
+        // anchor outside the current entries would make subList throw.
+        val anchor = lastSelectedIndex.takeIf { it in entries.indices } ?: index
+        val start = minOf(anchor, index)
+        val end = maxOf(anchor, index)
         val next = selectedPaths + entries.subList(start, end + 1).map { it.path }
         selectedPaths = next
         lastSelectedIndex = index
@@ -373,7 +376,7 @@ class FolderListing(
                 loadedFolder = folder
                 loadedCapabilities = capabilities
                 onNavigationLoaded(requestedPath)
-                isInternal = sorted.firstOrNull()?.realPath?.let { isInternalStoragePath(it) } ?: false
+                isInternal = folder.path.isBarePath && isInternalStoragePath(folder.path.toString())
                 if (animate) {
                     animationStartIndex = firstVisible
                     animatedIndices = (firstVisible until (firstVisible + 24).coerceAtMost(visible.size)).toSet()
@@ -427,7 +430,7 @@ class FolderListing(
     ): List<FileEntry> {
         val sorted = when (sortMode) {
             SortMode.NAME -> raw.sortedWith(
-                compareByDescending<FileEntry> { it.isDirectory }.thenBy { it.name.lowercase() }
+                compareByDescending<FileEntry> { it.isDirectory }.thenBy { it.name.lowercase(java.util.Locale.ROOT) }
             )
             SortMode.DATE -> raw.sortedWith(
                 compareByDescending<FileEntry> { it.isDirectory }.thenByDescending { it.modifiedAt }
@@ -438,7 +441,7 @@ class FolderListing(
             SortMode.TYPE -> raw.sortedWith(
                 compareByDescending<FileEntry> { it.isDirectory }
                     .thenBy { it.name.substringAfterLast('.', "") }
-                    .thenBy { it.name.lowercase() }
+                    .thenBy { it.name.lowercase(java.util.Locale.ROOT) }
             )
         }
         return if (sortReverse) sorted.reversed() else sorted

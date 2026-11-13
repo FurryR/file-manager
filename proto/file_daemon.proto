@@ -202,6 +202,7 @@ message Stat {
   bool can_create_children = 5;
   // Terminal availability, not a filesystem traversal permission check. Always true for a daemon.
   bool can_enter = 6;
+  int64 modified_at_ms = 7;
 }
 
 message SpawnPTYRequest {

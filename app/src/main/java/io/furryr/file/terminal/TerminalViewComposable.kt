@@ -1,4 +1,4 @@
-package io.furryr.file.agent
+package io.furryr.file.terminal
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -18,11 +18,13 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,28 +59,54 @@ fun TerminalViewComposable(
     enabled: Boolean = true,
     inputState: TerminalInputState = remember { TerminalInputState() },
 ) {
+    TerminalSurface.content(TerminalSurfaceArgs(session, enabled, modifier, inputState))
+}
+
+/** The connecting state, drawn over the shared terminal surface. */
+@Composable
+fun TerminalPlaceholder(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val terminalPalette = TerminalSchemeStore.current(context).palette()
+    Box(
+        modifier = modifier.background(Color(terminalPalette.background)),
+        contentAlignment = Alignment.Center,
+    ) {
+        CircularProgressIndicator(
+            color = Color(terminalPalette.foreground),
+            strokeWidth = 2.dp,
+            modifier = Modifier.size(24.dp),
+        )
+    }
+}
+
+private data class TerminalSurfaceArgs(
+    val session: TerminalSession?,
+    val enabled: Boolean,
+    val modifier: Modifier,
+    val inputState: TerminalInputState,
+)
+
+/**
+ * One movable surface shared by every terminal tab. Moving it between tab
+ * bodies keeps the AndroidView, input wrapper, focus and IME alive.
+ */
+private object TerminalSurface {
+    val content = movableContentOf<TerminalSurfaceArgs> { args ->
+        TerminalSurfaceContent(args)
+    }
+}
+
+@Composable
+private fun TerminalSurfaceContent(args: TerminalSurfaceArgs) {
+    val session = args.session
+    val enabled = args.enabled
+    val modifier = args.modifier
+    val inputState = args.inputState
     val context = LocalContext.current
     // The terminal owns its colours; the app theme never recolours it.
     val terminalPalette = TerminalSchemeStore.current(context).palette()
     val backgroundColor = terminalPalette.background
     val density = LocalDensity.current
-
-    // TerminalView paints black itself while it has no emulator, which ignores
-    // its background colour. A session that is still connecting is drawn as a
-    // placeholder in the terminal scheme instead.
-    if (session == null) {
-        Box(
-            modifier = modifier.background(Color(backgroundColor)),
-            contentAlignment = Alignment.Center,
-        ) {
-            CircularProgressIndicator(
-                color = Color(terminalPalette.foreground),
-                strokeWidth = 2.dp,
-                modifier = Modifier.size(24.dp),
-            )
-        }
-        return
-    }
 
     val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
     var fontSizeDp by remember { mutableIntStateOf(prefs.getInt("terminal_font_size", 9).coerceIn(8, 128)) }
@@ -102,82 +130,96 @@ fun TerminalViewComposable(
         }
     }
 
-    AndroidView(
-        factory = { context ->
-            val terminalView = TerminalView(context, null)
+    // One movable AndroidView shared by every tab. The update pass rebinds
+    // the wrapper and session, so the view, focus and IME survive a switch.
+    // The connecting spinner is an overlay, never a replacement tree: a new
+    // tab starts without a session, and swapping the movable content between
+    // a Box and an AndroidView would dispose the wrapper that owns the IME
+    // connection and leave later tabs unable to type.
+    Box(modifier = modifier) {
+        AndroidView(
+            factory = { context ->
+                val terminalView = TerminalView(context, null)
 
-            val wrapper = TerminalInputView(context, inputState)
+                val wrapper = TerminalInputView(context, inputState)
 
-            terminalView.apply {
-                // Text selection temporarily makes this view focusable (see
-                // TerminalViewClientImpl.onLongPress). Keeping it unfocusable in
-                // normal use stops TerminalView's own tap handler from stealing
-                // focus from the input wrapper, which would attach the IME to
-                // TerminalView's TYPE_NULL editor.
-                isFocusable = false
-                isFocusableInTouchMode = false
-                isClickable = true
-                val client = TerminalViewClientImpl(this, wrapper, inputState, fontSizeDp)
-                setTerminalViewClient(client)
-                setTextSize(fontSizePx)
-                setBackgroundColor(backgroundColor)
-            }
-
-            wrapper.apply {
-                isFocusable = true
-                isFocusableInTouchMode = true
-                addView(terminalView, FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT
-                ))
-            }
-
-            val listener: (TerminalSession) -> Unit = { terminalView.onScreenUpdated() }
-            SessionManager.addTextChangedListener(listener)
-            wrapper.addOnAttachStateChangeListener(object : OnAttachStateChangeListener {
-                override fun onViewAttachedToWindow(v: View) {}
-                override fun onViewDetachedFromWindow(v: View) {
-                    SessionManager.removeTextChangedListener(listener)
+                terminalView.apply {
+                    // Text selection temporarily makes this view focusable (see
+                    // TerminalViewClientImpl.onLongPress). Keeping it unfocusable in
+                    // normal use stops TerminalView's own tap handler from stealing
+                    // focus from the input wrapper, which would attach the IME to
+                    // TerminalView's TYPE_NULL editor.
+                    isFocusable = false
+                    isFocusableInTouchMode = false
+                    isClickable = true
+                    val client = TerminalViewClientImpl(this, wrapper, fontSizeDp)
+                    setTerminalViewClient(client)
+                    setTextSize(fontSizePx)
+                    setBackgroundColor(backgroundColor)
                 }
-            })
 
-            session?.let { terminalView.attachSession(it) }
-            terminalView.isEnabled = enabled
-            inputState.terminalView = terminalView
-            terminalView.post {
-                applyTerminalPalette(terminalView, terminalPalette)
-                terminalView.onScreenUpdated()
-            }
+                wrapper.apply {
+                    isFocusable = true
+                    isFocusableInTouchMode = true
+                    addView(terminalView, FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    ))
+                }
 
-            wrapper
-        },
-        update = { view ->
-            val tv = (view as FrameLayout).getChildAt(0) as? TerminalView ?: return@AndroidView
-            tv.setTextSize(fontSizePx)
-            if (typeface != null) tv.setTypeface(typeface)
-            if (tv.mClient is TerminalViewClientImpl) {
-                (tv.mClient as TerminalViewClientImpl).fontSizeDp = fontSizeDp
-            }
-            if (tv.currentSession !== session) {
-                inputState.resetModifiers()
-                session?.let { tv.attachSession(it) }
-                if (enabled) view.requestFocus()
-                tv.onScreenUpdated()
-            }
-            tv.isEnabled = enabled
-            if (!enabled) inputState.resetModifiers()
-            tv.setBackgroundColor(backgroundColor)
-            applyTerminalPalette(tv, terminalPalette)
-        },
-        onRelease = { view ->
-            (view as? TerminalInputView)?.releaseInput()
-            if (inputState.terminalView === view.getChildAt(0)) {
-                inputState.terminalView = null
-                inputState.resetModifiers()
-            }
-        },
-        modifier = modifier
-    )
+                val listener: (TerminalSession) -> Unit = { terminalView.onScreenUpdated() }
+                SessionManager.addTextChangedListener(listener)
+                wrapper.addOnAttachStateChangeListener(object : OnAttachStateChangeListener {
+                    override fun onViewAttachedToWindow(v: View) {}
+                    override fun onViewDetachedFromWindow(v: View) {
+                        SessionManager.removeTextChangedListener(listener)
+                    }
+                })
+
+                terminalView.attachSession(session)
+                terminalView.isEnabled = enabled
+                inputState.bind(wrapper, terminalView)
+                if (enabled) wrapper.post { wrapper.requestFocus() }
+                terminalView.post {
+                    applyTerminalPalette(terminalView, terminalPalette)
+                    terminalView.onScreenUpdated()
+                }
+
+                wrapper
+            },
+            update = { view ->
+                val tv = (view as FrameLayout).getChildAt(0) as? TerminalView ?: return@AndroidView
+                // Rebind on every composition: switching back to a tab
+                // reattaches its (possibly rebuilt) view to this state.
+                (view as? TerminalInputView)?.let { inputState.bind(it, tv) }
+                tv.setTextSize(fontSizePx)
+                if (typeface != null) tv.setTypeface(typeface)
+                if (tv.mClient is TerminalViewClientImpl) {
+                    (tv.mClient as TerminalViewClientImpl).fontSizeDp = fontSizeDp
+                }
+                if (tv.currentSession !== session) {
+                    inputState.resetModifiers()
+                    tv.attachSession(session)
+                    if (enabled) view.requestFocus()
+                    tv.onScreenUpdated()
+                }
+                tv.isEnabled = enabled
+                if (!enabled) inputState.resetModifiers()
+                tv.setBackgroundColor(backgroundColor)
+                applyTerminalPalette(tv, terminalPalette)
+            },
+            onRelease = { view ->
+                (view as? TerminalInputView)?.let { wrapper ->
+                    inputState.unbind(wrapper)
+                    wrapper.releaseInput()
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+        )
+        if (session == null) {
+            TerminalPlaceholder(Modifier.fillMaxSize())
+        }
+    }
 }
 
 @Composable
@@ -196,7 +238,9 @@ private const val DEFAULT_FONT_SIZE_DP = 9
 private const val MIN_FONT_SIZE_DP = 8
 private const val MAX_FONT_SIZE_DP = 128
 
-internal class TerminalInputView(context: Context, private val inputState: TerminalInputState) : FrameLayout(context) {
+internal class TerminalInputView(context: Context, initialInputState: TerminalInputState) : FrameLayout(context) {
+    internal var inputState = initialInputState
+        private set
     private var connection: TerminalInputConnection? = null
     private var restartPending = false
     private var released = false
@@ -211,7 +255,22 @@ internal class TerminalInputView(context: Context, private val inputState: Termi
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
     }
-    private val modeChanged: () -> Unit = {
+
+    /**
+     * Move this wrapper to the state of the tab now on screen. The wrapper can
+     * survive a tab switch when Compose reuses the AndroidView; its editor and
+     * key dispatch must follow the new state, not the one it was built with.
+     */
+    internal fun bindState(next: TerminalInputState) {
+        released = false
+        if (inputState === next) return
+        inputState = next
+        imeRequested = false
+        removeCallbacks(showIme)
+        onModeChanged()
+    }
+
+    internal fun onModeChanged() {
         // Retire the old editor before restartInput can flush stale candidates into it.
         connection?.closeConnection()
         if (hasFocus() && !restartPending) {
@@ -225,19 +284,11 @@ internal class TerminalInputView(context: Context, private val inputState: Termi
             }
         }
     }
-    private val requestImeCallback: () -> Unit = { requestIme() }
-
-    init {
-        inputState.onInputModeChanged = modeChanged
-        inputState.onImeRequested = requestImeCallback
-    }
 
     fun releaseInput() {
         released = true
         imeRequested = false
         removeCallbacks(showIme)
-        if (inputState.onInputModeChanged === modeChanged) inputState.onInputModeChanged = null
-        if (inputState.onImeRequested === requestImeCallback) inputState.onImeRequested = null
         connection?.closeConnection()
         connection = null
     }
@@ -280,7 +331,7 @@ internal class TerminalInputView(context: Context, private val inputState: Termi
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
             EditorInfo.IME_FLAG_NO_EXTRACT_UI or EditorInfo.IME_FLAG_NO_ENTER_ACTION
         connection?.closeConnection()
-        return TerminalInputConnection(this, inputState).also { connection = it }
+        return TerminalInputConnection(this).also { connection = it }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean =
@@ -288,9 +339,9 @@ internal class TerminalInputView(context: Context, private val inputState: Termi
 }
 
 internal class TerminalInputConnection(
-    view: View,
-    private val inputState: TerminalInputState,
-) : BaseInputConnection(view, true) {
+    private val inputView: TerminalInputView,
+) : BaseInputConnection(inputView, true) {
+    private val inputState: TerminalInputState get() = inputView.inputState
     private var closed = false
     private var forwardedComposition: String? = null
 
@@ -401,7 +452,6 @@ internal class TerminalInputConnection(
 private class TerminalViewClientImpl(
     private val view: TerminalView,
     private val wrapper: TerminalInputView,
-    private val inputState: TerminalInputState,
     initialFontSizeDp: Int = DEFAULT_FONT_SIZE_DP,
 ) : TerminalViewClient {
 
@@ -447,9 +497,9 @@ private class TerminalViewClientImpl(
     }
     override fun onKeyDown(keyCode: Int, e: KeyEvent, session: TerminalSession): Boolean = false
     override fun onKeyUp(keyCode: Int, e: KeyEvent): Boolean = false
-    override fun readControlKey(): Boolean = inputState.ctrl
-    override fun readAltKey(): Boolean = inputState.alt
-    override fun readShiftKey(): Boolean = inputState.shift
+    override fun readControlKey(): Boolean = wrapper.inputState.ctrl
+    override fun readAltKey(): Boolean = wrapper.inputState.alt
+    override fun readShiftKey(): Boolean = wrapper.inputState.shift
     override fun readFnKey(): Boolean = false
     override fun onCodePoint(codePoint: Int, ctrlDown: Boolean, session: TerminalSession): Boolean =
         false

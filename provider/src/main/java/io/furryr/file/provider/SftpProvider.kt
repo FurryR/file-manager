@@ -11,13 +11,17 @@ import com.jcraft.jsch.SftpProgressMonitor
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
+import io.furryr.file.core.source.SeekableCacheFileSource
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.FileNotFoundException
+import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.util.Vector
@@ -35,10 +39,9 @@ import java.util.Vector
  * transfers do not share a single channel's I/O thread.
  */
 object SftpProvider : FileProvider {
-    override val scheme: String get() = ProviderSchemes.SFTP
-    override val authority: String? get() = null
+    override val schemes: Set<String> get() = setOf(ProviderSchemes.SFTP)
     override val label: String get() = "SFTP Location"
-    override val writable: Boolean get() = false
+    override val writable: Boolean get() = true
     override val features: Set<ProviderFeature> get() = setOf(
         ProviderFeature.LIST, ProviderFeature.STAT,
         ProviderFeature.CREATE_FILE, ProviderFeature.CREATE_DIR,
@@ -50,13 +53,15 @@ object SftpProvider : FileProvider {
     private const val COPY_BUFFER_SIZE = 256 * 1024
 
     private lateinit var servers: SftpServerSource
+    private lateinit var cacheDir: File
 
     private val jsch = JSch()
     private val connLock = Any()
     private val sessions = mutableMapOf<String, Session>()
 
-    fun init(servers: SftpServerSource) {
+    fun init(servers: SftpServerSource, cacheDir: File) {
         this.servers = servers
+        this.cacheDir = cacheDir
     }
 
     override fun isAvailable(): Boolean = true
@@ -68,16 +73,16 @@ object SftpProvider : FileProvider {
         return super<FileProvider>.directoryCapabilities(path)
     }
 
-    override suspend fun disconnect() {
+    override suspend fun disconnect() = withContext(Dispatchers.IO) {
         synchronized(connLock) {
             sessions.values.forEach { runCatching { it.disconnect() } }
             sessions.clear()
         }
     }
 
-    override suspend fun list(path: String): Result<List<FileEntry>> = runCatching {
+    override suspend fun list(path: String): Result<List<FileEntry>> = io {
         if (path == "/") {
-            return@runCatching servers.sftpServers().map { server ->
+            return@io servers.sftpServers().map { server ->
                 FileEntry(
                     name = server.name,
                     path = "sftp://${server.host}/",
@@ -111,7 +116,7 @@ object SftpProvider : FileProvider {
         }
     }
 
-    override suspend fun stat(path: String): Result<ProviderStat> = runCatching {
+    override suspend fun stat(path: String): Result<ProviderStat> = io {
         val (server, remotePath) = resolveServerPath(path)
         val ch = channel(server)
         try {
@@ -141,7 +146,7 @@ object SftpProvider : FileProvider {
         }
     }
 
-    override suspend fun createFile(path: String): Result<Unit> = runCatching {
+    override suspend fun createFile(path: String): Result<Unit> = io {
         val (server, remotePath) = resolveServerPath(path)
         val ch = channel(server)
         try {
@@ -151,7 +156,7 @@ object SftpProvider : FileProvider {
         }
     }
 
-    override suspend fun createDirectory(path: String): Result<Unit> = runCatching {
+    override suspend fun createDirectory(path: String): Result<Unit> = io {
         val (server, remotePath) = resolveServerPath(path)
         val ch = channel(server)
         try {
@@ -161,7 +166,7 @@ object SftpProvider : FileProvider {
         }
     }
 
-    override suspend fun delete(path: String): Result<Unit> = runCatching {
+    override suspend fun delete(path: String): Result<Unit> = io {
         if (path == "/") throw IllegalArgumentException("Cannot delete sftp:/// root")
         val (server, remotePath) = resolveServerPath(path)
         val ch = channel(server)
@@ -173,7 +178,7 @@ object SftpProvider : FileProvider {
         }
     }
 
-    override suspend fun rename(path: String, newName: String): Result<Unit> = runCatching {
+    override suspend fun rename(path: String, newName: String): Result<Unit> = io {
         val (server, remotePath) = resolveServerPath(path)
         val ch = channel(server)
         try {
@@ -185,17 +190,49 @@ object SftpProvider : FileProvider {
         }
     }
 
-    override suspend fun open(path: String, mode: OpenMode): Result<FileSource> = runCatching {
-        if (mode != OpenMode.READ) throw UnsupportedOperationException("SftpProvider supports READ only")
+    override suspend fun open(path: String, mode: OpenMode): Result<FileSource> = io {
         val (server, remotePath) = resolveServerPath(path)
-        val ch = channel(server)
-        try {
-            val attrs = ch.lstat(remotePath)
-            if (attrs.isDir) throw FileNotFoundException("Is a directory: $path")
-            SftpReadSource(ch, remotePath, attrs.size)
-        } catch (failure: Throwable) {
-            runCatching { ch.disconnect() }
-            throw failure
+        if (mode == OpenMode.READ) {
+            val ch = channel(server)
+            try {
+                val attrs = ch.lstat(remotePath)
+                if (attrs.isDir) throw FileNotFoundException("Is a directory: $path")
+                SftpReadSource(ch, remotePath, attrs.size)
+            } catch (failure: Throwable) {
+                runCatching { ch.disconnect() }
+                throw failure
+            }
+        } else {
+            val staged = File.createTempFile("sftp-", ".stage", cacheDir)
+            if (mode == OpenMode.READ_WRITE) {
+                val ch = channel(server)
+                try {
+                    ch.get(remotePath, FileOutputStream(staged))
+                } catch (failure: Throwable) {
+                    staged.delete()
+                    throw failure
+                } finally {
+                    runCatching { ch.disconnect() }
+                }
+            }
+            try {
+                SeekableCacheFileSource(
+                    staged,
+                    mode,
+                    "sftp://${server.host}$remotePath",
+                    commit = { file ->
+                        val ch = channel(server)
+                        try {
+                            ch.put(file.absolutePath, remotePath)
+                        } finally {
+                            runCatching { ch.disconnect() }
+                        }
+                    },
+                )
+            } catch (failure: Throwable) {
+                staged.delete()
+                throw failure
+            }
         }
     }
 
@@ -267,6 +304,10 @@ object SftpProvider : FileProvider {
     }.flowOn(Dispatchers.IO)
 
     // ── Internal ───────────────────────────────────────────────────
+
+    /** Suspend entry point for the blocking JSch calls below. */
+    private suspend fun <T> io(block: () -> T): Result<T> =
+        withContext(Dispatchers.IO) { runCatching(block) }
 
     private fun resolveServerPath(innerPath: String): Pair<SftpServer, String> {
         if (innerPath == "/" || innerPath.isEmpty()) {

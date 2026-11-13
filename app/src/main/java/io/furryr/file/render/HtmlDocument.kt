@@ -52,10 +52,27 @@ class HtmlDocument(
     /** Resolve [relative] inside the file's own folder graph. */
     private suspend fun locate(relative: String): VFile {
         val clean = relative.substringBefore('?').substringBefore('#')
+        val absolute = clean.startsWith('/')
         val segments = clean.trimStart('/').split('/').filter { it.isNotEmpty() }
-        var node: VNode = file.parent
-            ?: error("html file has no parent folder: ${file.name}")
-        for (segment in segments) {
+        var node: VNode = if (absolute) {
+            if (file.path.isViewed) {
+                // An absolute reference inside an archive starts at that
+                // archive's root, never at the app filesystem root.
+                var current: VNode = file
+                while (true) {
+                    val parent = current.parent ?: break
+                    if (parent.path.views.size < file.path.views.size) break
+                    current = parent
+                }
+                current as? VFolder ?: error("html file has no view root: ${file.name}")
+            } else {
+                Vfs.folder(file.path.providerPath().root).getOrThrow()
+            }
+        } else {
+            file.parent ?: error("html file has no parent folder: ${file.name}")
+        }
+        for (raw in segments) {
+            val segment = android.net.Uri.decode(raw)
             when (segment) {
                 ".", "" -> Unit
                 ".." -> {

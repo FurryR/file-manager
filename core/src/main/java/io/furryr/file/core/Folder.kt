@@ -41,7 +41,7 @@ class Folder internal constructor(
         )
     }
 
-    override suspend fun child(name: String): Result<VNode> = runCatching {
+    override suspend fun child(name: String): Result<VNode> = runCatchingCancellable {
         requireValidName(name)
         val childPath = path.child(name)
         val stat = provider.stat(innerPathFor(childPath)).getOrThrow()
@@ -56,7 +56,7 @@ class Folder internal constructor(
         node as? VFile ?: error("not a file: $name")
     }
 
-    override suspend fun create(name: String): Result<VFile> = runCatching {
+    override suspend fun create(name: String): Result<VFile> = runCatchingCancellable {
         requireValidName(name)
         val childPath = path.child(name)
         val childInner = innerPathFor(childPath)
@@ -64,7 +64,7 @@ class Folder internal constructor(
         File(childPath, provider, childInner)
     }
 
-    override suspend fun mkdir(name: String): Result<VFolder> = runCatching {
+    override suspend fun mkdir(name: String): Result<VFolder> = runCatchingCancellable {
         requireValidName(name)
         val childPath = path.child(name)
         val childInner = innerPathFor(childPath)
@@ -72,7 +72,7 @@ class Folder internal constructor(
         Folder(childPath, provider, childInner)
     }
 
-    override suspend fun rename(newName: String): Result<VNode> = runCatching {
+    override suspend fun rename(newName: String): Result<VNode> = runCatchingCancellable {
         requireValidName(newName)
         val target = path.parent()?.child(newName)
             ?: error("cannot rename a root folder: ${path.toFullUri()}")
@@ -119,22 +119,17 @@ class File internal constructor(
 
     override suspend fun open(mode: OpenMode): Result<FileSource> = provider.open(innerPath, mode)
 
-    override suspend fun describe(): Result<ContentInfo> = runCatching {
+    override suspend fun describe(): Result<ContentInfo> = runCatchingCancellable {
         val stat = stat().getOrNull()
-        val source = open(OpenMode.READ).getOrNull()
-        val size = source?.size ?: stat?.size ?: 0L
-        val head = if (source != null && size > 0L) {
-            val length = minOf(size, ContentTypes.SNIFF_BYTES.toLong()).toInt()
-            runCatching { source.readAt(0L, length) }.getOrDefault(ByteArray(0))
-        } else {
-            ByteArray(0)
+        val source = if ((stat?.size ?: 0L) > 0L) open(OpenMode.READ).getOrNull() else null
+        try {
+            ContentTypes.describe(name, stat?.size ?: 0L, source)
+        } finally {
+            source?.close()
         }
-        val seekable = source?.seekable ?: false
-        runCatching { source?.close() }
-        ContentTypes.describe(name, size, head, seekable)
     }
 
-    override suspend fun rename(newName: String): Result<VNode> = runCatching {
+    override suspend fun rename(newName: String): Result<VNode> = runCatchingCancellable {
         requireValidName(newName)
         val target = path.parent()?.child(newName)
             ?: error("cannot rename a root file: ${path.toFullUri()}")

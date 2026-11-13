@@ -3,8 +3,8 @@ package io.furryr.file
 import android.content.Context
 import io.furryr.file.container.ContainerManager
 import io.furryr.file.container.ContainerPaths
-import io.furryr.file.container.ContainerUris
-import io.furryr.file.agent.SessionManager
+import io.furryr.file.core.ContainerUris
+import io.furryr.file.terminal.SessionManager
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.daemon.HubActions

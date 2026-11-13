@@ -3,32 +3,14 @@ package io.furryr.file.hub
 import android.util.Log
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
-import io.furryr.file.agent.AgentEnvironment
 import io.furryr.file.agent.AgentEvents
 import io.furryr.file.agent.AgentMcp
-import io.furryr.file.agent.AgentService
 import io.furryr.file.agent.AgentSession
-import io.furryr.file.container.ContainerUris
-import io.furryr.file.daemon.process.CommandSpec
 import io.furryr.file.daemon.process.PipeChannel
 import io.furryr.file.daemon.process.ProcessChannel
-import io.furryr.file.proto.agent.AgentAttachResponse
-import io.furryr.file.proto.agent.AgentEvent
-import io.furryr.file.daemon.HubActions
 import io.furryr.file.daemon.HubCallerRoot
-import io.furryr.file.proto.hub.ActiveSessionResponse
-import io.furryr.file.proto.hub.AiConfigResponse
-import io.furryr.file.proto.hub.CallerRoot
-import io.furryr.file.proto.hub.CapabilitiesResponse
-import io.furryr.file.proto.hub.ExecResponse
-import io.furryr.file.proto.hub.HistoryResponse
 import io.furryr.file.proto.hub.HubRequest
 import io.furryr.file.proto.hub.HubResponse
-import io.furryr.file.proto.hub.ListTargetsResponse
-import io.furryr.file.proto.hub.ModelsResponse
-import io.furryr.file.proto.hub.SessionInfo
-import io.furryr.file.proto.hub.SessionsResponse
-import io.furryr.file.proto.hub.Target
 import io.furryr.file.proto.hub.WaitResponse
 import io.furryr.file.uds.Transport
 import io.furryr.file.uds.TransportEvent
@@ -59,6 +41,9 @@ import java.util.concurrent.ConcurrentHashMap
  * daemon — spawning PTYs, forwarding signals, reaping children — and never
  * exposes the daemon's own file protocol. Each connection owns its PTY handles
  * and keeps its own authenticated caller root.
+ *
+ * Request categories live in `HubAgentOps` (agent/history) and `HubExecOps`
+ * (handshake/exec/PTY); this class owns the connection lifecycle.
  */
 class HubServer internal constructor(private val server: UdsServer) : Closeable {
 
@@ -86,8 +71,10 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                             }
                             val failure = when {
                                 request == null -> failure(0, "malformed hub request")
-                                event.frame.descriptorsTruncated -> failure(request.id,
-                                    "hub descriptor transfer was truncated (MSG_CTRUNC); received=${event.frame.fds.size}")
+                                event.frame.descriptorsTruncated -> failure(
+                                    request.id,
+                                    "hub descriptor transfer was truncated (MSG_CTRUNC); received=${event.frame.fds.size}",
+                                )
                                 event.frame.fds.isNotEmpty() -> failure(request.id, "unexpected hub descriptors")
                                 request.opCase != HubRequest.OpCase.HELLO && !state.authenticated ->
                                     failure(request.id, "authentication required")
@@ -280,12 +267,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                 }
                             } else {
                                 // A failed request must not cost the client its
-                                // connection. `dispatch` reports errors by
-                                // throwing (`require(...)`), and letting that
-                                // escape closes the socket through the outer
-                                // catch/finally — so one malformed or rejected
-                                // call would take down every other request and
-                                // every stream multiplexed on that connection.
+                                // connection: dispatch reports errors by throwing.
                                 val reply = try {
                                     dispatch(request!!, state, client)
                                 } catch (e: CancellationException) {
@@ -339,7 +321,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
         }
     }
 
-    private suspend fun send(client: Transport, reply: Reply) {
+    internal suspend fun send(client: Transport, reply: Reply) {
         try {
             client.send(reply.response.toByteArray(), reply.fds)
         } finally {
@@ -351,422 +333,19 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
     private suspend fun dispatch(request: HubRequest, state: ConnectionState, client: Transport): Reply {
         val id = request.id
         return runCatching {
-            when (request.opCase) {
-                HubRequest.OpCase.AGENT_ATTACH -> {
-                    val attach = request.agentAttach
-                    state.agentJobs.values.forEach { it.cancel() }
-                    state.agentJobs.clear()
-                    state.agent?.dispose()
-                    val sessionId = attach.sessionId.ifBlank { "agent" }
-                    val session = AgentSession(
-                        sessionId = sessionId,
-                        terminalId = state.terminalId.ifBlank { attach.terminalId },
-                        target = state.target,
-                        targetName = DaemonManager.hubId(state.target),
-                        cwd = attach.cwd.ifBlank { "/" },
-                        model = attach.model,
-                        effort = attach.effort,
-                        emit = { event ->
-                            send(
-                                client,
-                                Reply(
-                                    HubResponse.newBuilder().setId(request.id).setOk(true)
-                                        .setAgentEvent(event).build(),
-                                ),
-                            )
-                        },
-                    )
-                    state.agent = session
-                    Reply(
-                        HubResponse.newBuilder().setId(id).setOk(true)
-                            .setAgentAttach(
-                                AgentAttachResponse.newBuilder()
-                                    .setSessionId(session.sessionId)
-                                    .setTarget(session.targetName)
-                                    .setCwd(session.cwd)
-                                    .setContextTokens(session.usage().contextTokens)
-                                    .setPromptTokens(session.usage().promptTokens)
-                                    .setCompletionTokens(session.usage().completionTokens)
-                                    .setRequests(session.usage().requests)
-                                    .build(),
-                            ).build(),
-                    )
-                }
-
-                HubRequest.OpCase.AGENT_STEER -> {
-                    val agent = state.agent ?: error("agent is not attached")
-                    if (!agent.steer(request.agentSteer.text)) {
-                        error("the prompt is empty")
-                    }
-                    Reply(ok(id))
-                }
-
-                HubRequest.OpCase.AGENT_CANCEL -> {
-                    // Reply as soon as the kill is issued: the session closes its
-                    // exec handles on a detached scope and cancels its own job, so
-                    // nothing here waits for the run to unwind. Esc is the one
-                    // request that must never make the terminal feel stuck.
-                    val streams = state.agentJobs.keys.toList()
-                    state.agent?.cancel()
-                    state.agentJobs.values.forEach { it.cancel() }
-                    state.agentJobs.clear()
-                    // Close each open stream explicitly. A cancelled job unwinds by
-                    // throwing, and a stream that never reports `done` would leave
-                    // the terminal waiting on a frame that is never sent.
-                    for (streamId in streams) {
-                        runCatching {
-                            send(
-                                client,
-                                Reply(
-                                    HubResponse.newBuilder().setId(streamId).setOk(true)
-                                        .setAgentEvent(
-                                            AgentEvent.newBuilder().setDone(true).build(),
-                                        ).build(),
-                                ),
-                            )
-                        }
-                    }
-                    Reply(ok(id))
-                }
-
-                HubRequest.OpCase.AGENT_APPROVAL -> {
-                    state.agent?.resolveApproval(
-                        request.agentApproval.approvalId,
-                        request.agentApproval.allow,
-                    )
-                    Reply(ok(id))
-                }
-
-                HubRequest.OpCase.AGENT_MCP_RESULT -> {
-                    state.agent?.completeMcp(
-                        request.agentMcpResult.requestId,
-                        request.agentMcpResult.ok,
-                        request.agentMcpResult.content,
-                    )
-                    Reply(ok(id))
-                }
-
-                HubRequest.OpCase.AGENT_MCP_TOOLS -> {
-                    state.agent?.setMcpTools(request.agentMcpTools.definitionsJson)
-                    Reply(ok(id))
-                }
-
-                HubRequest.OpCase.HELLO -> {
-                    require(request.hello.key.isNotBlank()) { "missing daemon key" }
-                    val target = requireNotNull(DaemonManager.targetForKey(request.hello.key)) {
-                        "unknown daemon key"
-                    }
-                    val containerId = DaemonManager.hubId(target)
-                    val root = requireNotNull(HubActions.resolveRoot) {
-                        "filesystem resolution is unavailable"
-                    }.invoke(containerId)
-                    state.authenticated = true
-                    state.root = root
-                    state.target = target
-                    state.terminalId = request.hello.terminalId
-                    Reply(
-                        HubResponse.newBuilder().setId(id).setOk(true).setCallerRoot(
-                            CallerRoot.newBuilder().setContainerId(containerId),
-                        ).build(),
-                    )
-                }
-
-                HubRequest.OpCase.LIST_TARGETS ->
-                    Reply(
-                        HubResponse.newBuilder().setId(id).setOk(true)
-                            .setTargets(listTargets()).build(),
-                    )
-
-                HubRequest.OpCase.GET_AI_CONFIG -> {
-                    val config = requireNotNull(AgentEnvironment.aiConfigProvider) {
-                        "AI configuration is unavailable"
-                    }.invoke()
-                    Reply(
-                        HubResponse.newBuilder().setId(id).setOk(true)
-                            .setAiConfig(
-                                AiConfigResponse.newBuilder().setBaseUrl(config.baseUrl)
-                                    .setApiKey("").setModel(config.model)
-                                    .setEffort(config.effort).setProvider(config.provider),
-                            ).build(),
-                    )
-                }
-
-                HubRequest.OpCase.SET_AI_SELECTION -> {
-                    val selection = request.setAiSelection
-                    requireNotNull(AgentEnvironment.aiSelectionSaver) {
-                        "AI selection persistence is unavailable"
-                    }.invoke(selection.model, selection.effort)
-                    Reply(HubResponse.newBuilder().setId(id).setOk(true).build())
-                }
-
-                HubRequest.OpCase.EXEC -> {
-                    val exec = request.exec
-                    val targetId = exec.containerId.ifBlank { "host" }
-                    val target = target(targetId)
-                    val root = requireNotNull(state.root) { "hello is required" }
-                    val cwd = exec.cwd.ifBlank { null }?.let {
-                        requireNotNull(HubActions.resolveCwd) { "filesystem resolution is unavailable" }
-                            .invoke(root, targetId, it)
-                    }
-                    val env = exec.envMap + Hub.environment(target) +
-                        mapOf("HUB_TERMINAL" to state.terminalId)
-                    val service = DaemonManager.execService(target)
-                    if (exec.pipes) {
-                        val stream = service.spawnPipes(
-                            CommandSpec(
-                                command = exec.command,
-                                args = exec.argsList,
-                                env = env,
-                                cwd = cwd,
-                            ),
-                        ).getOrThrow()
-                        val handle = state.nextHandle++
-                        state.execs[handle] = OwnedExec(stream)
-                        return@runCatching Reply(
-                            HubResponse.newBuilder().setId(id).setOk(true)
-                                .setExec(
-                                    ExecResponse.newBuilder()
-                                        .setExecId(handle).setPid(stream.pid).build(),
-                                ).build(),
-                            listOf(stream.stdoutFd, stream.stderrFd),
-                        )
-                    }
-                    val pty = service.spawn(
-                        CommandSpec(
-                            command = exec.command,
-                            args = exec.argsList,
-                            env = env,
-                            cwd = cwd,
-                            termType = exec.term,
-                            rows = exec.rows,
-                            cols = exec.cols,
-                            user = if (exec.hasUser()) exec.user else null,
-                            nice = if (exec.hasNice()) exec.nice else null,
-                        ),
-                    ).getOrThrow()
-                    val handle = state.nextHandle++
-                    state.ptys[handle] = OwnedPty(
-                        pty,
-                        HubActions.onTerminalTarget?.invoke(state.terminalId, targetId),
-                    )
-                    Reply(
-                        HubResponse.newBuilder().setId(id).setOk(true)
-                            .setExec(
-                                ExecResponse.newBuilder()
-                                    .setPtyId(handle).setPid(pty.pid).build(),
-                            ).build(),
-                        listOfNotNull(pty.fileDescriptor),
-                    )
-                }
-
-                HubRequest.OpCase.CANCEL_REMOTE_MCP_CALL -> {
-                    state.httpCalls.remove(request.cancelRemoteMcpCall.requestId)?.cancel()
-                    Reply(ok(id))
-                }
-
-                HubRequest.OpCase.GET_HISTORY -> {
-                    val sessionId = request.getHistory.sessionId
-                    Reply(
-                        HubResponse.newBuilder().setId(id).setOk(true)
-                            .setHistory(
-                                HistoryResponse.newBuilder()
-                                    .setMessagesJson(
-                                        AgentEnvironment.sessionLoad?.invoke(sessionId).orEmpty(),
-                                    )
-                                    .setTitle(AgentEnvironment.sessionTitle?.invoke(sessionId).orEmpty())
-                                    .build(),
-                            ).build(),
-                    )
-                }
-
-                HubRequest.OpCase.SET_HISTORY -> {
-                    AgentEnvironment.sessionSave?.invoke(
-                        request.setHistory.sessionId,
-                        request.setHistory.messagesJson,
-                    )
-                    Reply(ok(id))
-                }
-
-                HubRequest.OpCase.GET_MODELS -> Reply(
-                    HubResponse.newBuilder().setId(id).setOk(true)
-                        .setModels(ModelsResponse.newBuilder().setCatalogJson(AgentService.catalog()).build())
-                        .build(),
-                )
-
-                HubRequest.OpCase.GET_CAPABILITIES -> {
-                    // Only server names travel to the caller; URLs and
-                    // credential headers stay in the app and are resolved by
-                    // RemoteMcpCall.
-                    val servers = AgentMcp.servers(state.target, request.getCapabilities.cwd)
-                        .filter { it.enabled && it.url.isNotBlank() }
-                    Reply(
-                        HubResponse.newBuilder().setId(id).setOk(true)
-                            .setCapabilities(
-                                CapabilitiesResponse.newBuilder()
-                                    .addAllRemoteMcpServers(servers.map { it.name })
-                                    .setWorkspaceMcp(AgentEnvironment.workspaceMcpEnabled?.invoke() == true)
-                                    .build(),
-                            ).build(),
-                    )
-                }
-
-                HubRequest.OpCase.LIST_SESSIONS -> Reply(
-                    HubResponse.newBuilder().setId(id).setOk(true)
-                        .setSessions(
-                            SessionsResponse.newBuilder().addAllSessions(
-                                AgentEnvironment.sessionList?.invoke().orEmpty().map { session ->
-                                    SessionInfo.newBuilder()
-                                        .setId(session.id)
-                                        .setTitle(session.title)
-                                        .setCreatedAt(session.createdAt)
-                                        .setUpdatedAt(session.updatedAt)
-                                        .setMessageCount(session.messageCount)
-                                        .build()
-                                },
-                            ).build(),
-                        ).build(),
-                )
-
-                HubRequest.OpCase.GET_ACTIVE_SESSION -> Reply(
-                    HubResponse.newBuilder().setId(id).setOk(true)
-                        .setActiveSession(
-                            ActiveSessionResponse.newBuilder()
-                                .setSessionId(AgentEnvironment.activeSession?.invoke(state.terminalId).orEmpty())
-                                .build(),
-                        ).build(),
-                )
-
-                HubRequest.OpCase.SET_ACTIVE_SESSION -> {
-                    AgentEnvironment.activeSessionSave?.invoke(
-                        state.terminalId,
-                        request.setActiveSession.sessionId,
-                    )
-                    Reply(ok(id))
-                }
-
-                HubRequest.OpCase.DELETE_SESSION -> {
-                    AgentEnvironment.sessionDelete?.invoke(request.deleteSession.sessionId)
-                    Reply(ok(id))
-                }
-
-                HubRequest.OpCase.RESIZE -> {
-                    val r = request.resize
-                    val pty = state.pty(r.ptyId)
-                    pty.channel.resize(r.rows, r.cols).getOrThrow()
-                    Reply(ok(id))
-                }
-
-                HubRequest.OpCase.HERE -> {
-                    val path = request.here.path
-                    require(path.startsWith('/')) { "here requires an absolute path" }
-                    val reveal = HubActions.onHere ?: error("file navigation is unavailable")
-                    reveal(path, requireNotNull(state.root) { "hello is required" })
-                    Reply(ok(id))
-                }
-
-                HubRequest.OpCase.SIGNAL -> {
-                    val s = request.signal
-                    val pty = state.pty(s.ptyId)
-                    pty.channel.signal(s.signal).getOrThrow()
-                    Reply(ok(id))
-                }
-
-                HubRequest.OpCase.CLOSE -> {
-                    val handle = request.close.ptyId
-                    val pty = state.pty(handle)
-                    pty.channel.close()
-                    state.ptys.remove(handle, pty)
-                    pty.terminalTarget?.close()
-                    Reply(ok(id))
-                }
-
-                HubRequest.OpCase.CLOSE_EXEC -> {
-                    val handle = request.closeExec.execId
-                    val exec = state.execs.remove(handle) ?: error("exec not owned by client")
-                    exec.channel.closeProcess()
-                    exec.channel.close()
-                    Reply(ok(id))
-                }
-
-                else -> Reply(failure(id, "missing hub op"))
-            }
+            dispatchAgentOps(request, state, client)
+                ?: dispatchExecOps(request, state, client)
+                ?: Reply(failure(id, "missing hub op"))
         }.getOrElse {
             if (it is CancellationException) throw it
             Reply(failure(id, it.message ?: "hub request failed"))
         }
     }
 
-    private fun listTargets(): ListTargetsResponse {
-        val live = DaemonManager.liveEndpoints().associateBy { it.name }
-        val names = LinkedHashSet<String>()
-        names.add("host")
-        names.add("app")
-        names.addAll(live.keys)
-        runCatching { HubActions.containerIds?.invoke().orEmpty() }
-            .onFailure { Log.w(TAG, "container enumeration failed", it) }
-            .getOrDefault(emptyList())
-            .let(names::addAll)
-        val ordered = names.filter { it == "host" || it == "app" } +
-            names.filterNot { it == "host" || it == "app" }.sorted()
-        val execTargets = ordered.map { name ->
-            val endpoint = live[name]
-            Target.newBuilder()
-                .setName(name)
-                .setElevated(endpoint?.elevated == true)
-                .setRunning(endpoint != null)
-                .setKind("exec")
-                .setLabel(DaemonManager.hubDisplayName(name))
-                .setRoot(execRoot(name))
-                .build()
-        }
-        val locations = runCatching { HubActions.locationTargets?.invoke().orEmpty() }
-            .onFailure { Log.w(TAG, "location enumeration failed", it) }
-            .getOrDefault(emptyList())
-        val fileTargets = locations
-            .filter { it.root.isNotBlank() }
-            .distinctBy { it.root }
-            .map { location ->
-                Target.newBuilder()
-                    .setName(location.root)
-                    .setKind(location.kind)
-                    .setLabel(location.label)
-                    .setRoot(location.root)
-                    .setRunning(true)
-                    .build()
-            }
-        return ListTargetsResponse.newBuilder()
-            .addAllTargets(execTargets)
-            .addAllTargets(fileTargets)
-            .build()
-    }
-
-
-    /**
-     * VFS root that addresses an execution target's filesystem. `app` has no
-     * separate provider, so it exposes no root.
-     */
-    private fun execRoot(name: String): String = when {
-        name == "host" -> "file:///"
-        DaemonManager.isContainerHubId(name) ->
-            ContainerUris.forContainer(DaemonManager.hubDisplayName(name))
-        else -> ""
-    }
-
-    private fun target(containerId: String): DaemonTarget = when (containerId) {
-        "host" -> DaemonTarget.Host
-        "app" -> DaemonTarget.App
-        else -> {
-            require(DaemonManager.isContainerHubId(containerId)) {
-                "invalid container id '$containerId'"
-            }
-            DaemonTarget.Named(DaemonManager.hubDisplayName(containerId))
-        }
-    }
-
-    private fun ok(id: Int): HubResponse =
+    internal fun ok(id: Int): HubResponse =
         HubResponse.newBuilder().setId(id).setOk(true).build()
 
-    private fun failure(id: Int, message: String): HubResponse =
+    internal fun failure(id: Int, message: String): HubResponse =
         HubResponse.newBuilder().setId(id).setOk(false).setError(message).build()
 
     override fun close() {
@@ -774,7 +353,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
         scope.cancel()
     }
 
-    private class ConnectionState {
+    internal class ConnectionState {
         var authenticated: Boolean = false
         var root: HubCallerRoot? = null
         var terminalId: String = ""
@@ -790,16 +369,16 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
             ptys[handle] ?: error("PTY not owned by client")
     }
 
-    private class OwnedPty(
+    internal class OwnedPty(
         val channel: ProcessChannel,
         val terminalTarget: Closeable?,
     )
 
-    private class OwnedExec(
+    internal class OwnedExec(
         val channel: PipeChannel,
     )
 
-    private class Reply(
+    internal class Reply(
         val response: HubResponse,
         val fds: List<FileDescriptor> = emptyList(),
     )
@@ -813,8 +392,6 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
          * instead of leaking.
          */
         private const val EXEC_WAIT_TIMEOUT_MS = 15 * 60 * 1000L
-
-        /** Upper bound on waiting for an agent run to unwind after cancel. */
 
         /** Bind [endpoint] and start serving. */
         fun listen(endpoint: UdsEndpoint): HubServer = HubServer(UdsServer.listen(endpoint))

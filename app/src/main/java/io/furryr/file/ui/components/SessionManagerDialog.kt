@@ -46,8 +46,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import io.furryr.file.R
-import io.furryr.file.container.ContainerUris
+import io.furryr.file.terminal.TerminalProfiles
+import io.furryr.file.core.ContainerUris
 import io.furryr.file.model.FileTab
+import io.furryr.file.model.PageKind
 
 /** Assumed two-line row pitch, used to give the list a bounded height. */
 private val RowHeight = 54.dp
@@ -55,14 +57,14 @@ private val MaxListHeight = 340.dp
 
 /** Leading icon for a tab, mirroring what kind of location it shows. */
 private fun sessionIcon(tab: FileTab): ImageVector = when {
-    tab.webUrl != null -> Icons.Default.Language
+    tab.currentPage.kind == PageKind.PAGE -> Icons.Default.Language
     ContainerUris.isContainer(tab.path) -> Icons.Default.DesktopWindows
-    tab.path.startsWith("ssh://") -> Icons.Default.Cloud
+    TerminalProfiles.isSsh(tab.path) -> Icons.Default.Cloud
     else -> Icons.Default.Folder
 }
 
 /** Secondary line: where the tab actually points. */
-private fun sessionDetail(tab: FileTab): String = tab.webUrl ?: tab.path
+private fun sessionDetail(tab: FileTab): String = tab.currentPage.path
 
 /**
  * Tab ("session") manager: switch, reorder and close tabs without hunting for

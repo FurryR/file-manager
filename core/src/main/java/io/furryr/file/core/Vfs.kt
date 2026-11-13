@@ -1,6 +1,7 @@
 package io.furryr.file.core
 
 import io.furryr.file.core.model.ProviderStat
+import java.util.Locale
 
 /**
  * Virtual filesystem router.
@@ -17,20 +18,31 @@ object Vfs {
     private val providers = mutableMapOf<String, FileProvider>()
     private var default: FileProvider? = null
 
+    @Synchronized
     fun register(scheme: String, provider: FileProvider) {
-        check(providers.putIfAbsent(scheme, provider) == null) {
+        val key = scheme.lowercase(Locale.ROOT)
+        check(providers.putIfAbsent(key, provider) == null) {
             "A provider is already registered for scheme '$scheme'"
         }
     }
 
+    @Synchronized
     fun register(provider: FileProvider) {
-        register(provider.scheme, provider)
+        for (scheme in provider.schemes) register(scheme, provider)
     }
 
+    /** The provider that owns [scheme], or null when nothing is registered. */
+    @Synchronized
+    fun provider(scheme: String): FileProvider? =
+        providers[scheme.lowercase(Locale.ROOT)]
+
+    @Synchronized
     fun unregister(scheme: String) {
-        providers.remove(scheme)
+        val removed = providers.remove(scheme.lowercase(Locale.ROOT))
+        if (removed != null && default === removed) default = null
     }
 
+    @Synchronized
     fun setDefault(provider: FileProvider) {
         default = provider
     }
@@ -44,9 +56,10 @@ object Vfs {
         }
         val scheme = path.scheme
         val provider = if (scheme == null) {
-            default ?: return Result.failure(IllegalStateException("No default provider"))
+            synchronized(this) { default }
+                ?: return Result.failure(IllegalStateException("No default provider"))
         } else {
-            providers[scheme]
+            synchronized(this) { providers[scheme.lowercase(Locale.ROOT)] }
                 ?: return Result.failure(IllegalStateException("No provider for scheme '$scheme'"))
         }
         return Result.success(ResolvedProvider(provider, path, path.toString()))
@@ -75,7 +88,7 @@ object Vfs {
      * container is just a longer chain. This is the only place an address
      * becomes a node.
      */
-    suspend fun node(path: Path): Result<VNode> = runCatching {
+    suspend fun node(path: Path): Result<VNode> = runCatchingCancellable {
         var node = root(path.providerPath()).getOrThrow()
         for (view in path.views) {
             val file = node as? VFile ?: error("view requires a file: ${node.path}")

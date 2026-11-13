@@ -15,6 +15,7 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ProgressBar
 import android.widget.Toast
+import android.webkit.ConsoleMessage
 import android.webkit.JsResult
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -48,6 +49,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -68,6 +70,10 @@ import io.furryr.file.core.ContentTypes
 import io.furryr.file.core.VFile
 import io.furryr.file.core.Vfs
 import io.furryr.file.ui.util.BrowseAddress
+import io.furryr.file.terminal.DevToolsLog
+import io.furryr.file.terminal.TerminalTab
+import io.furryr.file.terminal.WebDevToolsHost
+import io.furryr.file.terminal.WebDevToolsTab
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -78,6 +84,7 @@ import java.io.ByteArrayInputStream
 private const val ASSET_HOST = "file-manager.local"
 private const val DOCUMENT_PATH = "__document__"
 private const val LOADING_TAG = "web-loading"
+private const val DEVTOOLS_MAX_LOGS = 1000
 
 /** `scheme:` prefix: a hit-test URL that already stands on its own. */
 private val ABSOLUTE_URL = Regex("^[a-zA-Z][a-zA-Z0-9+.\\-]*:")
@@ -112,10 +119,20 @@ data class WebHitTarget(
  * keeps the WebView's own back/forward history and does not pay Chromium
  * start-up again. Only [close] destroys it.
  */
+class WebPageState(
+    var address: String,
+    var title: String?,
+) : PageState()
+
 class WebRendererSession(
     val document: HtmlDocument,
-    internal val host: RenderHost,
-) : RendererSession {
+    initialState: WebPageState? = null,
+) : PageSession<WebPageState>(initialState), WebDevToolsHost {
+    internal var host: RendererContext = DetachedRendererContext
+    override val state: WebPageState = seedState ?: WebPageState(
+        address = document.remoteBase ?: document.origin.let(NodeAddress::format),
+        title = null,
+    )
     /**
      * A live document is loaded by its own origin; a projected one is served
      * through [ASSET_HOST] so relative resources can be resolved through the
@@ -127,7 +144,8 @@ class WebRendererSession(
     val isRemote: Boolean get() = liveBase != null
     override val isLive: Boolean get() = isRemote
     override val webAddress: String? get() = address
-    override val title: String? get() = pageTitle
+    override val title: String? get() =
+        titleState ?: document.file.name.takeIf { it.isNotBlank() }
 
     /**
      * The folder that owns the document. A live page's node has no browsable
@@ -142,12 +160,24 @@ class WebRendererSession(
     /** Text address of the document itself (provider path plus view levels). */
     private val documentAddress: String = document.origin.let(NodeAddress::format)
 
-    override var address by mutableStateOf(liveBase ?: documentAddress)
-        internal set
+    override var address: String
+        get() = addressState
+        private set(value) {
+            addressState = value
+            state.address = value
+        }
+
+    private var addressState by mutableStateOf(state.address)
 
     /** Last page title; cleared as soon as a new document starts loading. */
-    var pageTitle by mutableStateOf<String?>(null)
-        private set
+    var pageTitle: String?
+        get() = titleState
+        private set(value) {
+            titleState = value
+            state.title = value
+        }
+
+    private var titleState by mutableStateOf(state.title)
 
     /** 0..100, drives the slim progress bar above the page. */
     override var progress by mutableIntStateOf(0)
@@ -204,6 +234,13 @@ class WebRendererSession(
     var hitTarget by mutableStateOf<WebHitTarget?>(null)
         private set
 
+    /** Console lines for the DevTools tab opened from this page. */
+    override val devToolsLogs = mutableStateListOf<DevToolsLog>()
+
+    /** False once the page is gone; the DevTools tab keeps its history. */
+    override var devToolsAlive by mutableStateOf(true)
+        private set
+
     private var webView: WebView? = null
     private var darkTheme = true
     private var closing = false
@@ -224,21 +261,17 @@ class WebRendererSession(
         get() = RenderCapabilities(
             // Back/forward are the tab's history, not the WebView's cache: the
             // session has nothing to advertise here.
-            canRefresh = true,
-            // A document reports its owning folder; a live page has none.
-            canGoParent = parent != null,
-            // A page is not a directory: no file creation, no PTY/terminal.
+            // A page is not a directory: no file creation, but the terminal
+            // action opens this page's DevTools console instead of a shell.
             canCreate = false,
-            canTerminal = false,
         )
+
+    override val terminalFactory: TerminalFactory =
+        TerminalFactory { WebDevToolsTab(this, "DevTools") }
 
     override val consumesEdgeGestures: Boolean get() = true
     override val canDismiss: Boolean get() = true
 
-    @Composable
-    override fun Content(darkTheme: Boolean, modifier: Modifier) {
-        WebContent(this, modifier)
-    }
 
     /**
      * Point this session at [url], keeping its WebView.
@@ -286,22 +319,46 @@ class WebRendererSession(
     }
 
     fun reload() {
-        webView?.reload()
-    }
-
-    override fun refresh(): Boolean {
-        // A web tab always owns refresh, even before its view is re-attached.
+        // A web tab always owns reload, even before its view is re-attached.
         webView?.reload() ?: run {
             loading = true
             progress = 0
             contentVisible = false
         }
+    }
+
+    /** Append one DevTools console line, keeping the tab bounded. */
+    internal fun appendDevToolsLog(entry: DevToolsLog) {
+        if (devToolsLogs.size >= DEVTOOLS_MAX_LOGS) devToolsLogs.removeAt(0)
+        devToolsLogs += entry
+    }
+
+    override fun clearDevToolsLogs() {
+        devToolsLogs.clear()
+    }
+
+    /** Run a script in the current page and echo its result to the console. */
+    override fun evaluateJs(script: String) {
+        val code = script.trim()
+        if (code.isEmpty()) return
+        appendDevToolsLog(DevToolsLog("input", code))
+        val view = webView
+        if (view == null) {
+            appendDevToolsLog(DevToolsLog("result", "page is closed"))
+            return
+        }
+        view.evaluateJavascript(code) { result ->
+            appendDevToolsLog(DevToolsLog("result", result ?: "undefined"))
+        }
+    }
+
+    override fun refreshPage(): Boolean {
+        reload()
         return true
     }
 
-    override fun close() {
-        if (closing) return
-        closing = true
+    override fun reset() {
+        host = DetachedRendererContext
         pendingUnload?.cancel()
         pendingUnload = null
         hitTarget = null
@@ -314,6 +371,13 @@ class WebRendererSession(
         view.stopLoading()
         view.loadUrl("about:blank")
         view.destroy()
+    }
+
+    override fun close() {
+        if (closing) return
+        closing = true
+        devToolsAlive = false
+        reset()
     }
 
     /** Close the long-press dialog; the page itself keeps running. */
@@ -333,7 +397,7 @@ class WebRendererSession(
             RendererMenuItem(
                 title = context.getString(R.string.refresh),
                 icon = Icons.Default.Refresh,
-            ) { refresh() },
+            ) { reload() },
         )
         host.bookmarkMenuItem(context)?.let(::add)
     }
@@ -458,6 +522,18 @@ class WebRendererSession(
                 }
             }
             webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(message: ConsoleMessage?): Boolean {
+                    message ?: return false
+                    appendDevToolsLog(
+                        DevToolsLog(
+                            level = message.messageLevel().name.lowercase(),
+                            message = message.message(),
+                            source = message.sourceId(),
+                            line = message.lineNumber(),
+                        ),
+                    )
+                    return true
+                }
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                     this@WebRendererSession.progress = newProgress
                     if (newProgress >= 100) loading = false
@@ -695,6 +771,17 @@ class WebRendererSession(
         )
 }
 
+/** View half of a web session; the session holds state and the WebView. */
+internal class WebSessionView(
+    private val session: WebRendererSession,
+) : SessionView {
+    @Composable
+    override fun Content(host: RendererContext, darkTheme: Boolean, modifier: Modifier) {
+        session.host = host
+        WebContent(session, modifier)
+    }
+}
+
 class WebRendererFactory : RendererFactory {
     override val id: String = "web"
 
@@ -714,10 +801,10 @@ class WebRendererFactory : RendererFactory {
 
     override suspend fun create(
         target: RenderTarget,
-        host: RenderHost,
-    ): Result<RendererSession> = runCatching {
+        host: RendererContext,
+    ): Result<RendererBase<*>> = runCatching {
         val file = target.node as? VFile ?: error("web renderer requires a file")
-        WebRendererSession(document = HtmlDocument(file), host = host)
+        WebSessionRenderer(HtmlDocument(file))
     }
 }
 
@@ -831,7 +918,7 @@ fun WebContent(
 @Composable
 private fun WebHitDialog(
     target: WebHitTarget,
-    host: RenderHost,
+    host: RendererContext,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current

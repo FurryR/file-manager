@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">File</string>
     <string name="permission_denied">権限がありません</string>
+    <string name="open_failed">開けません</string>
     <string name="service_not_started">「%1$s」のサービスが停止しています。</string>
     <string name="service_not_started_hint">アプリを起動すれば、位置にアクセスできます。</string>
     <string name="launch_service">起動</string>
@@ -23,9 +24,11 @@
     <string name="nav_settings">設定</string>
     <string name="settings">設定</string>
     <string name="settings_other">その他</string>
+    <string name="settings_debug">デバッグ</string>
+    <string name="settings_debug_desc">テスト用の例外を発生させる</string>
     <string name="language">言語</string>
     <string name="language_desc">アプリの言語を選択</string>
-    <string name="language_system">システムに従う</string>
+    <string name="language_system">デフォルト</string>
     <string name="language_english">English</string>
     <string name="language_chinese">简体中文</string>
     <string name="language_chinese_traditional">繁體中文</string>
@@ -50,6 +53,9 @@
     <string name="open_source_licenses">オープンソースライセンス</string>
     <string name="open_source_licenses_desc">このアプリと依存関係のライセンス</string>
     <string name="licenses_title">オープンソースライセンス</string>
+    <string name="licenses_group_android">Android / JVM</string>
+    <string name="licenses_group_rust">Rust</string>
+    <string name="licenses_group_native">ネイティブ</string>
     <string name="about">このアプリについて</string>
     <string name="about_desc">アプリ情報と法的通知</string>
     <string name="about_description">ローカル、ネットワーク、コンテナ、ターミナルに対応したファイルマネージャーです。</string>
@@ -130,7 +136,7 @@
     <string name="drawer_group_network">ネットワーク</string>
     <string name="drawer_group_container">コンテナ</string>
     <string name="drawer_group_tools">ツール</string>
-    <string name="drawer_new_container">新しいコンテナ</string>
+    <string name="drawer_new_container">コンテナを作成</string>
     <string name="drawer_new_terminal">新しいターミナル</string>
     <string name="drawer_sort">並べ替え</string>
     <string name="drawer_network_placeholder">SSH / FTP / SFTP (TODO)</string>
@@ -189,6 +195,7 @@
     <string name="terminal_drawer_title">ターミナル</string>
     <string name="terminal_empty">利用可能なターミナルはありません</string>
     <string name="terminal_retry">再試行</string>
+    <string name="retry">再試行</string>
     <string name="devtools_console">コンソール</string>
     <string name="devtools_clear">クリア</string>
     <string name="devtools_reload">再読み込み</string>
@@ -199,8 +206,13 @@
     <string name="terminal_drop_hint">ここにドロップしてパスを挿入</string>
     <string name="terminal_no_shell">このターミナルにはシェルがありません</string>
     <string name="terminal_failed">ターミナルの起動に失敗しました</string>
+    <string name="terminal_connection_lost_title">エラー</string>
+    <string name="terminal_connection_lost">リモートとの接続が切断されました。</string>
+    <string name="terminal_exited_abnormally">ターミナルが異常終了しました。</string>
+    <string name="terminal_close">ターミナルを閉じる</string>
     <string name="terminal_drop_failed">パスを挿入できません</string>
     <string name="terminal_drop_wrong_connection">この SSH 接続の項目のみ挿入できます</string>
+    <string name="terminal_drop_wrong_location">このターミナルの場所にある項目のみ挿入できます</string>
     <string name="terminal_drop_invalid_path">このパスはターミナルに挿入できません</string>
     <string name="terminal_drop_unreachable">このパスはコンテナ \'%1$s\' 内から到達できません</string>
     <string name="wizard_pull_title">Docker Hub から Linux rootfs を取得</string>
@@ -383,4 +395,61 @@
     <string name="web_copy_link_text">リンクテキストをコピー</string>
     <string name="web_copy_url">URL をコピー</string>
     <string name="web_share_url">URL を共有</string>
+
+    <!-- 汎用ローダー: 各組み込みオープナーが自分のアイコンと名前を説明する -->
+    <string name="open_with_title">開く方法…</string>
+    <string name="open_with_archive">アーカイブを閲覧</string>
+    <string name="open_with_browser">ウェブを閲覧</string>
+    <string name="open_with_editor">テキスト編集</string>
+    <string name="open_with_system">システム</string>
+    <string name="open_with_search">開く方法を検索</string>
+
+    <!-- Termux のテキスト選択メニュー（terminal-view ライブラリ文字列を上書き） -->
+    <string name="copy_text">コピー</string>
+    <string name="paste_text">貼り付け</string>
+    <string name="select_all_text">すべて選択</string>
+    <string name="web_search_text">ウェブ検索</string>
+    <string name="share_text">共有</string>
+    <string name="terminal_selection_open_link">リンクを開く</string>
+    <string name="terminal_selection_select_url">URL を選択</string>
+
+    <!-- Crash screen -->
+    <string name="crash_title">アプリがクラッシュしました</string>
+    <string name="crash_subtitle">アプリが予期せず停止しました。以下のレポートをコピーまたはエクスポートすると、問題の修正に役立ちます。</string>
+    <string name="crash_export">エクスポート</string>
+    <string name="crash_copy">コピー</string>
+    <string name="crash_restart">再起動</string>
+    <string name="crash_close">閉じる</string>
+    <string name="crash_share">共有</string>
+    <string name="crash_copied">クラッシュレポートをコピーしました</string>
+    <string name="crash_exported">クラッシュレポートを保存しました</string>
+    <string name="crash_export_failed">クラッシュレポートを保存できませんでした</string>
+    <string name="crash_share_failed">クラッシュレポートを共有できませんでした</string>
+    <string name="crash_report_missing">クラッシュレポートは利用できません。</string>
+
+    <!-- File picker -->
+    <string name="picker_pick_file">ファイルを選択</string>
+    <string name="picker_create_file">ファイルを保存</string>
+    <string name="picker_pick_folder">フォルダーを選択</string>
+    <string name="picker_select">選択</string>
+    <string name="picker_select_count">選択 (%1$d)</string>
+    <string name="picker_use_folder">このフォルダーを使用</string>
+    <string name="picker_save">保存</string>
+    <string name="picker_file_name">ファイル名</string>
+    <string name="picker_roots">場所</string>
+    <string name="picker_local">ローカルストレージ</string>
+    <string name="picker_root">内部ストレージ</string>
+    <string name="picker_containers">コンテナ</string>
+    <string name="picker_saf">SAF の場所</string>
+    <string name="picker_ftp">FTP</string>
+    <string name="picker_sftp">SFTP</string>
+    <string name="picker_ssh">SSH</string>
+    <string name="picker_alist">AList</string>
+    <string name="picker_empty">このフォルダーは空です</string>
+    <string name="picker_error">このフォルダーを開けません</string>
+    <string name="picker_retry">再試行</string>
+    <string name="picker_up">上へ</string>
+    <string name="picker_cancel">キャンセル</string>
+    <string name="picker_invalid_name">無効なファイル名</string>
+    <string name="picker_name_exists">同じ名前のファイルが既に存在します</string>
 </resources>

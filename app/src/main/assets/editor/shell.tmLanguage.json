@@ -1,5 +1,5 @@
 {
-  "name": "File Manager shell",
+  "name": "File shell",
   "scopeName": "source.fm-shell",
   "patterns": [
     {

@@ -1,24 +1,11 @@
 package io.furryr.file.shell
 
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import io.furryr.file.model.FileTab
 import io.furryr.file.render.RendererContext
-
-/**
- * One leave confirmation for every renderer. The editor supplies [onSave];
- * a WebView beforeunload prompt only supplies [onLeave].
- */
-internal data class LeavePrompt(
-    val ownerTabId: String,
-    val ownerPageId: String,
-    val message: String? = null,
-    val canSave: Boolean = false,
-    val onSave: (suspend () -> Result<Unit>)? = null,
-    val onLeave: () -> Unit,
-    val onCancel: () -> Unit = {},
-)
 
 /**
  * Tabs belong to the shell's process, not to one activity instance: changing
@@ -40,3 +27,14 @@ internal object FileTabs {
 internal interface ShellRendererContext : RendererContext {
     var boundPageId: String?
 }
+
+/**
+ * One entry in the shell modal stack. [content] is composed only while this
+ * entry is on top; [cancel] settles the entry when its owner disappears.
+ */
+internal class ShellModal(
+    val tabId: String? = null,
+    val pageId: String? = null,
+    val content: @Composable () -> Unit,
+    val cancel: (Any?) -> Unit = {},
+)

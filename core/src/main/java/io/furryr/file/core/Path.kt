@@ -19,12 +19,12 @@ import java.util.Locale
  * A literal `!` in a file name is written `!!`, so every address round-trips.
  *
  * Supported formats:
- * - [container://alpine/home/test]  → scheme=container, host=alpine, segments=[home, test]
+ * - [example://box/home/test]  → scheme=example, host=box, segments=[home, test]
  * - [ftp://user:pass@192.168.1.1:8080/path/to/file] → scheme=ftp, userInfo=user:pass,
  *   host=192.168.1.1, port=8080, segments=[path, to, file]
  * - [/storage/emulated/0]           → scheme=null, segments=[storage, emulated, 0]
  * - [/]                              → scheme=null, segments=[]
- * - [container:///]                  → scheme=container, host=null, segments=[], isRoot
+ * - [example:///]                  → scheme=example, host=null, segments=[], isRoot
  *
  * Internal representation uses [List]`<String>` segments.
  * Empty list = root (of the scheme/host context).
@@ -37,7 +37,7 @@ class Path private constructor(
     private val segments: List<String>,
     /** View levels entered inside the file, outermost first. Provider-blind. */
     val views: List<List<String>> = emptyList(),
-) {
+) : java.io.Serializable {
     // ── Companion & factory ──────────────────────────────────────────────
 
     companion object {
@@ -60,9 +60,9 @@ class Path private constructor(
          *
          * Examples:
          * ```
-         * Path.parse("container://alpine/home/test")  // scheme=container, host=alpine
+         * Path.parse("example://box/home/test")  // scheme=example, host=box
          * Path.parse("/storage/emulated/0")            // bare path
-         * Path.parse("container:///")                  // scheme root, host=null
+         * Path.parse("example:///")                  // scheme root, host=null
          * Path.parse("a.zip!")                         // view root inside a.zip
          * ```
          */
@@ -192,7 +192,7 @@ class Path private constructor(
     /** Root path for this scheme/host (drops all segments and views). */
     val root: Path get() = Path(scheme, userInfo, host, port, emptyList())
 
-    /** Last path segment, or host if no segments (for container:// URIs). */
+    /** Last path segment, or host if no segments (for example:// URIs). */
     val name: String? get() = segments.lastOrNull() ?: host
 
     /** True if this path has no scheme (bare filesystem path). */
@@ -223,7 +223,7 @@ class Path private constructor(
      * Returns the parent directory path, or null if already at root.
      *
      * ```
-     * Path.parse("container://alpine/home/test").parent()  // => container://alpine/home
+     * Path.parse("example://box/home/test").parent()  // => example://box/home
      * Path.parse("/a/b").parent()                           // => /a
      * Path.parse("/a.zip!/x").parent()                      // => /a.zip!
      * Path.parse("/a.zip!").parent()                        // => /a.zip
@@ -272,7 +272,7 @@ class Path private constructor(
      *
      * ```
      * Path.parse("/a/b").navigate("../c/d")  // => /a/c/d
-     * Path.parse("/a").navigate("container://alpine/")  // => container://alpine/
+     * Path.parse("/a").navigate("example://box/")  // => example://box/
      * ```
      */
     fun navigate(path: String): Path {
@@ -322,8 +322,8 @@ class Path private constructor(
      * Full URI with scheme, authority, and path.
      *
      * - Bare path: `"/storage/emulated/0"`
-     * - URI: `"container://alpine/home/test"`
-     * - Scheme root: `"container:///"`
+     * - URI: `"example://box/home/test"`
+     * - Scheme root: `"example:///"`
      */
     fun toFullUri(): String {
         if (scheme == null) return toLocalPath()
@@ -342,9 +342,9 @@ class Path private constructor(
      * the first segment. Names are raw (a filename's `!` is not escaped here).
      *
      * ```
-     * Path.parse("container://alpine/home/test").toInnerPath()  // => "/alpine/home/test"
+     * Path.parse("example://box/home/test").toInnerPath()  // => "/box/home/test"
      * Path.parse("ssh://user@host:2222/home").toInnerPath()     // => "/user@host:2222/home"
-     * Path.parse("container:///").toInnerPath()                 // => "/"
+     * Path.parse("example:///").toInnerPath()                 // => "/"
      * ```
      */
     fun toInnerPath(): String {

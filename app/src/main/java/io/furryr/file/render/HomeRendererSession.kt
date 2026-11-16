@@ -1,18 +1,28 @@
 package io.furryr.file.render
 
 import android.content.Context
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import io.furryr.file.R
+import io.furryr.file.home.Bookmarks
 import io.furryr.file.home.HomeEntry
+import io.furryr.file.home.HomeStore
 import io.furryr.file.isHomePath
 import io.furryr.file.ui.screens.HomeScreen
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
- * Everything the Home screen draws. The shell still owns the HomeStore, but
- * the session owns the projection just like every other renderer.
+ * Everything the Home screen draws. The session reads [HomeStore] directly;
+ * the shell only supplies navigation actions.
  */
 data class HomeRendererState(
     val recent: List<HomeEntry> = emptyList(),
@@ -28,14 +38,12 @@ object HomePageState : PageState()
  * the tab owns Back/Forward like it does for a page, and [HomeScreen] only
  * draws the projected state.
  */
-class HomeRendererSession(
+internal class HomeRendererSession(
     initialState: HomePageState? = null,
     title: String = "",
 ) : PageSession<HomePageState>(initialState) {
-    private var host: RendererContext = DetachedRendererContext
-    override val state: HomePageState = seedState ?: HomePageState
-    override val capabilities = RenderCapabilities()
-
+    private var host: RendererContext? = null
+    internal val state: HomePageState = seedState ?: HomePageState
     override val isLocationRenderer: Boolean get() = true
 
     private var homeTitle: String = title
@@ -82,16 +90,85 @@ class HomeRendererSession(
         this.host = host
     }
 
+    private var openJob: Job? = null
+    var opening by mutableStateOf(false)
+        private set
+
+    /**
+     * Resolve the row to a node, hand it to the opener and open the renderer
+     * it returns. The caller never decides between a renderer, a chooser or a
+     * platform hand-off.
+     */
+    fun open(entry: HomeEntry) {
+        val currentHost = host ?: return
+        openJob?.cancel()
+        opening = true
+        openJob = currentHost.scope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    currentHost.vfs.node(NodeAddress.parse(entry.location))
+                }
+                val node = result.getOrNull()
+                if (node == null) {
+                    currentHost.open(
+                        ErrorRenderer(
+                            entry.location,
+                            result.exceptionOrNull()
+                                ?: IllegalStateException("Cannot open ${entry.location}"),
+                        ),
+                    )
+                    return@launch
+                }
+                currentHost.open(currentHost.opener.route(node))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                currentHost.reportError(error)
+            } finally {
+                opening = false
+                openJob = null
+            }
+        }
+    }
+
+    fun cancelOpening() {
+        openJob?.cancel()
+        openJob = null
+        opening = false
+    }
+
+    /** Lists come straight from [HomeStore]; the shell is not a data source. */
+    fun view(): HomeRendererState {
+        HomeStore.revision()
+        return HomeRendererState(
+            recent = HomeStore.recent(),
+            bookmarks = HomeStore.bookmarks(),
+            opening = opening,
+        )
+    }
+
     override fun pathBar(context: Context): RendererPath =
-        HomeRenderer.pathBar(context).also { homeTitle = it.title }
+        RendererPath(
+            title = context.getString(R.string.home_title),
+            editText = "",
+        ).also { homeTitle = it.title }
 
-    override fun menuItems(context: Context): List<RendererMenuItem> =
-        HomeRenderer.menuItems(context, ::toggleFilter)
+    override fun menuItems(context: Context): List<RendererMenuItem> = listOf(
+        RendererMenuItem(
+            title = context.getString(R.string.filter_title),
+            icon = Icons.Default.FilterAlt,
+            onClick = ::toggleFilter,
+        ),
+    )
 
-    override fun close() = Unit
+    override fun close() {
+        openJob?.cancel()
+        openJob = null
+    }
 
     override fun reset() {
-        host = DetachedRendererContext
+        host = null
+        cancelOpening()
     }
 }
 
@@ -102,18 +179,18 @@ internal class HomeSessionView(
     @Composable
     override fun Content(host: RendererContext, darkTheme: Boolean, modifier: Modifier) {
         session.useHost(host)
-        val state = host.homeView() ?: return
+        val state = session.view()
         HomeScreen(
             recent = state.recent,
             bookmarks = state.bookmarks,
-            onOpen = host::openHome,
-            onToggleBookmark = host::toggleBookmark,
-            onRemoveRecent = { entry -> host.removeRecent(entry.key) },
-            onRemoveBookmark = { entry -> host.removeBookmark(entry.key) },
-            onClearRecent = host::clearRecent,
-            onClearBookmarks = host::clearBookmarks,
+            onOpen = session::open,
+            onToggleBookmark = { entry -> Bookmarks.toggle(entry) },
+            onRemoveRecent = { entry -> Bookmarks.removeRecent(entry) },
+            onRemoveBookmark = { entry -> Bookmarks.remove(entry) },
+            onClearRecent = { Bookmarks.clearRecent() },
+            onClearBookmarks = { Bookmarks.clearBookmarks() },
             opening = state.opening,
-            onCancelOpening = host::cancelOpening,
+            onCancelOpening = session::cancelOpening,
             filter = session.filterText,
             modifier = modifier,
         )

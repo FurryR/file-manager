@@ -20,6 +20,10 @@ import kotlinx.coroutines.launch
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.hub.Hub
 import io.furryr.file.container.ContainerManager
+import io.furryr.file.crash.CrashActivity
+import io.furryr.file.crash.CrashReporter
+import io.furryr.file.open.IncomingOpen
+import io.furryr.file.open.OpenRequest
 import io.furryr.file.pulse.PulseManager
 import io.furryr.file.ui.theme.FileManagerTheme
 import io.furryr.file.ui.util.OperationNotification
@@ -35,6 +39,10 @@ class MainActivity : ComponentActivity() {
         private set
 
     internal var containerErrorRequest by mutableStateOf<String?>(null)
+        private set
+
+    /** A file or link another app asked this one to show. */
+    internal var openRequest by mutableStateOf<OpenRequest?>(null)
         private set
 
     private var appliedLanguage = AppLocale.SYSTEM
@@ -55,24 +63,23 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashReporter.pendingReport(this)?.let { report ->
+            startActivity(CrashActivity.intent(this, report))
+            finish()
+            return
+        }
         OperationNotification.createChannel(this)
         ContainerNotification.createChannel(this)
-        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            Log.e("FileManager", "Uncaught exception in thread ${thread.name}", throwable)
-            defaultHandler?.uncaughtException(thread, throwable)
-        }
+        handleIntent(intent)
         if (intent?.getBooleanExtra("show_operation", false) == true) {
             pendingReopenOperation = true
         }
-        containerErrorRequest = intent?.getStringExtra("container_error")
-        if (intent?.action == ACTION_OPEN_TERMINAL) terminalOpenRequest++
 
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         // chrome://inspect over adb; the in-app terminal tab uses the console
         // bridge instead, this keeps the full Chrome DevTools available.
         WebView.setWebContentsDebuggingEnabled(true)
-        installFileProviders(this)
+        val world = AppRuntime.appWorld(this)
 
         // Bind the resident PulseAudio listener as early as possible. It binds its
         // socket immediately, so a container launch only reuses an existing
@@ -90,7 +97,7 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 Log.w("FileManager", "Daemon pre-start failed (will retry on first operation)", e)
             }
-            runCatching { Hub.start(applicationContext) }
+            runCatching { Hub.start(applicationContext, world.files) }
                 .onFailure { Log.w("FileManager", "hub start failed", it) }
         }
 
@@ -100,9 +107,11 @@ class MainActivity : ComponentActivity() {
             FileManagerTheme(darkTheme = darkTheme) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     FileManagerApp(
+                        world = world,
                         darkTheme = darkTheme,
                         terminalOpenRequest = terminalOpenRequest,
                         containerErrorRequest = containerErrorRequest,
+                        openRequest = openRequest,
                         onToggleTheme = {
                             darkTheme = !darkTheme
                             prefs.edit().putBoolean("dark_theme", darkTheme).apply()
@@ -116,10 +125,30 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.action == ACTION_OPEN_TERMINAL) terminalOpenRequest++
+        handleIntent(intent)
         if (intent.getBooleanExtra("show_operation", false)) {
             pendingReopenOperation = true
         }
-        containerErrorRequest = intent.getStringExtra("container_error")
     }
+
+    /**
+     * Fold one delivered intent into the shell state.
+     *
+     * The open payload is cleared once read, so an activity recreate shows the
+     * pages the shell already restored instead of opening the same file twice;
+     * a redelivered intent (after process death) still opens it again.
+     */
+    private fun handleIntent(intent: android.content.Intent?) {
+        if (intent == null) return
+        containerErrorRequest = intent.getStringExtra("container_error")
+        if (intent.action == ACTION_OPEN_TERMINAL) terminalOpenRequest++
+        val addresses = IncomingOpen.addresses(intent)
+        if (addresses.isEmpty()) return
+        openRequest = OpenRequest(++openRequestId, addresses)
+        intent.data = null
+        intent.clipData = null
+        intent.removeExtra(android.content.Intent.EXTRA_STREAM)
+    }
+
+    private var openRequestId = 0
 }

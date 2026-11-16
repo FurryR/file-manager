@@ -10,6 +10,11 @@ import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
 import io.furryr.file.daemon.process.CommandSpec
+import io.furryr.file.provider.terminal.DaemonTerminalProcess
+import io.furryr.file.provider.terminal.ExecProvider
+import io.furryr.file.provider.terminal.TerminalProcess
+import io.furryr.file.pulse.PulseManager
+import io.furryr.file.wayland.WaylandManager
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
 import kotlinx.coroutines.Dispatchers
@@ -25,9 +30,9 @@ import java.io.File
  * `container://<name>/<path>` maps to `<path>` inside that container's daemon;
  * `container:///` lists the app-local set of containers.
  */
-object ContainerProvider : FileProvider {
-    private lateinit var appContext: Context
-
+class ContainerProvider(
+    private val appContext: Context,
+) : FileProvider, ExecProvider, HostPathProvider {
     override val schemes: Set<String> get() = setOf(ContainerUris.SCHEME)
     override val label: String get() = "Containers"
     override val features: Set<ProviderFeature> get() = setOf(
@@ -35,11 +40,6 @@ object ContainerProvider : FileProvider {
         ProviderFeature.CREATE_DIR, ProviderFeature.DELETE, ProviderFeature.RENAME,
         ProviderFeature.STREAM_COPY, ProviderFeature.OPEN,
     )
-
-    fun init(context: Context) {
-        appContext = context.applicationContext
-    }
-
 
     /** User-visible locations: one per container, with edit/delete actions. */
     fun locations(context: Context): List<LocationEntry> =
@@ -83,16 +83,6 @@ object ContainerProvider : FileProvider {
     override suspend fun connect(): Result<Unit> = Result.success(Unit)
 
     override suspend fun disconnect() = DaemonManager.closeNamedConnections()
-
-    override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
-        val segments = containerSegmentsOrEmpty(path)
-        if (segments.isEmpty()) return DirectoryCapabilities()
-        val directory = stat(path).getOrNull() ?: return DirectoryCapabilities()
-        return DirectoryCapabilities(
-            canCreate = directory.canCreateChildren,
-            canOpenTerminal = directory.canEnter,
-        )
-    }
 
     override suspend fun list(path: String): Result<List<FileEntry>> = runCatching {
         val segments = containerSegmentsOrEmpty(path)
@@ -174,6 +164,64 @@ object ContainerProvider : FileProvider {
     }
 
     // ── Internal ───────────────────────────────────────────────────
+
+    override suspend fun terminal(cwd: VFolder, rows: Int, cols: Int): Result<TerminalProcess> =
+        runCatching {
+            val segments = containerSegments(innerPath(cwd.path))
+            val name = segments.first()
+            DaemonManager.warmNamed(name).getOrThrow()
+            val env = PulseManager.environment() + WaylandManager.environment(appContext) + mapOf(
+                "PATH" to ContainerDaemonLauncher.DEFAULT_PATH,
+            )
+            val channel = exec(name).spawn(
+                CommandSpec(
+                    command = "",
+                    args = listOf("-c", "exec /bin/login -p -f root"),
+                    env = env,
+                    cwd = "~",
+                    user = "root",
+                    rows = rows,
+                    cols = cols,
+                ),
+            ).getOrThrow()
+            DaemonTerminalProcess(channel, containerName = name)
+        }
+
+    /**
+     * The shell's own container sees its entries directly. Host entries and
+     * entries from another container are projected through the target's bind
+     * mounts, so a path under a mounted host location becomes its container
+     * path. A host location the target does not mount is rejected.
+     */
+    override fun terminalPath(cwd: VFolder, node: VNode): String? {
+        val target = runCatching { containerSegments(innerPath(cwd.path)).first() }.getOrNull()
+            ?: return null
+        val source = node.provider ?: return null
+        val followFinal = node is VFolder
+        if (source === this) {
+            val segments = runCatching { containerSegments(source.innerPath(node.path)) }.getOrNull()
+                ?: return null
+            val guest = daemonPath(segments)
+            if (segments.first() == target) return guest
+            val host = hostPath(source.innerPath(node.path), followFinal)
+            val viaBind = host?.let { ContainerPaths.containerGuestPath(appContext, target, it) }
+            if (viaBind != null) return viaBind
+            // The source rootfs stays reachable through the target's /data bind
+            // even when the target cannot see the source's private mount.
+            val rootfs = ContainerPaths.containerRootfsHostPath(appContext, segments.first(), guest)
+                ?: return null
+            return ContainerPaths.containerGuestPath(appContext, target, rootfs)
+        }
+        val hostPaths = source as? HostPathProvider ?: return null
+        val host = hostPaths.hostPath(source.innerPath(node.path), followFinal) ?: return null
+        return ContainerPaths.containerGuestPath(appContext, target, host)
+    }
+
+    /** The host pathname of an entry in this container's rootfs or binds. */
+    override fun hostPath(innerPath: String, followFinal: Boolean): String? = runCatching {
+        val segments = containerSegments(innerPath)
+        ContainerPaths.containerHostPath(appContext, segments.first(), daemonPath(segments), followFinal)
+    }.getOrNull()
 
     private fun files(name: String): FileService =
         DaemonManager.fileService(DaemonTarget.Named(name))

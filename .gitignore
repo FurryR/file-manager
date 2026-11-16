@@ -36,5 +36,11 @@ Thumbs.db
 # xkeyboard-config data installed by scripts/fetch-xkbdata.sh
 /app/src/main/assets/xkb/
 
+# libsepol static archive + headers installed by native/build-libsepol.sh
+/native/sepolicy/prefix/
+
+# Native download/build cache (scripts/build-native.sh, native/build-*.sh)
+/cache/
+
 # Local environment
 .env

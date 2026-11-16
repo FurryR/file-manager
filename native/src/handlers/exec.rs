@@ -221,6 +221,11 @@ pub(super) async fn run_exec_stream(
             crate::cgroup::attach_self();
             // Narrow the cgroup view to this container (see `isolate_view`).
             crate::cgroup::isolate_view();
+            // Enter the container domain for this exec; fail the spawn rather
+            // than run the command outside the domain.
+            if !unsafe { crate::sepolicy::apply_exec_context() } {
+                return Err(io::Error::from_raw_os_error(libc::EACCES));
+            }
             Ok(())
         } else {
             Err(io::Error::from_raw_os_error(libc::ESRCH))
@@ -296,6 +301,11 @@ pub(super) async fn run_exec(
             crate::cgroup::attach_self();
             // Narrow the cgroup view to this container (see `isolate_view`).
             crate::cgroup::isolate_view();
+            // Enter the container domain for this exec; fail the spawn rather
+            // than run the command outside the domain.
+            if !unsafe { crate::sepolicy::apply_exec_context() } {
+                return Err(io::Error::from_raw_os_error(libc::EACCES));
+            }
             Ok(())
         } else {
             Err(io::Error::from_raw_os_error(libc::ESRCH))

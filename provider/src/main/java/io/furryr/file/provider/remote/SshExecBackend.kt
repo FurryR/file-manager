@@ -235,7 +235,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         try {
             while (!channel.isClosed) {
                 interrupted()
-                if (System.nanoTime() - activity.get() > 120_000_000_000L) throw IOException("SSH operation timed out")
+                if (System.nanoTime() - activity.get() > 120_000_000_000L) throw SshException(SshError.TIMEOUT)
                 Thread.sleep(5)
             }
             val exit = channel.exitStatus
@@ -244,7 +244,10 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
                 var safe = details
                 listOf(location.password, location.passphrase, location.privateKey).filter { it.isNotEmpty() }
                     .forEach { safe = safe.replace(it, "[redacted]") }
-                throw IOException("SSH command failed ($exit)${if (safe.isBlank()) "" else ": $safe"}")
+                throw SshException(
+                    SshError.COMMAND,
+                    detail = exit.toString() + if (safe.isBlank()) "" else ": ${safe.take(512)}",
+                )
             }
             output.flush()
         } finally { channel.disconnect() }
@@ -295,7 +298,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
             require(offset >= 0 && len >= 0)
             if (len == 0 || offset >= size) return ByteArray(0)
             if (offset != position || stdout == null) openAt(offset)
-            val input = stdout ?: throw IOException("SSH download stream is unavailable")
+            val input = stdout ?: throw SshException(SshError.UNAVAILABLE)
             if (!headerRead) readHeader(input)
             if (position >= size) {
                 finish()
@@ -307,7 +310,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
             while (read < wanted) {
                 interrupted()
                 val count = input.read(buffer, read, wanted - read)
-                if (count < 0) throw IOException("Incomplete SSH file response")
+                if (count < 0) throw SshException(SshError.TRANSFER)
                 read += count
             }
             position += read
@@ -341,7 +344,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
             channel = exec
             stdout = input ?: run {
                 runCatching { exec.disconnect() }
-                throw IOException("SSH download stream is unavailable")
+                throw SshException(SshError.UNAVAILABLE)
             }
         }
 
@@ -358,22 +361,22 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
             var read = 0
             while (read < head.size) {
                 val count = input.read(head, read, head.size - read)
-                if (count < 0) throw IOException("Incomplete SSH file response")
+                if (count < 0) throw SshException(SshError.TRANSFER)
                 read += count
             }
             if (!head.contentEquals(marker)) {
-                throw IOException("Unexpected SSH stdout before file data; remove output from non-interactive shell startup")
+                throw SshException(SshError.TRANSFER, detail = "stdout")
             }
             val line = StringBuilder()
             while (true) {
                 val next = input.read()
-                if (next < 0) throw IOException("Incomplete SSH file response")
+                if (next < 0) throw SshException(SshError.TRANSFER)
                 if (next == '\n'.code) break
-                if (next !in '0'.code..'9'.code || line.length >= 32) throw IOException("Invalid SSH file length")
+                if (next !in '0'.code..'9'.code || line.length >= 32) throw SshException(SshError.RESPONSE)
                 line.append(next.toChar())
             }
-            val declared = line.toString().toLongOrNull() ?: throw IOException("Invalid SSH file length")
-            if (declared != size) throw IOException("SSH file changed during transfer")
+            val declared = line.toString().toLongOrNull() ?: throw SshException(SshError.RESPONSE)
+            if (declared != size) throw SshException(SshError.FILE_CHANGED)
         }
 
         private fun finish() {
@@ -383,16 +386,16 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
             try {
                 val deadline = System.nanoTime() + 5_000_000_000L
                 while (true) {
-                    if ((stdout?.available() ?: 0) > 0) throw IOException("SSH file changed during transfer")
+                    if ((stdout?.available() ?: 0) > 0) throw SshException(SshError.FILE_CHANGED)
                     if (exec.isClosed) break
                     interrupted()
                     if (System.nanoTime() > deadline) break
                     Thread.sleep(5)
                 }
-                if (exec.exitStatus != 0) throw IOException("SSH file transfer failed (${exec.exitStatus})")
+                if (exec.exitStatus != 0) throw SshException(SshError.TRANSFER, detail = exec.exitStatus.toString())
             } catch (interrupted: InterruptedException) {
                 Thread.currentThread().interrupt()
-                throw IOException("Operation cancelled", interrupted)
+                throw SshException(SshError.CANCELLED, cause = interrupted)
             }
         }
 

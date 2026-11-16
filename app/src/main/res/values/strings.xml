@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">File</string>
     <string name="permission_denied">Permission denied</string>
+    <string name="open_failed">Couldn\'t open</string>
     <string name="service_not_started">\"%1$s\"\'s service isn\'t running.</string>
     <string name="service_not_started_hint">Start the app to access this location.</string>
     <string name="launch_service">Launch</string>
@@ -23,6 +24,8 @@
     <string name="nav_settings">Settings</string>
     <string name="settings">Settings</string>
     <string name="settings_other">Other</string>
+    <string name="settings_debug">Debug</string>
+    <string name="settings_debug_desc">Trigger a test exception</string>
     <string name="language">Language</string>
     <string name="language_desc">Choose the app language</string>
     <string name="language_system">System default</string>
@@ -50,6 +53,9 @@
     <string name="open_source_licenses">Open source licenses</string>
     <string name="open_source_licenses_desc">Licenses for this app and its dependencies</string>
     <string name="licenses_title">Open source licenses</string>
+    <string name="licenses_group_android">Android / JVM</string>
+    <string name="licenses_group_rust">Rust</string>
+    <string name="licenses_group_native">Native</string>
     <string name="about">About</string>
     <string name="about_desc">App information and legal notices</string>
     <string name="about_description">A file manager with local, network, container, and terminal support.</string>
@@ -189,6 +195,7 @@
     <string name="terminal_drawer_title">Terminals</string>
     <string name="terminal_empty">No terminals available</string>
     <string name="terminal_retry">Retry</string>
+    <string name="retry">Retry</string>
     <string name="devtools_console">Console</string>
     <string name="devtools_clear">Clear</string>
     <string name="devtools_reload">Reload</string>
@@ -199,8 +206,13 @@
     <string name="terminal_drop_hint">Drop here to insert the path</string>
     <string name="terminal_no_shell">This terminal has no shell</string>
     <string name="terminal_failed">Terminal failed</string>
+    <string name="terminal_connection_lost_title">Error</string>
+    <string name="terminal_connection_lost">The connection to the remote end was lost.</string>
+    <string name="terminal_exited_abnormally">The terminal exited unexpectedly.</string>
+    <string name="terminal_close">Close terminal</string>
     <string name="terminal_drop_failed">Cannot insert path</string>
     <string name="terminal_drop_wrong_connection">Only entries from this SSH connection can be inserted</string>
+    <string name="terminal_drop_wrong_location">Only entries from this terminal\'s location can be inserted</string>
     <string name="terminal_drop_invalid_path">The path cannot be inserted into a terminal</string>
     <string name="terminal_drop_unreachable">The path is not reachable in container \'%1$s\'</string>
     <string name="wizard_pull_title">Pull a Linux rootfs from Docker Hub</string>
@@ -384,4 +396,61 @@
     <string name="web_copy_link_text">Copy link text</string>
     <string name="web_copy_url">Copy URL</string>
     <string name="web_share_url">Share URL</string>
+
+    <!-- Generic loader: every embedded open-with entry describes itself -->
+    <string name="open_with_title">Open with…</string>
+    <string name="open_with_archive">Browse archive</string>
+    <string name="open_with_browser">Browse web</string>
+    <string name="open_with_editor">Text editor</string>
+    <string name="open_with_system">System</string>
+    <string name="open_with_search">Search open with</string>
+
+    <!-- Termux text-selection menu (overrides terminal-view library strings) -->
+    <string name="copy_text">Copy</string>
+    <string name="paste_text">Paste</string>
+    <string name="select_all_text">Select all</string>
+    <string name="web_search_text">Web search</string>
+    <string name="share_text">Share</string>
+    <string name="terminal_selection_open_link">Open link</string>
+    <string name="terminal_selection_select_url">Select URL</string>
+
+    <!-- Crash screen -->
+    <string name="crash_title">App crashed</string>
+    <string name="crash_subtitle">The app stopped unexpectedly. Copy or export the report below to help fix the problem.</string>
+    <string name="crash_export">Export</string>
+    <string name="crash_copy">Copy</string>
+    <string name="crash_restart">Restart app</string>
+    <string name="crash_close">Close</string>
+    <string name="crash_share">Share</string>
+    <string name="crash_copied">Crash report copied</string>
+    <string name="crash_exported">Crash report saved</string>
+    <string name="crash_export_failed">Could not save the crash report</string>
+    <string name="crash_share_failed">Could not share the crash report</string>
+    <string name="crash_report_missing">The crash report is no longer available.</string>
+
+    <!-- File picker -->
+    <string name="picker_pick_file">Select file</string>
+    <string name="picker_create_file">Save file</string>
+    <string name="picker_pick_folder">Select folder</string>
+    <string name="picker_select">Select</string>
+    <string name="picker_select_count">Select (%1$d)</string>
+    <string name="picker_use_folder">Use this folder</string>
+    <string name="picker_save">Save</string>
+    <string name="picker_file_name">File name</string>
+    <string name="picker_roots">Locations</string>
+    <string name="picker_local">Local storage</string>
+    <string name="picker_root">Internal storage</string>
+    <string name="picker_containers">Containers</string>
+    <string name="picker_saf">SAF locations</string>
+    <string name="picker_ftp">FTP</string>
+    <string name="picker_sftp">SFTP</string>
+    <string name="picker_ssh">SSH</string>
+    <string name="picker_alist">AList</string>
+    <string name="picker_empty">This folder is empty</string>
+    <string name="picker_error">Cannot open this folder</string>
+    <string name="picker_retry">Retry</string>
+    <string name="picker_up">Up</string>
+    <string name="picker_cancel">Cancel</string>
+    <string name="picker_invalid_name">Invalid file name</string>
+    <string name="picker_name_exists">A file with this name already exists</string>
 </resources>

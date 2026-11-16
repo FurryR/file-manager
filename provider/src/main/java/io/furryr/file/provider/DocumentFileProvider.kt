@@ -32,11 +32,13 @@ import java.io.FileNotFoundException
  * // document://a1b2c3d4/Download/file.txt
  * ```
  */
-object DocumentFileProvider : FileProvider {
-    private const val SCHEME = "document"
-
-    private lateinit var appContext: Context
-    private lateinit var trees: DocumentTreeSource
+class DocumentFileProvider(
+    private val appContext: Context,
+    private val trees: DocumentTreeSource,
+) : FileProvider {
+    private companion object {
+        const val SCHEME = "document"
+    }
 
     override val schemes: Set<String> get() = setOf(SCHEME)
     override val label: String get() = "Document Provider"
@@ -47,16 +49,6 @@ object DocumentFileProvider : FileProvider {
         ProviderFeature.DELETE, ProviderFeature.RENAME, ProviderFeature.OPEN,
         ProviderFeature.STREAM_COPY,
     )
-
-    fun init(context: Context, trees: DocumentTreeSource) {
-        appContext = context.applicationContext
-        this.trees = trees
-    }
-
-    override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
-        if (path.trim('/').isEmpty()) return DirectoryCapabilities()
-        return super<FileProvider>.directoryCapabilities(path)
-    }
 
     // ── FileProvider implementation ─────────────────────────────────
 
@@ -83,6 +75,7 @@ object DocumentFileProvider : FileProvider {
             ProviderStat(
                 exists = true,
                 isDirectory = docFile.isDirectory,
+                mime = docFile.type?.takeUnless { docFile.isDirectory },
             )
         }
     }
@@ -222,6 +215,6 @@ object DocumentFileProvider : FileProvider {
             ?: throw IllegalStateException("Failed to create destination: $path")
     }
 
-    private const val COPY_BUFFER_SIZE = 256 * 1024
+    private val COPY_BUFFER_SIZE = 256 * 1024
 
 }

@@ -9,7 +9,12 @@ import io.furryr.file.core.source.OpenMode
 import io.furryr.file.core.source.SeekableCacheFileSource
 import io.furryr.file.core.DirectoryCapabilities
 import io.furryr.file.core.FileProvider
+import io.furryr.file.provider.terminal.ExecProvider
+import io.furryr.file.provider.terminal.SshTerminalProcess
+import io.furryr.file.provider.terminal.TerminalProcess
 import io.furryr.file.core.ProviderFeature
+import io.furryr.file.core.VFolder
+import io.furryr.file.core.VNode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -44,7 +49,7 @@ private class RemoteProvider(
     private val cacheDir: File,
     private val kind: RemoteKind,
     private val locations: RemoteLocationSource,
-) : FileProvider {
+) : FileProvider, ExecProvider {
     override val schemes: Set<String> get() = setOf(kind.scheme)
     override val label get() = if (kind == RemoteKind.ALIST) "AList" else "SSH commands"
     override val features = setOf(ProviderFeature.LIST, ProviderFeature.STAT, ProviderFeature.OPEN,
@@ -83,19 +88,8 @@ private class RemoteProvider(
             val space = if (info?.isDirectory == true) runCatching { client.space(remote) }.getOrNull() else null
             ProviderStat(exists = info != null, isDirectory = info?.isDirectory == true,
                 totalBytes = space?.totalBytes ?: info?.size ?: 0,
-                usableBytes = space?.usableBytes ?: 0,
-                canEnter = info?.isDirectory == true)
+                usableBytes = space?.usableBytes ?: 0)
         }
-    }
-    override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
-        if (path == "/") return DirectoryCapabilities()
-        return io {
-            val (location, remote) = resolve(path)
-            DirectoryCapabilities(
-                canCreate = backend(location).canWrite(remote),
-                canOpenTerminal = kind == RemoteKind.SSH,
-            )
-        }.getOrElse { DirectoryCapabilities() }
     }
     override suspend fun createFile(path: String): Result<Unit> = io {
         val (location, remote) = resolve(path); backend(location).createFile(mutablePath(remote))
@@ -195,6 +189,25 @@ private class RemoteProvider(
             emit(CopyProgress(offset, offset, remote, true, isCopy))
         } finally { staged.delete() }
     }.flowOn(Dispatchers.IO)
+
+    override suspend fun terminal(cwd: VFolder, rows: Int, cols: Int): Result<TerminalProcess> =
+        runInterruptible(Dispatchers.IO) {
+            runCatching {
+                require(kind == RemoteKind.SSH) { "AList has no terminal" }
+                val (location, remote) = resolve(innerPath(cwd.path))
+                SshTerminalProcess(SshTerminals.open(location, remote, rows, cols))
+            }
+        }
+
+    /** Only this SSH connection's own entries exist in its shell. */
+    override fun terminalPath(cwd: VFolder, node: VNode): String? {
+        if (kind != RemoteKind.SSH || node.provider !== this) return null
+        return runCatching {
+            val target = resolve(innerPath(cwd.path)).first
+            val (location, remote) = resolve(innerPath(node.path))
+            if (location.id == target.id) remote else null
+        }.getOrNull()
+    }
 
     private fun newCache(): File = File.createTempFile("remote-", ".stage", cacheDir)
     private fun resolve(path: String): Pair<RemoteLocation, String> {

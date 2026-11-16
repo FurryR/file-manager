@@ -5,4 +5,5 @@ plugins {
     id("org.jetbrains.kotlin.jvm") version "2.0.21" apply false
     id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
     id("com.google.protobuf") version "0.9.4" apply false
+    id("com.github.jk1.dependency-license-report") version "2.9" apply false
 }

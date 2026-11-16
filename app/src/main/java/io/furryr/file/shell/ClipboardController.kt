@@ -6,12 +6,14 @@ import io.furryr.file.R
 import io.furryr.file.clipboard.ClipboardAction
 import io.furryr.file.clipboard.ClipboardStore
 import io.furryr.file.clipboard.ClipboardTransfer
+import io.furryr.file.core.NodeOps
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.model.OperationProgress
 import io.furryr.file.model.Page
-import io.furryr.file.render.ListingHandle
+import io.furryr.file.render.SelectCapabilities
 import io.furryr.file.render.RendererBase
 import io.furryr.file.ui.util.OperationNotification
+import io.furryr.file.ui.util.errorText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -23,6 +25,7 @@ import kotlinx.coroutines.launch
  */
 internal class ClipboardController(
     private val context: Context,
+    private val nodeOps: NodeOps,
     private val scope: CoroutineScope,
     private val currentRenderer: () -> RendererBase<*>?,
     private val currentJob: () -> Job?,
@@ -33,7 +36,7 @@ internal class ClipboardController(
     private val onTaskIds: (List<Long>?) -> Unit,
     private val onRefresh: () -> Unit,
 ) {
-    fun listing(): ListingHandle? = currentRenderer()?.listingHandle
+    fun listing(): SelectCapabilities? = currentRenderer()?.capabilities?.select
 
     fun selectedEntries(): List<FileEntry> = listing()?.selectedEntries.orEmpty()
 
@@ -45,7 +48,7 @@ internal class ClipboardController(
     fun clear() {
         ClipboardStore.clear()
         allPages().forEach { page ->
-            page.renderer?.listingHandle?.clearDisplayedSelection()
+            page.renderer?.capabilities?.select?.clearDisplayedSelection()
         }
     }
 
@@ -70,7 +73,7 @@ internal class ClipboardController(
             var speed = 0L
             var failure: Throwable? = null
             try {
-                ClipboardTransfer.run(state, folder) { progress ->
+                ClipboardTransfer.run(state, folder, nodeOps) { progress ->
                     if (!progress.finished) {
                         val now = System.currentTimeMillis()
                         val elapsed = now - lastTime
@@ -107,7 +110,7 @@ internal class ClipboardController(
                         state.entries.firstOrNull()?.name.orEmpty(),
                     )
                 } else {
-                    failure?.message ?: context.getString(R.string.toast_failed)
+                    failure?.let { context.errorText(it) } ?: context.getString(R.string.toast_failed)
                 },
                 Toast.LENGTH_SHORT
             ).show()

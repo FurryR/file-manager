@@ -26,11 +26,12 @@ import java.util.concurrent.TimeUnit
  * valid across viewer restarts (only the socket inode inside changes), and
  * guests find it through `XDG_RUNTIME_DIR` + `WAYLAND_DISPLAY`.
  *
- * A wl_shm pool is an fd the *client* creates, and a memfd inode carries the
- * creating process's SELinux label. Proot containers share this process's
- * domain; a root container (chroot backend through `su`) does not, and the
- * compositor's read is denied unless the daemon redirects the pool. It needs
- * this domain to decide that ([SHM_CONTEXT_ENV]).
+ * A wl_shm pool is an fd the *client* creates. Receiving it is checked twice by
+ * SELinux: `fd { use }` against the creator's context and the inode permissions
+ * against the inode label (every memfd inode is `tmpfs`). A root container
+ * (chroot backend through `su`) runs in another domain than this process, so the
+ * container daemon's policy injection grants the app those two rules; it needs
+ * this process's context to write them ([APP_CONTEXT_ENV]).
  */
 object WaylandManager {
     private const val TAG = "WaylandManager"
@@ -43,10 +44,10 @@ object WaylandManager {
 
     /**
      * Environment variable carrying this process's SELinux context to the
-     * container daemon, which compares it with its own to decide whether shared
-     * memory needs to be redirected into the compositor's domain.
+     * container daemon, whose policy injection grants the app access to the
+     * descriptors container processes create.
      */
-    const val SHM_CONTEXT_ENV = "WAYLAND_SHM_CONTEXT"
+    const val APP_CONTEXT_ENV = "APP_SELINUX_CONTEXT"
 
     private val lock = Any()
 
@@ -80,7 +81,7 @@ object WaylandManager {
         return dpi / 160f
     }
 
-    /** This process's SELinux context, handed to containers as [SHM_CONTEXT_ENV]. */
+    /** This process's SELinux context, handed to containers as [APP_CONTEXT_ENV]. */
     fun selinuxContext(): String? = runCatching {
         File("/proc/self/attr/current").readText().trim().trimEnd('\u0000')
     }.getOrNull()?.takeIf { it.isNotEmpty() }
@@ -212,9 +213,9 @@ object WaylandManager {
             "WAYLAND_DISPLAY" to SOCKET_NAME,
             "XDG_RUNTIME_DIR" to CONTAINER_RUNTIME_DIR,
         )
-        // Lets the daemon tell whether container clients share this domain; it
-        // arms its shm gate only when they do not. See the object documentation.
-        selinuxContext()?.let { vars[SHM_CONTEXT_ENV] = it }
+        // Lets the daemon's policy injection grant this app the descriptor access
+        // container processes need. See the object documentation.
+        selinuxContext()?.let { vars[APP_CONTEXT_ENV] = it }
         return vars
     }
 

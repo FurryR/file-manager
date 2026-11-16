@@ -18,6 +18,7 @@ import io.furryr.file.provider.model.SftpServer
 import io.furryr.file.provider.model.WebLocation
 import io.furryr.file.provider.remote.RemoteLocation
 import io.furryr.file.store.LocationsRepository
+import io.furryr.file.ui.util.errorText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -502,7 +503,7 @@ internal fun DrawerDialogs(
                             saved.onSuccess { openRemote(trusted) }.onFailure {
                                 Toast.makeText(
                                     context,
-                                    it.message ?: context.getString(R.string.remote_store_error),
+                                    context.errorText(it, R.string.remote_store_error),
                                     Toast.LENGTH_LONG,
                                 ).show()
                             }

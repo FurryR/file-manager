@@ -4,9 +4,6 @@ import android.content.Context
 import android.os.Bundle
 import android.util.Log
 import io.furryr.file.R
-import io.furryr.file.core.ContentInfo
-import io.furryr.file.core.ContentKind
-import io.furryr.file.core.ContentTypes
 import io.github.rosemoe.sora.lang.EmptyLanguage
 import io.github.rosemoe.sora.lang.Language
 import io.github.rosemoe.sora.lang.completion.CompletionItem
@@ -33,11 +30,6 @@ internal object EditorLanguages {
     private const val DARK_THEME = "file-manager-dark"
     private const val LIGHT_THEME = "file-manager-light"
     private var ready = false
-
-    private val specialNames = setOf(
-        "dockerfile", "makefile", "cmakelists.txt", "license", "readme",
-        ".gitignore", ".gitattributes", ".editorconfig", ".env", ".bashrc", ".zshrc",
-    )
 
     /**
      * A language a plugin contributes. [grammar] must name a TextMate grammar
@@ -95,14 +87,6 @@ internal object EditorLanguages {
         "php" -> "PHP"
         "sql" -> "SQL"
         else -> id.replaceFirstChar { it.uppercase() }
-    }
-
-    /** Text/code facts, or a known text extension when a provider could not sniff. */
-    fun supports(name: String, content: ContentInfo?): Boolean {
-        val lower = name.lowercase(Locale.ROOT)
-        if (lower in specialNames) return true
-        if (ContentTypes.kindOfName(lower) in setOf(ContentKind.TEXT, ContentKind.CODE)) return true
-        return content?.kind == ContentKind.TEXT || content?.kind == ContentKind.CODE
     }
 
     fun id(path: String): String {

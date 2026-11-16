@@ -24,7 +24,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -59,7 +58,7 @@ fun TerminalViewComposable(
     enabled: Boolean = true,
     inputState: TerminalInputState = remember { TerminalInputState() },
 ) {
-    TerminalSurface.content(TerminalSurfaceArgs(session, enabled, modifier, inputState))
+    TerminalSurfaceContent(session, enabled, modifier, inputState)
 }
 
 /** The connecting state, drawn over the shared terminal surface. */
@@ -79,29 +78,13 @@ fun TerminalPlaceholder(modifier: Modifier = Modifier) {
     }
 }
 
-private data class TerminalSurfaceArgs(
-    val session: TerminalSession?,
-    val enabled: Boolean,
-    val modifier: Modifier,
-    val inputState: TerminalInputState,
-)
-
-/**
- * One movable surface shared by every terminal tab. Moving it between tab
- * bodies keeps the AndroidView, input wrapper, focus and IME alive.
- */
-private object TerminalSurface {
-    val content = movableContentOf<TerminalSurfaceArgs> { args ->
-        TerminalSurfaceContent(args)
-    }
-}
-
 @Composable
-private fun TerminalSurfaceContent(args: TerminalSurfaceArgs) {
-    val session = args.session
-    val enabled = args.enabled
-    val modifier = args.modifier
-    val inputState = args.inputState
+private fun TerminalSurfaceContent(
+    session: TerminalSession?,
+    enabled: Boolean,
+    modifier: Modifier,
+    inputState: TerminalInputState,
+) {
     val context = LocalContext.current
     // The terminal owns its colours; the app theme never recolours it.
     val terminalPalette = TerminalSchemeStore.current(context).palette()
@@ -167,10 +150,19 @@ private fun TerminalSurfaceContent(args: TerminalSurfaceArgs) {
                     ))
                 }
 
+                // The terminal surface is one movable view: a tab switch or the
+                // connecting→connected swap detaches and re-attaches the same
+                // view. Registration must follow both directions, or the view
+                // stops repainting until the activity (and this factory) runs
+                // again.
                 val listener: (TerminalSession) -> Unit = { terminalView.onScreenUpdated() }
                 SessionManager.addTextChangedListener(listener)
                 wrapper.addOnAttachStateChangeListener(object : OnAttachStateChangeListener {
-                    override fun onViewAttachedToWindow(v: View) {}
+                    override fun onViewAttachedToWindow(v: View) {
+                        SessionManager.addTextChangedListener(listener)
+                        terminalView.onScreenUpdated()
+                    }
+
                     override fun onViewDetachedFromWindow(v: View) {
                         SessionManager.removeTextChangedListener(listener)
                     }
@@ -178,7 +170,7 @@ private fun TerminalSurfaceContent(args: TerminalSurfaceArgs) {
 
                 terminalView.attachSession(session)
                 terminalView.isEnabled = enabled
-                inputState.bind(wrapper, terminalView)
+                wrapper.bindTerminal(terminalView, inputState)
                 if (enabled) wrapper.post { wrapper.requestFocus() }
                 terminalView.post {
                     applyTerminalPalette(terminalView, terminalPalette)
@@ -191,7 +183,7 @@ private fun TerminalSurfaceContent(args: TerminalSurfaceArgs) {
                 val tv = (view as FrameLayout).getChildAt(0) as? TerminalView ?: return@AndroidView
                 // Rebind on every composition: switching back to a tab
                 // reattaches its (possibly rebuilt) view to this state.
-                (view as? TerminalInputView)?.let { inputState.bind(it, tv) }
+                (view as? TerminalInputView)?.bindTerminal(tv, inputState)
                 tv.setTextSize(fontSizePx)
                 if (typeface != null) tv.setTypeface(typeface)
                 if (tv.mClient is TerminalViewClientImpl) {
@@ -204,7 +196,13 @@ private fun TerminalSurfaceContent(args: TerminalSurfaceArgs) {
                     tv.onScreenUpdated()
                 }
                 tv.isEnabled = enabled
-                if (!enabled) inputState.resetModifiers()
+                if (!enabled) {
+                    inputState.resetModifiers()
+                    // Hidden or connection-less: drop the selection/focus/IME
+                    // request this surface left on the shared wrapper, but keep
+                    // this tab's editor bound for when it is usable again.
+                    (view as? TerminalInputView)?.releaseBinding(closeInput = false)
+                }
                 tv.setBackgroundColor(backgroundColor)
                 applyTerminalPalette(tv, terminalPalette)
             },
@@ -237,23 +235,43 @@ fun TerminalSnippet(
 private const val DEFAULT_FONT_SIZE_DP = 9
 private const val MIN_FONT_SIZE_DP = 8
 private const val MAX_FONT_SIZE_DP = 128
+/** Refused IME shows before a pending request is dropped. */
+private const val MAX_IME_DECLINES = 3
 
 internal class TerminalInputView(context: Context, initialInputState: TerminalInputState) : FrameLayout(context) {
     internal var inputState = initialInputState
         private set
+    /** The Termux view this wrapper drives; kept so an attach can rebind. */
+    private var terminal: TerminalView? = null
     private var connection: TerminalInputConnection? = null
     private var restartPending = false
     private var released = false
     private var imeRequested = false
+    /** Refused show attempts on a laid-out surface; see [showIme]. */
+    private var imeDeclines = 0
     private val showIme: Runnable = Runnable {
         if (released || !imeRequested || !isAttachedToWindow) return@Runnable
         // A tap can happen before the window regains input focus (for example after
         // a freeform window was in front). Wait for onWindowFocusChanged() instead
         // of guessing a delay.
         if (!hasFocus() || !hasWindowFocus()) return@Runnable
-        imeRequested = false
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-        imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+        // Keep the request pending when the IME declines it (the sheet may
+        // still be growing); focus, attach and size changes retry it.
+        if (imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT) == true) {
+            imeRequested = false
+            imeDeclines = 0
+        } else if (width > 0 && height > 0) {
+            // Laid out, attached and focused, yet the IME refused: no soft
+            // keyboard (hardware keyboard) or a one-off refusal. Retry a
+            // bounded number of times, then drop the request instead of
+            // leaving it to pop up on some later attach or resize.
+            imeDeclines++
+            if (imeDeclines >= MAX_IME_DECLINES) {
+                imeRequested = false
+                imeDeclines = 0
+            }
+        }
     }
 
     /**
@@ -266,13 +284,29 @@ internal class TerminalInputView(context: Context, initialInputState: TerminalIn
         if (inputState === next) return
         inputState = next
         imeRequested = false
+        imeDeclines = 0
         removeCallbacks(showIme)
         onModeChanged()
     }
 
+    /**
+     * Bind this wrapper and its terminal child to the tab input state.
+     *
+     * Idempotent and safe to call from composition, attach and focus: a tab
+     * whose PTY connected before the shared surface was attached has no live
+     * binding until one of these points runs.
+     */
+    internal fun bindTerminal(view: TerminalView, state: TerminalInputState) {
+        terminal = view
+        state.bind(this, view)
+    }
+
     internal fun onModeChanged() {
-        // Retire the old editor before restartInput can flush stale candidates into it.
-        connection?.closeConnection()
+        // Retire what the IME was composing so restartInput cannot flush it into
+        // the tab taking over. The editor object itself must stay alive: the IME
+        // keeps the connection it was handed, and a closed one silently drops
+        // every later commit (keyboard up, no text, extra keys still fine).
+        connection?.cancelComposition()
         if (hasFocus() && !restartPending) {
             restartPending = true
             post {
@@ -293,8 +327,40 @@ internal class TerminalInputView(context: Context, initialInputState: TerminalIn
         connection = null
     }
 
+    /**
+     * Retire the transient state of the tab that was bound to this wrapper.
+     * The wrapper is shared by every tab, so anything left here follows the
+     * user into the next tab: a posted show request pops the keyboard for a
+     * tab that is gone, and Termux's text-selection mode keeps focus (and the
+     * IME) on the terminal view, whose editor is TYPE_NULL.
+     *
+     * [closeInput] is false when the same tab stays bound (the surface is
+     * hidden or waiting for its PTY): the editor is still this tab's, and
+     * discarding its composition would only lose in-flight text.
+     */
+    internal fun releaseBinding(closeInput: Boolean = true) {
+        imeRequested = false
+        imeDeclines = 0
+        removeCallbacks(showIme)
+        terminal?.let { view ->
+            // copyModeChanged(false) hands focus back to this wrapper.
+            view.stopTextSelectionMode()
+            // Long press sets these; only a selection exit clears them.
+            view.isFocusable = false
+            view.isFocusableInTouchMode = false
+            // A focused terminal view keeps the IME on its TYPE_NULL editor;
+            // the wrapper is the only editor this app owns.
+            if (!released && view.hasFocus()) requestFocus()
+        }
+        // The tab leaving must not destroy the surface's editor: the IME is
+        // still holding it and would drop every commit for the tab taking
+        // over. Only the composing text goes away.
+        if (closeInput) connection?.cancelComposition()
+    }
+
     fun requestIme() {
         imeRequested = true
+        imeDeclines = 0
         requestFocus()
         // InputMethodManager applies focus changes in a posted focus check, not
         // synchronously. Posting the show request puts it after that check instead
@@ -313,8 +379,31 @@ internal class TerminalInputView(context: Context, initialInputState: TerminalIn
         }
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        // The first surface can attach after its PTY connected; bind here so the
+        // extra keys and the IME act on this tab even when composition ran
+        // before the wrapper existed.
+        terminal?.let { inputState.rebind(this, it) }
+        if (imeRequested) {
+            removeCallbacks(showIme)
+            post(showIme)
+        }
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        // The sheet animates up from zero height. A show request made while it
+        // was collapsed is dropped by the IME; retry once it has a real size.
+        if (imeRequested && w > 0 && h > 0) {
+            removeCallbacks(showIme)
+            post(showIme)
+        }
+    }
+
     override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: Rect?) {
         super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
+        if (gainFocus) terminal?.let { inputState.rebind(this, it) }
         if (!gainFocus) imeRequested = false
     }
 
@@ -330,7 +419,10 @@ internal class TerminalInputView(context: Context, initialInputState: TerminalIn
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
             EditorInfo.IME_FLAG_NO_EXTRACT_UI or EditorInfo.IME_FLAG_NO_ENTER_ACTION
-        connection?.closeConnection()
+        // Never close the previous editor here: after a tab switch the IME may
+        // still be talking to it, and it already resolves the current tab
+        // through this wrapper, so a stale object keeps working instead of
+        // swallowing every commit.
         return TerminalInputConnection(this).also { connection = it }
     }
 
@@ -402,6 +494,24 @@ internal class TerminalInputConnection(
 
     override fun sendKeyEvent(event: KeyEvent): Boolean {
         return !closed && inputState.dispatchKeyEvent(event)
+    }
+
+    /**
+     * Input methods expose their own Paste (clipboard panel, suggestions bar).
+     * Some of them send it as the Paste command instead of committed text;
+     * BaseInputConnection ignores it, which would silently drop the paste, so
+     * route it through the terminal's paste path.
+     */
+    override fun performContextMenuAction(id: Int): Boolean {
+        if (closed) return false
+        return when (id) {
+            android.R.id.paste, android.R.id.pasteAsPlainText -> {
+                inputState.pasteFromClipboard()
+                resetToPlaceholder()
+                true
+            }
+            else -> super.performContextMenuAction(id)
+        }
     }
 
     override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {

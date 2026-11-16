@@ -1,4 +1,4 @@
-//! Container cgroup ownership: one write ends the whole container.
+//! Daemon cgroup ownership: one write ends the whole process tree.
 //!
 //! Nothing else in this daemon can guarantee that. There is no PID namespace, so
 //! an orphaned session reparents to init(1); `/proc` is far too slow to walk on a
@@ -7,8 +7,12 @@
 //! pty hang-up reaches the foreground process group and nobody who ignores
 //! SIGHUP. The cgroup is the one kernel object that outlives every process in
 //! the tree and is inherited by `fork`, so a single `cgroup.procs` write covers
-//! everything the container will ever spawn, and a single `cgroup.kill` write
+//! everything the daemon will ever spawn, and a single `cgroup.kill` write
 //! kills it all — no cooperation from the processes involved.
+//!
+//! The host daemon uses the same group as a container, so force-stopping the app
+//! (which closes the last daemon connection) ends every shell and command, not
+//! only container processes.
 //!
 //! Container daemons chroot themselves, which removes cgroupfs from view for the
 //! rest of their life. Every path here is therefore opened *before* the chroot
@@ -29,6 +33,7 @@ use std::ffi::CString;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 /// Per-container bookkeeping on the host filesystem (readable after the chroot
@@ -67,6 +72,17 @@ pub struct Group {
 }
 
 static GROUP: OnceLock<Group> = OnceLock::new();
+/// Container daemons narrow cgroupfs for their children; the host daemon must
+/// not, or a root `run0`/agent command would lose its normal cgroup view.
+static CONTAINER_MODE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_container_mode(enabled: bool) {
+    CONTAINER_MODE.store(enabled, Ordering::Relaxed);
+}
+
+pub fn container_mode() -> bool {
+    CONTAINER_MODE.load(Ordering::Relaxed)
+}
 
 fn cstr(bytes: &[u8]) -> io::Result<CString> {
     CString::new(bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))
@@ -457,7 +473,7 @@ pub fn attach_self() {
 /// simply keeps the shared view, and `cgroup` covers it with a member table that
 /// nobody inside can move out of.
 pub fn isolate_view() {
-    if GROUP.get().is_none() {
+    if !container_mode() || GROUP.get().is_none() {
         return;
     }
     unsafe {

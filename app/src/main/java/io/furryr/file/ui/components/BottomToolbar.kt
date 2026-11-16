@@ -31,16 +31,26 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import io.furryr.file.R
+
+/** One explicit toolbar slot for shells that do not use the file modes. */
+data class BottomToolbarAction(
+    val icon: ImageVector,
+    val contentDescription: String,
+    val enabled: Boolean = true,
+    val onClick: () -> Unit,
+)
 
 /**
  * One bottom bar, always five slots. Each mode has a fixed layout:
  * normal = Back, Forward, "+", Terminal, Parent;
  * selection = Select all, Invert, Clear, Same type, Share;
  * copy = Back, Forward, Confirm, Cancel, Parent.
+ * An explicit [actions] list replaces those modes for picker-style shells.
  *
  * Renderers own what enters selection/copy and whether the action is enabled;
  * the shell only projects the current mode.
@@ -73,9 +83,27 @@ fun BottomToolbar(
     canConfirmCopyMove: Boolean = true,
     onCopyMoveConfirm: () -> Unit = {},
     onCopyMoveCancel: () -> Unit = {},
+    /** Explicit slots for a shell without the file-manager modes. */
+    actions: List<BottomToolbarAction>? = null,
 ) {
     Column(modifier = modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)) {
         HorizontalDivider()
+        if (actions != null) {
+            Row(
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 6.dp)
+            ) {
+                actions.forEach { action ->
+                    IconButton(enabled = action.enabled, onClick = action.onClick) {
+                        Icon(action.icon, contentDescription = action.contentDescription)
+                    }
+                }
+            }
+            return@Column
+        }
         Row(
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,

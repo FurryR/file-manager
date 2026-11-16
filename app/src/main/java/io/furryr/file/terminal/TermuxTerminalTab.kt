@@ -1,38 +1,20 @@
 package io.furryr.file.terminal
 
-import android.app.Activity
 import android.content.Context
 import android.util.Log
-import android.view.WindowManager
 import android.widget.Toast
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Terminal
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
 import com.termux.terminal.TerminalSession
 import io.furryr.file.R
+import io.furryr.file.provider.terminal.ExecProvider
+import io.furryr.file.provider.terminal.TerminalProcess
 import io.furryr.file.container.ContainerPaths
 import io.furryr.file.container.PathUnavailableException
-import io.furryr.file.core.ContainerUriResolver
-import io.furryr.file.core.ContainerUris
+import io.furryr.file.core.Path
+import io.furryr.file.core.Vfs
+import io.furryr.file.core.VFolder
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.daemon.shellQuote
 import kotlinx.coroutines.CancellationException
@@ -49,76 +31,36 @@ private const val TAG = "TermuxTerminal"
 
 /** How a terminal tab is spawned; captured when the tab is created. */
 private data class TerminalSpec(
-    /** Shell to spawn; null is not used by this implementation. */
-    val type: SessionManager.SessionType?,
     val label: String,
+    val remote: Boolean,
+    val provider: ExecProvider,
+    val cwd: VFolder,
+    val vfs: Vfs,
+    val create: suspend (rows: Int, cols: Int) -> Result<TerminalProcess>,
 )
 
 private fun sanitizedTitle(raw: String?): String? =
     raw?.filterNot { it.isISOControl() }?.trim()?.takeIf { it.isNotEmpty() }
 
-private fun sessionLabel(type: SessionManager.SessionType): String = when (type) {
-    is SessionManager.SessionType.Container -> type.containerName
-    is SessionManager.SessionType.AppShell -> "Local"
-    is SessionManager.SessionType.Ssh -> type.profile.locationName
-}
-
-private fun terminalSpecFor(path: String): TerminalSpec {
-    val type = TerminalProfiles.resolve(path)?.first ?: if (ContainerUris.isContainer(path)) {
-        val resolved = ContainerUriResolver.resolveContainerUri(path).getOrThrow()
-        val name = resolved.containerName
-        if (name != null) {
-            SessionManager.SessionType.Container(name, resolved.containerPath)
-        } else {
-            SessionManager.SessionType.AppShell(cwd = "/sdcard")
-        }
-    } else if (path.startsWith("/")) {
-        SessionManager.SessionType.AppShell(cwd = path)
-    } else {
-        SessionManager.SessionType.AppShell(cwd = "/sdcard")
-    }
-    return TerminalSpec(type, sessionLabel(type))
-}
-
-private fun terminalPathForTarget(
-    context: Context,
-    path: String,
-    target: String,
-    isDirectory: Boolean,
-): String {
-    val sshAuthority = TerminalProfiles.sshAuthority(target)
-    if (sshAuthority != null) {
-        // sshRoot always ends in '/'; appending another one would require a
-        // double slash and reject every real entry under the connection.
-        val root = TerminalProfiles.sshRoot(sshAuthority).trimEnd('/')
-        if (path != root && !path.startsWith("$root/")) {
-            throw IllegalArgumentException(
-                context.getString(R.string.terminal_drop_wrong_connection),
-            )
-        }
-        return path.removePrefix(root).ifEmpty { "/" }
-    }
-    return ContainerPaths.terminalPath(context, path, target, isDirectory)
-}
-
 /**
  * Termux's terminal view, extra-key row, IME ownership and drop target.
  *
- * One instance is owned by one tab and lives until [dispose]. It never removes
- * its own tab; the shell watches [alive] and closes it.
+ * One instance is owned by one tab and lives until [dispose]. It removes its
+ * own tab on a normal shell exit; an abnormal end keeps the buffer and lets
+ * the user close the tab explicitly.
  */
 internal class TermuxTerminalTab private constructor(
     private val context: Context,
     private val spec: TerminalSpec,
-) : TerminalTab {
+) : TerminalViewTab {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /** Completes when the current connect attempt succeeds or fails. */
     private var ready = CompletableDeferred<Unit>()
 
-    /** One input state per tab; the TerminalView that reads it is per tab too. */
-    private val inputState = TerminalInputState()
+    /** One input state per tab; the shared terminal surface binds to it. */
+    override val inputState = TerminalInputState()
 
     /** Installed by enter(): the shell context that owns the drawer. */
     private var terminalContext: TerminalContext? = null
@@ -131,32 +73,48 @@ internal class TermuxTerminalTab private constructor(
         get() = displayTitle ?: spec.label
 
     private var sessionId by mutableStateOf<String?>(null)
-    private var connecting by mutableStateOf(false)
-    private var error by mutableStateOf<String?>(null)
-    private var session by mutableStateOf<TerminalSession?>(null)
+    override var connecting by mutableStateOf(false)
+        private set
+    override var error by mutableStateOf<String?>(null)
+        private set
+    override var connectionLost by mutableStateOf(false)
+        private set
+    override val remote: Boolean = spec.remote
+    override var session by mutableStateOf<TerminalSession?>(null)
+        private set
     private var closed = false
+    private var closing = false
 
     private val titleListener: (TerminalSession) -> Unit = { changed ->
         if (changed === session) displayTitle = sanitizedTitle(changed.title)
     }
 
     private val finishedListener: (TerminalSession) -> Unit = { finished ->
-        if (finished === session) sessionId?.let { SessionManager.destroySession(it) }
+        if (finished === session && !closed) {
+            if (finished.exitStatus == 0) {
+                // A normal shell exit closes its own tab. Only an abnormal end
+                // keeps the buffer and shows the connection-lost overlay.
+                if (!closing) {
+                    closing = true
+                    scope.launch { Terminal.requestClose(id) }
+                }
+            } else {
+                connectionLost = true
+                sessionId?.let { SessionManager.destroySession(it) }
+            }
+        }
     }
 
     /** Spawn [spec] in this tab. */
     private fun connect() {
         if (closed || connecting || session != null) return
-        val type = spec.type ?: run {
-            error = context.getString(R.string.terminal_no_shell)
-            ready.complete(Unit)
-            return
-        }
         if (ready.isCompleted) ready = CompletableDeferred()
         connecting = true
+        connectionLost = false
         error = null
         scope.launch {
-            SessionManager.createSession(type, context)
+            spec.create(24, 80)
+                .mapCatching { SessionManager.createSession(it, context).getOrThrow() }
                 .onSuccess {
                     bind(it)
                     ready.complete(Unit)
@@ -179,6 +137,7 @@ internal class TermuxTerminalTab private constructor(
         sessionId = SessionManager.sessionIdOf(created)
         displayTitle = sanitizedTitle(created.title)
         connecting = false
+        connectionLost = false
         error = null
         if (closed) {
             // The tab was closed while it was connecting; do not leave an
@@ -195,29 +154,32 @@ internal class TermuxTerminalTab private constructor(
         SessionManager.removeSessionFinishedListener(finishedListener)
     }
 
-    override val alive: Boolean
-        get() {
-            if (closed) return false
-            val id = sessionId ?: return true // still connecting
-            return SessionManager.getSession(id) != null
-        }
-
     override fun acceptDrop(entry: FileEntry): Boolean {
         val targetSession = session ?: return false
         val id = sessionId ?: return false
         if (!targetSession.isRunning) return false
-        val target = SessionManager.terminalTarget(id)
+        val override = SessionManager.terminalTarget(id)
         scope.launch {
             try {
                 val path = withContext(Dispatchers.IO) {
-                    terminalPathForTarget(context, entry.path, target, entry.isDirectory)
+                    if (override != null) {
+                        // A nested hub exec currently owns input in this tab, so
+                        // the tab's own provider no longer describes the target.
+                        ContainerPaths.terminalPath(context, entry.path, override, entry.isDirectory)
+                    } else {
+                        val node = spec.vfs.node(Path.parse(entry.path)).getOrThrow()
+                        spec.provider.terminalPath(spec.cwd, node)
+                            ?: throw IllegalArgumentException(
+                                context.getString(R.string.terminal_drop_wrong_location),
+                            )
+                    }
                 }
                 check(path.none { it.code < 32 || it.code == 127 }) {
                     context.getString(R.string.terminal_drop_invalid_path)
                 }
                 check(
                     session === targetSession && targetSession.isRunning &&
-                        SessionManager.terminalTarget(id) == target,
+                        SessionManager.terminalTarget(id) == override,
                 ) { context.getString(R.string.terminal_drop_failed) }
                 val completion = path + if (entry.isDirectory && !path.endsWith('/')) "/" else ""
                 targetSession.emulator?.paste(shellQuote(completion) + " ")
@@ -240,93 +202,31 @@ internal class TermuxTerminalTab private constructor(
 
     override suspend fun enter(ctx: TerminalContext) {
         terminalContext = ctx
-        ctx.commit { enabled, modifier -> TerminalBody(enabled, modifier) }
         connect()
         ready.await()
     }
 
-    override fun leave() {
-        terminalContext = null
-        inputState.leave()
+    override fun retry() {
+        connect()
     }
 
-    // Legacy window resizing is still the correct IME mode for target SDK 28.
-    @Suppress("DEPRECATION")
-    @Composable
-    private fun TerminalBody(enabled: Boolean, modifier: Modifier) {
-        val activity = LocalContext.current as? Activity
-        // The terminal is the only screen that holds the IME above its
-        // content. The mode follows the composed tab instead of the sheet
-        // flag, so it cannot leak to a tab that is not showing a terminal.
-        DisposableEffect(activity, enabled) {
-            if (enabled) {
-                activity?.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-            }
-            onDispose {
-                if (enabled) {
-                    activity?.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
-                }
-            }
-        }
-        val current = session
-        val failure = error
-        if (current == null) {
-            if (failure == null) {
-                TerminalViewComposable(
-                    session = null,
-                    modifier = modifier,
-                    enabled = false,
-                    inputState = inputState,
-                )
-            } else {
-                Column(
-                    modifier = modifier.fillMaxSize().padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    Icon(
-                        Icons.Default.Terminal,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        modifier = Modifier.size(48.dp),
-                    )
-                    Text(
-                        failure,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                    if (!connecting) {
-                        TextButton(
-                            onClick = { connect() },
-                            modifier = Modifier.padding(top = 4.dp),
-                        ) {
-                            Text(stringResource(R.string.terminal_retry))
-                        }
-                    }
-                }
-            }
-            return
-        }
-        Column(modifier.fillMaxSize()) {
-            TerminalViewComposable(
-                session = current,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                enabled = enabled,
-                inputState = inputState,
-            )
-            TerminalExtraKeys(
-                inputState = inputState,
-                enabled = enabled,
-                onOpenDrawer = { terminalContext?.requestOpenDrawer() },
-            )
-        }
+    override fun requestOpenDrawer() {
+        terminalContext?.requestOpenDrawer()
+    }
+
+    override fun requestClose() {
+        terminalContext?.requestClose()
+    }
+
+    override fun blur() {
+        terminalContext = null
+        inputState.blur()
     }
 
     override fun dispose() {
         if (closed) return
         closed = true
-        leave()
+        blur()
         ready.complete(Unit)
         sessionId?.let { SessionManager.destroySession(it) }
         detach()
@@ -334,14 +234,26 @@ internal class TermuxTerminalTab private constructor(
     }
 
     companion object {
-        /** Create a tab body that spawns the shell for [path] on first enter. */
+        /** Create a tab body that starts the provider backend on first enter. */
         internal fun start(
             context: Context,
-            path: String,
+            label: String,
+            provider: ExecProvider,
+            cwd: VFolder,
+            remote: Boolean = false,
+            vfs: Vfs,
+            create: suspend (rows: Int, cols: Int) -> Result<TerminalProcess>,
         ): TermuxTerminalTab =
             TermuxTerminalTab(
                 context.applicationContext,
-                terminalSpecFor(path),
+                TerminalSpec(
+                    label = label,
+                    remote = remote,
+                    provider = provider,
+                    cwd = cwd,
+                    vfs = vfs,
+                    create = create,
+                ),
             )
     }
 }

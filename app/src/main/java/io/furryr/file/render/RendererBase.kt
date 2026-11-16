@@ -4,6 +4,7 @@ import android.content.Context
 import io.furryr.file.clipboard.ClipboardSink
 import io.furryr.file.core.DirectoryStats
 import io.furryr.file.core.VFolder
+import io.furryr.file.core.model.FileEntry
 import io.furryr.file.model.PageKind
 
 /**
@@ -14,24 +15,16 @@ import io.furryr.file.model.PageKind
 abstract class RendererBase<S : PageState>(
     initialState: S? = null,
 ) : RendererSession {
-    protected val seedState: S? = initialState
-
     protected abstract fun createSession(state: S?): PageSession<S>
 
     /** Address and role this renderer contributes to its Page. */
     abstract val pagePath: String
     abstract val pageKind: PageKind
 
-    private val sessionDelegate = lazy { createSession(seedState) }
+    private val sessionDelegate = lazy { createSession(initialState) }
     protected val session: PageSession<S> get() = sessionDelegate.value
 
-    /** Directory operations, when the private session is a listing. */
-    internal val listingHandle: ListingHandle?
-        get() = session as? ListingHandle
-
-    /** Force the private session now (used by an opener that must preload). */
-    internal fun ensureSession(): PageSession<S> = session
-
+    /** Directory operations are exposed through [RenderCapabilities.select]. */
     /**
      * Make this page current. On the first show it loads and commits the
      * pending page; on every later show it only rebuilds what the state says
@@ -48,33 +41,23 @@ abstract class RendererBase<S : PageState>(
     override val locationInfo: DirectoryStats get() = session.locationInfo
     override fun titleSlot(): TitleSlot? = session.titleSlot()
     override val isLive: Boolean get() = session.isLive
-    override val isOverlay: Boolean get() = session.isOverlay
-    override val parent: VFolder? get() = session.parent
-    override val terminalPath: String? get() = session.terminalPath
-    override val terminalFactory: TerminalFactory? get() = session.terminalFactory
     override val suppressBookmark: Boolean get() = session.suppressBookmark
-    override val needsLeaveGuard: Boolean get() = session.needsLeaveGuard
+    override val needsUnloadGuard: Boolean get() = session.needsUnloadGuard
     override fun adopt(address: String, next: RendererSession): Boolean =
         session.adopt(address, next)
     override fun retrace(address: String): Boolean = session.retrace(address)
     override fun beginConfirmation() = session.beginConfirmation()
     override fun settleConfirmation() = session.settleConfirmation()
     override fun matchesLocation(path: String): Boolean = session.matchesLocation(path)
-    override val loading: Boolean get() = session.loading
-    override val progress: Int get() = session.progress
     override val consumesEdgeGestures: Boolean get() = session.consumesEdgeGestures
-    override val canDismiss: Boolean get() = session.canDismiss
-    override val modalActive: Boolean get() = session.modalActive
-    override fun canClose(): Boolean = session.canClose()
-    override fun requestClose(context: RendererContext, action: () -> Unit) =
-        session.requestClose(context, action)
+    override suspend fun requestUnload(context: RendererContext): Boolean =
+        session.requestUnload(context)
     override fun menuItems(context: Context): List<RendererMenuItem> = session.menuItems(context)
-    override fun requestCreate() = session.requestCreate()
     override val clipboardSink: ClipboardSink? get() = session.clipboardSink
     override fun onRelease() = session.onRelease()
     override fun pathBar(context: Context): RendererPath? = session.pathBar(context)
     override suspend fun save(): Result<Unit> = session.save()
-    override fun leave() = session.leave()
+    override fun blur() = session.blur()
 
     /** Drop views; the private session keeps its model state. */
     override fun reset() {

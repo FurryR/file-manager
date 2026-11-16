@@ -2,6 +2,7 @@ package io.furryr.file.terminal
 
 import android.app.Activity
 import android.content.Context
+import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -22,9 +23,16 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -51,7 +59,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import io.furryr.file.R
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.daemon.DaemonManager
 import kotlin.math.abs
@@ -169,12 +180,20 @@ fun TerminalSheet(
 
     fun closeTab(tab: TerminalTab) {
         val wasActive = Terminal.activeId == tab.id
-        Terminal.close(tab.id)
+        if (!Terminal.unload(tab.id)) return
         if (tabs.isEmpty()) {
             onDismiss()
             return
         }
         if (wasActive) Terminal.active?.let(::showTabToast)
+    }
+
+    // A tab body asks the shell to unload itself (connection-lost overlay).
+    SideEffect {
+        Terminal.setCloseRequester { id ->
+            val tab = tabs.firstOrNull { it.id == id } ?: return@setCloseRequester
+            closeTab(tab)
+        }
     }
 
     fun newTab() {
@@ -183,11 +202,6 @@ fun TerminalSheet(
         Terminal.open(tab)
         showDrawer = false
         showTabToast(tab)
-    }
-
-    /** Drop tabs whose backing session is gone; the PTY map is the truth. */
-    fun pruneTabs() {
-        Terminal.prune()
     }
 
     val sheetHeightPx = remember { Animatable(0f) }
@@ -217,19 +231,17 @@ fun TerminalSheet(
     LaunchedEffect(visible) {
         if (!visible) return@LaunchedEffect
         DaemonManager.warmUp()
-        pruneTabs()
         if (tabs.isEmpty()) newTab()
         if (tabs.isEmpty()) onDismiss()
     }
 
     DisposableEffect(Unit) {
-        val sessionListener: () -> Unit = {
-            pruneTabs()
-            if (tabs.isEmpty()) currentOnDismiss()
-        }
-        SessionManager.addSessionChangeListener(sessionListener)
         onDispose {
-            SessionManager.removeSessionChangeListener(sessionListener)
+            // These hooks live in the process-scoped Terminal object; leaving
+            // this composition's lambdas installed would keep a disposed
+            // composition (and its Activity) reachable.
+            Terminal.setDrawerOpener(null)
+            Terminal.setCloseRequester(null)
             currentToast?.cancel()
             currentToast = null
         }
@@ -355,13 +367,14 @@ fun TerminalSheet(
                     ) {
                         val active = Terminal.active
                         if (active != null) {
-                            val content = Terminal.contentFor(active.id)
-                            if (content != null) {
-                                content(visible, Modifier.fillMaxSize())
-                            } else {
-                                Box(Modifier.fillMaxSize())
-                            }
-                        } else {
+                            TerminalBodyHost(
+                                active,
+                                visible,
+                                Modifier.fillMaxSize(),
+                            )
+                        } else if (visible) {
+                            // A closing sheet has no tabs to describe; showing
+                            // the empty state here only flashes before it hides.
                             TerminalEmptyState(
                                 canCreateTerminal = newTerminal != null,
                                 onNewTab = ::newTab,
@@ -395,5 +408,143 @@ fun TerminalSheet(
                 }
             }
         }
+    }
+}
+
+/**
+ * The active tab's body: every Termux tab shares this one terminal surface, so
+ * a tab switch rebinds the session instead of moving an AndroidView between
+ * parents (Compose cannot move a view that still has a parent). Tabs that own
+ * their own body (the WebView DevTools tab) keep their committed content.
+ */
+@Composable
+private fun TerminalBodyHost(
+    tab: TerminalTab,
+    enabled: Boolean,
+    modifier: Modifier,
+) {
+    if (tab is TerminalViewTab) {
+        TerminalSurfaceBody(tab, enabled, modifier)
+    } else {
+        val content = Terminal.contentFor(tab.id)
+        if (content != null) content(enabled, modifier) else Box(modifier)
+    }
+}
+
+@Suppress("DEPRECATION") // ADJUST_RESIZE is still the IME contract below API 30; targetSdk is 28.
+@Composable
+private fun TerminalSurfaceBody(
+    tab: TerminalViewTab,
+    enabled: Boolean,
+    modifier: Modifier,
+) {
+    val activity = LocalContext.current as? Activity
+    // The terminal is the only screen that holds the IME above its content.
+    // The mode follows the active tab instead of the sheet flag, so it cannot
+    // leak to a tab that is not showing a terminal.
+    DisposableEffect(activity, enabled) {
+        if (enabled) {
+            activity?.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        }
+        onDispose {
+            if (enabled) {
+                activity?.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+            }
+        }
+    }
+    val current = tab.session
+    val failure = tab.error
+    // The surface is bound before the PTY exists. Focus it as soon as the
+    // sheet is shown so the first tap only has to raise the IME instead of
+    // racing the focus hand-off; a newly connected session asks for the IME
+    // itself once it becomes usable.
+    LaunchedEffect(tab, enabled, current) {
+        if (!enabled) return@LaunchedEffect
+        tab.inputState.requestFocus()
+        if (current != null && !tab.connectionLost) tab.inputState.requestIme()
+    }
+    Column(modifier.fillMaxSize()) {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            TerminalViewComposable(
+                session = current,
+                modifier = Modifier.fillMaxSize(),
+                enabled = enabled && current != null,
+                inputState = tab.inputState,
+            )
+            if (current == null && failure != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.surface),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Default.Terminal,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                            modifier = Modifier.size(48.dp),
+                        )
+                        Text(
+                            failure,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                        if (!tab.connecting) {
+                            TextButton(onClick = tab::retry, modifier = Modifier.padding(top = 4.dp)) {
+                                Text(stringResource(R.string.terminal_retry))
+                            }
+                        }
+                    }
+                }
+            }
+            if (tab.connectionLost) {
+                // Plain in-content overlay: the terminal drawer stays usable.
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Default.Terminal,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
+                            modifier = Modifier.size(48.dp),
+                        )
+                        Text(
+                            stringResource(R.string.terminal_connection_lost_title),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.titleMedium,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(top = 12.dp),
+                        )
+                        Text(
+                            stringResource(
+                                if (tab.remote) R.string.terminal_connection_lost
+                                else R.string.terminal_exited_abnormally,
+                            ),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(top = 4.dp, start = 16.dp, end = 16.dp),
+                        )
+                        TextButton(onClick = tab::requestClose, modifier = Modifier.padding(top = 4.dp)) {
+                            Text(stringResource(R.string.terminal_close))
+                        }
+                    }
+                }
+            }
+        }
+        // The row stays in the layout while a session is connecting or has
+        // been lost: hiding it would shrink the terminal and then move it
+        // again once the session arrives.
+        TerminalExtraKeys(
+            inputState = tab.inputState,
+            enabled = enabled && current != null && !tab.connectionLost,
+            onOpenDrawer = tab::requestOpenDrawer,
+        )
     }
 }

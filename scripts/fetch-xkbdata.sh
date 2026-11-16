@@ -15,13 +15,29 @@ set -euo pipefail
 VERSION="${XKEYBOARD_CONFIG_VERSION:-2.44}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST_DIR="$ROOT_DIR/app/src/main/assets/xkb"
+CACHE_DIR="$ROOT_DIR/cache/file-manager"
+CACHE_TARBALL="$CACHE_DIR/xkeyboard-config-$VERSION.tar.gz"
+STATE="$CACHE_DIR/xkeyboard-config-$VERSION.installed"
+STATE_KEY="$(sha256sum "$0" | cut -d' ' -f1):$VERSION"
 WORK_DIR="$(mktemp -d /tmp/xkbdata-XXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
+# Installed output wins: no network, no meson, no rewrite of assets.
+if [[ -f "$STATE" && "$(<"$STATE")" == "$STATE_KEY" &&
+      -f "$DEST_DIR/rules/evdev" && -f "$DEST_DIR/rules/evdev.xml" ]]; then
+    echo "==> xkeyboard-config $VERSION already installed"
+    exit 0
+fi
+
 URL="https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config/-/archive/xkeyboard-config-$VERSION/xkeyboard-config-xkeyboard-config-$VERSION.tar.gz"
-echo "==> Fetching xkeyboard-config $VERSION"
-curl -fsSL --retry 2 -o "$WORK_DIR/xkbdata.tar.gz" "$URL"
-tar xzf "$WORK_DIR/xkbdata.tar.gz" -C "$WORK_DIR"
+mkdir -p "$CACHE_DIR"
+if [[ ! -f "$CACHE_TARBALL" ]]; then
+    echo "==> Fetching xkeyboard-config $VERSION"
+    curl -fsSL --retry 2 --connect-timeout 20 --max-time 600 \
+        -o "$CACHE_TARBALL.part" "$URL"
+    mv "$CACHE_TARBALL.part" "$CACHE_TARBALL"
+fi
+tar xzf "$CACHE_TARBALL" -C "$WORK_DIR"
 
 SRC_DIR="$(ls -d "$WORK_DIR"/xkeyboard-config-* | head -n 1)"
 if [[ ! -d "$SRC_DIR/symbols" ]]; then
@@ -57,3 +73,4 @@ done
 
 echo "==> Done: $DEST_DIR"
 du -sh "$DEST_DIR"
+printf '%s\n' "$STATE_KEY" > "$STATE"

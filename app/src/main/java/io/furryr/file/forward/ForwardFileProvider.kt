@@ -15,15 +15,15 @@ import android.system.ErrnoException
 import android.system.OsConstants
 import android.util.Log
 import android.webkit.MimeTypeMap
+import io.furryr.file.AppRuntime
+import io.furryr.file.FileWorlds
 import io.furryr.file.ForwardProviderAuthority
 import io.furryr.file.core.ContentTypes
 import io.furryr.file.core.Path
 import io.furryr.file.core.VFile
-import io.furryr.file.core.Vfs
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
 import io.furryr.file.daemon.source.FdFileSource
-import io.furryr.file.installFileProviders
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -77,15 +77,15 @@ class ForwardFileProvider : ContentProvider() {
     override fun onCreate(): Boolean {
         val ctx = context?.applicationContext ?: return false
         // A provider may be created before the activity (e.g. a previously
-        // granted URI is reopened), so wire everything up here too.
-        installFileProviders(ctx)
+        // granted URI is reopened), so build the default world here too.
+        AppRuntime.appWorld(ctx)
         return true
     }
 
     // ── ContentProvider ─────────────────────────────────────────────
 
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
-        val target = targetOf(uri)?.target ?: throw FileNotFoundException("Invalid or expired URI: $uri")
+        val target = targetOf(uri)?.target ?: throw FileNotFoundException("Invalid URI: $uri")
         if (!mode.contains('r')) {
             throw FileNotFoundException("ForwardFileProvider is read-only: ${target.label()}")
         }
@@ -163,7 +163,7 @@ class ForwardFileProvider : ContentProvider() {
     // ── Internals ───────────────────────────────────────────────────
 
     /** A parsed address, with the page a live URL was reached from. */
-    private data class Target(val path: Path, val referer: String? = null)
+    private data class Target(val worldId: String, val path: Path, val referer: String? = null)
 
     /**
      * Expose a seekable [source] as a file descriptor. Reads arrive on a
@@ -255,7 +255,9 @@ class ForwardFileProvider : ContentProvider() {
     // One provider lookup whatever the address is. The signed referer only
     // changes anything for a live file, which is a capability of the node.
     private suspend fun openSource(target: Target): FileSource {
-        val node = Vfs.node(target.path).getOrThrow()
+        val vfs = FileWorlds.find(target.worldId)?.vfs
+            ?: throw FileNotFoundException("world '${target.worldId}' is not available")
+        val node = vfs.node(target.path).getOrThrow()
         val file = node as? VFile ?: throw FileNotFoundException("not a file: ${target.path}")
         return file.withReferer(target.referer).open(OpenMode.READ).getOrThrow()
     }
@@ -296,58 +298,53 @@ class ForwardFileProvider : ContentProvider() {
         private const val QUERY_PATH = "path"
         private const val QUERY_REF = "ref"
         private const val QUERY_REFERER = "referer"
-        private const val QUERY_EXPIRES = "expires"
         private const val QUERY_TOKEN = "token"
+        private const val QUERY_WORLD = "world"
         private const val COPY_BUFFER_SIZE = 256 * 1024
         private const val FACT_CACHE_ENTRIES = 128
 
         /**
          * Metadata captured when a URI is built, keyed by its share token.
-         * Entries disappear when the token expires or the cache evicts them,
-         * so `query`/`getType` never need to open the backend.
+         * Entries disappear when the cache evicts them, so `query`/`getType`
+         * never need to open the backend; after a process restart they fall
+         * back to the path and the file name.
          */
-        private class CachedFacts(val facts: ForwardFacts, val expires: Long)
+        private class CachedFacts(val facts: ForwardFacts)
 
         private val factCache = object : LinkedHashMap<String, CachedFacts>(16, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedFacts>?): Boolean =
                 size > FACT_CACHE_ENTRIES
         }
 
-        private fun rememberFacts(token: String, expires: Long, facts: ForwardFacts?) {
+        private fun rememberFacts(token: String, facts: ForwardFacts?) {
             if (facts == null) return
             synchronized(factCache) {
-                val now = System.currentTimeMillis()
-                factCache.entries.removeAll { it.value.expires < now }
-                factCache[token] = CachedFacts(facts, expires)
+                factCache[token] = CachedFacts(facts)
             }
         }
 
         private fun cachedFacts(token: String): ForwardFacts? = synchronized(factCache) {
-            val cached = factCache[token] ?: return null
-            if (cached.expires < System.currentTimeMillis()) {
-                factCache.remove(token)
-                return null
-            }
-            cached.facts
+            factCache[token]?.facts
         }
 
         /**
-         * Build a short-lived, token-authorized `content://` URI.
+         * Build a persistent, token-authorized `content://` URI.
          *
          * [referer] only applies to HTTP(S) paths: range requests must carry
          * the page that linked the file, or hotlink-protected hosts reject
          * them. It is part of the signed payload, like the path itself.
          *
          * [facts] answers `query`/`getType` without touching the backend; it
-         * is held by token and dropped with the token.
+         * is held by token and dropped with the cache entry.
          */
         fun buildUri(
             path: String,
             referer: String? = null,
             facts: ForwardFacts? = null,
+            worldId: String = FileWorlds.defaultId,
         ): Uri {
-            val (expires, token) = ShareToken.sign(payload(path, referer))
-            rememberFacts(token, expires, facts)
+            val token = ShareToken.sign(payload(worldId, path, referer))
+            rememberFacts(token, facts)
             return Uri.Builder()
                 .scheme("content")
                 .authority(ForwardProviderAuthority)
@@ -360,11 +357,11 @@ class ForwardFileProvider : ContentProvider() {
                         facts?.name ?: runCatching { Path.parse(path).name }.getOrNull(),
                     )
                 }
+                .appendQueryParameter(QUERY_WORLD, worldId)
                 .appendQueryParameter(QUERY_PATH, path)
                 .apply {
                     if (!referer.isNullOrBlank()) appendQueryParameter(QUERY_REFERER, referer)
                 }
-                .appendQueryParameter(QUERY_EXPIRES, expires.toString())
                 .appendQueryParameter(QUERY_TOKEN, token)
                 .build()
         }
@@ -377,12 +374,16 @@ class ForwardFileProvider : ContentProvider() {
          * entry or a container file behind `!` re-resolves through the opener
          * route instead of being flattened into a provider path.
          */
-        fun buildUri(file: VFile, facts: ForwardFacts? = null): Uri {
+        fun buildUri(
+            file: VFile,
+            facts: ForwardFacts? = null,
+            worldId: String = FileWorlds.defaultId,
+        ): Uri {
             val live = file.liveAddress
             return if (live != null) {
-                buildUri(live, file.liveReferer, facts)
+                buildUri(live, file.liveReferer, facts, worldId)
             } else {
-                buildUri(file.path, facts)
+                buildUri(file.path, facts, worldId)
             }
         }
 
@@ -392,17 +393,21 @@ class ForwardFileProvider : ContentProvider() {
          * payload is the address text itself, so the provider re-resolves the
          * same node through the opener route; nothing has to be encoded twice.
          */
-        fun buildUri(path: io.furryr.file.core.Path, facts: ForwardFacts? = null): Uri {
+        fun buildUri(
+            path: io.furryr.file.core.Path,
+            facts: ForwardFacts? = null,
+            worldId: String = FileWorlds.defaultId,
+        ): Uri {
             val encoded = path.toString()
-            val (expires, token) = ShareToken.sign(refPayload(encoded))
-            rememberFacts(token, expires, facts)
+            val token = ShareToken.sign(refPayload(worldId, encoded))
+            rememberFacts(token, facts)
             return Uri.Builder()
                 .scheme("content")
                 .authority(ForwardProviderAuthority)
                 .appendPath("file")
                 .apply { displaySegment(facts?.name ?: path.name) }
+                .appendQueryParameter(QUERY_WORLD, worldId)
                 .appendQueryParameter(QUERY_REF, encoded)
-                .appendQueryParameter(QUERY_EXPIRES, expires.toString())
                 .appendQueryParameter(QUERY_TOKEN, token)
                 .build()
         }
@@ -420,25 +425,26 @@ class ForwardFileProvider : ContentProvider() {
         private class ResolvedTarget(val target: Target, val token: String)
 
         private fun targetOf(uri: Uri): ResolvedTarget? {
-            val expires = uri.getQueryParameter(QUERY_EXPIRES)?.toLongOrNull() ?: return null
             val token = uri.getQueryParameter(QUERY_TOKEN) ?: return null
+            val worldId = uri.getQueryParameter(QUERY_WORLD) ?: FileWorlds.defaultId
             val encoded = uri.getQueryParameter(QUERY_REF)
             if (encoded != null) {
-                if (!ShareToken.verify(refPayload(encoded), expires, token)) return null
+                if (!ShareToken.verify(refPayload(worldId, encoded), token)) return null
                 val path = runCatching { Path.parse(encoded) }.getOrNull() ?: return null
-                return ResolvedTarget(Target(path), token)
+                return ResolvedTarget(Target(worldId, path), token)
             }
             val address = uri.getQueryParameter(QUERY_PATH) ?: return null
             val referer = uri.getQueryParameter(QUERY_REFERER)
-            if (!ShareToken.verify(payload(address, referer), expires, token)) return null
+            if (!ShareToken.verify(payload(worldId, address, referer), token)) return null
             val path = runCatching { Path.parse(address) }.getOrNull() ?: return null
-            return ResolvedTarget(Target(path, referer), token)
+            return ResolvedTarget(Target(worldId, path, referer), token)
         }
 
-        private fun payload(path: String, referer: String?): String =
-            if (referer.isNullOrBlank()) path else "$path\u0000$referer"
+        private fun payload(worldId: String, path: String, referer: String?): String =
+            if (referer.isNullOrBlank()) "$worldId\u0000$path" else "$worldId\u0000$path\u0000$referer"
 
-        private fun refPayload(encoded: String): String = "ref\u0000$encoded"
+        private fun refPayload(worldId: String, encoded: String): String =
+            "$worldId\u0000ref\u0000$encoded"
 
     }
 }

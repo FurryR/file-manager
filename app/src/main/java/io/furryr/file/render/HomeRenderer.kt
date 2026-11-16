@@ -1,34 +1,24 @@
 package io.furryr.file.render
 
-import android.content.Context
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.FilterAlt
-import io.furryr.file.R
+import io.furryr.file.model.PageKind
 
-/**
- * Shared Home path bar and overflow menu. The live view is a
- * [HomeRendererSession]; these pieces stay here so every Home session reports
- * the same title and filter action.
- */
-object HomeRenderer {
-    /**
-     * Home shows its title, but tapping it must start an empty address field:
-     * `home://` is an internal landing marker, not a location to edit.
-     */
-    fun pathBar(context: Context): RendererPath = RendererPath(
-        title = context.getString(R.string.home_title),
-        editText = "",
-    )
+class HomeRenderer(
+    initialState: HomePageState? = null,
+    private val homeTitle: String = "",
+) : RendererBase<HomePageState>(initialState) {
+    val state: HomePageState get() = homeSession.state
+    override val pagePath: String = "home://"
+    override val pageKind: PageKind = PageKind.LOCATION
 
-    fun menuItems(
-        context: Context,
-        onToggleFilter: () -> Unit,
-    ): List<RendererMenuItem> = listOf(
-        RendererMenuItem(
-            title = context.getString(R.string.filter_title),
-            icon = Icons.Default.FilterAlt,
-        ) {
-            onToggleFilter()
-        },
-    )
+    private val homeSession: HomeRendererSession get() = session as HomeRendererSession
+
+    override fun createSession(state: HomePageState?): PageSession<HomePageState> =
+        HomeRendererSession(state, homeTitle)
+
+    override suspend fun enter(host: RendererContext) {
+        (session as HomeRendererSession).prepareEnter()
+        host.commit { h, dark, modifier ->
+            HomeSessionView(session as HomeRendererSession).Content(h, dark, modifier)
+        }
+    }
 }

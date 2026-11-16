@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">檔案</string>
     <string name="permission_denied">權限不足</string>
+    <string name="open_failed">無法開啟</string>
     <string name="service_not_started">「%1$s」的服務尚未啟動。</string>
     <string name="service_not_started_hint">如果啟動應用程式，將可以存取此位置。</string>
     <string name="launch_service">啟動</string>
@@ -23,6 +24,8 @@
     <string name="nav_settings">設定</string>
     <string name="settings">設定</string>
     <string name="settings_other">其他</string>
+    <string name="settings_debug">偵錯</string>
+    <string name="settings_debug_desc">觸發一個測試例外</string>
     <string name="language">語言</string>
     <string name="language_desc">選擇應用程式語言</string>
     <string name="language_system">跟隨系統</string>
@@ -50,6 +53,9 @@
     <string name="open_source_licenses">開放原始碼授權</string>
     <string name="open_source_licenses_desc">本應用程式及其相依項目使用的授權</string>
     <string name="licenses_title">開放原始碼授權</string>
+    <string name="licenses_group_android">Android / JVM</string>
+    <string name="licenses_group_rust">Rust</string>
+    <string name="licenses_group_native">原生</string>
     <string name="about">關於</string>
     <string name="about_desc">應用程式資訊與法律聲明</string>
     <string name="about_description">支援本機、網路、容器與終端機的檔案管理器。</string>
@@ -189,6 +195,7 @@
     <string name="terminal_drawer_title">終端機</string>
     <string name="terminal_empty">沒有可用的終端機</string>
     <string name="terminal_retry">重試</string>
+    <string name="retry">重試</string>
     <string name="devtools_console">主控台</string>
     <string name="devtools_clear">清除</string>
     <string name="devtools_reload">重新載入</string>
@@ -199,8 +206,13 @@
     <string name="terminal_drop_hint">拖到此處插入路徑</string>
     <string name="terminal_no_shell">此終端機沒有可用的 shell</string>
     <string name="terminal_failed">終端機啟動失敗</string>
+    <string name="terminal_connection_lost_title">錯誤</string>
+    <string name="terminal_connection_lost">與遠端的連線已中斷。</string>
+    <string name="terminal_exited_abnormally">終端機異常退出。</string>
+    <string name="terminal_close">關閉終端機</string>
     <string name="terminal_drop_failed">無法插入路徑</string>
     <string name="terminal_drop_wrong_connection">只能插入此 SSH 連線中的項目</string>
+    <string name="terminal_drop_wrong_location">只能插入此終端機所在位置的項目</string>
     <string name="terminal_drop_invalid_path">此路徑無法插入終端機</string>
     <string name="terminal_drop_unreachable">此路徑在容器 \'%1$s\' 中不可達</string>
     <string name="wizard_pull_title">從 Docker Hub 取得 Linux rootfs</string>
@@ -383,4 +395,61 @@
     <string name="web_copy_link_text">複製連結文字</string>
     <string name="web_copy_url">複製 URL</string>
     <string name="web_share_url">分享 URL</string>
+
+    <!-- 通用載入器：每個內嵌開啟方式描述自己的圖示與名稱 -->
+    <string name="open_with_title">開啟方式…</string>
+    <string name="open_with_archive">瀏覽壓縮檔</string>
+    <string name="open_with_browser">瀏覽網頁</string>
+    <string name="open_with_editor">文字編輯</string>
+    <string name="open_with_system">系統</string>
+    <string name="open_with_search">搜尋開啟方式</string>
+
+    <!-- Termux 文字選擇選單（覆寫 terminal-view 函式庫字串） -->
+    <string name="copy_text">複製</string>
+    <string name="paste_text">貼上</string>
+    <string name="select_all_text">全選</string>
+    <string name="web_search_text">網頁搜尋</string>
+    <string name="share_text">分享</string>
+    <string name="terminal_selection_open_link">開啟連結</string>
+    <string name="terminal_selection_select_url">選擇 URL</string>
+
+    <!-- Crash screen -->
+    <string name="crash_title">應用程式已當機</string>
+    <string name="crash_subtitle">應用程式意外停止。你可以複製或匯出下方報告，以協助修正此問題。</string>
+    <string name="crash_export">匯出</string>
+    <string name="crash_copy">複製</string>
+    <string name="crash_restart">重新啟動</string>
+    <string name="crash_close">關閉</string>
+    <string name="crash_share">分享</string>
+    <string name="crash_copied">已複製當機報告</string>
+    <string name="crash_exported">當機報告已儲存</string>
+    <string name="crash_export_failed">無法儲存當機報告</string>
+    <string name="crash_share_failed">無法分享當機報告</string>
+    <string name="crash_report_missing">當機報告已不存在。</string>
+
+    <!-- File picker -->
+    <string name="picker_pick_file">選取檔案</string>
+    <string name="picker_create_file">儲存檔案</string>
+    <string name="picker_pick_folder">選取資料夾</string>
+    <string name="picker_select">選取</string>
+    <string name="picker_select_count">選取 (%1$d)</string>
+    <string name="picker_use_folder">使用此資料夾</string>
+    <string name="picker_save">儲存</string>
+    <string name="picker_file_name">檔案名稱</string>
+    <string name="picker_roots">位置</string>
+    <string name="picker_local">本機儲存</string>
+    <string name="picker_root">內部儲存</string>
+    <string name="picker_containers">容器</string>
+    <string name="picker_saf">SAF 位置</string>
+    <string name="picker_ftp">FTP</string>
+    <string name="picker_sftp">SFTP</string>
+    <string name="picker_ssh">SSH</string>
+    <string name="picker_alist">AList</string>
+    <string name="picker_empty">此資料夾為空</string>
+    <string name="picker_error">無法開啟此資料夾</string>
+    <string name="picker_retry">重試</string>
+    <string name="picker_up">上一層</string>
+    <string name="picker_cancel">取消</string>
+    <string name="picker_invalid_name">檔案名稱無效</string>
+    <string name="picker_name_exists">同名檔案已存在</string>
 </resources>

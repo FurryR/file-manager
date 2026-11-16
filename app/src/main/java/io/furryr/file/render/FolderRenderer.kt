@@ -18,14 +18,25 @@ import io.furryr.file.R
 import io.furryr.file.clipboard.ClipboardAction
 import io.furryr.file.clipboard.ClipboardState
 import io.furryr.file.clipboard.ClipboardSink
+import io.furryr.file.clipboard.ClipboardStore
 import io.furryr.file.core.DirectoryStats
 import io.furryr.file.core.Path
 import io.furryr.file.core.VFolder
+import io.furryr.file.core.Vfs
 import io.furryr.file.core.model.FileEntry
+import io.furryr.file.home.HomeEntry
+import io.furryr.file.home.HomeEntryKind
 import io.furryr.file.isHomePath
+import io.furryr.file.model.PageKind
 import io.furryr.file.model.summary
+import io.furryr.file.provider.terminal.ExecProvider
+import io.furryr.file.terminal.TermuxTerminalTab
+import io.furryr.file.ui.components.BatchRenameDialog
 import io.furryr.file.ui.components.ContextMenu
 import io.furryr.file.ui.components.CreateDialog
+import io.furryr.file.ui.components.DeleteConfirmDialog
+import io.furryr.file.ui.components.RenameDialog
+import io.furryr.file.ui.util.errorText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -41,7 +52,6 @@ import kotlinx.coroutines.withContext
 data class FolderRendererState(
     val path: String,
     val committedPath: String = path,
-    val folder: VFolder? = null,
     val scrollToPath: String? = null,
     val highlightPath: String? = null,
     val highlightDirectory: String? = null,
@@ -55,10 +65,20 @@ data class FolderRendererState(
  * right free-space summary.
  */
 class FolderPageState(
-    var path: String,
+    var path: Path,
     var title: String? = null,
     @Transient var cachedInfo: DirectoryStats? = null,
-) : PageState()
+    @Transient var folder: VFolder? = null,
+) : PageState() {
+    constructor(path: String, title: String? = null) : this(Path.parse(path), title)
+
+    /** A state seeded from its node: path and title come from the folder. */
+    constructor(folder: VFolder) : this(
+        path = folder.path,
+        title = folder.name,
+        folder = folder,
+    )
+}
 
 /** A folder title available before the listing loads. */
 private fun String.pathLabel(): String? {
@@ -74,11 +94,11 @@ private fun String.pathLabel(): String? {
  * the same free-space summary instead of waiting for another stat.
  */
 private fun seedVolumeFacts(renderer: RendererBase<*>, listing: FolderListing) {
-    val target = renderer as? FolderSessionRenderer ?: return
-    if (target.state.path.isBlank()) return
+    val target = renderer as? FolderRenderer ?: return
+    if (target.state.path.toString().isBlank()) return
     val current = listing.loadedPath ?: return
     val currentPath = runCatching { Path.parse(current) }.getOrNull() ?: return
-    val targetPath = runCatching { Path.parse(target.state.path) }.getOrNull() ?: return
+    val targetPath = target.state.path
     if (currentPath.isViewed || targetPath.isViewed) return
     if (targetPath.parent() != currentPath) return
     val info = listing.directoryInfo
@@ -87,37 +107,97 @@ private fun seedVolumeFacts(renderer: RendererBase<*>, listing: FolderListing) {
 }
 
 /**
- * A directory tab as a normal renderer.
- *
- * The session owns the listing and selection, so switching tabs keeps both.
- * The shell only pushes [FolderRendererState]; every app-level action goes
- * through [RendererContext], exactly like the Web and editor renderers.
+ * Resource half of a directory page: the listing, its scope and the host
+ * binding. It carries no UI: menus, dialogs and titles belong to
+ * [FolderRenderer], which keeps them alive across tab switches exactly like
+ * the session keeps the listing.
  */
-class FolderRendererSession(
+internal class FolderRendererSession(
+    private val vfs: Vfs,
     initialSelection: Set<String>,
     initialSelectedIndex: Int,
     initialState: FolderPageState? = null,
-) : PageSession<FolderPageState>(initialState), ListingSession {
-    private var host: RendererContext = DetachedRendererContext
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    val listing = FolderListing(scope) { paths, index, entries ->
-        host.onSelectionChanged(paths, index, entries)
-    }
+) : PageSession<FolderPageState>(initialState) {
+    internal var host: RendererContext? = null
+    internal val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    internal val listing = FolderListing(
+        vfs = vfs,
+        scope = scope,
+        onSelectionChanged = { paths, index, entries ->
+            host?.onSelectionChanged(paths, index, entries)
+        },
+        onError = onError@ { error ->
+            val currentHost = host ?: return@onError
+            val address = state.path.toString()
+            if (address.isBlank()) return@onError
+            currentHost.replace(ErrorRenderer(address, error, locationPage = true))
+        },
+    )
 
     init {
         listing.seedSelection(initialSelection, initialSelectedIndex)
     }
 
-    override val state: FolderPageState = seedState ?: FolderPageState("")
+    internal val state: FolderPageState = seedState ?: FolderPageState("")
 
     override val isLocationRenderer: Boolean get() = true
 
-    override fun leave() {
-        menuEntry = null
-        showCreateDialog = false
-        showSortDialog = false
-        listing.clearDisplayedSelection()
+    internal val entries: List<FileEntry> get() = listing.entries
+    internal val selectedEntries: List<FileEntry> get() = listing.selectedEntries
+    internal val selectedPaths: Set<String> get() = listing.selectedPaths
+    internal fun selectAll() = listing.selectAll()
+    internal fun invertSelection() = listing.invertSelection()
+    internal fun selectSameType() = listing.selectSameType()
+    internal fun setSelection(paths: Set<String>, index: Int) = listing.setSelection(paths, index)
+    internal fun clearSelection() = listing.clearSelection()
+    internal fun clearDisplayedSelection() = listing.clearDisplayedSelection()
+
+    internal fun refreshListing(
+        animate: Boolean,
+        highlightPath: String?,
+        highlightDirectory: String?,
+    ) {
+        listing.refresh(
+            animate = animate,
+            highlightPath = highlightPath,
+            highlightDirectory = highlightDirectory,
+        )
     }
+
+    internal fun useHost(host: RendererContext) {
+        this.host = host
+    }
+
+    override fun onRelease() {
+        listing.close()
+    }
+
+    override fun close() {
+        listing.close()
+        scope.cancel()
+    }
+
+    override fun reset() {
+        host = null
+    }
+}
+
+/**
+ * A directory tab as a normal renderer.
+ *
+ * The session owns the listing and selection, so switching tabs keeps both.
+ * Every menu, dialog and title mode lives here, next to the view that draws
+ * it; the shell only pushes [FolderRendererState].
+ */
+class FolderRenderer(
+    private val vfs: Vfs,
+    private val initialSelection: Set<String> = emptySet(),
+    private val initialSelectedIndex: Int = -1,
+    initialState: FolderPageState? = null,
+) : RendererBase<FolderPageState>(initialState), SelectCapabilities {
+    val state: FolderPageState get() = folderSession.state
+    override val pagePath: String get() = state.path.toString()
+    override val pageKind: PageKind = PageKind.LOCATION
 
     override val entries: List<FileEntry> get() = listing.entries
     override val selectedEntries: List<FileEntry> get() = listing.selectedEntries
@@ -128,6 +208,40 @@ class FolderRendererSession(
     override fun setSelection(paths: Set<String>, index: Int) = listing.setSelection(paths, index)
     override fun clearSelection() = listing.clearSelection()
     override fun clearDisplayedSelection() = listing.clearDisplayedSelection()
+    override fun refreshListing(
+        animate: Boolean,
+        highlightPath: String?,
+        highlightDirectory: String?,
+    ) {
+        listing.refresh(
+            animate = animate,
+            highlightPath = highlightPath,
+            highlightDirectory = highlightDirectory,
+        )
+    }
+
+    override fun createSession(state: FolderPageState?): PageSession<FolderPageState> =
+        FolderRendererSession(vfs, initialSelection, initialSelectedIndex, state)
+
+    private val folderSession: FolderRendererSession get() = session as FolderRendererSession
+    internal val listing: FolderListing get() = folderSession.listing
+
+    internal fun bindHost(host: RendererContext) = folderSession.useHost(host)
+
+    /** Keep the page's durable path in step with the shell's location. */
+    internal fun syncPath(path: String) {
+        state.path = Path.parse(path)
+    }
+
+    /** The node this page was opened from, if any. */
+    internal fun folderNode(): VFolder? = state.folder
+
+    /** True for structural views and folder roots with no modify operations. */
+    internal fun isReadOnly(): Boolean =
+        state.folder?.addressable == false ||
+            (listing.loadedCapabilities.rename == null && listing.loadedCapabilities.delete == null)
+
+    override val isLocationRenderer: Boolean get() = true
 
     /** Long-press opens the renderer's own entry menu, not a shell dialog. */
     var menuEntry by mutableStateOf<FileEntry?>(null)
@@ -139,6 +253,18 @@ class FolderRendererSession(
 
     /** The renderer's own sort dialog, opened by its menu. */
     var showSortDialog by mutableStateOf(false)
+        internal set
+
+    /** The renderer's own delete confirmation. */
+    var deleteEntries by mutableStateOf<List<FileEntry>?>(null)
+        internal set
+
+    /** The renderer's own single-entry rename dialog. */
+    var renameEntry by mutableStateOf<FileEntry?>(null)
+        internal set
+
+    /** The renderer's own batch rename dialog and its frozen targets. */
+    var batchRenameEntries by mutableStateOf<List<FileEntry>?>(null)
         internal set
 
     private var filterText by mutableStateOf("")
@@ -159,10 +285,16 @@ class FolderRendererSession(
         setFilter("")
     }
 
-    /** Drop the filter overlay and any row animation before this page commits. */
-    internal fun prepareEnter() {
+    override suspend fun enter(host: RendererContext) {
+        // A filter and its row animation belong to the frame that showed them.
+        // Reset both before the new body commits, so no stale overlay or
+        // entrance animation survives the transition.
         closeFilter()
         listing.finishAnimation()
+        listing.lockSelection(ClipboardStore.state.inTransfer)
+        host.commit { h, dark, modifier ->
+            FolderSessionView(this).Content(h, dark, modifier)
+        }
     }
 
     override val locationInfo: DirectoryStats
@@ -172,17 +304,26 @@ class FolderRendererSession(
             return state.cachedInfo ?: live
         }
 
+    override fun bookmarkEntry(): HomeEntry? {
+        val path = listing.loadedPath ?: state.path.toString()
+        if (path.isBlank() || isHomePath(path)) return null
+        val label = state.title?.takeIf { it.isNotBlank() }
+            ?: state.path.name
+            ?: path
+        return HomeEntry(HomeEntryKind.FOLDER, path, label, path)
+    }
+
     override val title: String?
         get() {
-            val shown = host.folderView()
-            return shown?.folder?.name?.takeIf { it.isNotBlank() }
+            val shown = folderSession.host?.folderView()
+            return state.folder?.name?.takeIf { it.isNotBlank() }
                 ?: state.title?.takeIf { it.isNotBlank() }
                 ?: shown?.path?.pathLabel()
-                ?: state.path.pathLabel()
+                ?: state.path.toString().pathLabel()
         }
 
     override fun pathBar(context: Context): RendererPath? {
-        val path = host.folderView()?.path ?: state.path
+        val path = folderSession.host?.folderView()?.path ?: state.path.toString()
         if (path.isBlank()) return null
         return RendererPath(
             title = path,
@@ -203,30 +344,14 @@ class FolderRendererSession(
         }
     }
 
-    override val capabilities: RenderCapabilities
-        get() = RenderCapabilities(
-            canCreate = listing.loadedCapabilities.canCreate,
-        )
-
-    override val parent: VFolder?
-        get() = listing.loadedFolder?.parent
-
-    override val terminalPath: String?
-        get() = listing.loadedPath?.takeIf { listing.loadedCapabilities.canOpenTerminal }
+    internal val terminalPath: String?
+        get() = listing.loadedPath?.takeIf {
+            val folder = listing.loadedFolder ?: return@takeIf false
+            val exec = folder.provider as? ExecProvider ?: return@takeIf false
+            runCatching { exec.terminalPath(folder, folder) }.getOrNull() != null
+        }
 
     override fun matchesLocation(path: String): Boolean = !isHomePath(path)
-
-    override fun refreshListing(
-        animate: Boolean,
-        highlightPath: String?,
-        highlightDirectory: String?,
-    ) {
-        listing.refresh(
-            animate = animate,
-            highlightPath = highlightPath,
-            highlightDirectory = highlightDirectory,
-        )
-    }
 
     override fun menuItems(context: Context): List<RendererMenuItem> = buildList {
         add(
@@ -250,74 +375,215 @@ class FolderRendererSession(
                 onClick = { showSortDialog = true },
             ),
         )
-        host.bookmarkMenuItem(context)?.let(::add)
+        bookmarkMenuItem(context, bookmarkEntry())?.let(::add)
     }
 
-    override fun requestCreate() {
-        if (!listing.loadedCapabilities.canCreate || listing.loadedFolder == null) return
-        showCreateDialog = true
+    override val capabilities: RenderCapabilities
+        get() {
+            val folder = listing.loadedFolder
+            val up = folder?.parent?.let { parent -> { openParent(parent) } }
+            val terminal = folder?.let { current ->
+                val exec = current.provider as? ExecProvider ?: return@let null
+                if (runCatching { exec.terminalPath(current, current) }.getOrNull() == null) {
+                    return@let null
+                }
+                TerminalFactory { ctx ->
+                    TermuxTerminalTab.start(ctx, current.name, exec, current, vfs = vfs) { rows, cols ->
+                        exec.terminal(current, rows, cols)
+                    }
+                }
+            }
+            val caps = listing.loadedCapabilities
+            return RenderCapabilities(
+                create = if (caps.createFile != null || caps.createDirectory != null) {
+                    { showCreateDialog = true }
+                } else {
+                    null
+                },
+                rename = if (caps.rename != null) ::requestRename else null,
+                delete = if (caps.delete != null) ::requestDelete else null,
+                up = up,
+                terminal = terminal,
+                select = this,
+            )
+        }
+
+    /** Up: route the owning folder and append it as a new stop. */
+    private fun openParent(parent: VFolder) {
+        val session = folderSession
+        val host = session.host ?: return
+        session.scope.launch {
+            try {
+                host.open(host.opener.route(parent))
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                host.reportError(error)
+            }
+        }
     }
 
     internal fun createEntry(context: Context, name: String, directory: Boolean) {
-        val folder = listing.loadedFolder ?: return
+        val caps = listing.loadedCapabilities
         showCreateDialog = false
-        scope.launch {
+        folderSession.scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    if (directory) folder.mkdir(name).getOrThrow() else folder.create(name).getOrThrow()
+                    if (directory) {
+                        caps.createDirectory?.invoke(name)?.getOrThrow()
+                            ?: error("cannot create a folder here")
+                    } else {
+                        caps.createFile?.invoke(name)?.getOrThrow()
+                            ?: error("cannot create a file here")
+                    }
                 }
             }
             Toast.makeText(
                 context,
-                result.exceptionOrNull()?.message ?: context.getString(R.string.toast_created, name),
+                result.exceptionOrNull()?.let { context.errorText(it) }
+                    ?: context.getString(R.string.toast_created, name),
                 Toast.LENGTH_SHORT,
             ).show()
             listing.refresh(animate = true)
         }
     }
 
+    /** Open the renderer's own delete confirmation for [entries]. */
+    internal fun requestDelete(entries: List<FileEntry>) {
+        deleteEntries = entries
+    }
+
+    /** Open a single rename, or the batch rename when several are selected. */
+    internal fun requestRename(entries: List<FileEntry>) {
+        if (entries.size > 1) {
+            batchRenameEntries = entries
+        } else {
+            renameEntry = entries.firstOrNull()
+        }
+    }
+
+    internal fun delete(context: Context, entries: List<FileEntry>) {
+        deleteEntries = null
+        folderSession.scope.launch {
+            var failure: Throwable? = null
+            withContext(Dispatchers.IO) {
+                val delete = listing.loadedCapabilities.delete ?: error("cannot delete here")
+                for (entry in entries) {
+                    val result = runCatching { delete(entry.name).getOrThrow() }
+                    if (result.isFailure) {
+                        failure = result.exceptionOrNull()
+                        break
+                    }
+                }
+            }
+            val error = failure
+            Toast.makeText(
+                context,
+                when {
+                    error != null -> context.errorText(error)
+                    entries.size == 1 -> context.getString(R.string.toast_deleted, entries.first().name)
+                    else -> context.getString(R.string.toast_deleted_count, entries.size)
+                },
+                Toast.LENGTH_SHORT,
+            ).show()
+            listing.clearSelection()
+            listing.refresh(animate = true)
+        }
+    }
+
+    internal fun rename(context: Context, entry: FileEntry, newName: String) {
+        renameEntry = null
+        folderSession.scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val rename = listing.loadedCapabilities.rename ?: error("cannot rename here")
+                    rename(entry.name, newName).getOrThrow()
+                }
+            }
+            Toast.makeText(
+                context,
+                if (result.isSuccess) context.getString(R.string.toast_renamed, newName)
+                else context.errorText(result.exceptionOrNull()),
+                Toast.LENGTH_SHORT,
+            ).show()
+            listing.refresh(animate = true)
+        }
+    }
+
+    internal fun batchRename(context: Context, entries: List<FileEntry>, pattern: String, replacement: String) {
+        batchRenameEntries = null
+        val regex = runCatching { Regex(pattern) }.getOrNull()
+        folderSession.scope.launch {
+            val failures = if (regex == null) {
+                listOf(IllegalArgumentException(context.getString(R.string.toast_failed)))
+            } else {
+                withContext(Dispatchers.IO) {
+                    val rename = listing.loadedCapabilities.rename ?: error("cannot rename here")
+                    entries.mapNotNull { entry ->
+                        val newName = regex.replace(entry.name, replacement)
+                        if (newName.isBlank() || newName == entry.name) {
+                            null
+                        } else {
+                            runCatching { rename(entry.name, newName).getOrThrow() }
+                                .exceptionOrNull()
+                        }
+                    }
+                }
+            }
+            Toast.makeText(
+                context,
+                if (failures.isEmpty()) context.getString(R.string.toast_renamed, entries.size.toString())
+                else context.errorText(failures.first()),
+                Toast.LENGTH_SHORT,
+            ).show()
+            if (failures.isEmpty()) listing.clearSelection()
+            listing.refresh(animate = true)
+        }
+    }
+
     override val clipboardSink: ClipboardSink? = object : ClipboardSink {
-        override fun accepts(state: ClipboardState): Boolean =
-            state.inTransfer && listing.loadedCapabilities.canCreate && listing.loadedFolder != null
+        override fun accepts(state: ClipboardState): Boolean {
+            val caps = listing.loadedCapabilities
+            return state.inTransfer && listing.loadedFolder != null &&
+                (caps.createFile != null || caps.createDirectory != null)
+        }
 
         override fun destinationFolder(): VFolder? = listing.loadedFolder
     }
 
-    internal fun useHost(host: RendererContext) {
-        this.host = host
+    override fun blur() {
+        menuEntry = null
+        showCreateDialog = false
+        showSortDialog = false
+        listing.clearDisplayedSelection()
     }
 
-    override fun onRelease() {
-        listing.close()
-    }
+    override fun onRelease() = folderSession.onRelease()
 
-    override fun close() {
-        listing.close()
-        scope.cancel()
-    }
+    override fun close() = folderSession.close()
 
-    override fun reset() {
-        host = DetachedRendererContext
-    }
+    override fun reset() = folderSession.reset()
 }
 
-/** View half of the directory session; all state stays in the session. */
+/** View half of the directory renderer; all state stays in the renderer. */
 internal class FolderSessionView(
-    private val session: FolderRendererSession,
+    private val renderer: FolderRenderer,
 ) : SessionView {
     @Composable
     override fun Content(host: RendererContext, darkTheme: Boolean, modifier: Modifier) {
-        session.useHost(host)
+        val listing = renderer.listing
+        renderer.bindHost(host)
         val state = host.folderView() ?: return
-        (session.state as? FolderPageState)?.path = state.path
+        renderer.syncPath(state.path)
         val context = LocalContext.current
         val scope = rememberCoroutineScope()
         Box(modifier) {
             FolderContent(
-                listing = session.listing,
+                listing = listing,
                 path = state.path,
+                worldId = host.worldId,
                 committedPath = state.committedPath,
-                folderOverride = state.folder,
+                folderOverride = renderer.folderNode(),
                 onNavigationLoaded = host::onFolderLoaded,
                 onNavigationCancelled = host::onFolderCancelled,
                 scrollToPath = state.scrollToPath,
@@ -330,81 +596,100 @@ internal class FolderSessionView(
                         host.openEntry(entry, null)
                     } else {
                         scope.launch {
-                            val opener = host.opener
-                            if (opener == null) {
-                                host.openEntry(entry, node)
-                                return@launch
-                            }
-                            when (val opened = opener.open(node, null, host)) {
-                                is Opened.Renderer -> {
-                                    seedVolumeFacts(opened.renderer, session.listing)
-                                    host.open(opened.renderer)
-                                }
-                                is Opened.Failure -> host.reportError(
-                                    IllegalStateException(opened.message ?: "Cannot open"),
-                                )
+                            try {
+                                val opened = host.opener.route(node)
+                                seedVolumeFacts(opened, listing)
+                                host.open(opened)
+                            } catch (error: kotlinx.coroutines.CancellationException) {
+                                throw error
+                            } catch (error: Throwable) {
+                                host.reportError(error)
                             }
                         }
                     }
                 },
-                onLongPress = { entry -> session.menuEntry = entry },
+                onLongPress = { entry -> renderer.menuEntry = entry },
                 opening = state.opening,
                 onCancelOpening = host::cancelOpening,
                 onFileDragStart = host::onFileDragStart,
                 onFileDragEnd = host::onFileDragEnd,
-                errorView = DefaultRendererErrorView,
             )
-            session.menuEntry?.let { entry ->
-                val selected = session.listing.selectedEntries
+            renderer.menuEntry?.let { entry ->
+                val selected = listing.selectedEntries
                 val batch = selected.ifEmpty { listOf(entry) }
-                val readOnly = state.folder != null
+                val readOnly = renderer.isReadOnly()
                 ContextMenu(
                     entry = entry,
-                    onDismiss = { session.menuEntry = null },
+                    onDismiss = { renderer.menuEntry = null },
                     onCopy = {
-                        host.putOnClipboard(session.listing.clipboardEntries(batch), ClipboardAction.COPY)
-                        session.menuEntry = null
+                        host.putOnClipboard(listing.clipboardEntries(batch), ClipboardAction.COPY)
+                        renderer.menuEntry = null
                     },
                     onMove = {
-                        host.putOnClipboard(session.listing.clipboardEntries(batch), ClipboardAction.MOVE)
-                        session.menuEntry = null
+                        host.putOnClipboard(listing.clipboardEntries(batch), ClipboardAction.MOVE)
+                        renderer.menuEntry = null
                     },
                     onRename = {
-                        host.requestRename(batch)
-                        session.menuEntry = null
+                        renderer.requestRename(batch)
+                        renderer.menuEntry = null
                     },
                     onDelete = {
-                        host.requestDelete(batch)
-                        session.menuEntry = null
+                        renderer.requestDelete(batch)
+                        renderer.menuEntry = null
                     },
                     onProperties = {
                         host.requestProperties(entry)
-                        session.menuEntry = null
+                        renderer.menuEntry = null
                     },
                     onShare = {
-                        host.requestShare(batch)
-                        session.menuEntry = null
+                        host.requestShare(listing.clipboardEntries(batch))
+                        renderer.menuEntry = null
                     },
-                    canShare = !readOnly && batch.all { !it.isDirectory },
+                    canCopy = true,
+                    canMove = !readOnly,
+                    canShare = batch.all { !it.isDirectory },
                     canModify = !readOnly,
                 )
             }
-            if (session.showCreateDialog) {
+            if (renderer.showCreateDialog) {
                 CreateDialog(
-                    initialPath = session.listing.loadedPath ?: state.path,
-                    onDismiss = { session.showCreateDialog = false },
-                    onCreateFile = { name -> session.createEntry(context, name, directory = false) },
-                    onCreateFolder = { name -> session.createEntry(context, name, directory = true) },
+                    initialPath = listing.loadedPath ?: state.path,
+                    onDismiss = { renderer.showCreateDialog = false },
+                    onCreateFile = { name -> renderer.createEntry(context, name, directory = false) },
+                    onCreateFolder = { name -> renderer.createEntry(context, name, directory = true) },
                 )
             }
-            if (session.showSortDialog) {
+            if (renderer.showSortDialog) {
                 SortDialog(
-                    currentMode = session.listing.sortMode,
-                    currentReverse = session.listing.sortReverse,
-                    onDismiss = { session.showSortDialog = false },
+                    currentMode = listing.sortMode,
+                    currentReverse = listing.sortReverse,
+                    onDismiss = { renderer.showSortDialog = false },
                     onConfirm = { mode, reverse ->
-                        session.listing.setSort(mode, reverse)
-                        session.showSortDialog = false
+                        listing.setSort(mode, reverse)
+                        renderer.showSortDialog = false
+                    },
+                )
+            }
+            renderer.deleteEntries?.let { entries ->
+                DeleteConfirmDialog(
+                    entries = entries,
+                    onDismiss = { renderer.deleteEntries = null },
+                    onConfirm = { renderer.delete(context, entries) },
+                )
+            }
+            renderer.renameEntry?.let { entry ->
+                RenameDialog(
+                    entry = entry,
+                    onDismiss = { renderer.renameEntry = null },
+                    onConfirm = { newName -> renderer.rename(context, entry, newName) },
+                )
+            }
+            renderer.batchRenameEntries?.let { entries ->
+                BatchRenameDialog(
+                    count = entries.size,
+                    onDismiss = { renderer.batchRenameEntries = null },
+                    onConfirm = { pattern, replacement ->
+                        renderer.batchRename(context, entries, pattern, replacement)
                     },
                 )
             }

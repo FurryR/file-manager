@@ -488,6 +488,14 @@ private fun SettingsMainPage(
                 ),
                 onClick = { showLanguageDialog = true },
             )
+            SettingsDivider()
+            SettingsValueRow(
+                title = stringResource(R.string.settings_debug),
+                value = stringResource(R.string.settings_debug_desc),
+                onClick = {
+                    throw RuntimeException("Debug exception triggered from settings")
+                },
+            )
         }
     }
 
@@ -924,30 +932,3 @@ private fun TerminalSchemeSwatches(scheme: TerminalScheme) {
     }
 }
 
-@Composable
-private fun AboutDialog(onDismiss: () -> Unit) {
-    val context = LocalContext.current
-    val version = context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.about)) },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineMedium)
-                Text(
-                    stringResource(R.string.version, version),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(24.dp))
-                Text(stringResource(R.string.about_description), style = MaterialTheme.typography.bodyLarge)
-                Spacer(Modifier.height(24.dp))
-                Text(stringResource(R.string.source_code), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                Text("https://github.com/FurryR/file-manager", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp))
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.confirm)) }
-        },
-    )
-}

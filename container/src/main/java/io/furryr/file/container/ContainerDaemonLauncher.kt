@@ -15,15 +15,15 @@ import io.furryr.file.wayland.WaylandManager
  * `:core` never sees it.
  *
  * - chroot: launched as root via `su -c '<daemon> --key <pub> --id <id> --chroot <rootfs> --bind …'`.
- *   It also owns the container cgroup (`--group <name>`): the daemon outlives the
- *   app on purpose (its parent is the su daemon, not the app) so that it can end
- *   the container when its last client goes away, and `cgroup::sweep` ends groups
- *   whose owner died. proot uses PRoot's `--cgroup` emulation instead (below).
+ *   The daemon automatically owns a cgroup named from its `--id`: it outlives
+ *   the app on purpose (its parent is the su daemon, not the app) so that it can
+ *   end the container when its last client goes away, and `cgroup::sweep` ends
+ *   groups whose owner died. proot uses PRoot's `--cgroup` emulation instead (below).
  *   The daemon isolates the mount tree and chroots itself.
  * - proot: launched as the app UID through proot, so the daemon process itself
  *   lives inside the container.  proot's `--cgroup` emulation gives the daemon
- *   a private cgroup v2 hierarchy, so `--group` still owns the container
- *   lifetime even though the app cannot create real cgroups.
+ *   a private cgroup v2 hierarchy, so the automatic cgroup still owns the
+ *   container lifetime even though the app cannot create real cgroups.
  */
 object ContainerDaemonLauncher {
     const val DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -51,7 +51,6 @@ object ContainerDaemonLauncher {
             "--key", shellQuote(request.publicKey),
             "--id", shellQuote(request.id),
             "--chroot", shellQuote(container.rootfsPath),
-            "--group", shellQuote(container.name),
         )
         for ((source, target) in ProotRunner.chrootBinds(context, container)) {
             tokens.add("--bind")

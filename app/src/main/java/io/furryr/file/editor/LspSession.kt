@@ -194,7 +194,7 @@ internal class LspSession private constructor(
             ),
         )
         val result = request("initialize", obj("processId" to JSONObject.NULL,
-            "clientInfo" to obj("name" to "File Manager", "version" to "1.0"),
+            "clientInfo" to obj("name" to "File", "version" to "1.0"),
             "rootUri" to fileUri(settings.root), "workspaceFolders" to workspaceFolders(), "capabilities" to capabilities))
             .optJSONObject("result")?.optJSONObject("capabilities") ?: JSONObject()
         require(result.optString("positionEncoding", "utf-16") == "utf-16") { "Language server must support UTF-16 positions" }

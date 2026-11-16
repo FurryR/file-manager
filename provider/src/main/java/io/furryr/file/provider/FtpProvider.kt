@@ -37,7 +37,10 @@ import java.io.InputStream
  * // Then access files via: ftp://192.168.1.1/srv/ftp/file.txt
  * ```
  */
-object FtpProvider : FileProvider {
+class FtpProvider(
+    private val servers: FtpServerSource,
+    private val cacheDir: File,
+) : FileProvider {
     override val schemes: Set<String> get() = setOf(ProviderSchemes.FTP)
     override val label: String get() = "FTP Location"
     override val writable: Boolean get() = true
@@ -48,28 +51,15 @@ object FtpProvider : FileProvider {
         ProviderFeature.OPEN, ProviderFeature.STREAM_COPY,
     )
 
-    private const val TIMEOUT_MS = 30_000
-    private const val COPY_BUFFER_SIZE = 256 * 1024
-
-    private lateinit var servers: FtpServerSource
-    private lateinit var cacheDir: File
+    private val TIMEOUT_MS = 30_000
+    private val COPY_BUFFER_SIZE = 256 * 1024
 
     private val connLock = Any()
     private val clients = mutableMapOf<String, FTPClient>()
 
-    fun init(servers: FtpServerSource, cacheDir: File) {
-        this.servers = servers
-        this.cacheDir = cacheDir
-    }
-
     override fun isAvailable(): Boolean = true
 
     override suspend fun connect(): Result<Unit> = Result.success(Unit)
-
-    override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
-        if (path.trim('/').isEmpty()) return DirectoryCapabilities()
-        return super<FileProvider>.directoryCapabilities(path)
-    }
 
     override suspend fun disconnect() {
         synchronized(connLock) {

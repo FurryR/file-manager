@@ -1,52 +1,53 @@
 package io.furryr.file
 
 import android.content.Context
-import android.util.Log
 import io.furryr.file.agent.AgentEnvironment
 import io.furryr.file.agent.AgentSettings
-import io.furryr.file.terminal.SessionManager
 import io.furryr.file.container.ContainerDaemonLauncher
 import io.furryr.file.container.ContainerProvider
 import io.furryr.file.container.ContainerRuntime
+import io.furryr.file.container.ContainerUris
+import io.furryr.file.core.ContentKind
+import io.furryr.file.core.ContentTypes
+import io.furryr.file.core.FileProvider
+import io.furryr.file.core.FileWorld
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.HubActions
 import io.furryr.file.daemon.HubLocation
+import io.furryr.file.editor.EditorFactory
+import io.furryr.file.forward.ShareToken
 import io.furryr.file.home.HomeStore
-import io.furryr.file.provider.LocalProvider
 import io.furryr.file.provider.DocumentFileProvider
 import io.furryr.file.provider.FtpProvider
+import io.furryr.file.provider.LocalProvider
+import io.furryr.file.provider.ProviderSchemes
 import io.furryr.file.provider.SAFProvider
 import io.furryr.file.provider.SftpProvider
-import io.furryr.file.core.Vfs
-import io.furryr.file.core.Plugins
 import io.furryr.file.provider.remote.RemoteProviders
 import io.furryr.file.provider.remote.SshTerminals
-import io.furryr.file.opener.ArchiveOpener
-import io.furryr.file.editor.EditorRendererFactory
-import io.furryr.file.core.ViewOpeners
-import io.furryr.file.render.Renderers
-import io.furryr.file.render.WebRendererFactory
-import io.furryr.file.render.WebTransferService
 import io.furryr.file.provider.web.HttpProvider
 import io.furryr.file.provider.web.WebTransfers
+import io.furryr.file.proxy.ArchiveProxy
+import io.furryr.file.render.GenericFactory
+import io.furryr.file.render.WebFactory
+import io.furryr.file.render.WebTransferService
 import io.furryr.file.settings.PulseSettings
 import io.furryr.file.store.LocalLocationStore
 import io.furryr.file.store.LocationStores
 import io.furryr.file.store.LocationsRepository
 import io.furryr.file.store.WebLocationStore
 
+private var processInstalled = false
 private var runtimeListenerInstalled = false
-private var fileProvidersInstalled = false
 
 /**
- * Wire up the daemon configuration and register every file provider.
- *
- * Idempotent, so it is safe to call from both the activity and any process
- * entry point that may run first (e.g. the forwarded-content provider).
+ * Process-owned services. These are resources, not registrations: one daemon
+ * per process, one set of preference/database stores, one foreground-transfer
+ * notifier. Every world shares them.
  */
 @Synchronized
-fun installFileProviders(context: Context) {
-    if (fileProvidersInstalled) return
+fun ensureProcessServices(context: Context) {
+    if (processInstalled) return
     val appContext = context.applicationContext
     val prefs = appContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
@@ -60,6 +61,9 @@ fun installFileProviders(context: Context) {
     WebTransfers.init { WebTransferService.start(appContext) }
     AgentSettings.install(appContext)
     PulseSettings.install(appContext)
+    // Shared content:// URIs outlive the activity and the process, like picker
+    // document ids; keep their signing key in app-private storage.
+    ShareToken.install(java.io.File(appContext.filesDir, "share-token.bin"))
     DaemonManager.configure(
         rootEnabled = prefs.getBoolean("root_enabled", false),
         shellEnabled = prefs.getBoolean("shell_enabled", false),
@@ -77,45 +81,116 @@ fun installFileProviders(context: Context) {
             }
         }
     }
+    processInstalled = true
+    // A persisted document URI names a world that may not be live yet. Rebuild
+    // it from the persisted locations instead of failing the read.
+    FileWorlds.factory = { id -> buildAppWorld(appContext, id, manager = id == "app") }
+}
 
-    ContainerRuntime.isRunning = DaemonManager::isNamedConnected
+/**
+ * Build one independent world. [manager] wires the features that only the full
+ * file manager owns: container scope for the agent, `here` navigation and hub
+ * location targets. A picker world builds the same file stack without them.
+ */
+fun buildAppWorld(context: Context, id: String, manager: Boolean): AppWorld {
+    ensureProcessServices(context)
+    val appContext = context.applicationContext
 
     val local = LocalProvider()
-    Vfs.setDefault(local)
-    Vfs.register(local)
-    ContainerProvider.init(appContext)
-    Vfs.register(ContainerProvider)
-    DocumentFileProvider.init(appContext, LocationStores)
-    Vfs.register(DocumentFileProvider)
-    SAFProvider.init(appContext, LocationStores)
-    Vfs.register(SAFProvider)
-    FtpProvider.init(LocationStores, appContext.cacheDir)
-    Vfs.register(FtpProvider)
-    SftpProvider.init(LocationStores, appContext.cacheDir)
-    Vfs.register(SftpProvider)
-    // A URL is an address like any other: both schemes reach the same
-    // read-only provider, and nothing above it inspects the scheme.
-    Vfs.register(HttpProvider)
-    HereNavigation.install(appContext)
-    HubActions.locationTargets = {
-        LocationsRepository.locations(appContext, local)
-            .filter { it.kind != "local" }
-            .map { HubLocation(kind = it.kind, label = it.title, root = it.root) }
+    val providers = mutableListOf<FileProvider>(
+        local,
+        ContainerProvider(appContext),
+        DocumentFileProvider(appContext, LocationStores),
+        SAFProvider(appContext, LocationStores),
+        FtpProvider(LocationStores, appContext.cacheDir),
+        SftpProvider(LocationStores, appContext.cacheDir),
+        HttpProvider(ProviderSchemes.web),
+    )
+    providers += RemoteProviders.providers(appContext.cacheDir, LocationStores)
+
+    val files = FileWorld()
+    files.vfs.setDefault(local)
+    for (provider in providers) files.vfs.register(provider)
+
+    val picker = !manager
+    val selection = if (picker) io.furryr.file.picker.PickerSelection() else null
+    val opener = Opener(files)
+    if (picker) {
+        // A picker has no editor, browser or archive view. Every regular file
+        // goes to the one select action, so a click means "choose this file".
+        opener.registerFallback(
+            io.furryr.file.picker.PickerSelectFactory(requireNotNull(selection)),
+        )
+    } else {
+        // Structural views are world-local: `a.zip!/x` resolves through this
+        // world's registry, never a process-global one.
+        val archive = ArchiveProxy(appContext.cacheDir)
+        files.proxies.register("application/zip", archive)
+        opener.registerChooserOnly(
+            ArchiveOpener(files, archive, appContext.getString(R.string.open_with_archive)),
+        )
+
+        val editor = EditorFactory(files, appContext.getString(R.string.open_with_editor))
+        val web = WebFactory(files, appContext.getString(R.string.open_with_browser))
+        opener.register("text/html", web)
+        opener.register("application/xhtml+xml", web)
+        for (mime in ContentTypes.mimes) {
+            if (ContentTypes.isHtmlMime(mime)) continue
+            if (ContentTypes.kindOf(mime, "") == ContentKind.TEXT ||
+                ContentTypes.kindOf(mime, "") == ContentKind.CODE
+            ) {
+                opener.register(mime, editor)
+            }
+        }
+        opener.registerFallback(GenericFactory { opener.options })
     }
-    RemoteProviders.providers(appContext.cacheDir, LocationStores).forEach {
-        Vfs.register(it)
+
+    val world = AppWorld(id, files, opener, local, providers, selection)
+
+    if (manager) {
+        ContainerRuntime.isRunning = DaemonManager::isNamedConnected
+        // The agent names a container scope through this seam, so `:agent` never
+        // spells a container address itself.
+        AgentEnvironment.namedTargetRoot = { name -> ContainerUris.forContainer(name) }
+        HereNavigation.install(appContext)
+        HubActions.locationTargets = {
+            LocationsRepository.locations(appContext, local, files.vfs)
+                .filter { it.kind != "local" }
+                .map { HubLocation(kind = it.kind, label = it.title, root = it.root) }
+        }
+        SshTerminals.configure(LocationStores)
     }
-    SshTerminals.configure(LocationStores)
-    // Container openers and renderers are Kotlin-side; they never touch a
-    // daemon API. Directory tabs are shell-owned location renderers, so the
-    // open-with table only handles files.
-    ViewOpeners.register(100, ArchiveOpener(appContext.cacheDir))
-    Renderers.register(15, EditorRendererFactory())
-    Renderers.register(20, WebRendererFactory())
-    OpenTable.install()
-    // Plugin contributions go through the same registries as the built-ins.
-    Plugins.installAll().forEach { failure ->
-        Log.w("Plugins", "Plugin '${failure.id}' failed to install", failure.cause)
+
+    return world
+}
+
+/**
+ * Process services plus the file manager's default world.
+ *
+ * Idempotent, so a content provider that starts before the activity can build
+ * the same world the UI will use.
+ */
+object AppRuntime {
+    @Synchronized
+    fun appWorld(context: Context): AppWorld {
+        ensureProcessServices(context)
+        FileWorlds.app()?.let { return it }
+        val world = buildAppWorld(context, id = "app", manager = true)
+        FileWorlds.install(world, default = true)
+        return world
     }
-    fileProvidersInstalled = true
+
+    /** The picker's own world; it never becomes the process default. */
+    @Synchronized
+    fun pickerWorld(context: Context): AppWorld {
+        ensureProcessServices(context)
+        // Every picker activity gets its own world: two pickers in the same
+        // process must not overwrite each other's PickerSelection callback.
+        val id = "picker-${++pickerSequence}"
+        val world = buildAppWorld(context, id, manager = false)
+        FileWorlds.install(world)
+        return world
+    }
+
+    private var pickerSequence = 0
 }

@@ -1,7 +1,6 @@
 package io.furryr.file.provider
 
 import io.furryr.file.core.*
-
 import io.furryr.file.provider.model.SafLocation
 import android.content.Context
 import android.database.Cursor
@@ -24,10 +23,13 @@ import java.io.FileNotFoundException
 
 /**
  * FileProvider for SAF document tree locations.
- * Maps `saf://<hexId>/<path>` URIs — the authority `<hexId>` is an 8-char hex ID.
- * `saf:///` lists all registered locations.
+ * Maps `saf:///<hexId>/<path>` URIs — `<hexId>` is an 8-char location ID.
+ * `saf:///` lists all registered locations under their hex IDs.
  */
-object SAFProvider : FileProvider {
+class SAFProvider(
+    private val appContext: Context,
+    private val locations: SafLocationSource,
+) : FileProvider {
     override val schemes: Set<String> get() = setOf("saf")
     override val label: String get() = "SAF Location"
     override val writable: Boolean get() = true
@@ -38,18 +40,6 @@ object SAFProvider : FileProvider {
         ProviderFeature.RENAME, ProviderFeature.STREAM_COPY,
     )
 
-    private lateinit var locations: SafLocationSource
-
-    override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
-        if (path.trim('/').isEmpty()) return DirectoryCapabilities()
-        return super<FileProvider>.directoryCapabilities(path)
-    }
-        private lateinit var appContext: Context
-
-            fun init(context: Context, locations: SafLocationSource) {
-                appContext = context.applicationContext
-                this.locations = locations
-            }
 
             override fun isAvailable(): Boolean = true
             override suspend fun connect(): Result<Unit> = Result.success(Unit)
@@ -60,8 +50,8 @@ object SAFProvider : FileProvider {
                 if (path == "/") {
                     return@runCatching locations.safLocations().map { loc ->
                         FileEntry(
-                            name = loc.name.ifBlank { loc.hexId },
-                            path = Path.of("saf", host = loc.hexId).toString(),
+                            name = loc.hexId,
+                            path = Path.of("saf", segments = listOf(loc.hexId)).toString(),
                             isDirectory = true,
                             modifiedAt = 0,
                             size = 0,
@@ -83,9 +73,8 @@ object SAFProvider : FileProvider {
                 val entries = mutableListOf<FileEntry>()
                 val baseUri = Path.of(
                     "saf",
-                    host = loc.hexId,
-                    segments = relPath.split('/').filter { it.isNotEmpty() },
-                ).toString().trimEnd('/')
+                    segments = listOf(loc.hexId) + relPath.split('/').filter { it.isNotEmpty() },
+                ).toString()
                 queryOrThrow(
                     treeUri,
                     childrenUri,
@@ -135,7 +124,11 @@ object SAFProvider : FileProvider {
                     } else {
                         val mime = queryMimeType(treeUri, docUri)
                             ?: throw ProviderUnavailableException(endpoint(treeUri))
-                        ProviderStat(exists = true, isDirectory = mime == DocumentsContract.Document.MIME_TYPE_DIR)
+                        ProviderStat(
+                            exists = true,
+                            isDirectory = mime == DocumentsContract.Document.MIME_TYPE_DIR,
+                            mime = mime.takeUnless { it == DocumentsContract.Document.MIME_TYPE_DIR },
+                        )
                     }
             }
 
@@ -162,6 +155,7 @@ object SAFProvider : FileProvider {
             override suspend fun delete(path: String): Result<Unit> = runCatching {
                 if (path == "/") throw IllegalArgumentException("Cannot delete saf:/// root")
                     val (loc, relPath) = resolveLocation(path)
+                    if (relPath.isEmpty()) throw IllegalArgumentException("Cannot delete a SAF location root")
                     val treeUri = Uri.parse(loc.treeUri)
                     val docUri = resolveDocUri(treeUri, relPath)
                     ?: throw FileNotFoundException("Not found: $path")
@@ -171,6 +165,7 @@ object SAFProvider : FileProvider {
 
             override suspend fun rename(path: String, newName: String): Result<Unit> = runCatching {
                 val (loc, relPath) = resolveLocation(path)
+                if (relPath.isEmpty()) throw IllegalArgumentException("Cannot rename a SAF location root")
                 val treeUri = Uri.parse(loc.treeUri)
                 val docUri = resolveDocUri(treeUri, relPath)
                 ?: throw FileNotFoundException("Not found: $path")

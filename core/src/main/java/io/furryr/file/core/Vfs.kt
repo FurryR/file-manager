@@ -4,17 +4,20 @@ import io.furryr.file.core.model.ProviderStat
 import java.util.Locale
 
 /**
- * Virtual filesystem router.
+ * Virtual filesystem router for one shell world.
  *
  * Maps a canonical path or URI to a [FileProvider] by scheme, then dispatches
  * every filesystem operation through the provider contract. Bare paths use the
- * registered default provider. This layer is platform- and UI-independent:
- * callers (UI, hub, CLI bridges) only deal in paths and opaque providers.
+ * registered default provider. Each world owns its provider table and its
+ * [Proxies]; a picker can register a different provider for the same scheme
+ * without touching the file manager.
  *
  * [node] is the single address→node boundary; everything above it takes nodes
  * (see [NodeOps] for copy/move).
  */
-object Vfs {
+class Vfs(
+    val proxies: Proxies = Proxies(),
+) {
     private val providers = mutableMapOf<String, FileProvider>()
     private var default: FileProvider? = null
 
@@ -84,7 +87,7 @@ object Vfs {
      * The node at [path]. The provider mints the provider part: a storage
      * provider answers with a [Folder]/[File], a live one with its own [VNode]
      * implementation, and the caller never has to know which. Each `!` view
-     * level after it is entered through [ViewOpeners], so a file that is also a
+     * level after it is entered through [proxies], so a file that is also a
      * container is just a longer chain. This is the only place an address
      * becomes a node.
      */
@@ -92,10 +95,17 @@ object Vfs {
         var node = root(path.providerPath()).getOrThrow()
         for (view in path.views) {
             val file = node as? VFile ?: error("view requires a file: ${node.path}")
-            val content = file.describe().getOrThrow()
-            val opener = ViewOpeners.resolve(file, content)
-                ?: error("no opener supports ${file.name}")
-            node = ViewOpeners.enter(file, opener).getOrThrow()
+            // Enter the view, then walk the level's own segments. `a.zip!`
+            // stops at the view root; `a.zip!/docs/page.html` ends at that
+            // entry, so every nested archive and every typed address resolves
+            // to the same node its listing produced.
+            var current: VNode = proxies.open(file).getOrThrow()
+            for (segment in view) {
+                val folder = current as? VFolder
+                    ?: error("not a folder: ${current.path}")
+                current = folder.child(segment).getOrThrow()
+            }
+            node = current
         }
         node
     }
@@ -122,7 +132,18 @@ object Vfs {
     suspend fun stat(path: Path): Result<ProviderStat> = node(path).mapCatching { node ->
         when (node) {
             is VFile -> node.stat().getOrThrow()
-            is VFolder -> node.stat().getOrThrow()
+            is VFolder -> {
+                val info = node.info()
+                val capabilities = node.capabilities()
+                ProviderStat(
+                    exists = true,
+                    isDirectory = true,
+                    usableBytes = info.usableBytes,
+                    totalBytes = info.totalBytes,
+                    canCreateChildren = capabilities.createFile != null ||
+                        capabilities.createDirectory != null,
+                )
+            }
             else -> error("unsupported node: ${node.path}")
         }
     }

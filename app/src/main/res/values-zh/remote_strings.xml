@@ -29,4 +29,16 @@
     <string name="remote_save_open">保存并连接</string>
     <string name="remote_alist_help">使用 AList v3 HTTP API。填写服务器基础地址，可包含部署路径前缀。启用双重验证的账户请使用 API Token；留空凭据可尝试访客访问。凭据在本地加密保存。</string>
     <string name="remote_ssh_help">通过 SSH 命令通道传输文件，无需 SFTP。服务器需要 POSIX shell、find、stat（GNU/BusyBox 或 BSD）、cat、wc、mkdir、rm、mv 和 chmod。密码和私钥在本地加密保存。</string>
+    <string name="remote_host_required">连接前需要验证此 SSH 主机密钥。</string>
+    <string name="ssh_error_key_unlock">无法解锁 SSH 私钥，请检查格式和密码短语。</string>
+    <string name="ssh_error_connect">SSH 连接或身份验证失败，请检查主机、端口和凭据。</string>
+    <string name="ssh_error_channel">SSH 控制通道失败，请重试该操作。</string>
+    <string name="ssh_error_timeout">SSH 操作超时。</string>
+    <string name="ssh_error_command">SSH 命令失败：%1$s</string>
+    <string name="ssh_error_transfer">SSH 文件传输失败。</string>
+    <string name="ssh_error_transfer_detail">SSH 文件传输失败：%1$s</string>
+    <string name="ssh_error_response">SSH 服务器返回了无效响应。</string>
+    <string name="ssh_error_file_changed">传输过程中 SSH 文件已更改。</string>
+    <string name="ssh_error_unavailable">SSH 数据流不可用。</string>
+    <string name="ssh_error_cancelled">操作已取消。</string>
 </resources>

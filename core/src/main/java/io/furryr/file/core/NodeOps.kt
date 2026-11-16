@@ -1,5 +1,7 @@
 package io.furryr.file.core
 
+import io.furryr.file.core.exception.NodeNotFoundException
+
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.source.OpenMode
 import kotlinx.coroutines.Dispatchers
@@ -8,11 +10,12 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 
 /**
- * Node-to-node operations. Every function takes nodes that already exist; the
- * caller resolves a path once through [Vfs.node] (or takes the destination from
- * [VFolder.destination]), so an operation never formats a provider path.
+ * Node-to-node operations for one [Vfs] world. Every function takes nodes that
+ * already exist; the caller resolves a path once through [Vfs.node] (or takes
+ * the destination from [VFolder.destination]), so an operation never formats a
+ * provider path.
  */
-object NodeOps {
+class NodeOps(private val vfs: Vfs) {
 
     /**
      * Copy [source] onto [target]. Both nodes already exist: the caller takes
@@ -39,7 +42,7 @@ object NodeOps {
      * handed a path from outside (agent tool input, restored state).
      */
     suspend fun destination(path: String): Result<VFile> = runCatchingCancellable {
-        val existing = Vfs.node(path)
+        val existing = vfs.node(path)
         val node = existing.getOrNull()
         if (node is VFile) return@runCatchingCancellable node
         // Only a genuinely missing destination may be created. A permission,
@@ -51,7 +54,7 @@ object NodeOps {
         val parsed = Path.parse(path)
         val name = parsed.name ?: error("no file name in $path")
         val parent = parsed.parent() ?: error("no parent folder for $path")
-        Vfs.folder(parent).getOrThrow().destination(name).getOrThrow()
+        vfs.folder(parent).getOrThrow().destination(name).getOrThrow()
     }
 
     private fun copyNode(source: VNode, target: VNode, isCopy: Boolean): Flow<CopyProgress> = flow {
@@ -119,5 +122,7 @@ object NodeOps {
             null
         }
 
-    private const val COPY_CHUNK = 256 * 1024
+    private companion object {
+        const val COPY_CHUNK = 256 * 1024
+    }
 }

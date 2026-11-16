@@ -1,13 +1,11 @@
 package io.furryr.file.agent
 
-import io.furryr.file.core.NodeOps
+import io.furryr.file.core.FileWorld
 import io.furryr.file.core.Path
 import io.furryr.file.core.VFile
 import io.furryr.file.core.VFolder
-import io.furryr.file.core.Vfs
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.source.OpenMode
-import io.furryr.file.core.ContainerUris
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.daemon.process.CommandSpec
@@ -57,6 +55,7 @@ internal data class ToolInfo(
 )
 
 internal data class ToolContext(
+    val world: FileWorld,
     val target: DaemonTarget,
     val targetName: String,
     val cwd: String,
@@ -147,6 +146,7 @@ internal object AgentTools {
             listDirectory(
                 ListDirectoryRequest.newBuilder().setPath(path).build(),
                 context.target,
+                context.world,
             )
         }.getOrNull()
         if (directory != null) return renderDirectory(path, directory)
@@ -154,6 +154,7 @@ internal object AgentTools {
             ReadFileRequest.newBuilder()
                 .setPath(path).setOffset(offset).setLength(length.toInt()).build(),
             context.target,
+            context.world,
         )
         if (response.data.isEmpty()) {
             return "(empty at offset $offset; file size ${response.size} bytes)"
@@ -190,6 +191,7 @@ internal object AgentTools {
             readFile(
                 ReadFileRequest.newBuilder().setPath(path).setLength(MAX_WRITE_PREVIEW).build(),
                 context.target,
+                context.world,
             )
         }.getOrNull()?.takeIf { it.eof }?.data?.toStringUtf8()
         val diff = old?.let { renderDiff(it, content) }
@@ -206,6 +208,7 @@ internal object AgentTools {
                 com.google.protobuf.ByteString.copyFromUtf8(content),
             ).build(),
             context.target,
+            context.world,
         )
         return "Wrote ${written.bytesWritten} bytes to $path"
     }
@@ -216,6 +219,7 @@ internal object AgentTools {
         val response = copyFile(
             CopyFileRequest.newBuilder().setFrom(from).setTo(to).build(),
             context.target,
+            context.world,
         )
         return "Copied ${response.bytesCopied} bytes from $from to $to"
     }
@@ -233,10 +237,11 @@ internal object AgentTools {
             "glob path must be absolute or a VFS URI"
         }
         val maxResults = args.optInt("max_results", 200).coerceAtLeast(1)
-        val response = glob(
+        val response = globFiles(
             GlobRequest.newBuilder()
                 .setPattern(pattern).setPath(path).setMaxResults(maxResults).build(),
             context.target,
+            context.world,
         )
         if (response.pathsCount == 0) {
             return "(no matches for $pattern under $path)"
@@ -377,7 +382,7 @@ internal object AgentTools {
 
     private suspend fun archiveList(args: JSONObject, context: ToolContext): String {
         val ref = archiveRef(args, context)
-        val folder = Vfs.node(ref).getOrThrow() as? VFolder
+        val folder = context.world.vfs.node(ref).getOrThrow() as? VFolder
             ?: error("not a folder in archive: ${args.optString("path")}")
         val all = folder.listNodes().getOrThrow()
         val nodes = all.take(MAX_ARCHIVE_ENTRIES)
@@ -405,7 +410,7 @@ internal object AgentTools {
 
     private suspend fun archiveRead(args: JSONObject, context: ToolContext): String {
         val ref = archiveRef(args, context)
-        val file = Vfs.node(ref).getOrThrow() as? VFile
+        val file = context.world.vfs.node(ref).getOrThrow() as? VFile
             ?: error("not a file in archive: ${args.optString("path")}")
         val offset = args.optLong("offset", 0L).coerceAtLeast(0L)
         val requested = args.optInt("length", 0).let {
@@ -438,13 +443,13 @@ internal object AgentTools {
 
     private suspend fun archiveCopy(args: JSONObject, context: ToolContext): String {
         val ref = archiveRef(args, context)
-        val file = Vfs.node(ref).getOrThrow() as? VFile
+        val file = context.world.vfs.node(ref).getOrThrow() as? VFile
             ?: error("not a file in archive: ${args.optString("path")}")
         val destination = callerPath(context.target, stringArg(args, "to"), "copy destination")
         // Address text ends here: the copy itself is node → node.
-        val target = NodeOps.destination(destination).getOrThrow()
+        val target = context.world.nodeOps.destination(destination).getOrThrow()
         var copied = 0L
-        NodeOps.copyTo(file, target).collect { progress ->
+        context.world.nodeOps.copyTo(file, target).collect { progress ->
             if (progress.finished) copied = progress.copiedBytes
         }
         return "Copied $copied bytes from ${refLabel(args)} to $destination"

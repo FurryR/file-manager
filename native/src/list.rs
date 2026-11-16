@@ -100,7 +100,6 @@ pub fn stat_path(path: &str) -> io::Result<Stat> {
         exists,
         is_directory,
         can_create_children: can_list,
-        can_enter: true,
         modified_at_ms,
     })
 }

@@ -74,7 +74,6 @@ internal class WebDevToolsTab(
     override val title: String get() =
         if (host.devToolsAlive) label else "$label (closed)"
 
-    override val alive: Boolean get() = host.devToolsAlive
     override fun acceptDrop(entry: FileEntry): Boolean = false
     override fun dispose() {}
 

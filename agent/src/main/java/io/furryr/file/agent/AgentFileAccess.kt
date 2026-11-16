@@ -1,10 +1,8 @@
 package io.furryr.file.agent
 
 import com.google.protobuf.ByteString
-import io.furryr.file.core.ContainerUris
-import io.furryr.file.core.NodeOps
+import io.furryr.file.core.FileWorld
 import io.furryr.file.core.Path
-import io.furryr.file.core.Vfs
 import io.furryr.file.core.source.OpenMode
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
@@ -36,10 +34,14 @@ private const val MAX_DIRECTORY_ENTRIES = 2_000
 // can keep a `**` walk running for minutes.
 private val GLOB_SKIP_DIRS = setOf("/proc", "/sys", "/dev")
 
-public suspend fun readFile(request: ReadFileRequest, target: DaemonTarget): ReadFileResponse =
+public suspend fun readFile(
+    request: ReadFileRequest,
+    target: DaemonTarget,
+    world: FileWorld,
+): ReadFileResponse =
     withContext(Dispatchers.IO) {
         require(request.path.isNotBlank()) { "read requires a path" }
-        if (isVfsPath(request.path)) return@withContext readVfsFile(request)
+        if (isVfsPath(request.path)) return@withContext readVfsFile(request, world)
         val file = DaemonManager.fileService(target).open(request.path, OpenMode.READ).getOrThrow()
         try {
             val size = file.size
@@ -70,8 +72,9 @@ public suspend fun readFile(request: ReadFileRequest, target: DaemonTarget): Rea
         }
     }
 
-public suspend fun readVfsFile(request: ReadFileRequest): ReadFileResponse = withContext(Dispatchers.IO) {
-    val source = Vfs.file(request.path).getOrThrow().open(OpenMode.READ).getOrThrow()
+public suspend fun readVfsFile(request: ReadFileRequest, world: FileWorld): ReadFileResponse =
+    withContext(Dispatchers.IO) {
+        val source = world.vfs.file(request.path).getOrThrow().open(OpenMode.READ).getOrThrow()
     source.use {
         val size = source.size
         val offset = request.offset.coerceAtMost(size)
@@ -102,10 +105,11 @@ public suspend fun readVfsFile(request: ReadFileRequest): ReadFileResponse = wit
 public suspend fun listDirectory(
     request: ListDirectoryRequest,
     target: DaemonTarget,
+    world: FileWorld,
 ): ListDirectoryResponse {
     val path = request.path.ifBlank { "/" }
     val entries = if (isVfsPath(path)) {
-        Vfs.folder(path).getOrThrow().list().getOrThrow()
+        world.vfs.folder(path).getOrThrow().list().getOrThrow()
     } else {
         DaemonManager.fileService(target).list(path).getOrThrow()
     }
@@ -130,12 +134,16 @@ public suspend fun listDirectory(
         .build()
 }
 
-public suspend fun writeFile(request: WriteFileRequest, target: DaemonTarget): WriteFileResponse =
+public suspend fun writeFile(
+    request: WriteFileRequest,
+    target: DaemonTarget,
+    world: FileWorld,
+): WriteFileResponse =
     withContext(Dispatchers.IO) {
         require(request.path.isNotBlank()) { "write requires a path" }
         val data = request.data.toByteArray()
         if (isVfsPath(request.path)) {
-            Vfs.file(request.path).getOrThrow().open(OpenMode.WRITE).getOrThrow().use { source ->
+            world.vfs.file(request.path).getOrThrow().open(OpenMode.WRITE).getOrThrow().use { source ->
                 if (data.isNotEmpty()) source.writeAt(0, data)
                 if (source.seekable) source.truncate(data.size.toLong())
             }
@@ -153,14 +161,18 @@ public suspend fun writeFile(request: WriteFileRequest, target: DaemonTarget): W
         }
     }
 
-public suspend fun copyFile(request: CopyFileRequest, target: DaemonTarget): CopyFileResponse {
+public suspend fun copyFile(
+    request: CopyFileRequest,
+    target: DaemonTarget,
+    world: FileWorld,
+): CopyFileResponse {
     val from = callerPath(target, request.from, "copy source")
     val to = callerPath(target, request.to, "copy destination")
     // Tool input is a path; it becomes a node here and stays a node.
-    val source = Vfs.node(from).getOrThrow()
-    val destination = NodeOps.destination(to).getOrThrow()
+    val source = world.vfs.node(from).getOrThrow()
+    val destination = world.nodeOps.destination(to).getOrThrow()
     var copied = 0L
-    NodeOps.copyTo(source, destination).collect { progress ->
+    world.nodeOps.copyTo(source, destination).collect { progress ->
         if (progress.finished) copied += progress.copiedBytes
     }
     return CopyFileResponse.newBuilder().setBytesCopied(copied).build()
@@ -173,12 +185,16 @@ public fun callerPath(target: DaemonTarget, path: String, label: String): String
     if (isVfsPath(path)) return path
     require(path.startsWith('/')) { "$label must be absolute or a VFS URI" }
     return when (target) {
-        is DaemonTarget.Named -> ContainerUris.forContainer(target.name, path)
+        is DaemonTarget.Named -> (scopeRootOf(DaemonManager.hubId(target)) ?: return path) + path
         else -> path
     }
 }
 
-public suspend fun glob(request: GlobRequest, target: DaemonTarget): GlobResponse {
+public suspend fun globFiles(
+    request: GlobRequest,
+    target: DaemonTarget,
+    world: FileWorld,
+): GlobResponse {
     // A base must name one domain explicitly; never fall back to the host root.
     val base = requireNotNull(request.path.takeIf { it.isNotBlank() }) {
         "glob requires an explicit base path"
@@ -187,7 +203,7 @@ public suspend fun glob(request: GlobRequest, target: DaemonTarget): GlobRespons
     // base to a plain path and walk the caller's daemon, so results are plain
     // paths like /src/Main.kt instead of container://name/src/Main.kt.
     ownScopePath(base, target)?.let { return globDaemon(request, it, target) }
-    if (isVfsPath(base)) return globVfs(request, base)
+    if (isVfsPath(base)) return globVfs(request, base, world)
     return globDaemon(request, base, target)
 }
 
@@ -217,7 +233,7 @@ private suspend fun globDaemon(
     )
 }
 
-public suspend fun globVfs(request: GlobRequest, base: String): GlobResponse {
+public suspend fun globVfs(request: GlobRequest, base: String, world: FileWorld): GlobResponse {
     val basePath = base.trimEnd('/').ifEmpty { base }
     val prefix = if (basePath.endsWith('/')) basePath else "$basePath/"
     return walkGlob(
@@ -225,7 +241,7 @@ public suspend fun globVfs(request: GlobRequest, base: String): GlobResponse {
         basePath,
         list = { directory ->
             try {
-                Vfs.folder(directory).getOrThrow().list().getOrThrow()
+                world.vfs.folder(directory).getOrThrow().list().getOrThrow()
             } catch (e: Exception) {
                 if (directory == basePath) throw e
                 emptyList()
@@ -303,11 +319,18 @@ public suspend fun readText(target: DaemonTarget, path: String, limit: Int = 409
     }
 
 // The VFS root of the caller's own scope, resolved from the Hello handshake.
-public fun ownScopeRoot(target: DaemonTarget): String? = when (target) {
-    DaemonTarget.Host -> "file://"
-    is DaemonTarget.Named -> ContainerUris.forContainer(target.name)
-    DaemonTarget.App -> null
-}
+public fun ownScopeRoot(target: DaemonTarget): String? = scopeRootOf(DaemonManager.hubId(target))
+
+/**
+ * The VFS root that addresses the scope named by [targetName] (a hub id:
+ * `host` or `container-<name>`), or null when no container layer is installed.
+ */
+public fun scopeRootOf(targetName: String): String? =
+    if (DaemonManager.isContainerHubId(targetName)) {
+        AgentEnvironment.namedTargetRoot?.invoke(DaemonManager.hubDisplayName(targetName))
+    } else {
+        "file://"
+    }
 
 /** `container://test/src` becomes `/src` for a caller inside container `test`. */
 public fun ownScopePath(path: String, target: DaemonTarget): String? {

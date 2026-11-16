@@ -2,6 +2,9 @@ package io.furryr.file.home
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 import io.furryr.file.HomePath
 import io.furryr.file.core.Path
 import org.json.JSONArray
@@ -41,10 +44,16 @@ object HomeStore {
 
     private lateinit var prefs: SharedPreferences
 
+    /** Bumped on every persisted change; compositions read this to subscribe. */
+    private var revision by mutableIntStateOf(0)
+
     @Synchronized
     fun init(context: Context) {
         prefs = context.applicationContext.getSharedPreferences("home", Context.MODE_PRIVATE)
     }
+
+    /** Read in a composition to follow visits, titles and bookmark edits. */
+    fun revision(): Int = revision
 
     @Synchronized
     fun recent(): List<HomeEntry> = read(RECENT_KEY)
@@ -181,6 +190,7 @@ object HomeStore {
         // commit would put disk I/O on the main thread. Losing one entry on a
         // storage failure is preferable to crashing the browser.
         prefs.edit().putString(key, records.toString()).apply()
+        revision++
     }
 
     private fun cleanTitle(kind: HomeEntryKind, location: String, title: String): String {

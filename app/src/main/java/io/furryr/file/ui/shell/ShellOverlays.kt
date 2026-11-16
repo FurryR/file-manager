@@ -25,7 +25,7 @@ import io.furryr.file.isHomePath
 import io.furryr.file.model.FileTab
 import io.furryr.file.model.OperationProgress
 import io.furryr.file.render.TerminalFactory
-import io.furryr.file.shell.LeavePrompt
+import io.furryr.file.shell.ShellModal
 import io.furryr.file.terminal.TerminalSheet
 import io.furryr.file.terminal.TerminalTab
 import io.furryr.file.ui.components.EntryInfoDialog
@@ -144,57 +144,8 @@ internal fun OperationProgressOverlay(
 }
 
 @Composable
-internal fun LeavePromptOverlay(
-    prompt: LeavePrompt?,
-    saving: Boolean,
-    modalActive: Boolean,
-    onDismiss: () -> Unit,
-    onCancel: () -> Unit,
-    onLeave: () -> Unit,
-    onSave: () -> Unit,
-) {
-    if (prompt == null || modalActive) return
-    val save = prompt.onSave
-    val canSave = prompt.canSave && save != null
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.editor_unsaved)) },
-        text = {
-            Text(
-                prompt.message?.takeIf { it.isNotBlank() }
-                    ?: stringResource(
-                        if (canSave) R.string.editor_unsaved_message
-                        else R.string.editor_leave_message
-                    )
-            )
-        },
-        confirmButton = {
-            TextButton(
-                enabled = !saving,
-                onClick = {
-                    if (save == null || !canSave) onLeave() else onSave()
-                },
-            ) {
-                Text(stringResource(if (canSave) R.string.editor_save else R.string.editor_leave))
-            }
-        },
-        dismissButton = {
-            if (canSave) {
-                Row {
-                    TextButton(enabled = !saving, onClick = onCancel) {
-                        Text(stringResource(R.string.cancel))
-                    }
-                    TextButton(enabled = !saving, onClick = onLeave) {
-                        Text(stringResource(R.string.editor_discard))
-                    }
-                }
-            } else {
-                TextButton(onClick = onCancel) {
-                    Text(stringResource(R.string.cancel))
-                }
-            }
-        },
-    )
+internal fun ModalStackHost(modals: List<ShellModal>) {
+    modals.lastOrNull()?.content?.invoke()
 }
 
 /** Dims everything below the measured top bar while the path field is edited. */

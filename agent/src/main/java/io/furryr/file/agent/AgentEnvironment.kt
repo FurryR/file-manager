@@ -70,6 +70,14 @@ object AgentEnvironment {
      */
     @Volatile
     var modelContextWindow: ((String) -> Long?)? = null
+
+    /**
+     * VFS root that addresses a named daemon target (`container://<name>`).
+     * The container layer installs it, so the agent names a container scope
+     * without spelling the scheme itself.
+     */
+    @Volatile
+    var namedTargetRoot: ((String) -> String?)? = null
 }
 
 data class AgentAiConfig(

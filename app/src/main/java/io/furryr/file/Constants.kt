@@ -23,3 +23,6 @@ const val ProviderAuthority = "io.furryr.file.provider"
 
 /** Authority of [io.furryr.file.forward.ForwardFileProvider]. */
 const val ForwardProviderAuthority = "io.furryr.file.forward"
+
+/** Authority of the picker's document provider. */
+const val PickerProviderAuthority = "io.furryr.file.picker"

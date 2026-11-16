@@ -218,6 +218,9 @@ pub fn spawn_init(slot: &InitSlot) {
                 // services without escaping the group that ends the container.
                 crate::cgroup::attach_self();
                 crate::cgroup::isolate_view();
+                if !crate::sepolicy::apply_exec_context() {
+                    return Err(io::Error::from_raw_os_error(libc::EACCES));
+                }
                 Ok(())
             } else {
                 Err(io::Error::from_raw_os_error(libc::ESRCH))

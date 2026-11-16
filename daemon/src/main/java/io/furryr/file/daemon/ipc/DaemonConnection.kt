@@ -3,7 +3,7 @@ package io.furryr.file.daemon.ipc
 import android.system.Os
 import android.util.Log
 import io.furryr.file.daemon.DaemonIdentity
-import io.furryr.file.core.PermissionDeniedException
+import io.furryr.file.core.exception.PermissionDeniedException
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.daemon.model.ExecResult
 import io.furryr.file.core.model.FileEntry

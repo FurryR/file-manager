@@ -1,0 +1,47 @@
+[
+  {
+    "name": "File",
+    "license": "GPL-3.0-only",
+    "url": "https://github.com/FurryR/file-manager"
+  },
+  {
+    "name": "PRoot",
+    "license": "GPL-2.0-only",
+    "url": "https://github.com/termux/proot"
+  },
+  {
+    "name": "PulseAudio",
+    "license": "LGPL-2.1-or-later",
+    "url": "https://www.freedesktop.org/wiki/Software/PulseAudio/"
+  },
+  {
+    "name": "libsndfile",
+    "license": "LGPL-2.1-or-later",
+    "url": "https://libsndfile.github.io/libsndfile/"
+  },
+  {
+    "name": "libltdl",
+    "license": "LGPL-2.1-or-later",
+    "url": "https://www.gnu.org/software/libtool/"
+  },
+  {
+    "name": "libsepol",
+    "license": "LGPL-2.1-or-later",
+    "url": "https://github.com/SELinuxProject/selinux"
+  },
+  {
+    "name": "libxkbcommon",
+    "license": "MIT",
+    "url": "https://github.com/xkbcommon/libxkbcommon"
+  },
+  {
+    "name": "xkeyboard-config",
+    "license": "MIT",
+    "url": "https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config"
+  },
+  {
+    "name": "libepoxy",
+    "license": "MIT",
+    "url": "https://github.com/anholt/libepoxy"
+  }
+]

@@ -5,7 +5,8 @@ set -euo pipefail
 # No D-Bus, GLib, session manager, module files or external PulseAudio daemon.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST_DIR="$ROOT_DIR/native/pulse"
-WORK_DIR="${PULSE_BUILD_DIR:-/tmp/opencode/pulse-cross-17.0}"
+WORK_DIR="${PULSE_BUILD_DIR:-$ROOT_DIR/cache/native/pulse-cross-17.0}"
+CACHE_DIR="$ROOT_DIR/cache/file-manager"
 PREFIX="$WORK_DIR/deps"
 SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/.local/share/android}}"
 NDK_ROOT="${ANDROID_NDK_HOME:-}"
@@ -13,6 +14,7 @@ if [[ -z "$NDK_ROOT" ]]; then
     NDK_ROOT="$(find "$SDK_ROOT/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
 fi
 TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64"
+GH_PROXY="${GH_PROXY-https://gh-proxy.com}"
 export CC="$TOOLCHAIN/bin/aarch64-linux-android26-clang"
 export CXX="$TOOLCHAIN/bin/aarch64-linux-android26-clang++"
 export AR="$TOOLCHAIN/bin/llvm-ar"
@@ -22,25 +24,27 @@ export OBJDUMP="$TOOLCHAIN/bin/llvm-objdump"
 export STRIP="$TOOLCHAIN/bin/llvm-strip"
 export PATH="$HOME/.local/bin:$TOOLCHAIN/bin:$PATH"
 [[ -x "$CC" ]] || { echo "Android API-26 ARM64 compiler not found: $CC" >&2; exit 1; }
-mkdir -p "$WORK_DIR" "$PREFIX"
+mkdir -p "$WORK_DIR" "$PREFIX" "$CACHE_DIR"
 
 download() {
     local name="$1" url="$2" checksum="$3"
-    if [[ ! -f "$WORK_DIR/$name" ]]; then
-        curl -fL --retry 3 --connect-timeout 20 --max-time 600 "$url" -o "$WORK_DIR/$name.part"
-        mv "$WORK_DIR/$name.part" "$WORK_DIR/$name"
+    if [[ ! -f "$CACHE_DIR/$name" ]]; then
+        curl -fL --retry 3 --connect-timeout 20 --max-time 600 "$url" -o "$CACHE_DIR/$name.part"
+        mv "$CACHE_DIR/$name.part" "$CACHE_DIR/$name"
     fi
-    echo "$checksum  $WORK_DIR/$name" | sha256sum --check
+    echo "$checksum  $CACHE_DIR/$name" | sha256sum --check
 }
 download pulseaudio-17.0.tar.xz https://freedesktop.org/software/pulseaudio/releases/pulseaudio-17.0.tar.xz \
     053794d6671a3e397d849e478a80b82a63cb9d8ca296bd35b73317bb5ceb87b5
-download libsndfile-1.2.2.tar.gz https://codeload.github.com/libsndfile/libsndfile/tar.gz/refs/tags/1.2.2 \
+LIBSNDFILE_URL="https://codeload.github.com/libsndfile/libsndfile/tar.gz/refs/tags/1.2.2"
+if [[ -n "$GH_PROXY" ]]; then LIBSNDFILE_URL="$GH_PROXY/$LIBSNDFILE_URL"; fi
+download libsndfile-1.2.2.tar.gz "$LIBSNDFILE_URL" \
     ffe12ef8add3eaca876f04087734e6e8e029350082f3251f565fa9da55b52121
-download libtool-2.4.7.tar.xz https://ftpmirror.gnu.org/libtool/libtool-2.4.7.tar.xz \
+download libtool-2.4.7.tar.xz https://ftp.gnu.org/gnu/libtool/libtool-2.4.7.tar.xz \
     4f7f217f057ce655ff22559ad221a0fd8ef84ad1fc5fcb6990cecc333aa1635d
 
 if [[ ! -f "$PREFIX/lib/libltdl.a" ]]; then
-    tar -xf "$WORK_DIR/libtool-2.4.7.tar.xz" -C "$WORK_DIR"
+    tar -xf "$CACHE_DIR/libtool-2.4.7.tar.xz" -C "$WORK_DIR"
     mkdir -p "$WORK_DIR/ltdl-build"
     (
         cd "$WORK_DIR/ltdl-build"
@@ -52,7 +56,7 @@ if [[ ! -f "$PREFIX/lib/libltdl.a" ]]; then
     )
 fi
 if [[ ! -f "$PREFIX/lib/libsndfile.a" ]]; then
-    tar -xf "$WORK_DIR/libsndfile-1.2.2.tar.gz" -C "$WORK_DIR"
+    tar -xf "$CACHE_DIR/libsndfile-1.2.2.tar.gz" -C "$WORK_DIR"
     cmake -S "$WORK_DIR/libsndfile-1.2.2" -B "$WORK_DIR/sndfile-build" -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE="$NDK_ROOT/build/cmake/android.toolchain.cmake" \
         -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
@@ -66,7 +70,7 @@ fi
 
 PA_SRC="$WORK_DIR/pulseaudio-17.0"
 PA_BUILD="$WORK_DIR/build"
-if [[ ! -d "$PA_SRC" ]]; then tar -xf "$WORK_DIR/pulseaudio-17.0.tar.xz" -C "$WORK_DIR"; fi
+if [[ ! -d "$PA_SRC" ]]; then tar -xf "$CACHE_DIR/pulseaudio-17.0.tar.xz" -C "$WORK_DIR"; fi
 python3 "$HOST_DIR/prepare.py" "$PA_SRC"
 cat > "$WORK_DIR/cross.ini" <<EOF
 [binaries]

@@ -32,8 +32,8 @@ internal class SshControl(private val location: RemoteLocation) {
 
     fun run(script: String): ByteArray = synchronized(lock) {
         ensureOpen()
-        val stdout = input ?: throw IOException("SSH control channel is not open")
-        val sink = stdin ?: throw IOException("SSH control channel is not open")
+        val stdout = input ?: throw SshException(SshError.CHANNEL)
+        val sink = stdin ?: throw SshException(SshError.CHANNEL)
         val token = UUID.randomUUID().toString()
         stderrSink.reset()
         discardPending(stdout)
@@ -47,7 +47,7 @@ internal class SshControl(private val location: RemoteLocation) {
             sink.flush()
         } catch (failure: IOException) {
             closeLocked()
-            throw IOException("SSH control channel failed; retry the operation", failure)
+            throw SshException(SshError.CHANNEL, cause = failure)
         }
         val reply = try {
             readReply(stdout, token)
@@ -70,8 +70,10 @@ internal class SshControl(private val location: RemoteLocation) {
             var safe = details
             listOf(location.password, location.passphrase, location.privateKey).filter { it.isNotEmpty() }
                 .forEach { safe = safe.replace(it, "[redacted]") }
-            throw IOException(
-                "SSH command failed (${reply.status})${if (safe.isBlank()) "" else ": $safe"}"
+            throw SshException(
+                SshError.COMMAND,
+                detail = reply.status.toString() +
+                    if (safe.isBlank()) "" else ": ${safe.take(512)}",
             )
         }
         reply.bytes
@@ -94,7 +96,7 @@ internal class SshControl(private val location: RemoteLocation) {
             channel = exec
             input = exec.inputStream
             stdin = exec.outputStream
-            discardPending(input ?: throw IOException("SSH control channel has no stdout"))
+            discardPending(input ?: throw SshException(SshError.CHANNEL))
         } catch (failure: Throwable) {
             runCatching { fresh.close() }
             throw failure
@@ -132,16 +134,18 @@ internal class SshControl(private val location: RemoteLocation) {
         var phase = 0 // 0 = scanning stdout, 1 = reading status, 2 = done
         var lastActivity = System.nanoTime()
         while (phase != 2) {
-            if (Thread.currentThread().isInterrupted) throw IOException("Operation cancelled")
+            if (Thread.currentThread().isInterrupted) throw SshException(SshError.CANCELLED)
             val available = stdout.available()
             if (available <= 0) {
-                if (System.nanoTime() - lastActivity > TIMEOUT_NS) throw IOException("SSH operation timed out")
+                if (System.nanoTime() - lastActivity > TIMEOUT_NS) {
+                    throw SshException(SshError.TIMEOUT)
+                }
                 Thread.sleep(2)
                 continue
             }
             val buffer = ByteArray(minOf(available, 64 * 1024))
             val read = stdout.read(buffer)
-            if (read < 0) throw IOException("SSH control channel closed")
+            if (read < 0) throw SshException(SshError.CHANNEL)
             lastActivity = System.nanoTime()
             for (index in 0 until read) {
                 val value = buffer[index]
@@ -159,7 +163,7 @@ internal class SshControl(private val location: RemoteLocation) {
                                 matched = 0
                             }
                             if (value == marker[0]) matched = 1 else output.write(value.toInt() and 0xFF)
-                            if (output.size() > MAX_OUTPUT) throw IOException("SSH response is too large")
+                            if (output.size() > MAX_OUTPUT) throw SshException(SshError.RESPONSE)
                         }
                     }
                     1 -> {
@@ -169,9 +173,9 @@ internal class SshControl(private val location: RemoteLocation) {
                         } else if (underscores == 0 && value in '0'.code.toByte()..'9'.code.toByte()) {
                             status = if (status < 0) value - '0'.code else status * 10 + (value - '0'.code)
                             digits++
-                            if (digits > 6) throw IOException("Invalid SSH command status")
+                            if (digits > 6) throw SshException(SshError.RESPONSE)
                         } else {
-                            throw IOException("Invalid SSH command response")
+                            throw SshException(SshError.RESPONSE)
                         }
                     }
                 }

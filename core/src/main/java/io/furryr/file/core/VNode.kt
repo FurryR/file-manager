@@ -29,6 +29,12 @@ interface VNode {
     val path: Path
 
     /**
+     * The provider that minted this node, when one exists. Capability modules
+     * cast it to their own interface; archive and live nodes report null.
+     */
+    val provider: FileProvider? get() = null
+
+    /**
      * Rename inside the parent folder and return this node under its new name.
      * Callers keep working with nodes; no path is ever rebuilt from strings.
      * Read-only views (archives, URLs) refuse.
@@ -43,6 +49,11 @@ interface VNode {
 
 /** A file node. It may also be an archive/container, but it is still bytes. */
 interface VFile : VNode {
+    /**
+     * Filesystem and routing facts in one call: existence, size, modification
+     * time, capabilities and the MIME this file routes by. The default name
+     * fallback is filled by the node; a provider may answer from headers.
+     */
     suspend fun stat(): Result<ProviderStat>
     suspend fun open(mode: OpenMode): Result<FileSource>
 
@@ -61,19 +72,6 @@ interface VFile : VNode {
 
     /** The page a live resource was reached from, or null. */
     val liveReferer: String? get() = null
-
-    /**
-     * Content facts for renderer selection. Providers may refine the MIME
-     * type; the default implementation falls back to name/extension and a
-     * small magic-byte sniff.
-     */
-    suspend fun describe(): Result<ContentInfo>
-
-    /**
-     * Facts without transferring the body. The default is [describe]; a live
-     * provider that can answer from headers overrides it.
-     */
-    suspend fun peek(): Result<ContentInfo> = describe()
 
     /** [this] with the page a live request came from; stored files ignore it. */
     fun withReferer(referer: String?): VFile = this
@@ -102,7 +100,6 @@ interface VFolder : VNode {
     suspend fun listWithNodes(): Result<Pair<List<FileEntry>, List<VNode>>> =
         list().mapCatching { entries -> entries to listNodes().getOrThrow() }
 
-    suspend fun stat(): Result<ProviderStat>
     suspend fun capabilities(): DirectoryCapabilities
     suspend fun info(): DirectoryStats
 

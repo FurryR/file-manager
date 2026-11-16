@@ -8,10 +8,13 @@ platform services and calls the library.
 
 | Directory | Contents |
 |-----------|----------|
-| `.` (root) | `MainActivity.kt`, `FileManagerApp.kt`, `Constants.kt`, `Providers.kt` |
+| `.` (root) | `MainActivity.kt`, `FileManagerApp.kt`, `AppWorld.kt`, `Constants.kt`, `Opener.kt`, `Providers.kt`, `FileManagerApplication.kt` |
 | `agent/` | Agent settings (MCP/model/provider), no terminal code |
+| `crash/` | `CrashReporter.kt` (uncaught handler + pending report) and `CrashActivity.kt` (report screen, copy/share/export/restart) |
 | `terminal/` | Terminal subsystem: `Terminal` tab owner, sheet, PTY `SessionManager`, Termux view/input, tab implementations, DevTools |
-| `forward/` | `ForwardFileProvider` + per-process share-token signing |
+| `forward/` | `ForwardFileProvider` + persistent share-token signing |
+| `open/` | `IncomingOpen` — system VIEW/SEND intents as addresses and `content://` documents |
+| `picker/` | `FilePickerActivity` + `FilePickerApp` (single-folder shell), `PickerDocumentsProvider` (persistent document/tree URIs), `PickerTokens` (persisted id HMAC), `PickerSelection` (generic select opener) |
 | `model/` | `Models.kt`, `LocationAddress.kt`, `ErrorState.kt` |
 | `render/` | `FolderRenderer.kt`, `FolderContent.kt`, `RendererErrorView.kt`, `SortMode.kt`, Web/Home renderers |
 | `shell/` | Shell types, process-scoped tab store, clipboard controller, platform permission helpers |
@@ -19,7 +22,7 @@ platform services and calls the library.
 | `settings/` | `PulseSettings.kt` — app-owned PulseAudio preference store |
 | `store/` | Location stores + `LocationStores` + `LocationsRepository` (all persistence) |
 | `ui/components/` | `BottomToolbar.kt`, `TopBarContent.kt`, `FileDrawer.kt`, `Dialogs.kt`, `ServiceUnavailableState.kt` |
-| `ui/screens/` | `SettingsActivity.kt`, `LicensesScreen.kt` |
+| `ui/screens/` | `SettingsActivity.kt`, `LicensesScreen.kt` (reads the generated `assets/licenses.json`), `LicensesActivity` |
 | `ui/theme/` | `FileManagerTheme.kt` (Material3 dark/light), `Color.kt` (palettes + AMOLED canvas), `PaletteStore.kt` |
 | `ui/util/` | `Formatters.kt`, `FileIcons.kt`, `FileOpen.kt`, `OperationNotification.kt` |
 | `editor/` | Tab-owned Sora text editor, text codec, TextMate grammars and container LSP |
@@ -27,7 +30,10 @@ platform services and calls the library.
 > The VFS abstraction lives in `:core`; protocol providers (Local/FTP/SFTP/
 > SAF/remote) live in `:provider`; containers and the single `ContainerProvider`
 > live in `:container`; daemon IPC lives in `:daemon`; the hub lives in `:hub`.
-> `Providers.kt` only wires platform services. All location persistence
+> `Providers.kt` initializes process services once and builds one `AppWorld`
+> per shell (`AppRuntime.appWorld` for the file manager). A world owns its
+> `Vfs`, `Proxies`, `Opener` and provider instances; `FileWorlds` keeps them
+> addressable for forwarded `content://` URIs. All location persistence
 > (SQLite, SharedPreferences, encrypted files) lives in `store/` and is passed
 > to providers through the `LocationSources.kt` interfaces.
 
@@ -35,6 +41,9 @@ platform services and calls the library.
 
 - **Add new file operation**: define proto message → `:daemon/FileService.kt` → `:core/Vfs.kt` helper → call from `FileManagerApp.kt`
 - **Add UI toggle**: `SettingsActivity.kt` (prefs-based, `DaemonManager.reset()` on change)
+- **Crash handling**: `FileManagerApplication.kt` installs `crash/CrashReporter.kt` before any activity; reports land in `filesDir/crash/`, the pending marker is shown by `crash/CrashActivity.kt` (immediately or from `MainActivity.kt` on next launch)
+- **Default handler intents**: `AndroidManifest.xml` registers `MainActivity` for `http(s)` and file `VIEW`; `MainActivity.handleIntent` folds the payload into `open/IncomingOpen.kt` (`OpenRequest`), and `FileManagerApp` opens the first address in the current tab and each extra one in its own tab. A `content://` document becomes a `VFile` there; it is platform wiring, not a VFS provider.
+- **File picker**: `picker/FilePickerActivity.kt` handles `GET_CONTENT`, `OPEN_DOCUMENT`, `CREATE_DOCUMENT` and `OPEN_DOCUMENT_TREE`. It builds `AppRuntime.pickerWorld` (no editor/browser/archive opener, no terminal) and returns `PickerDocumentsProvider` document/tree URIs signed by `PickerTokens` (persistent key). Read/write access is inside the signed id; `openDocument("w")` commits on close.
 - **Change IPC protocol**: `proto/file_daemon.proto` in `:daemon` (both sides need rebuild)
 - **Selection logic**: `FileManagerApp.kt` lines 200-218 (`toggleSelection`, `rangeSelectTo`)
 - **Terminal sessions**: `terminal/SessionManager.kt` — session lifecycle, container session cleanup
@@ -64,9 +73,16 @@ platform services and calls the library.
 
 ## TODO - Bug checks
 
+- [ ] `render/FolderRenderer.kt` + `editor/EditorRenderer.kt` + `ui/shell/FileDrawerHost.kt` + `ui/components/drawer/SafLocationItem.kt`: verify create/rename/delete use folder callbacks, `saf:///` greys modify actions, SAF locations open as `saf:///<hex>`, and Up returns to `saf:///`.
+- [ ] `render/FolderRenderer.kt` + `editor/EditorRenderer.kt`: verify terminal availability uses `ExecProvider.terminalPath(folder, folder)` so `container:///` and `ssh:///` stay closed while real folders stay open.
+- [ ] `render/ErrorRenderer.kt` + `FileManagerApp.kt` + `render/HomeRendererSession.kt`: verify unreachable local/FTP/SFTP/SSH/AList addresses open a retryable error page, Retry replaces it on success, Back returns to the previous folder, and operation failures still toast.
+
+- [ ] `crash/CrashReporter.kt` + `crash/CrashActivity.kt` + `MainActivity.kt` + `FileManagerApplication.kt`: verify a main-thread crash opens the crash screen with the stack trace, export writes a readable `.txt` through SAF, copy/share keep the report intact, restart returns to Home, a helper-process crash is shown on next launch, and a crash whose screen launch is blocked leaves the pending report for the next launch.
 - [ ] `render/FolderSessionRenderer.kt` + `render/HomeSessionRenderer.kt` + `render/FolderRenderer.kt` + `render/HomeRendererSession.kt`: verify re-entering a filtered folder/Home closes the filter before commit and no stale filter or row entrance animation survives a tab switch.
 - [ ] `ui/components/FileDrawer.kt`: verify the drawer title row, theme/menu buttons and divider stay fixed while only the group list below scrolls, including collapsed groups and sort mode.
-- [ ] `OpenTable.kt`: verify an extensionless text file opens in the editor (no facts supplied by the row) while an extensionless binary still goes to the platform viewer.
+- [ ] `Opener.kt` + `render/GenericRenderer.kt` + `ui/shell/GenericLoaderDialog.kt` + `Providers.kt` + `res/values*/strings.xml`: verify the generic loader lists archive/browser/editor with their localized labels and icons in all four locales, System (bottom left) opens the platform chooser, Cancel returns to the original page with title/path unchanged, and a pick commits the chosen renderer/archive.
+- [ ] `Opener.kt` + `FileManagerApp.kt`: verify an extensionless file routes by `stat`/name only (fallback chooser), archives/HTML/code still open from folder rows, and opening a remote file no longer reads its body.
+- [ ] `Opener.kt`: verify an extensionless text file reaches the fallback chooser (no content sniff) while a named `.txt`/code file opens in the editor and an extensionless binary goes to the platform viewer.
 - [ ] `FileManagerApp.kt`: verify directory rows, link hits, typed addresses, home rows and history restore still open after `openNode`/`openResolvedNodeFn` were merged into `openVFile`.
 - [ ] `terminal/TerminalInputState.kt` + `terminal/TerminalExtraKeys.kt`: verify Ctrl+Enter sends LF, Alt+Enter sends ESC+CR, Ctrl+Alt+Enter sends ESC+LF, and modifier+arrow/letter keys still carry their meta state.
 - [ ] `terminal/TerminalExtraKeys.kt` + `terminal/TerminalInputState.kt`: verify the up-swipe summons the IME on every terminal tab after switching, not only the first, and an inactive tab no longer keeps a reference to the shared input wrapper.
@@ -81,13 +97,14 @@ platform services and calls the library.
 - [ ] `ui/screens/WaylandActivity.kt`: verify the viewer attaches its surface to the Smithay compositor, renders a container app, and forwards touch/keyboard input.
 - [ ] `ui/screens/WaylandActivity.kt`: verify leaving and reopening the viewer keeps the Wayland socket and connected clients alive.
 - [ ] `AndroidManifest.xml`: verify the merged manifest builds after dropping the wldroid `overrideLibrary` entry and that minSdk 26 is still accepted.
+- [ ] `AndroidManifest.xml` + `MainActivity.kt` + `open/IncomingOpen.kt` + `FileManagerApp.kt`: verify setting the app as default browser opens a tapped `http(s)` link in the WebView page, setting it as default file app opens `content://`/`file://` taps (text → editor, HTML → browser, unknown → chooser), a second tap with the app already open arrives through `onNewIntent` without a duplicate page, a write-granted document saves back, a read-only one refuses, and rotate/recreate does not reopen the same payload.
 - [ ] `ui/screens/LicensesScreen.kt`: verify the license list renders with the Smithay/libxkbcommon entries and no removed wldroid entries.
 - [ ] `editor/EditorRenderer.kt`: verify SAF, document, FTP, SFTP, SSH, AList and HTTP files open read-only and local/container files still save.
 - [ ] `render/WebRenderer.kt` + `render/HtmlDocument.kt` + `FileManagerApp.kt`: verify live-page detection without the extension fallback, referer on link hits/shares, and `confirmPage` hand-back for non-pages.
 - [ ] `forward/ForwardFileProvider.kt`: verify a shared live URL keeps its referer and archive entries still re-resolve through `Vfs.node`.
 - [ ] `model/LocationAddress.kt` + `store/WebLocationStore.kt` + `ui/components/FileDrawer.kt` + `ui/components/drawer/DialogAddLocation.kt`: verify add-location for `ftp`, `sftp`, `ssh`, `alist`, `http` and `https`.
 - [ ] `render/NodeAddress.kt` (renamed from `LocationAddress`): verify typed addresses, breadcrumbs and the editor parent address still format/parse.
-- [ ] `HereNavigation.kt` + `FileManagerApp.kt` + `terminal/SessionManager.kt` + `util/ProcessHelper.kt` + `terminal/TerminalSheet.kt`: verify here reveal, container root navigation and terminal container markers after the `ContainerUris` move.
+- [ ] `HereNavigation.kt` + `FileManagerApp.kt` + `terminal/SessionManager.kt` + `util/ProcessHelper.kt` + `terminal/TerminalSheet.kt`: verify here reveal, container root navigation and terminal container markers after `ContainerUris` moved back to `:container`.
 - [ ] `app/src/main/java/io/furryr/file/render/FolderRenderer.kt` + `render/FolderContent.kt` + `render/RendererErrorView.kt` + `ui/components/ServiceUnavailableState.kt`: verify an unavailable SAF location shows the centered unavailable state, the launch button opens the target app, and returning after launch retries the listing.
 - [ ] `ui/components/ServiceUnavailableState.kt`: verify authority→package resolution and the no-launcher fallback to application details on system providers and apps without a launcher activity.
 - [ ] `ui/components/TopBarContent.kt`: verify the address suggestion popup still appears only while typing and hides when the anchor or rows are missing.
@@ -98,7 +115,8 @@ platform services and calls the library.
 - [ ] `render/DirectoryRenderer.kt`: verify refresh, filter and sort menu actions still fire from the folder renderer overflow menu.
 - [ ] `Providers.kt`: verify directory tabs still restore correctly after tab switches and tab closes now that directory sessions are created only by the shell.
 - [ ] `render/Renderer.kt` + `FileManagerApp.kt`: verify generic page metadata (`address`, `webAddress`, `title`, `isLive`, `isOverlay`, `parent`, `terminalPath`, `suppressBookmark`) across web, editor, folder and Home tabs, including pages, bookmarks, Up and terminal cwd.
-- [ ] `OpenTable.kt` + `FileManagerApp.kt`: verify `AppOpenOutcome.Renderer` opens pages, editors and falls back to the platform viewer without concrete renderer checks.
+- [ ] `Opener.kt` + `render/GenericRenderer.kt` + `FileManagerApp.kt`: verify the opener always returns a renderer, callers only call `ctx.open(renderer)`, and the generic chooser (including System/Cancel) lives entirely inside `GenericRenderer`.
+- [ ] `render/Renderer.kt` + `FileManagerApp.kt`: verify `ctx.open(renderer, OpenMode.NewTab)` adds and selects a tab above the caller's location, Back/Up return to that location, a cancelled/chooser renderer leaves the tab on the location, and `OpenMode.Current`/`replace()` keep appending and replacing in the calling tab.
 - [ ] `render/WebRenderer.kt`: verify `adopt` keeps a live WebView across live-page navigation, `retrace` still restores cached history, and confirmation hooks still hide the cover for optimistic non-page hand-back.
 - [ ] `editor/EditorRenderer.kt`: verify dirty leave prompts, `terminalPath`, bookmark suppression and Back overlay behaviour after the metadata overrides.
 - [ ] `ui/components/ServiceUnavailableState.kt` + `res/values*/strings.xml`: verify the crying icon, app-label title, hint and launch button for a stopped SAF provider app in all four locales.
@@ -122,23 +140,24 @@ platform services and calls the library.
 - [ ] `store/ServerDatabase.kt` + `store/FtpDatabase.kt` + `store/SftpDatabase.kt`: verify insert, rename, host update, reorder and default ports on both existing and fresh databases.
 - [ ] `render/FolderRenderer.kt` + `FileManagerApp.kt`: verify the folder overflow menu shows the bookmark row, adds/removes the current directory, and Home lists it.
 - [ ] `FileManagerApp.kt`: verify `VFolder.addressable` replaces every old `is Folder` branch for local, container, archive, SAF, FTP, SFTP, SSH, AList and HTTP tabs.
-- [ ] `OpenTable.kt`: verify a failing renderer reports `AppOpenOutcome.Failure` and is not silently handed to the platform viewer.
+- [ ] `Opener.kt`: verify a failing factory lands in `GenericRenderer` with its error and is not silently handed to the platform viewer.
 - [ ] `render/HtmlDocument.kt`: verify an absolute `/logo.png` in `/docs/page.html` resolves from the page origin root, including inside a zip and with percent-encoded names.
 - [ ] `render/FolderListing.kt`: verify the internal-storage flag comes from the folder path and empty internal folders still report internal.
 - [ ] `model/LocationAddress.kt`: verify add-location parse/format for userinfo, IPv6 and ports still matches core `Path`.
 - [ ] `ui/components/drawer/RemoteProtocols.kt` + `DialogAddLocation.kt` + `FileDrawer.kt`: verify FTP/SFTP/SSH/AList/http(s) add flows and that an unknown plugin scheme reports invalid instead of becoming a local path.
 - [ ] `terminal/SessionManager.kt` + `terminal/TerminalSheet.kt` + `terminal/Terminal.kt` + `ui/components/SessionManagerDialog.kt` + `util/ProcessHelper.kt`: verify SSH sessions, labels, cwd drops and icons after the profile indirection.
-- [ ] `ui/util/FileOpen.kt` + `opener/.../ArchiveFolder.kt`: verify multi-select share resolves archive entries and live nodes through `Vfs`.
-- [ ] `render/Renderer.kt`: verify NavigationHost, FileActionHost and HomeHost together expose every callback used by folder, web, editor and Home renderers.
+- [ ] `ui/util/FileOpen.kt` + `proxy/.../ArchiveFolder.kt`: verify multi-select share resolves archive entries and live nodes through `Vfs`.
+- [ ] `render/Renderer.kt`: verify `RendererContext` exposes every callback used by folder, web, editor and Home renderers, and that bookmark reads/writes only go through the renderer's own entry and `Bookmarks`.
 - [ ] `store/LocationsRepository.kt`: verify plugin location-kind collision checks and that remote provider lookup no longer rebuilds `RemoteProviders`.
 - [ ] `terminal/TerminalExtraKeys.kt` + `terminal/TerminalSheet.kt` + `terminal/Terminal.kt`: verify extra-key modifiers/enter/swipe and tab labels after moving the composables out of the sheet.
 - [ ] `render/RendererMenuItemRow.kt` + `FileManagerApp.kt`: verify renderer submenus, checkbox rows and menu clicks after the row composable move.
 - [ ] `ui/components/drawer/DrawerDialogs.kt` + `FileDrawer.kt`: verify every drawer rename/delete/add dialog, SSH host-key approval and add-location flow after the `DrawerDialogState` move.
 - [ ] `hub/.../HubAgentOps.kt` + `hub/.../HubExecOps.kt` + `HubServer.kt`: verify agent attach/prompt/cancel/approval/MCP, exec/PTY wait/resize/signal/close, hello and target listing over a live hub connection.
-- [ ] `terminal/TerminalSheet.kt`: verify terminal tab create/switch/close, active-id fallback after closing a middle tab, sheet drag heights, drawer swipe and tab toasts.
+- [ ] `terminal/TerminalSheet.kt`: verify terminal tab create/switch/close, active-id fallback after closing a middle tab, sheet drag heights, drawer swipe and tab toasts, and that the drawer/close hooks installed on the process-scoped `Terminal` are cleared when the sheet leaves composition.
 - [ ] `terminal/Terminal.kt`: verify tabs and the active id survive activity recreate, a finished session prunes only its own tab, and DevTools is dropped when its page closes.
 - [ ] `terminal/TerminalTabUi.kt`: verify drawer rows/labels and the empty state after the tab split.
 - [ ] `terminal/TermuxTerminalTab.kt`: verify `terminalSpecFor` labels for local, container and SSH addresses and the retry path after a failed spawn.
+- [ ] `terminal/TermuxTerminalTab.kt` + `terminal/Terminal.kt`: verify a normal shell exit (status 0) closes its own tab, including a background tab and the last tab (sheet dismisses), while an abnormal end still shows the connection-lost overlay.
 - [ ] `terminal/TerminalTab.kt` + `terminal/TermuxTerminalTab.kt`: verify per-tab creation/retry, error isolation between tabs, title updates, session finish, dropped paths, IME adjustResize restore, and that a tab survives sheet hide and activity recreate.
 - [ ] `render/Renderer.kt`: verify `createTerminalTab()` for folder/editor stops and null for web/Home.
 - [ ] `FileManagerApp.kt`: verify opening the terminal uses the active renderer spec, web/Home tabs create no terminal tab, and the sheet no longer changes the window soft-input mode when hidden.
@@ -167,12 +186,16 @@ platform services and calls the library.
 - [ ] `terminal/Terminal.kt` + `terminal/TerminalTab.kt` + `terminal/TermuxTerminalTab.kt` + `terminal/WebDevToolsTab.kt`: verify tab open/switch/close enter-leave ordering, switching away during connect does not kill the PTY, retry after failure reconnects, and DevTools still commits its body.
 - [ ] `terminal/TerminalSheet.kt`: verify the committed content appears on open/switch, the spinner/error states show before a session is ready, and hiding/showing the sheet re-binds the active tab.
 - [ ] `render/Renderer.kt` + `render/FolderRenderer.kt` + `render/WebRenderer.kt` + `editor/EditorRenderer.kt` + `FileManagerApp.kt`: verify the folder and web overflow Refresh rows still fire after deleting the generic `refresh()`/`canRefresh` path, and Home/Editor still show no Refresh row.
-- [ ] `terminal/TerminalInputState.kt` + `terminal/TerminalViewComposable.kt`: verify `leave()` clears the surface/focus/IME request, `bindState` restarts the input mode, and no modifier or input connection leaks across terminal tabs.
+- [ ] `terminal/TerminalInputState.kt` + `terminal/TerminalViewComposable.kt`: verify `blur()` clears the surface/focus/IME request and retires the shared wrapper's transient state (posted `showSoftInput`, Termux text-selection mode, terminal-view focusability, composing text) without closing the editor the IME still holds, `bindState` restarts the input mode, a blurred tab cannot reclaim the wrapper through attach/focus, and no modifier or selection leaks across terminal tabs.
 - [ ] `terminal/TerminalViewComposable.kt` + `terminal/TerminalSheet.kt`: verify the movable terminal surface keeps the IME open across PTY tabs, rebinds the new session/state, keeps typing on the active tab, and still releases focus/input when switching to DevTools, hiding the sheet or closing the last tab.
+- [ ] `terminal/TerminalSheet.kt` + `terminal/TerminalTab.kt`: verify every Termux tab shares one terminal surface (no per-tab AndroidView move), connecting/failed overlays and retry still render, the extra-key row appears with the session, and the DevTools tab still draws its committed content.
+- [ ] `terminal/SessionManager.kt`: verify a session finishing inside `onSessionFinished` (destroy from the callback) no longer throws `ConcurrentModificationException`, and create/destroy notifications still reach the sheet.
+- [ ] `terminal/TerminalViewComposable.kt`: verify the terminal repaints while typing after the connecting→connected swap and after switching away and back (the text-changed listener must be re-registered on view attach), including sheet hide/show and activity recreate.
 - [ ] `terminal/TerminalViewComposable.kt` + `terminal/TerminalInputState.kt`: verify every terminal tab accepts IME text after switching (not only the first), the connecting spinner no longer disposes the shared wrapper, focus/IME survive a tab switch, and extra keys still target the active session.
 - [ ] `FileManagerApp.kt` + `render/HomeSessionRenderer.kt` + `render/HomeRendererSession.kt` + `render/RendererSessions.kt`: verify the initial Home tab shows the localized title/path immediately (no `home://` flash), the tab label is localized after a language change, and new Home tabs/here navigation still render.
 - [ ] `terminal/TerminalTab.kt` + `terminal/Terminal.kt` + `terminal/TerminalSheet.kt` + `terminal/TermuxTerminalTab.kt` + `render/Renderer.kt` + `render/WebRenderer.kt`: verify the extra-key menu opens the sheet drawer on every tab (including after activity recreate), and `TerminalFactory` callers still create local/DevTools tabs.
 - [ ] `terminal/TerminalInputState.kt`: verify Ctrl+IME Enter sends LF both as an Enter key event and as committed newline text, Alt+Enter sends ESC+CR, and plain IME Enter still sends CR.
+- [ ] `terminal/TerminalInputState.kt` + `terminal/TerminalViewComposable.kt`: verify an IME's own paste reaches the terminal through all three paths — committed text, `performContextMenuAction(R.id.paste/R.id.pasteAsPlainText)` and `KEYCODE_PASTE` — each using the terminal paste path (bracketed paste, CR newlines, control characters stripped) and not typing into the placeholder editor.
 - [ ] `ui/shell/FileTabStrip.kt` + `FileManagerApp.kt`: verify tab select/close/drag-reorder, the add button, long-press session manager, and the narrow-screen `ScrollableTabRow` fallback still behave after the tab strip extraction.
 - [ ] `ui/shell/ShellOverlays.kt` + `FileManagerApp.kt`: verify page sheet rows hide Home, terminal sheet creation still follows `terminalFactory`, session manager open/close/reorder, container error and entry info dialogs still show and dismiss.
 - [ ] `shell/ShellTypes.kt` + `shell/PlatformPermissions.kt`: verify tabs survive activity recreate after the `FileTabs` move and the storage permission launch still runs on first composition.
@@ -180,4 +203,27 @@ platform services and calls the library.
 - [ ] `ui/shell/FileOperationDialogs.kt` + `FileManagerApp.kt`: verify delete, single rename and regex batch rename still toast, clear selection, refresh and close the dialog on success and failure.
 - [ ] `ui/shell/ShellTopBar.kt` + `ui/shell/ShellBottomBar.kt` + `ui/shell/ShellContentHost.kt` + `ui/shell/ShellOverlays.kt`: verify progress strips, renderer overflow/submenus, settings/exit guard, pending renderer cover and Cancel, page/terminal sheets, operation progress, leave prompt and the path-edit scrim.
 - [ ] `shell/ClipboardController.kt` + `FileManagerApp.kt`: verify copy/move progress, speed sampling, cancel, success toast and clipboard clear still run through the controller, and a second paste cancels the first without clearing the new job.
+- [ ] `terminal/TerminalInputState.kt` + `terminal/TerminalViewComposable.kt`: verify the first terminal opened in a new folder raises the IME and routes extra keys/IME text to that tab without closing and reopening the terminal (pending request replayed on bind, rebind on attach/focus, retry when the sheet grows).
+- [ ] `terminal/TerminalViewComposable.kt`: verify a declined `showSoftInput` keeps the request pending, attach/size/window-focus retry it without looping or re-showing an already visible IME, and a laid-out surface that refuses three times drops the request so a later resize cannot pop the keyboard.
+- [ ] `:daemon/DaemonManager.kt` + `terminal/SessionManager.kt` + `util/ProcessHelper.kt`: verify one `host` daemon starts (root/Shizuku/direct), no `app` target or socket remains, every local terminal/agent/run0 child inherits the daemon identity (a root terminal can `cd /storage/emulated/0`), and file operations keep the same daemon identity.
+- [ ] `terminal/TerminalSheet.kt` + `terminal/TermuxTerminalTab.kt` + `res/values*/strings.xml`: verify a local/container shell that exits abnormally shows the "terminal exited unexpectedly" overlay while an SSH disconnect keeps the connection-lost text, in all four locales.
+- [ ] `app/build.gradle.kts` + `terminal/SessionManager.kt`: verify the ASM transform drops Termux's `[Process completed …]` banner, keeps the transcript intact on an SSH disconnect, and still runs `onSessionFinished` so the tab closes or shows the connection-lost overlay.
+- [ ] `res/values*/strings.xml`: verify the Termux text-selection menu shows localized `Copy`/`Paste`/`Select all`/`Web search`/`Share` in all four locales, with no `More…` fallback and the library defaults overridden.
+- [ ] `app/build.gradle.kts` + `terminal/TerminalSelectionMenu.kt` + `com/termux/view/TerminalSelectionBridge.kt` + `terminal/TerminalViewComposable.kt`: verify the system selection ActionMode keeps Copy/Paste as the floating action buttons, pins Select all/Select URL/Web search to the overflow (so the overflow button is always present), places Share/Open link by remaining width, shows Open link only while the selection is one URL (also after dragging the handles), lists installed `ACTION_PROCESS_TEXT` apps in the overflow with their app icons and the selection, and that Select URL selects the http(s)/www link nearest the cursor (also across a wrapped row, and hidden when the screen has none) so Copy/Share/Open link then act on it; actions keep the transcript, and Select all highlights the visible screen.
+- [ ] `render/HomeRenderer.kt` + `render/HomeRendererSession.kt` + `render/FolderRenderer.kt` + `render/WebRenderer.kt` + `render/EditorRenderer.kt` + `FileManagerApp.kt`: verify Home path bar/menu still render and filter toggles after `HomeChrome` inlining, and folder/Home/Web/editor pages still open after the renderer class renames.
+- [ ] `render/FolderRenderer.kt` + `Opener.kt` + `FileManagerApp.kt`: verify a folder page opened from the opener lists and refreshes without re-entering `Vfs` (including an archive opened as itself), the archive menu stays read-only, Up/Back still resolve, and a shell-minted location renderer (history, typed address) still lists via `Vfs`.
+- [ ] `render/FolderRenderer.kt` + `render/Renderer.kt` + `ui/shell/ShellBottomBar.kt` + `ui/shell/ShellTopBar.kt` + `FileManagerApp.kt`: verify create/rename/delete/batch-rename dialogs and toasts still run from the renderer, `RenderCapabilities` null callbacks hide the `+` button, selection/share/copy-move still work on folders and archives, and Back/Forward availability matches tab history plus `canDismiss`.
+- [ ] `render/FolderRenderer.kt` + `render/WebRenderer.kt` + `editor/EditorRenderer.kt` + `FileManagerApp.kt`: verify Up works from a folder, an archive, a stored HTML page and an editor file (appends the owning folder and keeps the current page as a Back stop), is hidden for Home and live pages, and the path-parent fallback still fires when no renderer is live.
+- [ ] `render/RendererBase.kt` + `render/Renderer.kt` + all `*RendererSession.kt`: verify every page still renders and restores after the state ownership change (session stores the single seed, renderer exports only a getter) and after the session classes became `internal`.
+- [ ] `Opener.kt` + `FileManagerApp.kt`: verify Home is built by the shell, every other location resolves through `world.vfs.node` then `world.opener.route`, `navigateToFolder` still installs its pending page before the async renderer arrives, and view/archive/here navigation keeps working.
+- [ ] `render/Renderer.kt` + `render/FolderRenderer.kt` + `render/WebRenderer.kt` + `editor/EditorRenderer.kt` + `FileManagerApp.kt`: verify the terminal button and sheet still follow `capabilities.terminal` on folder, editor and web pages (DevTools), stay absent on Home/live pages, and the drag-to-terminal gesture still opens the sheet.
+- [ ] `FileManagerApp.kt`: verify the 300ms cover is suppressed for a pending page that called `popup` (chooser, editor conflict), still appears for normal folder/file opens, and the popup flag is cleared when the page is released.
+- [ ] `terminal/TerminalBridge.kt` + `terminal/TerminalProcess.kt` + `app/build.gradle.kts` ASM + `provider/.../terminal/*` + `provider/.../LocalProvider.kt` + `provider/.../remote/RemoteProviders.kt` + `container/.../ContainerProvider.kt` + `terminal/TermuxTerminalTab.kt` + `terminal/SessionManager.kt`: verify local, container and SSH terminals spawn, read/write, resize, exit and close through the ASM-rewritten `TerminalSession` (no fd/relay), including tab close and abnormal exits.
+- [ ] `render/Renderer.kt` + `render/FolderRenderer.kt` + `FileManagerApp.kt` + `shell/ClipboardController.kt` + `ui/shell/ShellBottomBar.kt` + `ui/util/FileOpen.kt`: verify selection mode, select-all/invert/same-type/clear, refresh and copy/move still work through `capabilities.select`, a non-location page offers no selection, and share reads the Clipboard nodes (including archive entries) without a `Vfs` round trip.
+- [ ] `model/Models.kt` + `FileManagerApp.kt` + `ui/shell/ShellContentHost.kt` + `ui/shell/ShellTopBar.kt`: verify every Back/close/history/here path uses `Page.location` (not `PageKind`), location pages still update `tab.path`, overlays keep the location behind them, and icons still come from `kind`.
+- [ ] `FileManagerApp.kt` + `editor/EditorRenderer.kt` + `render/WebRenderer.kt` + `ui/shell/ShellTopBar.kt`: verify editor and page unload prompts return false on cancel and true on save/discard, tab close asks every page, progress bars follow `setProgress` and clear on finish, and Back works without `canDismiss`.
+- [ ] `render/WebRenderer.kt`: verify a server-side redirect (`WebResourceRequest.isRedirect`) is followed by the WebView, produces one titled stop instead of a second titleless page, and a real link click still routes through `host.openFile`.
+- [ ] `model/Models.kt` + `FileManagerApp.kt`: verify mutating `Page.path`/`kind`/`location` in place (redirect, pending retarget, folder restore) keeps the renderer and the tab path, and Back/Forward/history still work without `Page.copy`.
+- [ ] `ui/util/ErrorText.kt` + `render/FolderRenderer.kt` + `shell/ClipboardController.kt` + `editor/EditorRenderer.kt` + `FileManagerApp.kt`: verify `PresentableException` failures show localized text (permission denied, service not running) in toasts and editor errors, and non-presentable errors keep their message.
+- [ ] `core/.../exception/PresentableException.kt` + `provider/.../remote/SshException.kt` + `ui/util/ErrorText.kt` + `res/values*/remote_strings.xml`: verify SSH failures (host key changed/required, connect/auth, channel, timeout, command, transfer, file changed, cancelled) show localized text in the file error page, toasts and drawer, and `zh`/`en` strings resolve.
 

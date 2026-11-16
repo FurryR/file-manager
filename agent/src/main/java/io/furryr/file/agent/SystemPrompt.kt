@@ -1,6 +1,5 @@
 package io.furryr.file.agent
 
-import io.furryr.file.core.ContainerUris
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.daemon.HubActions
@@ -36,10 +35,6 @@ internal object SystemPrompt {
         val entries = ArrayList<String>()
         for (target in DaemonManager.targetCatalog()) {
             val label = target.label
-            if (target.id == DaemonManager.APP_ID) {
-                entries.add("$label (app, files)")
-                continue
-            }
             val state = if (target.running) "running" else "stopped"
             val elevated = if (target.elevated) ", elevated" else ""
             val root = if (target.root.isNotEmpty()) " ${target.root}" else ""
@@ -126,19 +121,13 @@ internal object AgentPolicy {
     private fun outside(path: String, cwd: String, targetName: String): String? {
         if (path.isBlank()) return null
         val bare = if (path.contains("://")) {
-            // Keep only the path part of a URI. Local scopes (file:///... and
-            // container://name/...) can still be inside the workspace or /tmp;
-            // every other protocol is a separate domain and always asks.
-            val scheme = path.substringBefore("://")
-            if (scheme != "file" && scheme != ContainerUris.SCHEME) return path
-            val rest = path.substringAfter("://")
-            val slash = rest.indexOf('/')
-            if (slash < 0) return path
-            if (scheme == ContainerUris.SCHEME) {
-                val container = ContainerUris.containerName(path) ?: return path
-                if (container != DaemonManager.hubDisplayName(targetName)) return path
-            }
-            rest.substring(slash)
+            // Keep only the path part of a URI. The caller's own scope (the
+            // host or this container) can still be inside the workspace or
+            // /tmp; every other protocol is a separate domain and always asks.
+            val root = scopeRootOf(targetName) ?: return path
+            val prefix = "$root/"
+            if (path != root && !path.startsWith(prefix)) return path
+            path.substring(root.length).ifEmpty { "/" }
         } else {
             path
         }

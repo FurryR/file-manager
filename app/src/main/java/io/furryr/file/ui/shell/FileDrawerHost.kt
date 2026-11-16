@@ -8,7 +8,7 @@ import io.furryr.file.DefaultPath
 import io.furryr.file.R
 import io.furryr.file.container.ContainerBackend
 import io.furryr.file.container.ContainerManager
-import io.furryr.file.core.ContainerUris
+import io.furryr.file.container.ContainerUris
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.store.LocationsRepository
 import io.furryr.file.terminal.SessionManager
@@ -26,6 +26,7 @@ import kotlinx.coroutines.withContext
  */
 @Composable
 internal fun FileDrawerHost(
+    vfs: io.furryr.file.core.Vfs,
     darkTheme: Boolean,
     onToggleTheme: () -> Unit,
     locations: LocationCollections,
@@ -44,6 +45,7 @@ internal fun FileDrawerHost(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     FileDrawer(
+        vfs = vfs,
         darkTheme = darkTheme,
         onToggleTheme = onToggleTheme,
         onHomeClick = { onNavigate(DefaultPath) },
@@ -186,7 +188,7 @@ internal fun FileDrawerHost(
                 }
             }
         },
-        onSafClick = { hexId -> onNavigate("saf://$hexId/") },
+        onSafClick = { hexId -> onNavigate("saf:///$hexId") },
         onSafRename = { hexId, newName ->
             scope.launch {
                 withContext(Dispatchers.IO) { LocationsRepository.renameSaf(hexId, newName) }

@@ -1,6 +1,7 @@
 package io.furryr.file.hub
 
 import android.content.Context
+import io.furryr.file.core.FileWorld
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.uds.UdsEndpoint
@@ -39,12 +40,12 @@ object Hub {
     }
 
     /** Bring the hub up. Idempotent until the hub is stopped. */
-    fun start(context: Context) {
+    fun start(context: Context, world: FileWorld) {
         synchronized(this) {
             directory = File(context.applicationContext.applicationInfo.nativeLibraryDir)
             if (server != null) return
             val endpointName = "file-hub-${UUID.randomUUID()}"
-            server = HubServer.listen(UdsEndpoint.Abstract(endpointName))
+            server = HubServer.listen(UdsEndpoint.Abstract(endpointName), world)
             DaemonManager.attachHub(endpointName)
         }
     }

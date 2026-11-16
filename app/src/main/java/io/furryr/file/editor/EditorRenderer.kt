@@ -54,25 +54,30 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import io.furryr.file.R
-import io.furryr.file.core.DirectoryCapabilities
+import io.furryr.file.Factory
+import io.furryr.file.Renderer
+import io.furryr.file.core.OpenIcon
+import io.furryr.file.core.OpenOption
 import io.furryr.file.core.Path
 import io.furryr.file.core.VFile
 import io.furryr.file.core.VFolder
-import io.furryr.file.render.DetachedRendererContext
-import io.furryr.file.render.EditorSessionRenderer
+import io.furryr.file.core.Vfs
+import io.furryr.file.core.runCatchingCancellable
+import io.furryr.file.provider.terminal.ExecProvider
+import io.furryr.file.render.EditorRenderer
 import io.furryr.file.render.NodeAddress
+import io.furryr.file.render.RenderCapabilities
 import io.furryr.file.render.RendererBase
+import io.furryr.file.render.TerminalFactory
+import io.furryr.file.terminal.TermuxTerminalTab
 import io.furryr.file.render.PageSession
 import io.furryr.file.render.PageState
-import io.furryr.file.render.RenderCapabilities
 import io.furryr.file.render.RendererContext
-import io.furryr.file.render.RenderTarget
-import io.furryr.file.render.RendererFactory
 import io.furryr.file.render.RendererMenuItem
 import io.furryr.file.render.RendererPath
 import io.furryr.file.render.RendererSession
 import io.furryr.file.render.SessionView
-import io.furryr.file.render.bookmarkMenuItem
+import io.furryr.file.ui.util.errorText
 import io.github.rosemoe.sora.event.ContentChangeEvent
 import io.github.rosemoe.sora.event.EditorKeyEvent
 import io.github.rosemoe.sora.event.PublishSearchResultEvent
@@ -116,13 +121,16 @@ class EditorPageState(
     var languageId: String = initialLanguageId
 }
 
-class EditorRendererSession(
+private enum class EditorUnloadChoice { SAVE, DISCARD, CANCEL }
+
+internal class EditorRendererSession(
+    private val vfs: Vfs,
     val file: VFile,
     override val address: String,
     initialState: EditorPageState? = null,
 ) : PageSession<EditorPageState>(initialState) {
-    private var host: RendererContext = DetachedRendererContext
-    override val state: EditorPageState =
+    private var host: RendererContext? = null
+    internal val state: EditorPageState =
         seedState ?: EditorPageState(EditorLanguages.id(file.name))
 
     private var documentState by mutableStateOf<TextDocument?>(null)
@@ -141,7 +149,7 @@ class EditorRendererSession(
         }
     var saving by mutableStateOf(false)
         private set
-    override var loading by mutableStateOf(true)
+    var loading by mutableStateOf(true)
         private set
     var error by mutableStateOf<String?>(null)
     var conflict by mutableStateOf(false)
@@ -187,9 +195,6 @@ class EditorRendererSession(
         }
     var completionsEnabled by mutableStateOf(true)
         private set
-    /** Directory actions (terminal) depend on the folder that owns the file. */
-    var parentCapabilities by mutableStateOf(DirectoryCapabilities())
-        private set
     /** Bumped after every edit, so capability getters re-read undo state. */
     var revision by mutableIntStateOf(0)
         private set
@@ -208,12 +213,48 @@ class EditorRendererSession(
         get() = parentFolder?.let { folder ->
             runCatching { NodeAddress.format(folder.path) }.getOrNull()
         }
-    override val parent: VFolder? get() = parentFolder
-    override val terminalPath: String?
-        get() = if (parentCapabilities.canOpenTerminal) parentAddress else null
+    internal val terminalPath: String?
+        get() {
+            val folder = parentFolder ?: return null
+            val exec = folder.provider as? ExecProvider ?: return null
+            if (runCatching { exec.terminalPath(folder, folder) }.getOrNull() == null) return null
+            return parentAddress
+        }
+
+    /** Up routes the folder that owns the edited file and appends it. */
+    override val capabilities: RenderCapabilities
+        get() {
+            val folder = parentFolder
+            val host = host
+            val up = if (folder == null || host == null) {
+                null
+            } else {
+                {
+                    scope.launch {
+                        try {
+                            host.open(host.opener.route(folder))
+                        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                            throw cancelled
+                        } catch (error: Throwable) {
+                            host.reportError(error)
+                        }
+                    }
+                    Unit
+                }
+            }
+            val terminal = parentFolder?.let { folder ->
+                (folder.provider as? ExecProvider)?.let { exec ->
+                    TerminalFactory { ctx ->
+                        TermuxTerminalTab.start(ctx, folder.name, exec, folder, vfs = vfs) { rows, cols ->
+                            exec.terminal(folder, rows, cols)
+                        }
+                    }
+                }
+            }
+            return RenderCapabilities(up = up, terminal = terminal)
+        }
     override val suppressBookmark: Boolean get() = true
-    override val isOverlay: Boolean get() = true
-    override val needsLeaveGuard: Boolean get() = true
+    override val needsUnloadGuard: Boolean get() = true
     override val title: String get() = (if (dirty) "• " else "") + file.name
 
     /**
@@ -237,50 +278,46 @@ class EditorRendererSession(
     /** Continuation of a leave action waiting for the conflict dialog. */
     private var pendingSave: ((Boolean) -> Unit)? = null
 
-    override val capabilities: RenderCapabilities
-        get() {
-            // Read the revision and dirty states so Compose re-evaluates the
-            // shared toolbar after every edit.
-            revision
-            val view = editorView
-            return RenderCapabilities(
-                canSave = dirty && !saving && document != null && !readOnly,
-                canUndo = view != null && !view.isReleased && view.text.canUndo(),
-                canEdit = document != null && !saving && !readOnly,
-            )
-        }
-
     override val consumesEdgeGestures: Boolean get() = true
-    override val canDismiss: Boolean get() = true
-    override val modalActive: Boolean get() = conflict
 
     internal fun useHost(host: RendererContext) {
         this.host = host
     }
 
-    override fun requestClose(context: RendererContext, action: () -> Unit) {
+    override suspend fun requestUnload(context: RendererContext): Boolean {
         if (saving) {
             appContext?.let { error = it.getString(R.string.editor_saving_wait) }
-            return
+            return false
         }
-        if (canClose()) {
-            close()
-            action()
-            return
+        if (!dirty) return true
+        val choice = context.popup<EditorUnloadChoice> { resolve ->
+            AlertDialog(
+                onDismissRequest = { resolve(EditorUnloadChoice.CANCEL) },
+                title = { Text(stringResource(R.string.editor_unsaved)) },
+                text = { Text(stringResource(R.string.editor_unsaved_message)) },
+                confirmButton = {
+                    TextButton(onClick = { resolve(EditorUnloadChoice.SAVE) }) {
+                        Text(stringResource(R.string.editor_save))
+                    }
+                },
+                dismissButton = {
+                    Row {
+                        TextButton(onClick = { resolve(EditorUnloadChoice.CANCEL) }) {
+                            Text(stringResource(R.string.cancel))
+                        }
+                        TextButton(onClick = { resolve(EditorUnloadChoice.DISCARD) }) {
+                            Text(stringResource(R.string.editor_discard))
+                        }
+                    }
+                },
+            )
         }
-        context.confirmLeave(
-            message = null,
-            canSave = capabilities.canSave,
-            onSave = { saveForLeave(context) },
-            onLeave = {
-                close()
-                action()
-            },
-            onCancel = {},
-        )
+        return when (choice) {
+            EditorUnloadChoice.SAVE -> saveForUnload(context).isSuccess
+            EditorUnloadChoice.DISCARD -> true
+            EditorUnloadChoice.CANCEL, null -> false
+        }
     }
-
-    override fun canClose(): Boolean = !dirty && !saving
 
     override fun pathBar(context: Context): RendererPath = RendererPath(
         title = address,
@@ -293,6 +330,7 @@ class EditorRendererSession(
 
     override fun menuItems(context: Context): List<RendererMenuItem> = buildList {
         val view = editorView?.takeIf { !it.isReleased }
+        val canSave = dirty && !saving && document != null && !readOnly
         val canUndo = view != null && !saving && view.text.canUndo()
         val canRedo = view != null && !saving && view.text.canRedo()
         add(
@@ -304,7 +342,7 @@ class EditorRendererSession(
                         RendererMenuItem(
                             title = context.getString(R.string.editor_save),
                             icon = Icons.Default.Save,
-                            enabled = capabilities.canSave,
+                            enabled = canSave,
                         ) { requestSave() },
                     )
                     add(
@@ -374,7 +412,6 @@ class EditorRendererSession(
                 checked = completionsEnabled,
             ) { toggleCompletions(context) },
         )
-        host.bookmarkMenuItem(context)?.let(::add)
     }
 
     suspend fun load(): Result<Unit> = runCatching {
@@ -389,31 +426,15 @@ class EditorRendererSession(
                 originalBytes = snapshot.toByteArray(),
             )
             loading = false
-            observeParentCapabilities()
             return@runCatching
         }
         val bytes = EditorFiles.read(file)
         document = withContext(Dispatchers.IO) { TextDocument.decode(bytes) }
         loading = false
-        observeParentCapabilities()
     }.onFailure { failure ->
         if (failure is CancellationException) throw failure
         loading = false
-        error = failure.localizedMessage ?: failure.javaClass.simpleName
-    }
-
-    /**
-     * Directory capability probing can cost a remote round-trip, so the editor
-     * opens first and the terminal action enables when the answer arrives.
-     */
-    private fun observeParentCapabilities() {
-        val folder = parentFolder ?: return
-        scope.launch {
-            val capabilities = withContext(Dispatchers.IO) {
-                runCatching { folder.capabilities() }.getOrNull()
-            } ?: return@launch
-            if (!closed) parentCapabilities = capabilities
-        }
+        error = appContext?.errorText(failure) ?: failure.javaClass.simpleName
     }
 
     /**
@@ -519,7 +540,7 @@ class EditorRendererSession(
         val next = title
         if (next != lastPublishedTitle) {
             lastPublishedTitle = next
-            host.updateTitle(next)
+            host?.updateTitle(next)
         }
     }
 
@@ -562,7 +583,7 @@ class EditorRendererSession(
             revision++
             if (!dirty) {
                 lastPublishedTitle = title
-                host.updateTitle(title)
+                host?.updateTitle(title)
             }
             lsp?.let { server ->
                 try {
@@ -578,7 +599,7 @@ class EditorRendererSession(
             Result.success(Unit)
         } catch (failure: Exception) {
             if (failure is CancellationException) throw failure
-            error = failure.localizedMessage ?: failure.javaClass.simpleName
+            error = appContext?.errorText(failure) ?: failure.javaClass.simpleName
             Result.failure(failure)
         } finally {
             saving = false
@@ -590,7 +611,7 @@ class EditorRendererSession(
      * Save as part of leaving the editor. A conflict keeps this suspended until
      * the renderer's own conflict dialog is resolved.
      */
-    suspend fun saveForLeave(context: RendererContext): Result<Unit> {
+    suspend fun saveForUnload(context: RendererContext): Result<Unit> {
         val result = save()
         if (result.isSuccess || !conflict) return result
         // The conflict dialog lives in this page's own composition; ask the
@@ -643,7 +664,7 @@ class EditorRendererSession(
 
     /** Enter the tab's copy flow so the user picks a destination for the file. */
     fun saveAs() {
-        host.copyFile(file)
+        host?.copyFile(file)
     }
 
     fun toggleCompletions(context: Context) {
@@ -787,7 +808,7 @@ class EditorRendererSession(
     }
 
     override fun reset() {
-        host = DetachedRendererContext
+        host = null
         changeJob?.cancel()
         changeJob = null
         editorView?.let { editor ->
@@ -824,30 +845,18 @@ internal class EditorSessionView(
     }
 }
 
-class EditorRendererFactory : RendererFactory {
-    override val id: String = "editor"
+class EditorFactory(private val files: io.furryr.file.core.FileWorld, label: String) : Factory {
+    override val option: OpenOption = OpenOption(id = "editor", label = label, icon = OpenIcon.EDITOR)
 
-    override fun supports(target: RenderTarget): Boolean {
-        val node = target.node as? VFile ?: return false
-        return EditorLanguages.supports(node.name, target.content)
-    }
-
-    override suspend fun create(
-        target: RenderTarget,
-        host: RendererContext,
-    ): Result<RendererBase<*>> = runCatching {
-        val node = target.node as? VFile
-            ?: error("editor renderer requires a file")
-        val address = runCatching { NodeAddress.format(node.path) }.getOrNull() ?: node.name
-        val renderer = EditorSessionRenderer(node, address)
-        (renderer.ensureSession() as EditorRendererSession).load()
-        renderer
+    override suspend fun create(file: VFile): Result<Renderer> = runCatchingCancellable {
+        val address = runCatching { NodeAddress.format(file.path) }.getOrNull() ?: file.name
+        EditorRenderer(files.vfs, file, address)
     }
 }
 
 /** Compose projection of an [EditorRendererSession]; the session owns all state. */
 @Composable
-fun EditorContent(
+internal fun EditorContent(
     session: EditorRendererSession,
     darkTheme: Boolean = true,
     modifier: Modifier = Modifier,

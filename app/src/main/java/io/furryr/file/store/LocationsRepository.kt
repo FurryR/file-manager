@@ -7,10 +7,7 @@ import io.furryr.file.core.LocationActions
 import io.furryr.file.core.LocationEntry
 import io.furryr.file.core.Path
 import io.furryr.file.core.Vfs
-import io.furryr.file.provider.FtpProvider
 import io.furryr.file.provider.ProviderSchemes
-import io.furryr.file.provider.SAFProvider
-import io.furryr.file.provider.SftpProvider
 import io.furryr.file.provider.model.FtpServer
 import io.furryr.file.provider.model.LocalLocation
 import io.furryr.file.provider.model.SafLocation
@@ -51,20 +48,24 @@ object LocationsRepository {
         extraKinds.remove(id)
     }
 
-    private fun kinds(localProvider: FileProvider): List<LocationKind> {
+    private fun kinds(localProvider: FileProvider, vfs: Vfs): List<LocationKind> {
         val plugins = synchronized(this) { extraKinds.values.toList() }
-        return listOf(
+        return listOfNotNull(
             LocalKind(localProvider),
-            SafKind,
-            FtpKind,
-            SftpKind,
-            EncryptedRemoteKind(),
+            vfs.provider("saf")?.let(::SafKind),
+            vfs.provider(ProviderSchemes.FTP)?.let(::FtpKind),
+            vfs.provider(ProviderSchemes.SFTP)?.let(::SftpKind),
+            EncryptedRemoteKind(vfs),
         ) + plugins
     }
 
     /** Unified gallery entries; actions are implemented by each [LocationKind]. */
-    fun locations(context: Context, localProvider: FileProvider): List<LocationEntry> =
-        kinds(localProvider).flatMap { kind ->
+    fun locations(
+        context: Context,
+        localProvider: FileProvider,
+        vfs: Vfs,
+    ): List<LocationEntry> =
+        kinds(localProvider, vfs).flatMap { kind ->
             runCatching { kind.records(context) }
                 .onFailure { Log.w(TAG, "Location kind '${kind.id}' failed", it) }
                 .getOrDefault(emptyList())
@@ -200,7 +201,7 @@ object LocationsRepository {
             runCatching { LocalLocationStore.reorder(ids) }
     }
 
-    private object SafKind : LocationKind {
+    private class SafKind(private val provider: FileProvider) : LocationKind {
         override val id: String = "saf"
 
         override fun records(context: Context): List<LocationRecord> =
@@ -211,7 +212,7 @@ object LocationsRepository {
                     subtitle = location.treeUri,
                     root = Path.of("saf", host = location.hexId).toString(),
                     kind = id,
-                    provider = SAFProvider,
+                    provider = provider,
                 )
             }
 
@@ -224,7 +225,7 @@ object LocationsRepository {
             runCatching { LocationStores.saf.reorder(ids) }
     }
 
-    private object FtpKind : LocationKind {
+    private class FtpKind(private val provider: FileProvider) : LocationKind {
         override val id: String = ProviderSchemes.FTP
 
         override fun records(context: Context): List<LocationRecord> =
@@ -235,7 +236,7 @@ object LocationsRepository {
                     subtitle = "ftp://${server.host}:${server.port}",
                     root = Path.of(ProviderSchemes.FTP, host = server.host).toString(),
                     kind = id,
-                    provider = FtpProvider,
+                    provider = provider,
                 )
             }
 
@@ -248,7 +249,7 @@ object LocationsRepository {
             runCatching { LocationStores.ftp.reorder(ids) }
     }
 
-    private object SftpKind : LocationKind {
+    private class SftpKind(private val provider: FileProvider) : LocationKind {
         override val id: String = ProviderSchemes.SFTP
 
         override fun records(context: Context): List<LocationRecord> =
@@ -259,7 +260,7 @@ object LocationsRepository {
                     subtitle = "sftp://${server.host}:${server.port}",
                     root = Path.of(ProviderSchemes.SFTP, host = server.host).toString(),
                     kind = id,
-                    provider = SftpProvider,
+                    provider = provider,
                 )
             }
 
@@ -272,12 +273,12 @@ object LocationsRepository {
             runCatching { LocationStores.sftp.reorder(ids) }
     }
 
-    private class EncryptedRemoteKind : LocationKind {
+    private class EncryptedRemoteKind(private val vfs: Vfs) : LocationKind {
         override val id: String = "remote"
 
         override fun records(context: Context): List<LocationRecord> {
             return RemoteLocationStore.all().mapNotNull { location ->
-                val provider = Vfs.provider(location.kind.scheme)
+                val provider = vfs.provider(location.kind.scheme)
                     ?: return@mapNotNull null
                 LocationRecord(
                     id = location.id,

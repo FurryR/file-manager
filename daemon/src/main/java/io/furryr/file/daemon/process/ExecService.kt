@@ -87,8 +87,9 @@ interface ProcessChannel : Closeable {
  * Executes commands against one daemon target. Returned by
  * [io.furryr.file.daemon.DaemonManager.execService].
  */
-class ExecService internal constructor(private val resolve: () -> DaemonConnection) {
-
+class ExecService internal constructor(
+    private val resolve: () -> DaemonConnection,
+) {
     /** Start a process and return its live [ProcessChannel]. */
     suspend fun spawn(spec: CommandSpec): Result<ProcessChannel> = withContext(Dispatchers.IO) {
         runCatching {
@@ -120,7 +121,8 @@ class ExecService internal constructor(private val resolve: () -> DaemonConnecti
     /** Run [spec] to completion and buffer its output (non-interactive). */
     suspend fun run(spec: CommandSpec): Result<ExecResult> = withContext(Dispatchers.IO) {
         runCatching {
-            resolve().exec(
+            val connection = resolve()
+            connection.exec(
                 command = spec.command, args = spec.args, cwd = spec.cwd, env = spec.env,
             ).getOrThrow()
         }

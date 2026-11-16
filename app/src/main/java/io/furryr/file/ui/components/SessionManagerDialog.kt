@@ -46,9 +46,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import io.furryr.file.R
-import io.furryr.file.terminal.TerminalProfiles
-import io.furryr.file.core.ContainerUris
+import io.furryr.file.container.ContainerUris
 import io.furryr.file.model.FileTab
+import io.furryr.file.model.LocationAddressParser
 import io.furryr.file.model.PageKind
 
 /** Assumed two-line row pitch, used to give the list a bounded height. */
@@ -59,7 +59,7 @@ private val MaxListHeight = 340.dp
 private fun sessionIcon(tab: FileTab): ImageVector = when {
     tab.currentPage.kind == PageKind.PAGE -> Icons.Default.Language
     ContainerUris.isContainer(tab.path) -> Icons.Default.DesktopWindows
-    TerminalProfiles.isSsh(tab.path) -> Icons.Default.Cloud
+    LocationAddressParser.parse(tab.path)?.isRemote == true -> Icons.Default.Cloud
     else -> Icons.Default.Folder
 }
 

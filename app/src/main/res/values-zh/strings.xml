@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">文件</string>
     <string name="permission_denied">权限不足</string>
+    <string name="open_failed">无法打开</string>
     <string name="service_not_started">“%1$s”的服务尚未启动。</string>
     <string name="service_not_started_hint">如果启动应用，将可以访问该位置。</string>
     <string name="launch_service">启动</string>
@@ -23,6 +24,8 @@
     <string name="nav_settings">设置</string>
     <string name="settings">设置</string>
     <string name="settings_other">其他</string>
+    <string name="settings_debug">调试</string>
+    <string name="settings_debug_desc">触发一个测试异常</string>
     <string name="language">语言</string>
     <string name="language_desc">选择应用语言</string>
     <string name="language_system">跟随系统</string>
@@ -50,6 +53,9 @@
     <string name="open_source_licenses">开放源代码许可</string>
     <string name="open_source_licenses_desc">本应用及其依赖项使用的许可</string>
     <string name="licenses_title">开放源代码许可</string>
+    <string name="licenses_group_android">Android / JVM</string>
+    <string name="licenses_group_rust">Rust</string>
+    <string name="licenses_group_native">原生</string>
     <string name="about">关于</string>
     <string name="about_desc">应用信息和法律声明</string>
     <string name="about_description">支持本地、网络、容器和终端的文件管理器。</string>
@@ -187,6 +193,7 @@
     <string name="terminal_drawer_title">终端</string>
     <string name="terminal_empty">没有可用的终端。</string>
     <string name="terminal_retry">重试</string>
+    <string name="retry">重试</string>
     <string name="devtools_console">控制台</string>
     <string name="devtools_clear">清空</string>
     <string name="devtools_reload">刷新</string>
@@ -197,8 +204,13 @@
     <string name="terminal_drop_hint">拖到此处插入路径</string>
     <string name="terminal_no_shell">此终端没有可用的 shell</string>
     <string name="terminal_failed">终端启动失败</string>
+    <string name="terminal_connection_lost_title">错误</string>
+    <string name="terminal_connection_lost">与远端的连接已丢失。</string>
+    <string name="terminal_exited_abnormally">终端异常退出。</string>
+    <string name="terminal_close">关闭终端</string>
     <string name="terminal_drop_failed">无法插入路径</string>
     <string name="terminal_drop_wrong_connection">只能插入此 SSH 连接中的条目</string>
+    <string name="terminal_drop_wrong_location">只能插入此终端所在位置的条目</string>
     <string name="terminal_drop_invalid_path">该路径无法插入终端</string>
     <string name="terminal_drop_unreachable">该路径在容器 \'%1$s\' 中不可达</string>
     <string name="wizard_pull_title">从 Docker Hub 拉取 Linux rootfs</string>
@@ -381,4 +393,61 @@
     <string name="web_copy_link_text">复制链接文本</string>
     <string name="web_copy_url">复制 URL</string>
     <string name="web_share_url">分享 URL</string>
+
+    <!-- 通用加载器：每个内嵌打开方式描述自己的图标与名称 -->
+    <string name="open_with_title">打开方式…</string>
+    <string name="open_with_archive">浏览压缩包</string>
+    <string name="open_with_browser">浏览网页</string>
+    <string name="open_with_editor">文本编辑</string>
+    <string name="open_with_system">系统</string>
+    <string name="open_with_search">搜索打开方式</string>
+
+    <!-- Termux 文本选择菜单（覆盖 terminal-view 库字符串） -->
+    <string name="copy_text">复制</string>
+    <string name="paste_text">粘贴</string>
+    <string name="select_all_text">全选</string>
+    <string name="web_search_text">网页搜索</string>
+    <string name="share_text">分享</string>
+    <string name="terminal_selection_open_link">打开链接</string>
+    <string name="terminal_selection_select_url">选择 URL</string>
+
+    <!-- Crash screen -->
+    <string name="crash_title">应用已崩溃</string>
+    <string name="crash_subtitle">应用意外停止。你可以复制或导出下方报告，以帮助修复此问题。</string>
+    <string name="crash_export">导出</string>
+    <string name="crash_copy">复制</string>
+    <string name="crash_restart">重新启动</string>
+    <string name="crash_close">关闭</string>
+    <string name="crash_share">分享</string>
+    <string name="crash_copied">已复制崩溃报告</string>
+    <string name="crash_exported">崩溃报告已保存</string>
+    <string name="crash_export_failed">无法保存崩溃报告</string>
+    <string name="crash_share_failed">无法分享崩溃报告</string>
+    <string name="crash_report_missing">崩溃报告已不存在。</string>
+
+    <!-- File picker -->
+    <string name="picker_pick_file">选择文件</string>
+    <string name="picker_create_file">保存文件</string>
+    <string name="picker_pick_folder">选择文件夹</string>
+    <string name="picker_select">选择</string>
+    <string name="picker_select_count">选择 (%1$d)</string>
+    <string name="picker_use_folder">使用此文件夹</string>
+    <string name="picker_save">保存</string>
+    <string name="picker_file_name">文件名</string>
+    <string name="picker_roots">位置</string>
+    <string name="picker_local">本地存储</string>
+    <string name="picker_root">内部存储</string>
+    <string name="picker_containers">容器</string>
+    <string name="picker_saf">SAF 位置</string>
+    <string name="picker_ftp">FTP</string>
+    <string name="picker_sftp">SFTP</string>
+    <string name="picker_ssh">SSH</string>
+    <string name="picker_alist">AList</string>
+    <string name="picker_empty">此文件夹为空</string>
+    <string name="picker_error">无法打开此文件夹</string>
+    <string name="picker_retry">重试</string>
+    <string name="picker_up">上一级</string>
+    <string name="picker_cancel">取消</string>
+    <string name="picker_invalid_name">文件名无效</string>
+    <string name="picker_name_exists">同名文件已存在</string>
 </resources>

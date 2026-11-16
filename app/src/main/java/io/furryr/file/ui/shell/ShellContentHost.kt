@@ -21,6 +21,7 @@ import io.furryr.file.model.FileTab
 import io.furryr.file.model.PageKind
 import io.furryr.file.render.RendererBase
 import io.furryr.file.render.RendererContent
+import io.furryr.file.shell.ShellModal
 import io.furryr.file.shell.ShellRendererContext
 
 /**
@@ -72,7 +73,7 @@ internal fun ShellContentHost(
             }
             // A page owns the location even before its renderer is
             // rebuilt; draw nothing rather than falling back to Home.
-            tab.currentPage.kind == PageKind.PAGE && tab.currentPage.renderer == null -> Box(
+            !tab.currentPage.location && tab.currentPage.renderer == null -> Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(MaterialTheme.colorScheme.background),

@@ -1,5 +1,7 @@
 package io.furryr.file
 import io.furryr.file.model.*
+import io.furryr.file.open.IncomingOpen
+import io.furryr.file.open.OpenRequest
 import io.furryr.file.home.HomeEntry
 import io.furryr.file.home.HomeEntryKind
 import io.furryr.file.home.HomeStore
@@ -9,14 +11,14 @@ import io.furryr.file.ui.util.*
 import io.furryr.file.shell.*
 import io.furryr.file.ui.shell.*
 import io.furryr.file.ui.state.rememberLocationCollections
-import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.ContentTypes
+import io.furryr.file.core.MimeType
 import io.furryr.file.core.Path
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonStatus
 import io.furryr.file.container.ContainerManager
 import io.furryr.file.container.ContainerBackend
-import io.furryr.file.core.ContainerUris
+import io.furryr.file.container.ContainerUris
 import io.furryr.file.core.DirectoryCapabilities
 import io.furryr.file.terminal.SessionManager
 import io.furryr.file.terminal.TerminalSheet
@@ -31,22 +33,20 @@ import io.furryr.file.core.VNode
 import io.furryr.file.core.VFile
 import io.furryr.file.core.NodeOps
 import io.furryr.file.core.Vfs
+import io.furryr.file.core.model.ProviderStat
+import io.furryr.file.render.ErrorRenderer
 import io.furryr.file.render.FolderRendererState
 import io.furryr.file.render.HomeRenderer
-import io.furryr.file.render.HomeRendererState
-import io.furryr.file.render.ListingHandle
+import io.furryr.file.render.SelectCapabilities
 import io.furryr.file.render.NodeAddress
-import io.furryr.file.render.RenderCapabilities
+import io.furryr.file.render.OpenMode
 import io.furryr.file.render.RendererContext
 import io.furryr.file.render.RendererMenuItem
 import io.furryr.file.render.RendererMenuItemRow
 import io.furryr.file.render.RendererPath
-import io.furryr.file.render.NodeOpener
-import io.furryr.file.render.Opened
 import io.furryr.file.render.RendererBase
 import io.furryr.file.render.RendererContent
 import io.furryr.file.render.RendererSession
-import io.furryr.file.render.RendererSessions
 import io.furryr.file.provider.web.WebTransfers
 import io.furryr.file.provider.remote.RemoteLocation
 import android.app.Activity
@@ -165,6 +165,7 @@ import io.furryr.file.ui.util.ContainerNotification
 import io.furryr.file.ui.util.formatSize
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -177,10 +178,12 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun FileManagerApp(
+    world: AppWorld,
     darkTheme: Boolean = true,
     onToggleTheme: () -> Unit = {},
     terminalOpenRequest: Int = 0,
     containerErrorRequest: String? = null,
+    openRequest: OpenRequest? = null,
 ) {
     val context = LocalContext.current
 
@@ -188,8 +191,12 @@ fun FileManagerApp(
     fun homePage(): Page = Page(
         path = HomePath,
         kind = PageKind.LOCATION,
+        location = true,
         title = context.getString(R.string.home_title),
-        pathInfo = HomeRenderer.pathBar(context),
+        pathInfo = RendererPath(
+            title = context.getString(R.string.home_title),
+            editText = "",
+        ),
     )
 
     fun newHomeTab(): FileTab = FileTab(path = HomePath, pages = listOf(homePage()))
@@ -216,9 +223,6 @@ fun FileManagerApp(
     var titleEditing by remember { mutableStateOf(false) }
 
     // Context menu & file operations state
-    var showDeleteConfirm by remember { mutableStateOf<List<FileEntry>?>(null) }
-    var showRenameDialog by remember { mutableStateOf<FileEntry?>(null) }
-    var showBatchRenameDialog by remember { mutableStateOf(false) }
     var showEntryInfo by remember { mutableStateOf<FileEntry?>(null) }
 
     var operationProgress by remember { mutableStateOf<OperationProgress?>(null) }
@@ -257,18 +261,8 @@ fun FileManagerApp(
     lateinit var contextFor: (String, String?) -> ShellRendererContext
     // Assigned after their local functions are declared; the host methods run
     // only from user events, so they never need a forward declaration body.
-    lateinit var openVFileFn: (VFile, String, String, ContentInfo?, Boolean, Boolean, Boolean) -> Unit
-    lateinit var openHomeEntryFn: (HomeEntry) -> Unit
-    lateinit var toggleHomeBookmarkFn: (HomeEntry) -> Unit
+    lateinit var openVFileFn: (VFile, String, String, MimeType?, Boolean, Boolean, Boolean) -> Unit
     lateinit var cancelOpeningFn: () -> Unit
-    lateinit var bookmarkEntryFn: () -> HomeEntry?
-    // One shared leave-confirmation dialog for every renderer. The editor
-    // offers Save/Discard/Cancel; a WebView beforeunload prompt offers
-    // Leave/Cancel because the page owns its own storage.
-    var leavePrompt by remember { mutableStateOf<LeavePrompt?>(null) }
-    var leaveSaving by remember { mutableStateOf(false) }
-    // Bumped whenever the home store changes, so the home screen re-reads it.
-    var homeVersion by remember { mutableIntStateOf(0) }
     LaunchedEffect(terminalOpenRequest) {
         if (terminalOpenRequest > 0) {
             showTerminalSheet = true
@@ -368,6 +362,14 @@ fun FileManagerApp(
 
     /** Composable content committed by each page; shell executes it here. */
     val pageContents = remember { mutableStateMapOf<String, RendererContent>() }
+    // A renderer that opened a popup answered within the pending window, so the
+    // 300 ms page cover must not appear over it.
+    val popupPages = remember { mutableStateMapOf<String, Boolean>() }
+    // Page load progress reported through RendererContext.setProgress.
+    val progressPages = remember { mutableStateMapOf<String, Int>() }
+
+    /** LIFO modal stack: only the top entry is composed. */
+    val modalStack = remember { mutableStateListOf<ShellModal>() }
 
     /** Release hook then close; sessions may run this only once. */
     fun releaseSession(session: RendererSession) {
@@ -403,15 +405,17 @@ fun FileManagerApp(
 
     /** Close and detach the renderer of one page. */
     fun releasePage(pageId: String) {
+        popupPages.remove(pageId)
+        progressPages.remove(pageId)
         val page = pageOf(pageId) ?: return
         val renderer = page.renderer ?: return
         page.renderer = null
         releaseSession(renderer)
     }
 
-    fun leavePage(pageId: String?) {
+    fun blurPage(pageId: String?) {
         pageId ?: return
-        pageOf(pageId)?.renderer?.leave()
+        pageOf(pageId)?.renderer?.blur()
     }
 
     /** Force-release every page a tab (or its pending location) owns. */
@@ -431,22 +435,60 @@ fun FileManagerApp(
     }
 
     /** Drop a navigation that has not committed, releasing its extra pages. */
+    fun isPageVisible(pageId: String): Boolean {
+        val tab = currentTab()
+        return tab.currentPage.id == pageId ||
+            pendingNavigations[tab.id]?.currentPage?.id == pageId
+    }
+
+    fun cancelModals(tabId: String, pageId: String? = null) {
+        modalStack
+            .filter { it.tabId == tabId && (pageId == null || it.pageId == pageId) }
+            .forEach { entry ->
+                if (modalStack.remove(entry)) entry.cancel(null)
+            }
+    }
+
     fun cancelPending(tabId: String): FileTab? {
         val pending = pendingNavigations.remove(tabId) ?: return null
+        cancelModals(tabId, pending.currentPage.id)
         releasePendingPages(pending)
         return pending
     }
 
     /** Mint the directory/Home renderer for a location page. */
-    fun newLocationSession(tab: FileTab, page: Page): RendererBase<*> {
-        val renderer = RendererSessions.location(
-            path = page.path,
-            initialSelection = tab.selectedPaths,
-            initialSelectedIndex = tab.lastSelectedIndex,
-            homeTitle = context.getString(R.string.home_title),
-        )
-        page.renderer = renderer
-        return renderer
+    fun newLocationSession(tab: FileTab, page: Page): RendererBase<*>? {
+        if (isHomePath(page.path)) {
+            val renderer = HomeRenderer(homeTitle = context.getString(R.string.home_title))
+            page.renderer = renderer
+            return renderer
+        }
+        // A committed location lost its renderer: rebuild it from the node the
+        // address resolves to. The page shows its placeholder until then.
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                world.vfs.node(Path.parse(page.path))
+            }
+            val node = result.getOrNull()
+            if (node !is VFolder) {
+                page.renderer = ErrorRenderer(
+                    page.path,
+                    result.exceptionOrNull()
+                        ?: IllegalStateException("not a folder: ${page.path}"),
+                    locationPage = true,
+                )
+                return@launch
+            }
+            val renderer = try {
+                world.opener.route(node)
+            } catch (error: Throwable) {
+                page.renderer = ErrorRenderer(page.path, error, locationPage = true)
+                return@launch
+            }
+            renderer.capabilities.select?.setSelection(tab.selectedPaths, tab.lastSelectedIndex)
+            page.renderer = renderer
+        }
+        return null
     }
 
     /**
@@ -457,7 +499,7 @@ fun FileManagerApp(
         if (entries.isEmpty()) return
         ClipboardStore.begin(entries, action)
         allPages().forEach { page ->
-            page.renderer?.listingHandle?.clearDisplayedSelection()
+            page.renderer?.capabilities?.select?.clearDisplayedSelection()
         }
     }
 
@@ -468,7 +510,7 @@ fun FileManagerApp(
         page.renderer?.let { return it }
         // A page or an edited file is rebuilt from its page; only a directory
         // or Home has a renderer the shell can mint on demand.
-        if (page.kind != PageKind.LOCATION) return null
+        if (!page.location) return null
         // Background tabs keep only renderers they already built.
         if (id != currentTab().id) return null
         return newLocationSession(tab, page)
@@ -477,7 +519,7 @@ fun FileManagerApp(
     fun pendingForCurrent(): FileTab? = pendingNavigations[currentTab().id]
 
     fun recordHome(kind: HomeEntryKind, location: String, title: String, detail: String = "") {
-        if (HomeStore.record(kind, location, title, detail)) homeVersion++
+        HomeStore.record(kind, location, title, detail)
     }
 
     fun replaceTab(tab: FileTab) {
@@ -519,7 +561,8 @@ fun FileManagerApp(
         val oldPage = current.currentPage
         val nextPage = pending.currentPage
         pendingNavigations.remove(tabId)
-        oldPage.renderer?.leave()
+        cancelModals(tabId, oldPage.id)
+        oldPage.renderer?.blur()
         if (nextPage.id == oldPage.id) {
             // A page rebuilt in place keeps its identity but gets a new renderer.
             oldPage.close()
@@ -532,12 +575,9 @@ fun FileManagerApp(
         if (index >= 0) tabs[index] = transform(tabs[index])
     }
 
-    /** Forget a prompt whose owner is leaving; its session cancels the rest. */
-    fun clearLeavePrompt(id: String) {
-        if (leavePrompt?.ownerTabId == id) {
-            leavePrompt = null
-            leaveSaving = false
-        }
+    /** Forget every modal owned by a leaving tab. */
+    fun clearModals(id: String) {
+        cancelModals(tabId = id)
     }
 
     /** Primary line for a page row: only the renderer cache, no path parsing. */
@@ -569,10 +609,10 @@ fun FileManagerApp(
     fun closeRenderer(id: String) {
         val tab = tabs.firstOrNull { it.id == id } ?: return
         val page = tab.currentPage
-        if (page.kind == PageKind.LOCATION) return
+        if (page.location) return
         val renderer = page.renderer
         if (renderer?.isLocationRenderer == true) return
-        clearLeavePrompt(id)
+        clearModals(id)
         page.close()
         val index = tab.pages.indexOfFirst { it.id == page.id }
         if (index < 0) return
@@ -581,58 +621,13 @@ fun FileManagerApp(
             replaceTab(
                 tab.copy(pages = emptyList()).appended(
                     if (isHomePath(tab.path)) homePage()
-                    else Page(path = tab.path, folder = tab.folder),
+                    else Page(path = tab.path, location = true),
                 ),
             )
             return
         }
         val nextIndex = (index - 1).coerceIn(0, stops.lastIndex)
         replaceTab(tab.copy(pages = stops, pageIndex = nextIndex).movedTo(nextIndex))
-    }
-
-    /**
-     * Give [id] a renderer without touching the visible page yet.
-     *
-     * The candidate tab owns the renderer; the shell renders it in the hidden
-     * pending layer until the renderer calls commit(). WebView adoption
-     * is intentionally not used here: a pending page must be a fresh session so
-     * the outgoing page stays intact.
-     */
-    fun showRenderer(
-        id: String,
-        renderer: RendererBase<*>,
-        host: RendererContext,
-        address: String,
-        pushPage: Boolean = true,
-    ) {
-        clearLeavePrompt(id)
-        cancelPending(id)
-        val tab = tabs.firstOrNull { it.id == id } ?: run {
-            releaseSession(renderer)
-            return
-        }
-        val current = tab.currentPage
-        val kind = if (renderer.webAddress != null || renderer.isLive) PageKind.PAGE else PageKind.FILE
-        val title = renderer.title?.removePrefix("• ")?.takeIf { it.isNotBlank() }
-        // A location can never be replaced by an overlay: even a caller that
-        // asked for no page push gets a new page above the folder.
-        val appendPage = pushPage || current.kind == PageKind.LOCATION
-        val target = if (appendPage) {
-            Page(path = address, kind = kind, title = title)
-        } else {
-            current.copy(path = address, kind = kind, title = title)
-        }
-        target.renderer = renderer
-        pendingNavigations[id] = if (appendPage) tab.appended(target) else tab.replacedCurrent(target)
-    }
-
-    /** Replace any pending prompt, cancelling the previous owner cleanly. */
-    fun requestLeave(prompt: LeavePrompt) {
-        val previous = leavePrompt
-        leavePrompt = null
-        leaveSaving = false
-        previous?.onCancel?.invoke()
-        leavePrompt = prompt
     }
 
     /**
@@ -643,148 +638,35 @@ fun FileManagerApp(
     fun guardRenderer(id: String, action: () -> Unit): Boolean {
         val page = activeTabState(id)?.currentPage ?: return false
         val renderer = page.renderer ?: return false
-        if (!renderer.needsLeaveGuard) return false
-        renderer.requestClose(contextFor(id, null).also { it.bindPage(page.id) }) {
-            page.close()
-            action()
+        if (!renderer.needsUnloadGuard) return false
+        scope.launch {
+            val host = contextFor(id, null).also { it.bindPage(page.id) }
+            if (renderer.requestUnload(host)) {
+                page.close()
+                action()
+            }
         }
         return true
     }
 
     /**
-     * Navigate to [path] as a plain location. [view] is a node the caller has
-     * already resolved; it is kept only when it is a view, so a provider
-     * directory is still listed through its own path (and stays writable).
+     * Run an asynchronous open under the tab's opening indicator. A remote
+     * probe or archive index may take seconds; the previous view must keep
+     * showing a loading overlay instead of appearing frozen.
      */
-    fun navigateTo(
-        path: String,
-        tabId: String = currentTab().id,
-        record: Boolean = true,
-        view: VFolder? = null,
-        /** Append even when [path] is already the tab's location. */
-        force: Boolean = false,
-    ) {
-        if (guardRenderer(tabId) { navigateTo(path, tabId, record, view, force) }) return
-        val tab = tabs.firstOrNull { it.id == tabId } ?: return
-        if (pendingNavigations[tab.id] != null) return
-        // Re-entering the current plain location is not a step; when an overlay
-        // covers it, the same address still has to reveal the list.
-        if (!force && path == tab.path && tab.currentPage.kind == PageKind.LOCATION) return
-        if (record && !isHomePath(path)) {
-            recordHome(HomeEntryKind.FOLDER, path, Path.parse(path).name ?: path, path)
-        }
-        val page = if (isHomePath(path)) homePage() else Page(
-            path = path,
-            folder = view,
-            kind = PageKind.LOCATION,
-        )
-        val next = tab.appended(page)
-        page.renderer = RendererSessions.location(
-            path = path,
-            initialSelection = tab.selectedPaths,
-            initialSelectedIndex = tab.lastSelectedIndex,
-            homeTitle = context.getString(R.string.home_title),
-        )
-        if (tabId == currentTab().id) {
-            highlightPath = null
-            highlightDirectory = null
-            pendingScrollPath = null
-        }
-        // Home has no resource to load, so it commits in this frame instead of
-        // waiting for a renderer round trip.
-        if (isHomePath(path) || isHomePath(tab.path)) {
-            leavePage(tab.currentPage.id)
-            replaceTab(next)
-        } else {
-            pendingNavigations[next.id] = next
-        }
-    }
-
-    fun navigateToFolder(
-        folder: VFolder,
-        tabId: String = currentTab().id,
-        /** Replace an overlay stop with this folder instead of appending. */
-        replaceCurrent: Boolean = false,
-    ) {
-        if (guardRenderer(tabId) { navigateToFolder(folder, tabId, replaceCurrent) }) return
-        val tab = tabs.firstOrNull { it.id == tabId } ?: return
-        if (pendingNavigations[tab.id] != null) return
-        if (folder.addressable) {
-            recordHome(HomeEntryKind.FOLDER, folder.path.toString(), folder.name, folder.path.toString())
-        }
-        val page = Page(path = folder.path.toString(), folder = folder, kind = PageKind.LOCATION)
-        page.renderer = RendererSessions.location(
-            path = page.path,
-            initialSelection = tab.selectedPaths,
-            initialSelectedIndex = tab.lastSelectedIndex,
-            homeTitle = context.getString(R.string.home_title),
-        )
-        if (tabId == currentTab().id) {
-            highlightPath = null
-            highlightDirectory = null
-            pendingScrollPath = null
-        }
-        // A rejected page guess is one page, not a page plus an archive above
-        // it: replace it in place and let the directory renderer take over.
-        if (replaceCurrent && tab.currentPage.kind != PageKind.LOCATION) {
-            val next = tab.replacedCurrent(page)
-            if (isHomePath(tab.path)) {
-                leavePage(tab.currentPage.id)
-                replaceTab(next)
-            } else {
-                pendingNavigations[next.id] = next
+    fun trackNodeOpen(tabId: String, block: suspend () -> Unit) {
+        val generation = ++nodeOpenGeneration
+        nodeOpenJob?.cancel()
+        nodeOpeningTab = tabId
+        nodeOpenJob = scope.launch {
+            try {
+                block()
+            } finally {
+                if (generation == nodeOpenGeneration) {
+                    nodeOpeningTab = null
+                    nodeOpenJob = null
+                }
             }
-            return
-        }
-        val next = tab.appended(page)
-        if (isHomePath(tab.path)) {
-            leavePage(tab.currentPage.id)
-            replaceTab(next)
-        } else {
-            pendingNavigations[next.id] = next
-        }
-    }
-
-    /** Put an open outcome on screen for [tabId]. */
-    fun applyOpen(
-        tabId: String,
-        file: VFile?,
-        address: String,
-        name: String,
-        content: ContentInfo?,
-        host: RendererContext,
-        pushPage: Boolean,
-        outcome: AppOpenOutcome,
-    ) {
-        when (outcome) {
-            is AppOpenOutcome.Folder ->
-                navigateToFolder(outcome.node, tabId, replaceCurrent = !pushPage)
-            is AppOpenOutcome.Renderer -> showRenderer(tabId, outcome.renderer, host, address, pushPage)
-            AppOpenOutcome.External -> if (file != null) {
-                openFile(
-                    context,
-                    FileEntry(
-                        name = name,
-                        path = address,
-                        isDirectory = false,
-                        modifiedAt = 0L,
-                        size = content?.size ?: 0L,
-                    ),
-                    file,
-                    content,
-                )
-            } else {
-                Toast.makeText(
-                    context,
-                    context.getString(R.string.toast_cannot_open, name),
-                    Toast.LENGTH_SHORT,
-                ).show()
-            }
-            is AppOpenOutcome.Failure -> Toast.makeText(
-                context,
-                outcome.message ?: context.getString(R.string.toast_cannot_open, name),
-                Toast.LENGTH_SHORT,
-            ).show()
         }
     }
 
@@ -805,7 +687,7 @@ fun FileManagerApp(
         tabId: String,
         live: VFile,
         session: RendererSession,
-        reopen: suspend (ContentInfo) -> Unit,
+        reopen: suspend (MimeType?) -> Unit,
     ) {
         val expected = session.address ?: return
         val guessedStop = pendingOf(tabId)?.currentPage?.id
@@ -815,23 +697,11 @@ fun FileManagerApp(
         // said what it is, so a hand-back never flashes a frame of it.
         session.beginConfirmation()
         scope.launch {
-            val declared = withContext(Dispatchers.IO) { live.peek().getOrNull() }
-            // Headers that name no usable type need the body sniff the eager
-            // probe runs anyway: the same request, now overlapped with the
-            // transfer the WebView already started.
-            val confirmed = if (WebPagePolicy.verdict(declared, settled = false) ==
-                WebPagePolicy.Verdict.UNDECIDED
-            ) {
-                withContext(Dispatchers.IO) { live.describe().getOrNull() }
-            } else {
-                declared
-            }
+            val declared = withContext(Dispatchers.IO) { live.stat().getOrNull()?.mime }
             // Something else may have taken the tab while the server answered;
             // only the page this probe belongs to may be handed back.
             if (!isActiveSession(tabId, session) || session.address != expected) return@launch
-            if (confirmed == null ||
-                WebPagePolicy.verdict(confirmed, settled = true) != WebPagePolicy.Verdict.NOT_PAGE
-            ) {
+            if (WebPagePolicy.verdict(declared, live.name) != WebPagePolicy.Verdict.NOT_PAGE) {
                 // A page, or an address whose type nobody named: the browser
                 // keeps it, exactly where the eager path would have put it.
                 session.settleConfirmation()
@@ -840,7 +710,7 @@ fun FileManagerApp(
             // Not a page: reopen the same stop with the real type. If the
             // route hands it to an external viewer, no renderer replaced the
             // guess and the stop is dropped here.
-            reopen(confirmed)
+            reopen(declared)
             if (pageOf(guessedStop)?.renderer === session) closeRenderer(tabId)
         }
     }
@@ -861,7 +731,7 @@ fun FileManagerApp(
         file: VFile,
         address: String,
         name: String,
-        contentHint: ContentInfo? = null,
+        mimeHint: MimeType? = null,
         host: RendererContext,
         /** A document the user opened: it becomes a home row. */
         recordHome: Boolean = true,
@@ -869,17 +739,16 @@ fun FileManagerApp(
         pushPage: Boolean = true,
     ) {
         val live = file.liveAddress != null
-        val optimistic = contentHint == null && live &&
+        val optimistic = mimeHint == null && live &&
             WebPagePolicy.likelyPage(address)
-        // An optimistic address deliberately keeps its facts unknown: that is
-        // what makes the route table hand it to the browser without a request.
-        val content = contentHint ?: if (optimistic) {
-            null
-        } else {
-            withContext(Dispatchers.IO) { file.describe().getOrNull() }
-        }
-        val outcome = withContext(Dispatchers.IO) {
-            OpenTable.route(file, content, OpenContext(host))
+        // A live address that already looks like a page keeps its facts
+        // unknown: the route table hands it to the browser with a page hint, so
+        // the server's first byte is not delayed by a HEAD. Every other open
+        // asks the file's stat for its MIME, then falls back to the extension.
+        // No body is read here.
+        val routedMime = mimeHint ?: if (optimistic) "text/html" else null
+        val renderer = withContext(Dispatchers.IO) {
+            host.opener.route(file, routedMime)
         }
         // Only a plain provider path becomes a home row; a view address is
         // rebuilt from its own text when it is reopened. A live resource is a
@@ -888,13 +757,13 @@ fun FileManagerApp(
             val kind = if (file.liveAddress != null) HomeEntryKind.WEB else HomeEntryKind.FILE
             recordHome(kind, address, name, address)
         }
-        applyOpen(tabId, file, address, name, content, host, pushPage, outcome)
+        if (pushPage) host.open(renderer) else host.replace(renderer)
         if (optimistic) {
             // The renderer that took the tab is the one whose address is a
             // page; the optimistic open made it the current stop already.
             val page = pendingOf(tabId)?.currentPage?.renderer ?: activeSession(tabId)
             if (page?.webAddress != null) confirmPage(tabId, file, page) { facts ->
-                // The reopen carries the facts, so the table cannot guess a
+                // The reopen carries the MIME, so the table cannot guess a
                 // second time. It pushes no page and records no home row:
                 // the optimistic open already made this address the current
                 // stop and its own Home row. A fresh host belongs to the
@@ -904,7 +773,7 @@ fun FileManagerApp(
                     file = file,
                     address = address,
                     name = name,
-                    contentHint = facts,
+                    mimeHint = facts,
                     host = contextFor(tabId, null),
                     recordHome = false,
                     pushPage = false,
@@ -914,6 +783,145 @@ fun FileManagerApp(
     }
 
 
+    /** The one path→node step: address text enters the node graph here. */
+    suspend fun resolveNode(path: Path): Result<VNode> =
+        withContext(Dispatchers.IO) { world.vfs.node(path) }
+
+    /** A failed address is still a page: install the retryable error view. */
+    fun openErrorPage(address: String, failure: Throwable, tabId: String = currentTab().id) {
+        if (tabs.none { it.id == tabId }) return
+        contextFor(tabId, null).open(ErrorRenderer(address, failure))
+    }
+
+    /** Install [folder] as the tab's location; the renderer arrives asynchronously. */
+    fun navigateToFolder(
+        folder: VFolder,
+        tabId: String = currentTab().id,
+        /** Replace an overlay stop with this folder instead of appending. */
+        replaceCurrent: Boolean = false,
+    ) {
+        if (guardRenderer(tabId) { navigateToFolder(folder, tabId, replaceCurrent) }) return
+        val tab = tabs.firstOrNull { it.id == tabId } ?: return
+        if (pendingNavigations[tab.id] != null) return
+        if (folder.addressable) {
+            recordHome(HomeEntryKind.FOLDER, folder.path.toString(), folder.name, folder.path.toString())
+        }
+        val page = Page(path = folder.path.toString(), kind = PageKind.LOCATION, location = true)
+        if (tabId == currentTab().id) {
+            highlightPath = null
+            highlightDirectory = null
+            pendingScrollPath = null
+        }
+        // A rejected page guess is one page, not a page plus an archive above
+        // it: replace it in place and let the directory renderer take over.
+        val next = if (replaceCurrent && !tab.currentPage.location) {
+            tab.replacedCurrent(page)
+        } else {
+            tab.appended(page)
+        }
+        pendingNavigations[next.id] = next
+        scope.launch {
+            val renderer = try {
+                world.opener.route(folder)
+            } catch (error: Throwable) {
+                openErrorPage(folder.path.toString(), error, tabId)
+                return@launch
+            }
+            renderer.capabilities.select?.setSelection(tab.selectedPaths, tab.lastSelectedIndex)
+            page.renderer = renderer
+        }
+    }
+
+    /**
+     * The stop an already-built renderer becomes. Its address and role come
+     * from the renderer; the shell only mints the page identity.
+     */
+    fun rendererPage(renderer: RendererBase<*>): Page {
+        val page = Page(
+            path = renderer.pagePath,
+            kind = renderer.pageKind,
+            location = renderer.isLocationRenderer,
+            title = renderer.title,
+        )
+        page.renderer = renderer
+        return page
+    }
+
+    /**
+     * Install [renderer] as a tab of its own and activate it.
+     *
+     * The new tab starts at the calling tab's location so Back and Up keep a
+     * folder to return to; the opened page stays pending until its renderer
+     * commits, exactly like a same-tab open. A renderer that only contributes
+     * a dialog (the chooser) therefore leaves the tab on that location instead
+     * of blanking it.
+     */
+    fun openInNewTab(from: FileTab, renderer: RendererBase<*>) {
+        val base = if (isHomePath(from.path)) homePage() else Page(
+            path = from.path,
+            kind = PageKind.LOCATION,
+            location = true,
+            // Until the base location's renderer reports, the strip keeps the
+            // title the calling tab last gave that location.
+            title = from.pages
+                .take((from.pageIndex + 1).coerceAtLeast(0))
+                .lastOrNull { it.location }
+                ?.title,
+        )
+        val fresh = FileTab(path = from.path, pages = listOf(base))
+        tabs.add(fresh)
+        selectTab(tabs.lastIndex)
+        pendingNavigations[fresh.id] = fresh.appended(rendererPage(renderer))
+    }
+
+    /**
+     * Navigate to [path]. Home is the only renderer the shell builds itself;
+     * every other address resolves to a node and goes through the opener.
+     */
+    fun navigateTo(
+        path: String,
+        tabId: String = currentTab().id,
+        record: Boolean = true,
+        folder: VFolder? = null,
+        /** Append even when [path] is already the tab's location. */
+        force: Boolean = false,
+    ) {
+        if (guardRenderer(tabId) { navigateTo(path, tabId, record, folder, force) }) return
+        val tab = tabs.firstOrNull { it.id == tabId } ?: return
+        if (pendingNavigations[tab.id] != null) return
+        if (!force && path == tab.path && tab.currentPage.location) return
+        if (isHomePath(path)) {
+            val page = homePage()
+            page.renderer = HomeRenderer(homeTitle = context.getString(R.string.home_title))
+            val next = tab.appended(page)
+            blurPage(tab.currentPage.id)
+            replaceTab(next)
+            return
+        }
+        if (folder != null) {
+            navigateToFolder(folder, tabId)
+            return
+        }
+        scope.launch {
+            val result = resolveNode(Path.parse(path))
+            when (val node = result.getOrNull()) {
+                is VFolder -> navigateToFolder(node, tabId)
+                is VFile -> routeVFile(
+                    tabId = tabId,
+                    file = node,
+                    address = path,
+                    name = node.name,
+                    host = contextFor(tabId, null),
+                )
+                null -> openErrorPage(
+                    path,
+                    result.exceptionOrNull() ?: IllegalStateException("Cannot open $path"),
+                    tabId,
+                )
+            }
+        }
+    }
+
     fun rendererContextFor(id: String, pendingPageId: String? = null): ShellRendererContext {
         val hostScope = scope
         val hostContext = context
@@ -921,6 +929,9 @@ fun FileManagerApp(
             override var boundPageId: String? = null
             override val scope: CoroutineScope get() = hostScope
             override val context: Context? get() = hostContext
+            override val vfs = world.vfs
+            override val worldId: String = world.id
+            override val opener = world.opener
 
             /** The uncommitted renderer this host is rendering, if any. */
             fun boundPending(): FileTab? {
@@ -950,16 +961,10 @@ fun FileManagerApp(
                     candidate.pages.any { it.id == pageId }
                 } ?: return
                 if (pendingNavigations[tab.id] != null) return
-                // Asking to be seen cancels the pending close: the renderer's
-                // own dialog is about to take over.
-                if (leavePrompt?.ownerPageId == pageId) {
-                    leavePrompt = null
-                    leaveSaving = false
-                }
                 activeTabId.value = tab.id
                 val index = tab.pages.indexOfFirst { it.id == pageId }
                 if (index < 0 || tab.pageIndex == index) return
-                leavePage(tab.currentPage.id)
+                blurPage(tab.currentPage.id)
                 replaceTab(tab.movedTo(index))
             }
 
@@ -973,24 +978,39 @@ fun FileManagerApp(
                 pageOf(pageId)?.title = title
             }
 
-            override val opener: NodeOpener get() = OpenTable
-
-            override fun open(renderer: RendererBase<*>) {
-                val tab = currentTab()
-                val page = Page(
-                    path = renderer.pagePath,
-                    kind = renderer.pageKind,
-                    title = renderer.title,
-                )
-                page.renderer = renderer
+            override fun open(
+                renderer: RendererBase<*>,
+                mode: OpenMode,
+                pushPage: Boolean,
+            ) {
+                val tab = tabs.firstOrNull { it.id == id } ?: run {
+                    releaseSession(renderer)
+                    return
+                }
+                if (mode == OpenMode.NewTab) {
+                    // The calling tab keeps its own stops untouched: only the
+                    // new tab's page is pending, and its own modals stay.
+                    openInNewTab(tab, renderer)
+                    return
+                }
+                val page = rendererPage(renderer)
+                clearModals(tab.id)
                 cancelPending(tab.id)
-                pendingNavigations[tab.id] = tab.appended(page)
+                // A location can only be replaced by another location. An
+                // overlay still gets a page above it even when the caller
+                // asked for no push.
+                val appendPage = pushPage ||
+                    (tab.currentPage.location && !renderer.isLocationRenderer)
+                pendingNavigations[tab.id] = if (appendPage) {
+                    tab.appended(page)
+                } else {
+                    tab.replacedCurrent(page)
+                }
             }
 
             override fun navigate(node: io.furryr.file.core.VNode, rendererId: String?) {
                 if (node is VFolder) {
-                    if (node.addressable) navigateTo(node.path.toString(), id)
-                    else navigateToFolder(node, id)
+                    navigateToFolder(node, id)
                 }
             }
 
@@ -1009,7 +1029,6 @@ fun FileManagerApp(
                     if (renderer?.isLive == true) {
                         val address = renderer.address ?: return
                         HomeStore.updateTitle(address, title)
-                        homeVersion++
                     }
                 }
             }
@@ -1026,9 +1045,10 @@ fun FileManagerApp(
                     val current = pending.currentPage
                     if (current.path == address) return
                     val moved = current.renderer ?: return
-                    val updated = current.copy(path = address, kind = PageKind.PAGE, title = null)
-                    updated.renderer = moved
-                    pendingNavigations[id] = pending.replacedCurrent(updated)
+                    current.path = address
+                    current.kind = PageKind.PAGE
+                    current.title = null
+                    pendingNavigations[id] = pending
                     return
                 }
                 if (boundCommitted() == null) return
@@ -1041,20 +1061,15 @@ fun FileManagerApp(
                 // A redirect never rendered its source page, so its provisional
                 // stop is replaced in place, not pushed.
                 if (replacePrevious != null && current.path == replacePrevious) {
-                    val redirected = current.copy(path = address, kind = PageKind.PAGE, title = null)
-                    replaceTab(
-                        tab.replacedCurrent(redirected),
-                    )
+                    current.path = address
+                    current.kind = PageKind.PAGE
+                    current.title = null
                     return
                 }
                 // The page being left keeps the title it last reported.
-                val titled = tab.replacedCurrent(
-                    current.copy(
-                        title = current.title,
-                    ),
-                )
+                val titled = tab
                 val known = titled.pages.indexOfLast {
-                    it.path == address && it.kind == PageKind.PAGE && it.id != current.id
+                    it.path == address && it.id != current.id
                 }
                 if (known >= 0) {
                     val target = titled.pages[known]
@@ -1075,30 +1090,7 @@ fun FileManagerApp(
                 replaceTab(titled.appended(next))
             }
 
-            override fun updateCapabilities(capabilities: RenderCapabilities) = Unit
-
-            override fun confirmLeave(
-                message: String?,
-                canSave: Boolean,
-                onSave: (suspend () -> Result<Unit>)?,
-                onLeave: () -> Unit,
-                onCancel: () -> Unit,
-            ) {
-                val pageId = boundPageId ?: return onLeave()
-                requestLeave(
-                    LeavePrompt(
-                        ownerTabId = id,
-                        ownerPageId = pageId,
-                        message = message,
-                        canSave = canSave,
-                        onSave = onSave,
-                        onLeave = onLeave,
-                        onCancel = onCancel,
-                    )
-                )
-            }
-
-            override fun openFile(file: VFile, content: ContentInfo?) {
+            override fun openFile(file: VFile, stat: ProviderStat?) {
                 // The node already carries its address, view levels included.
                 // A link is a navigation inside the tab, not a document the
                 // user opened, so it does not become a home entry.
@@ -1106,36 +1098,35 @@ fun FileManagerApp(
                     file,
                     file.path.toString(),
                     file.name,
-                    content,
+                    stat?.mime,
                     false,
                     true,
                     false,
                 )
             }
 
-            override fun copyFile(file: VFile, content: ContentInfo?) {
+            override fun copyFile(file: VFile, stat: ProviderStat?) {
                 // Put the node on the clipboard; the user picks the destination
                 // by switching tabs and pasting there.
                 startClipboard(
                     listOf(
                         ClipboardEntry(
                             node = file,
-                            name = content?.name?.takeIf { it.isNotBlank() } ?: file.name,
+                            name = file.name,
                         ),
                     ),
                     ClipboardAction.COPY,
                 )
             }
 
-            override fun shareFile(file: VFile, content: ContentInfo?) {
-                io.furryr.file.ui.util.shareFile(context, file, content)
+            override fun shareFile(file: VFile, stat: ProviderStat?) {
+                io.furryr.file.ui.util.shareFile(context, file, stat)
             }
 
             override fun openEntry(entry: FileEntry, node: VNode?) {
                 if (entry.isDirectory) {
                     when (node) {
-                        is VFolder -> if (node.addressable) navigateTo(node.path.toString(), id)
-                        else navigateToFolder(node, id)
+                        is VFolder -> navigateToFolder(node, id)
                         else -> navigateTo(entry.path, id)
                     }
                 } else {
@@ -1154,17 +1145,8 @@ fun FileManagerApp(
                 }
             }
 
-            override fun requestShare(entries: List<FileEntry>) {
-                scope.launch { shareEntries(context, entries) }
-            }
-
-            override fun requestDelete(entries: List<FileEntry>) {
-                showDeleteConfirm = entries
-            }
-
-            override fun requestRename(entries: List<FileEntry>) {
-                if (entries.size > 1) showBatchRenameDialog = true
-                else entries.firstOrNull()?.let { showRenameDialog = it }
+            override fun requestShare(entries: List<ClipboardEntry>) {
+                scope.launch { shareEntries(context, entries.map { it.node }) }
             }
 
             override fun requestProperties(entry: FileEntry) {
@@ -1232,36 +1214,7 @@ fun FileManagerApp(
                 }
             }
 
-            override fun openHome(entry: HomeEntry) = openHomeEntryFn(entry)
-
-            override fun toggleBookmark(entry: HomeEntry) = toggleHomeBookmarkFn(entry)
-
-            override fun removeRecent(key: String) {
-                HomeStore.removeRecent(key)
-                homeVersion++
-            }
-
-            override fun removeBookmark(key: String) {
-                HomeStore.removeBookmark(key)
-                homeVersion++
-            }
-
-            override fun clearRecent() {
-                HomeStore.clearRecent()
-                homeVersion++
-            }
-
-            override fun clearBookmarks() {
-                HomeStore.clearBookmarks()
-                homeVersion++
-            }
-
             override fun cancelOpening() = cancelOpeningFn()
-
-            override fun bookmarkEntry(): HomeEntry? = bookmarkEntryFn()
-
-            override fun isBookmarked(entry: HomeEntry): Boolean =
-                HomeStore.isBookmarked(entry.kind, entry.location)
 
             override fun folderView(): FolderRendererState? {
                 val pending = boundPending()
@@ -1270,7 +1223,6 @@ fun FileManagerApp(
                     return FolderRendererState(
                         path = page.path,
                         committedPath = page.path,
-                        folder = page.folder,
                         scrollToPath = pendingScrollPath,
                         highlightPath = highlightPath,
                         highlightDirectory = highlightDirectory,
@@ -1281,7 +1233,6 @@ fun FileManagerApp(
                 return FolderRendererState(
                     path = tab.path,
                     committedPath = tab.path,
-                    folder = tab.folder,
                     scrollToPath = pendingScrollPath,
                     highlightPath = highlightPath,
                     highlightDirectory = highlightDirectory,
@@ -1289,31 +1240,46 @@ fun FileManagerApp(
                 )
             }
 
-            override fun homeView(): HomeRendererState? {
-                if (boundPending() == null && boundCommitted() == null) return null
-                // Reading the version subscribes this getter to HomeStore edits.
-                homeVersion
-                return HomeRendererState(
-                    recent = HomeStore.recent(),
-                    bookmarks = HomeStore.bookmarks(),
-                    opening = nodeOpeningTab == id,
-                )
-            }
-
             override fun reportError(error: Throwable) {
-                Toast.makeText(context, error.message ?: "Renderer failed", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, context.errorText(error), Toast.LENGTH_SHORT).show()
             }
 
-            override fun requestClose() {
-                val pending = boundPending()
-                if (pending != null) {
-                    if (pendingNavigations[id] === pending) {
-                        pendingNavigations.remove(id)
-                        releasePendingPages(pending)
-                    }
-                    return
+            override fun setProgress(progress: Int?) {
+                val pageId = boundPageId ?: return
+                if (progress == null) progressPages.remove(pageId) else progressPages[pageId] = progress
+            }
+
+            override fun dismissPending() {
+                val pending = boundPending() ?: return
+                if (pendingNavigations[id] === pending) cancelPending(id)
+            }
+
+            @Suppress("UNCHECKED_CAST")
+            override suspend fun <T> popup(
+                content: @Composable ((T) -> Unit) -> Unit,
+            ): T? {
+                val pageId = boundPageId ?: return null
+                popupPages[pageId] = true
+                val deferred = CompletableDeferred<T?>()
+                val entry = ShellModal(
+                    tabId = id,
+                    pageId = pageId,
+                    content = { content { value -> deferred.complete(value as T?) } },
+                    cancel = { deferred.complete(null) },
+                )
+                modalStack.add(entry)
+                if (!isPageVisible(pageId)) focus()
+                if (!isPageVisible(pageId)) {
+                    modalStack.remove(entry)
+                    deferred.complete(null)
+                    return null
                 }
-                closeRenderer(id)
+                return try {
+                    deferred.await()
+                } finally {
+                    modalStack.remove(entry)
+                    if (!deferred.isCompleted) deferred.complete(null)
+                }
             }
 
             override fun commit(content: RendererContent) {
@@ -1338,27 +1304,6 @@ fun FileManagerApp(
     cancelOpeningFn = ::cancelNodeOpening
 
     /**
-     * Run an asynchronous open under the tab's opening indicator. A remote
-     * probe or archive index may take seconds; the previous view must keep
-     * showing a loading overlay instead of appearing frozen.
-     */
-    fun trackNodeOpen(tabId: String, block: suspend () -> Unit) {
-        val generation = ++nodeOpenGeneration
-        nodeOpenJob?.cancel()
-        nodeOpeningTab = tabId
-        nodeOpenJob = scope.launch {
-            try {
-                block()
-            } finally {
-                if (generation == nodeOpenGeneration) {
-                    nodeOpeningTab = null
-                    nodeOpenJob = null
-                }
-            }
-        }
-    }
-
-    /**
      * The one fire-and-forget file open for the current tab. Every caller that
      * already holds a node — a directory row, a link hit, a typed address, a
      * home row — lands here; [routeVFile] owns the describe → route → apply
@@ -1368,7 +1313,7 @@ fun FileManagerApp(
         file: VFile,
         address: String,
         name: String,
-        contentHint: ContentInfo? = null,
+        mimeHint: MimeType? = null,
         recordHome: Boolean = true,
         pushPage: Boolean = true,
         tracked: Boolean = false,
@@ -1377,59 +1322,19 @@ fun FileManagerApp(
         val host = rendererContextFor(tabId)
         if (tracked) {
             trackNodeOpen(tabId) {
-                routeVFile(tabId, file, address, name, contentHint, host, recordHome, pushPage)
+                routeVFile(tabId, file, address, name, mimeHint, host, recordHome, pushPage)
             }
         } else {
             scope.launch {
-                routeVFile(tabId, file, address, name, contentHint, host, recordHome, pushPage)
+                routeVFile(tabId, file, address, name, mimeHint, host, recordHome, pushPage)
             }
         }
     }
     openVFileFn = ::openVFile
 
-    fun toggleHomeBookmark(entry: HomeEntry) {
-        HomeStore.toggleBookmark(entry)
-        homeVersion++
-    }
-    toggleHomeBookmarkFn = ::toggleHomeBookmark
-
-    fun currentBookmarkEntry(): HomeEntry? {
-        val tab = currentTab()
-        val path = tab.path
-        // A page or an opened file is bookmarkable even when it was opened
-        // from home; only the directory branch needs a real location. The
-        // session knows whether its address is live or a projected file.
-        val session = activeSession(tab.id)
-        if (session != null && session.address != null) {
-            if (session.suppressBookmark) return null
-            val address = session.address!!
-            val kind = if (session.isLive) HomeEntryKind.WEB else HomeEntryKind.FILE
-            return HomeEntry(kind, address, session.title ?: tab.currentPage.title ?: address, address)
-        }
-        if (isHomePath(path)) return null
-        // A loaded directory is bookmarkable even though it has a folder hint.
-        val folderPath = tab.folder?.path?.toString() ?: path
-        if (isHomePath(folderPath)) return null
-        return HomeEntry(
-            HomeEntryKind.FOLDER,
-            folderPath,
-            Path.parse(folderPath).name ?: folderPath,
-            folderPath,
-        )
-    }
-
-    fun toggleCurrentBookmark() {
-        currentBookmarkEntry()?.let { toggleHomeBookmark(it) }
-    }
-    bookmarkEntryFn = ::currentBookmarkEntry
-
-    /** The one path→node step: address text enters the node graph here. */
-    suspend fun resolveNode(path: Path): VNode? =
-        withContext(Dispatchers.IO) { Vfs.node(path).getOrNull() }
-
     /** The directory node for [path], reusing [hint] when the tab already has one. */
     suspend fun folderFor(path: String, hint: VFolder? = null): VFolder? =
-        hint ?: withContext(Dispatchers.IO) { Vfs.folder(path).getOrNull() }
+        hint ?: withContext(Dispatchers.IO) { world.vfs.folder(path).getOrNull() }
 
     /**
      * Go to [address] in [tabId]: the provider decides what it is.
@@ -1440,39 +1345,65 @@ fun FileManagerApp(
      * here reads a scheme, and no caller needs a second "open a URL" path.
      */
     /** The resolve-and-route half of [openAddress], usable under an opening indicator. */
-    suspend fun openAddressNow(address: String, tabId: String) {
+    suspend fun openAddressNow(address: String, tabId: String, recordHome: Boolean = true) {
         if (tabs.none { it.id == tabId }) return
         val parsed = NodeAddress.parse(address)
-        val node = resolveNode(parsed)
-        when (node) {
+        val result = resolveNode(parsed)
+        when (val node = result.getOrNull()) {
             // A view level already resolved to a node: keep it, so an
             // archive root is not re-opened from its path.
-            is VFolder -> if (parsed.isViewed) navigateToFolder(node, tabId)
-            else navigateTo(address, tabId, view = node.takeIf { it.isView })
-            is VFile -> routeVFile(tabId, node, address, node.name, host = rendererContextFor(tabId))
-            null -> navigateTo(address, tabId, record = false)
+            is VFolder -> navigateToFolder(node, tabId)
+            is VFile -> routeVFile(
+                tabId,
+                node,
+                address,
+                node.name,
+                host = rendererContextFor(tabId),
+                recordHome = recordHome,
+            )
+            null -> openErrorPage(
+                address,
+                result.exceptionOrNull() ?: IllegalStateException("Cannot open $address"),
+                tabId,
+            )
         }
     }
 
-    fun openAddress(address: String, tabId: String = currentTab().id) {
-        if (guardRenderer(tabId) { openAddress(address, tabId) }) return
-        scope.launch { openAddressNow(address, tabId) }
+    fun openAddress(
+        address: String,
+        tabId: String = currentTab().id,
+        recordHome: Boolean = true,
+    ) {
+        if (guardRenderer(tabId) { openAddress(address, tabId, recordHome) }) return
+        scope.launch { openAddressNow(address, tabId, recordHome) }
     }
 
-    /** Open a home row through the same path a directory row uses. */
-    fun openHomeEntry(entry: HomeEntry) {
-        val tabId = currentTab().id
-        when (entry.kind) {
-            // A directory commits its renderer in this frame; that renderer
-            // owns the delayed list spinner.
-            HomeEntryKind.FOLDER -> navigateTo(entry.location)
-            // Resolving a stored file or URL may take a remote round trip, so
-            // home keeps its own overlay until the route hands over.
-            HomeEntryKind.WEB, HomeEntryKind.FILE ->
-                trackNodeOpen(tabId) { openAddressNow(entry.location, tabId) }
+    /**
+     * Open what another app handed over: a tapped file, a picked document or a
+     * link. The first address lands in the current tab, every additional one
+     * gets its own tab; an address the system delivered is not a home row, so
+     * it never outlives the grant that came with the intent.
+     */
+    LaunchedEffect(openRequest?.id) {
+        val request = openRequest ?: return@LaunchedEffect
+        request.addresses.forEachIndexed { index, address ->
+            if (index > 0) {
+                tabs.add(newHomeTab())
+                selectTab(tabs.lastIndex)
+            }
+            val document = withContext(Dispatchers.IO) { IncomingOpen.document(context, address) }
+            if (document != null) {
+                openVFileFn(
+                    document, address, document.name, null,
+                    // One delivered document may hold the whole screen; does not
+                    // record a home row. A single address may cancel the last one.
+                    false, true, index == 0 && request.addresses.size == 1,
+                )
+            } else {
+                openAddress(address, recordHome = false)
+            }
         }
     }
-    openHomeEntryFn = ::openHomeEntry
 
     /** Show the home page, even when a page opened from home is still active. */
     fun goHome() {
@@ -1488,11 +1419,11 @@ fun FileManagerApp(
         // A renderer opened from home sits on top of the home location. The
         // leave guard may already have removed its session, so the stop kind,
         // not the map, decides whether there is an overlay to drop.
-        if (tab.currentPage.kind != PageKind.LOCATION) {
+        if (!tab.currentPage.location) {
             closeRenderer(tab.id)
             return
         }
-        replaceCurrent(tab.copy(folder = null))
+        replaceCurrent(tab.copy())
     }
 
     /** Reveal [address] selected inside [parent], the jump-dialog behaviour. */
@@ -1500,13 +1431,13 @@ fun FileManagerApp(
         val tabId = currentTab().id
         if (parent.path.toString() == currentTab().path) {
             closeRenderer(tabId)
-            val listing = rendererOf(tabId)?.listingHandle
+            val listing = rendererOf(tabId)?.capabilities?.select
             val index = listing?.entries?.indexOfFirst { it.path == address } ?: -1
             listing?.setSelection(setOf(address), index)
             pendingScrollPath = address
             return
         }
-        navigateTo(parent.path.toString())
+        openAddress(parent.path.toString())
         highlightPath = address
         highlightDirectory = parent.path.toString()
         pendingScrollPath = address
@@ -1534,12 +1465,9 @@ fun FileManagerApp(
         // is entered, so no boundary is found by probing the filesystem.
         val address = NodeAddress.parse(input)
         scope.launch {
-            val node = resolveNode(address)
-            when (node) {
-                is VFolder -> {
-                    if (address.isViewed) navigateToFolder(node, tabId)
-                    else navigateTo(input, tabId, view = node.takeIf { it.isView })
-                }
+            val result = resolveNode(address)
+            when (val node = result.getOrNull()) {
+                is VFolder -> navigateToFolder(node, tabId)
                 is VFile -> {
                     // A listed file is shown selected in its own folder; a node
                     // without a browsable parent (a live address, a view root)
@@ -1551,10 +1479,14 @@ fun FileManagerApp(
                         openVFile(node, address.toString(), node.name)
                     }
                 }
-                else -> when {
+                null -> when {
                     // A missing absolute path or scheme URI is still an
                     // address: show its error state instead of searching.
-                    NodeAddress.isAddress(input) -> navigateTo(input, record = false)
+                    NodeAddress.isAddress(input) -> openErrorPage(
+                        input,
+                        result.exceptionOrNull() ?: IllegalStateException("Cannot open $input"),
+                        tabId,
+                    )
                     else -> BrowseAddress.normalize(input)?.let { url -> openAddress(url) }
                         ?: openAddress(SearchSettings.searchUrl(context, input))
                 }
@@ -1571,13 +1503,24 @@ fun FileManagerApp(
         stop.restoring = true
         scope.launch {
             try {
-                val node = resolveNode(NodeAddress.parse(stop.path))
+                val result = resolveNode(NodeAddress.parse(stop.path))
                 // The tab may have moved on while the address was resolving.
                 val current = tabs.firstOrNull { it.id == tabId }
                 if (current?.currentPage?.id != stop.id ||
                     pendingNavigations[tabId] != null ||
                     pageOf(stop.id)?.renderer != null
                 ) {
+                    return@launch
+                }
+                val node = result.getOrNull()
+                if (node == null) {
+                    pageOf(stop.id)?.renderer = ErrorRenderer(
+                        stop.path,
+                        result.exceptionOrNull()
+                            ?: IllegalStateException("Cannot open ${stop.path}"),
+                        locationPage = stop.location,
+                    )
+                    updateTab(tabId) { it }
                     return@launch
                 }
                 when (node) {
@@ -1587,7 +1530,7 @@ fun FileManagerApp(
                             file = node,
                             address = stop.path,
                             name = node.name,
-                            contentHint = null,
+                            mimeHint = null,
                             host = rendererContextFor(tabId),
                             recordHome = false,
                             pushPage = false,
@@ -1598,7 +1541,7 @@ fun FileManagerApp(
                         val tab = tabs.firstOrNull { it.id == tabId }
                         if (pendingNavigations[tabId] == null &&
                             tab?.currentPage?.id == stop.id &&
-                            tab.currentPage.kind != PageKind.LOCATION &&
+                            !tab.currentPage.location &&
                             pageOf(stop.id)?.renderer == null
                         ) {
                             closeRenderer(tabId)
@@ -1608,14 +1551,15 @@ fun FileManagerApp(
                         // A stop recorded as a file/page can turn out to be a
                         // folder after the fact; the directory renderer takes it.
                         if (tab.currentPage.id == stop.id) {
-                            tab.replacedCurrent(
-                                stop.copy(kind = PageKind.LOCATION, folder = node, title = null),
-                            )
+                            stop.kind = PageKind.LOCATION
+                            stop.location = true
+                            stop.title = null
+                            if (tab.path != stop.path) tab.copy(path = stop.path) else tab
                         } else {
                             tab
                         }
                     }
-                    null -> Unit
+                    else -> Unit
                 }
             } finally {
                 stop.restoring = false
@@ -1640,25 +1584,22 @@ fun FileManagerApp(
         val session = current.renderer
         // A WebView is one view: moving to a page in its own cache transfers
         // the renderer instead of releasing and rebuilding it.
-        if (target.kind == PageKind.PAGE && session != null && session.retrace(target.path)) {
+        if (session?.webAddress != null && session.retrace(target.path)) {
             current.renderer = null
             target.close()
             target.renderer = session
             replaceTab(tab.movedTo(index))
             return
         }
-        clearLeavePrompt(tab.id)
-        leavePage(current.id)
+        clearModals(tab.id)
+        blurPage(current.id)
         val moved = tab.movedTo(index)
         replaceTab(moved)
-        when (target.kind) {
-            PageKind.LOCATION -> Unit
-            PageKind.FILE, PageKind.PAGE -> {
-                // A stale renderer for the target would otherwise be replaced
-                // without its release hook.
-                target.close()
-                restorePageNode(tab.id, target)
-            }
+        if (!target.location) {
+            // A stale renderer for the target would otherwise be replaced
+            // without its release hook.
+            target.close()
+            restorePageNode(tab.id, target)
         }
     }
 
@@ -1668,7 +1609,7 @@ fun FileManagerApp(
         if (!tab.canGoBack) {
             // A trimmed list can leave an overlay without a location behind it;
             // dismissing the overlay is still the right undo.
-            if (tab.currentPage.kind != PageKind.LOCATION &&
+            if (!tab.currentPage.location &&
                 !guardRenderer(tab.id) { goBack() }
             ) {
                 closeRenderer(tab.id)
@@ -1699,38 +1640,15 @@ fun FileManagerApp(
     fun goParent() {
         val tab = currentTab()
         val renderer = activeSession(tab.id)
-        val rendererParent = renderer?.parent
-        if (rendererParent != null) {
-            // Up means the folder that owns the edited file, not the folder
-            // the tab happened to show before the file was opened.
-            val parentAddress = NodeAddress.format(rendererParent.path)
-            // A document opened from its own folder sits over that folder, so
-            // "up" appends the list as a new stop and keeps the document as a
-            // Back stop, rather than discarding it.
-            if (parentAddress == tab.path && tab.currentPage.kind != PageKind.LOCATION) {
-                if (rendererParent.addressable) {
-                    navigateTo(parentAddress, force = true)
-                } else {
-                    navigateToFolder(rendererParent)
-                }
-                return
-            }
-            // A provider folder is addressed by its path; only a view folder
-            // needs its node kept as a hint.
-            if (rendererParent.addressable) navigateTo(parentAddress)
-            else navigateToFolder(rendererParent)
+        val up = renderer?.capabilities?.up
+        if (up != null) {
+            up()
             return
         }
         val activePath = pendingOf(tab.id)?.path ?: tab.path
         if (isHomePath(activePath)) return
-        val activeFolder = pendingOf(tab.id)?.folder ?: tab.folder
-        if (activeFolder != null) {
-            val parent = activeFolder.parent ?: return
-            if (parent.addressable) navigateTo(parent.path.toString()) else navigateToFolder(parent)
-            return
-        }
         val parent = Path.parse(activePath).parent()?.toString() ?: return
-        navigateTo(parent)
+        openAddress(parent)
     }
 
     /** Single refresh entry point for the directory listing. */
@@ -1739,43 +1657,21 @@ fun FileManagerApp(
         highlightPath: String? = null,
         highlightDirectory: String? = null,
     ) {
-        val listing = rendererOf(currentTab().id)?.listingHandle ?: return
+        val listing = rendererOf(currentTab().id)?.capabilities?.select ?: return
         listing.refreshListing(animate, highlightPath, highlightDirectory)
     }
 
-    /** Capabilities of whatever owns the current tab: renderer or directory. */
-    fun currentCapabilities(): RenderCapabilities {
-        val tab = currentTab()
-        val state = activeTabState(tab.id) ?: tab
-        val renderer = rendererOf(tab.id)
-        if (renderer != null) {
-            return renderer.capabilities.copy(
-                // Pages belong to the tab. A renderer that can dismiss
-                // itself (a page or the editor) also makes Back available.
-                canGoBack = state.canGoBack || renderer.canDismiss,
-                canGoForward = state.canGoForward,
-            )
-        }
-        return RenderCapabilities(
-            canGoBack = state.canGoBack,
-            canGoForward = state.canGoForward,
-            canCreate = false,
-        )
-    }
-
-    /** Up exists only when the owner exposes a parent node. */
+    /** Up exists when the active renderer supplies its own parent action. */
     fun currentCanGoParent(): Boolean {
         val tab = currentTab()
         val renderer = rendererOf(tab.id)
-        if (renderer != null) return renderer.parent != null
-        val folder = tab.folder
-        return folder?.parent != null ||
-            (folder == null && Path.parse(tab.path).parent() != null)
+        if (renderer != null) return renderer.capabilities.up != null
+        return Path.parse(tab.path).parent() != null
     }
 
     val handleHereRequest by rememberUpdatedState(newValue = { request: HereNavigation.Request ->
         val tab = currentTab()
-        clearLeavePrompt(tab.id)
+        clearModals(tab.id)
         // A here request supersedes an in-flight navigation in the current tab.
         cancelPending(tab.id)
         showTerminalSheet = false
@@ -1784,10 +1680,9 @@ fun FileManagerApp(
         pendingScrollPath = request.selectedPath
         // Re-entering the same plain directory is not a step; an overlay over
         // that directory still gets a new location stop behind it.
-        if (tab.currentPage.kind == PageKind.LOCATION && tab.path == request.directory) {
+        if (tab.currentPage.location && tab.path == request.directory) {
             replaceCurrent(
                 tab.copy(
-                    folder = null,
                     selectedPaths = emptySet(),
                     lastSelectedIndex = -1,
                 ),
@@ -1797,14 +1692,19 @@ fun FileManagerApp(
                 highlightDirectory = highlightDirectory,
             )
         } else {
-            val page = Page(path = request.directory, kind = PageKind.LOCATION)
-            page.renderer = RendererSessions.location(
-                path = request.directory,
-                initialSelection = tab.selectedPaths,
-                initialSelectedIndex = tab.lastSelectedIndex,
-                homeTitle = context.getString(R.string.home_title),
-            )
-            pendingNavigations[tab.id] = tab.appended(page)
+            scope.launch {
+                val result = resolveNode(Path.parse(request.directory))
+                when (val node = result.getOrNull()) {
+                    is VFolder -> navigateToFolder(node, tab.id)
+                    null -> openErrorPage(
+                        request.directory,
+                        result.exceptionOrNull()
+                            ?: IllegalStateException("Cannot open ${request.directory}"),
+                        tab.id,
+                    )
+                    else -> Unit
+                }
+            }
         }
     })
     fun dispatchHere(request: HereNavigation.Request) {
@@ -1839,10 +1739,12 @@ fun FileManagerApp(
 
     val activeRenderer = rendererOf(currentTab().id)
     val activePending = pendingOf(currentTab().id)
+    // A renderer that already opened a popup must never trigger the page cover.
+    val activePendingOverlay = activePending?.currentPage?.id?.let { popupPages[it] } == true
     var pendingSpinner by remember { mutableStateOf(false) }
-    LaunchedEffect(activePending?.currentPage?.id) {
+    LaunchedEffect(activePending?.currentPage?.id, activePendingOverlay) {
         pendingSpinner = false
-        if (activePending != null) {
+        if (activePending != null && !activePendingOverlay) {
             delay(300)
             pendingSpinner = true
         }
@@ -1853,7 +1755,7 @@ fun FileManagerApp(
     val composedPage = currentTab().currentPage
     LaunchedEffect(composedPage.id) {
         val tab = currentTab()
-        if (composedPage.kind == PageKind.LOCATION) return@LaunchedEffect
+        if (composedPage.location) return@LaunchedEffect
         if (pendingNavigations[tab.id] != null) return@LaunchedEffect
         if (composedPage.renderer != null) return@LaunchedEffect
         restorePageNode(tab.id, composedPage)
@@ -1861,8 +1763,11 @@ fun FileManagerApp(
     // Block reads of remote HTTP(S) handles (archive index, proxy descriptor)
     // publish their progress here; the top strip below mirrors page loading.
     val remoteTransfers by WebTransfers.progress.collectAsState()
-    val homeRecent = remember(homeVersion) { HomeStore.recent() }
-    val homeBookmarks = remember(homeVersion) { HomeStore.bookmarks() }
+    // HomeStore owns its revision; reading it here keeps suggestions in step
+    // with visits, title refreshes and renderer-made bookmark edits.
+    val homeRevision = HomeStore.revision()
+    val homeRecent = remember(homeRevision) { HomeStore.recent() }
+    val homeBookmarks = remember(homeRevision) { HomeStore.bookmarks() }
     val pathSuggestionSource = remember(homeBookmarks, homeRecent) {
         object : PathSuggestionSource {
             override fun local(query: String): List<PathSuggestion> =
@@ -1885,7 +1790,7 @@ fun FileManagerApp(
         val index = tabs.indexOfFirst { it.id == tabId }
         if (index < 0) return
         val closing = tabs.removeAt(index)
-        clearLeavePrompt(closing.id)
+        clearModals(closing.id)
         releaseStops(closing, pendingNavigations.remove(closing.id))
         selectTab(selectedTabIndex.coerceAtMost(tabs.lastIndex))
     }
@@ -1906,9 +1811,9 @@ fun FileManagerApp(
                 return
             }
             val renderer = page.renderer ?: return step(at + 1)
-            if (renderer.canClose()) return step(at + 1)
-            renderer.requestClose(contextFor(tab.id, null).also { it.bindPage(page.id) }) {
-                step(at + 1)
+            scope.launch {
+                val host = contextFor(tab.id, null).also { it.bindPage(page.id) }
+                if (renderer.requestUnload(host)) step(at + 1)
             }
         }
         step(0)
@@ -1948,7 +1853,7 @@ fun FileManagerApp(
         if (matches.isEmpty()) return
         matches.sortedDescending().forEach {
             val removed = tabs.removeAt(it)
-            clearLeavePrompt(removed.id)
+            clearModals(removed.id)
             releaseStops(removed, pendingNavigations.remove(removed.id))
         }
         if (tabs.isEmpty()) {
@@ -1959,15 +1864,9 @@ fun FileManagerApp(
         }
     }
 
-    /** The tab's directory as a node: the one path→node step operations use. */
-    suspend fun folderOf(tab: FileTab): VFolder? = folderFor(tab.path, tab.folder)
-
-    /** A listed entry as a node of [folder]. */
-    suspend fun nodeOf(folder: VFolder?, name: String): VNode? =
-        if (folder == null) null else withContext(Dispatchers.IO) { folder.child(name).getOrNull() }
-
     val clipboardController = ClipboardController(
         context = context,
+        nodeOps = world.nodeOps,
         scope = scope,
         currentRenderer = { rendererOf(currentTab().id) },
         currentJob = { operationJob },
@@ -1979,7 +1878,7 @@ fun FileManagerApp(
         onRefresh = ::refreshFileList,
     )
 
-    fun currentListing(): ListingHandle? = clipboardController.listing()
+    fun currentListing(): SelectCapabilities? = clipboardController.listing()
 
     fun selectedEntries(): List<FileEntry> = clipboardController.selectedEntries()
 
@@ -2010,9 +1909,9 @@ fun FileManagerApp(
             if (ClipboardStore.state.action == ClipboardAction.NONE) {
                 val previous = tabs.getOrNull(lastRefreshedTabIndex)
                 if (previous != null && previous.id != currentTab().id) {
-                    val listing = previous.currentPage.renderer?.listingHandle
+                    val listing = previous.currentPage.renderer?.capabilities?.select
                     if (listing != null) {
-                        previous.currentPage.renderer?.leave()
+                        previous.currentPage.renderer?.blur()
                         if (listing.selectedPaths.isNotEmpty()) listing.clearSelection()
                     } else {
                         updateTab(previous.id) {
@@ -2087,7 +1986,7 @@ fun FileManagerApp(
             cancelPending(currentTab().id)
             highlightPath = null
             pendingScrollPath = null
-        } else if (currentTab().canGoBack || activeRenderer?.canDismiss == true) {
+        } else if (currentTab().canGoBack || !currentTab().currentPage.location) {
             // Back is the undo: it closes an editor, retraces a page and steps
             // out of a folder through pages first. "Up" is the parent action,
             // and only exists where something has a parent.
@@ -2119,6 +2018,7 @@ fun FileManagerApp(
         gesturesEnabled = activeRenderer?.consumesEdgeGestures != true || drawerState.isOpen,
         drawerContent = {
             FileDrawerHost(
+                vfs = world.vfs,
                 darkTheme = darkTheme,
                 onToggleTheme = onToggleTheme,
                 locations = locations,
@@ -2147,7 +2047,7 @@ fun FileManagerApp(
                     }
                 },
                 onNavigate = { address ->
-                    navigateTo(address)
+                    openAddress(address)
                     scope.launch { drawerState.close() }
                 },
                 onOpenAddress = { url ->
@@ -2196,6 +2096,7 @@ fun FileManagerApp(
                     operationHidden = operationHidden,
                     copyMode = ClipboardStore.state.inTransfer,
                     remoteTransfers = remoteTransfers,
+                    loadProgress = progressPages[currentTab().currentPage.id],
                     suggestionSource = pathSuggestionSource,
                     suggestionAnchor = topBarBounds,
                     onBounds = { topBarBounds = it },
@@ -2215,12 +2116,16 @@ fun FileManagerApp(
                 )
             },
             bottomBar = {
+                val barTab = currentTab()
+                val barRenderer = rendererOf(barTab.id)
+                val barState = activeTabState(barTab.id) ?: barTab
                 ShellBottomBar(
-                    tab = currentTab(),
-                    renderer = rendererOf(currentTab().id),
-                    capabilities = currentCapabilities(),
+                    tab = barTab,
+                    renderer = barRenderer,
+                    canGoBack = barState.canGoBack || !barState.currentPage.location,
+                    canGoForward = barState.canGoForward,
                     canGoParent = currentCanGoParent(),
-                    canOpenTerminal = rendererOf(currentTab().id)?.terminalFactory != null ||
+                    canOpenTerminal = barRenderer?.capabilities?.terminal != null ||
                         hasTerminalSessions,
                     pagesVisible = showPages,
                     onHeight = { bottomBarHeightPx = it },
@@ -2236,9 +2141,8 @@ fun FileManagerApp(
                         }
                     },
                     onShare = {
-                        val entries = rendererOf(currentTab().id)
-                            ?.listingHandle?.selectedEntries.orEmpty()
-                        scope.launch { shareEntries(context, entries) }
+                        val entries = ClipboardStore.state.entries
+                        scope.launch { shareEntries(context, entries.map { it.node }) }
                     },
                     onCopyMoveConfirm = ::performPaste,
                     onCopyMoveCancel = ::clearClipboard,
@@ -2286,40 +2190,6 @@ fun FileManagerApp(
         )
         }
     }
-
-    DeleteEntriesDialog(
-        entries = showDeleteConfirm,
-        context = context,
-        scope = scope,
-        currentTab = ::currentTab,
-        folderOf = ::folderOf,
-        nodeOf = ::nodeOf,
-        onDismiss = { showDeleteConfirm = null },
-        onSelectionClear = ::clearSelection,
-        onRefresh = ::refreshFileList,
-    )
-
-    RenameEntryDialog(
-        entry = showRenameDialog,
-        context = context,
-        scope = scope,
-        currentTab = ::currentTab,
-        folderOf = ::folderOf,
-        onDismiss = { showRenameDialog = null },
-        onRefresh = ::refreshFileList,
-    )
-
-    BatchRenameEntriesDialog(
-        visible = showBatchRenameDialog,
-        entries = if (showBatchRenameDialog) selectedEntries() else emptyList(),
-        context = context,
-        scope = scope,
-        currentTab = ::currentTab,
-        folderOf = ::folderOf,
-        onDismiss = { showBatchRenameDialog = false },
-        onSelectionClear = ::clearSelection,
-        onRefresh = ::refreshFileList,
-    )
 
     EntryInfoOverlay(
         entry = showEntryInfo,
@@ -2381,56 +2251,14 @@ fun FileManagerApp(
 
     TerminalSheetOverlay(
         visible = showTerminalSheet,
-        terminalFactory = rendererOf(currentTab().id)?.terminalFactory,
+        terminalFactory = rendererOf(currentTab().id)?.capabilities?.terminal,
         onDismiss = { showTerminalSheet = false },
         onShow = { showTerminalSheet = true },
         onDropAccepted = { terminalDropAccepted = true },
     )
 
-    val promptModalActive = leavePrompt?.let { pageOf(it.ownerPageId)?.renderer?.modalActive == true } == true
-    val prompt = leavePrompt
-    LeavePromptOverlay(
-        prompt = prompt,
-        saving = leaveSaving,
-        modalActive = promptModalActive,
-        onDismiss = {
-            if (!leaveSaving) {
-                leavePrompt = null
-                prompt?.onCancel()
-            }
-        },
-        onCancel = {
-            leavePrompt = null
-            prompt?.onCancel()
-        },
-        onLeave = {
-            leavePrompt = null
-            prompt?.onLeave()
-        },
-        onSave = {
-            val active = prompt
-            val save = active?.onSave
-            if (active != null && save != null) {
-                scope.launch {
-                    leaveSaving = true
-                    val result = try {
-                        save()
-                    } catch (failure: CancellationException) {
-                        throw failure
-                    } catch (failure: Exception) {
-                        Result.failure(failure)
-                    }
-                    leaveSaving = false
-                    if (result.isSuccess) {
-                        if (leavePrompt === active) leavePrompt = null
-                        active.onLeave()
-                    } else {
-                        if (leavePrompt === active) leavePrompt = null
-                        active.onCancel()
-                    }
-                }
-            }
-        },
-    )
+    // LIFO modal stack. Session manager, renderer popups and unload prompts
+    // all compose here; only the top entry is visible and interactive.
+    ModalStackHost(modalStack)
 }
 

@@ -33,6 +33,7 @@ internal object Terminal {
     private val enterJobs = mutableMapOf<String, Job>()
     private val contents = mutableStateMapOf<String, TerminalContent>()
     private var drawerOpener: (() -> Unit)? = null
+    private var closeRequester: ((String) -> Unit)? = null
 
     val active: TerminalTab?
         get() = tabs.firstOrNull { it.id == activeId }
@@ -40,6 +41,21 @@ internal object Terminal {
     /** The sheet installs the opener for its current drawer state. */
     fun setDrawerOpener(opener: (() -> Unit)?) {
         drawerOpener = opener
+    }
+
+    /** The sheet installs the unload action a tab body can request. */
+    fun setCloseRequester(requester: ((String) -> Unit)?) {
+        closeRequester = requester
+    }
+
+    /**
+     * Ask the shell to unload [id]. Unlike a tab's own [TerminalContext], this
+     * also works for a background tab that is not currently entered. When no
+     * shell is composed, remove the tab directly.
+     */
+    fun requestClose(id: String) {
+        val requester = closeRequester
+        if (requester != null) requester(id) else unload(id)
     }
 
     fun contentFor(id: String): TerminalContent? = contents[id]
@@ -54,13 +70,15 @@ internal object Terminal {
         switchTo(tab)
     }
 
-    /** Remove [id] and dispose its body; the neighbour becomes active. */
-    fun close(id: String) {
+    /** Remove [id] and dispose its body; false when the tab vetoed unloading. */
+    fun unload(id: String): Boolean {
         val index = tabs.indexOfFirst { it.id == id }
-        if (index < 0) return
-        val tab = tabs.removeAt(index)
+        if (index < 0) return false
+        val tab = tabs[index]
+        if (!tab.unload()) return false
+        tabs.removeAt(index)
         enterJobs.remove(id)?.cancel()
-        tab.leave()
+        tab.blur()
         tab.dispose()
         contents.remove(id)
         if (activeId == id) {
@@ -68,11 +86,7 @@ internal object Terminal {
             activeId = next?.id
             next?.let(::launchEnter)
         }
-    }
-
-    /** Drop tabs whose backing PTY or page is gone. */
-    fun prune() {
-        tabs.filterNot { it.alive }.forEach { close(it.id) }
+        return true
     }
 
     private fun switchTo(tab: TerminalTab) {
@@ -80,7 +94,7 @@ internal object Terminal {
         if (previous?.id == tab.id) return
         previous?.let {
             enterJobs.remove(it.id)?.cancel()
-            it.leave()
+            it.blur()
         }
         activeId = tab.id
         launchEnter(tab)
@@ -110,6 +124,10 @@ internal object Terminal {
 
         override fun requestOpenDrawer() {
             drawerOpener?.invoke()
+        }
+
+        override fun requestClose() {
+            Terminal.requestClose(id)
         }
     }
 }

@@ -26,8 +26,29 @@ class TerminalInputState {
     internal var inputView: TerminalInputView? = null
     internal var terminalView: TerminalView? = null
 
+    /**
+     * A session that connects before the shared surface has bound itself asks
+     * for the IME immediately. Store the request and replay it in [bind], or
+     * the first terminal in a tab stays unfocused until its view is rebuilt.
+     */
+    private var imePending = false
+
+    /**
+     * True between [blur] and the next [bind]. An attach/focus callback is a
+     * recovery path for a state that never bound; a blurred state must not use
+     * it to reclaim the shared wrapper, or the surface would keep typing into
+     * the tab that is no longer on screen.
+     */
+    private var blurred = false
+
     fun requestIme() {
-        inputView?.requestIme()
+        val view = inputView
+        if (view != null) view.requestIme() else imePending = true
+    }
+
+    /** Focus the surface without raising the IME (used when the sheet opens). */
+    internal fun requestFocus() {
+        inputView?.requestFocus()
     }
 
     private fun notifyMode(old: Boolean) {
@@ -45,9 +66,22 @@ class TerminalInputState {
         val previous = view.inputState
         if (previous !== this) previous.unbind(view)
         inputView = view
+        blurred = false
         view.bindState(this)
         if (terminalView !== terminal) resetModifiers()
         terminalView = terminal
+        // A session can connect before the surface exists; replay the request
+        // now that there is a wrapper to receive it.
+        if (imePending) {
+            imePending = false
+            view.requestIme()
+        }
+    }
+
+    /** Attach/focus recovery; a blurred tab never reclaims a shared surface. */
+    internal fun rebind(view: TerminalInputView, terminal: TerminalView) {
+        if (blurred) return
+        bind(view, terminal)
     }
 
     /** The surface left composition; only clear the binding it still owns. */
@@ -59,8 +93,20 @@ class TerminalInputState {
         }
     }
 
-    /** The tab stopped being current: drop the surface binding, keep focus. */
-    internal fun leave() {
+    /**
+     * The tab stopped being current: drop the surface binding, keep focus.
+     *
+     * The wrapper is shared by every tab, so its transient state belongs to the
+     * tab that is leaving: a pending IME request, an open editor and Termux's
+     * text-selection mode (which pins focus and the IME on the terminal view)
+     * must be retired before the pointer is dropped, or the next tab inherits
+     * them and the first tap only closes the stale selection instead of
+     * summoning the keyboard.
+     */
+    internal fun blur() {
+        imePending = false
+        blurred = true
+        inputView?.releaseBinding()
         inputView = null
         terminalView = null
         resetModifiers()
@@ -107,6 +153,12 @@ class TerminalInputState {
             if (event.action == KeyEvent.ACTION_DOWN) sendModifiedEnter()
             return true
         }
+        // Termux's view has no Paste handler; keyboards that paste with the
+        // dedicated key still expect the terminal's own paste path.
+        if (event.keyCode == KeyEvent.KEYCODE_PASTE) {
+            if (event.action == KeyEvent.ACTION_DOWN) pasteFromClipboard()
+            return true
+        }
         if (event.action == KeyEvent.ACTION_MULTIPLE && event.keyCode == KeyEvent.KEYCODE_UNKNOWN) {
             val text = event.characters ?: return false
             if (view.currentSession == null) return false
@@ -119,6 +171,17 @@ class TerminalInputState {
             resetModifiers()
         }
         return handled
+    }
+
+    /**
+     * The terminal's paste path (bracketed paste, CR normalization, control
+     * characters stripped), shared by the selection menu, the input method's
+     * Paste command and the Paste key.
+     */
+    internal fun pasteFromClipboard() {
+        val view = terminalView?.takeIf { it.isEnabled && it.currentSession != null } ?: return
+        view.stopTextSelectionMode()
+        view.currentSession?.onPasteTextFromClipboard()
     }
 
     internal fun commitText(text: CharSequence) {

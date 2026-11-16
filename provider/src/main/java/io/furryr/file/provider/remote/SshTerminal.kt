@@ -24,8 +24,7 @@ import java.util.concurrent.atomic.AtomicReference
  * corrupt the channel's packet stream mid-write, which surfaces as the terminal
  * session dying on every size change (for example while the sheet animates).
  */
-class SshShell internal constructor(
-    private val channel: ChannelShell,
+class SshShell internal constructor(    private val channel: ChannelShell,
     private val lease: SshLease,
     val input: InputStream,
     private val output: OutputStream,
@@ -84,6 +83,19 @@ class SshShell internal constructor(
         resizer.shutdownNow()
         synchronized(writeLock) { runCatching { channel.disconnect() } }
         lease.close()
+    }
+
+    /** Block until the channel ends; JSch exposes no waiter of its own. */
+    fun awaitExit(): Int {
+        while (!channel.isClosed) {
+            try {
+                Thread.sleep(50)
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            }
+        }
+        return channel.exitStatus
     }
 }
 

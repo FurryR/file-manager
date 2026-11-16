@@ -38,7 +38,10 @@ import java.util.Vector
  * each operation opens a fresh [ChannelSftp] on that session, so concurrent
  * transfers do not share a single channel's I/O thread.
  */
-object SftpProvider : FileProvider {
+class SftpProvider(
+    private val servers: SftpServerSource,
+    private val cacheDir: File,
+) : FileProvider {
     override val schemes: Set<String> get() = setOf(ProviderSchemes.SFTP)
     override val label: String get() = "SFTP Location"
     override val writable: Boolean get() = true
@@ -49,29 +52,16 @@ object SftpProvider : FileProvider {
         ProviderFeature.OPEN, ProviderFeature.STREAM_COPY,
     )
 
-    private const val TIMEOUT_MS = 30_000
-    private const val COPY_BUFFER_SIZE = 256 * 1024
-
-    private lateinit var servers: SftpServerSource
-    private lateinit var cacheDir: File
+    private val TIMEOUT_MS = 30_000
+    private val COPY_BUFFER_SIZE = 256 * 1024
 
     private val jsch = JSch()
     private val connLock = Any()
     private val sessions = mutableMapOf<String, Session>()
 
-    fun init(servers: SftpServerSource, cacheDir: File) {
-        this.servers = servers
-        this.cacheDir = cacheDir
-    }
-
     override fun isAvailable(): Boolean = true
 
     override suspend fun connect(): Result<Unit> = Result.success(Unit)
-
-    override suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
-        if (path.trim('/').isEmpty()) return DirectoryCapabilities()
-        return super<FileProvider>.directoryCapabilities(path)
-    }
 
     override suspend fun disconnect() = withContext(Dispatchers.IO) {
         synchronized(connLock) {

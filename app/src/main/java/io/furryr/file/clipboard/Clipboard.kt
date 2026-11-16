@@ -92,6 +92,7 @@ object ClipboardTransfer {
     suspend fun run(
         state: ClipboardState,
         folder: VFolder,
+        nodeOps: NodeOps,
         onProgress: (CopyProgress) -> Unit,
     ): Result<Unit> = runCatching {
         require(state.inTransfer) { "Nothing to paste" }
@@ -112,8 +113,8 @@ object ClipboardTransfer {
                 }
             }
             val flow = when (state.action) {
-                ClipboardAction.COPY -> NodeOps.copyTo(entry.node, target)
-                ClipboardAction.MOVE -> NodeOps.moveTo(entry.node, target)
+                ClipboardAction.COPY -> nodeOps.copyTo(entry.node, target)
+                ClipboardAction.MOVE -> nodeOps.moveTo(entry.node, target)
                 ClipboardAction.NONE -> error("Nothing to paste")
             }
             flow.collect { progress ->

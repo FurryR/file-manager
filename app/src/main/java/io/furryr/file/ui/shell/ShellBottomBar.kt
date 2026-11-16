@@ -5,20 +5,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.onGloballyPositioned
 import io.furryr.file.clipboard.ClipboardStore
 import io.furryr.file.model.FileTab
-import io.furryr.file.render.RenderCapabilities
 import io.furryr.file.render.RendererBase
 import io.furryr.file.ui.components.BottomToolbar
 
 /**
  * Bottom toolbar: navigation, selection and copy/move confirm. Selection
- * facts come from the active renderer's [ListingHandle]; the shell supplies
+ * facts come from the active renderer's [SelectCapabilities]; the shell supplies
  * only the navigation capabilities and the page-drag gesture.
  */
 @Composable
 internal fun ShellBottomBar(
     tab: FileTab,
     renderer: RendererBase<*>?,
-    capabilities: RenderCapabilities,
+    canGoBack: Boolean,
+    canGoForward: Boolean,
     canGoParent: Boolean,
     canOpenTerminal: Boolean,
     pagesVisible: Boolean,
@@ -34,11 +34,11 @@ internal fun ShellBottomBar(
     onCopyMoveCancel: () -> Unit,
 ) {
     val clipboard = ClipboardStore.state
-    val selection = renderer?.listingHandle
+    val selection = renderer?.capabilities?.select
     val selectionMode = !clipboard.inTransfer &&
         selection != null && selection.selectedPaths.isNotEmpty()
-    val canShare = selection != null && tab.folder == null &&
-        selection.selectedEntries.all { !it.isDirectory }
+    val canShare = !clipboard.inTransfer && clipboard.entries.isNotEmpty() &&
+        clipboard.entries.all { it.node is io.furryr.file.core.VFile }
     val copyActive = clipboard.inTransfer
     val canConfirmCopyMove = copyActive &&
         renderer?.clipboardSink?.accepts(clipboard) == true
@@ -46,13 +46,13 @@ internal fun ShellBottomBar(
         modifier = Modifier.onGloballyPositioned {
             onHeight(it.size.height)
         },
-        canGoBack = capabilities.canGoBack,
-        canGoForward = capabilities.canGoForward,
+        canGoBack = canGoBack,
+        canGoForward = canGoForward,
         canGoParent = canGoParent,
         onBack = onBack,
         onForward = onForward,
-        onCreate = { renderer?.requestCreate() },
-        canCreate = capabilities.canCreate,
+        onCreate = { renderer?.capabilities?.create?.invoke() },
+        canCreate = renderer?.capabilities?.create != null,
         onTerminal = onTerminal,
         onParent = onParent,
         onPagesDrag = { if (!pagesVisible) onPagesDrag(it) },

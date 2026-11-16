@@ -33,8 +33,11 @@ import kotlinx.coroutines.withContext
  * [onSelectionChanged].
  */
 class FolderListing(
+    private val vfs: Vfs,
     private val scope: CoroutineScope,
     private val onSelectionChanged: (Set<String>, Int, List<ClipboardEntry>) -> Unit,
+    private val onError: (Throwable) -> Unit = {},
+    private val clipboardAware: Boolean = true,
 ) {
     val listState = LazyListState()
 
@@ -122,7 +125,8 @@ class FolderListing(
         selectionLocked = locked
     }
 
-    private fun selectionMutable(): Boolean = !selectionLocked && !ClipboardStore.state.inTransfer
+    private fun selectionMutable(): Boolean =
+        !selectionLocked && (!clipboardAware || !ClipboardStore.state.inTransfer)
 
     private fun notifySelection() {
         onSelectionChanged(selectedPaths, lastSelectedIndex, clipboardEntries(selectedEntries))
@@ -317,7 +321,7 @@ class FolderListing(
                     if (generation == loadGeneration) showSpinner = true
                 }
                 val folder = withContext(Dispatchers.IO) {
-                    folderOverride ?: Vfs.folder(requestedPath).getOrThrow()
+                    folderOverride ?: vfs.folder(requestedPath).getOrThrow()
                 }
                 val listing = withContext(Dispatchers.IO) { folder.listWithNodes() }
                 if (generation != loadGeneration) return@launch
@@ -391,6 +395,7 @@ class FolderListing(
                 if (!selectionLocked) notifySelection()
                 loadSequence++
                 error = listing.exceptionOrNull()
+                error?.let(onError)
                 directoryInfo = info
             } catch (e: CancellationException) {
                 throw e
@@ -410,6 +415,7 @@ class FolderListing(
                     }
                     directoryInfo = DirectoryStats()
                     error = e
+                    onError(e)
                 }
             } finally {
                 if (generation == loadGeneration) {

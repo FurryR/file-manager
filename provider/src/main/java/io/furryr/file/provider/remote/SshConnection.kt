@@ -8,7 +8,6 @@ import com.jcraft.jsch.JSch
 import com.jcraft.jsch.JSchException
 import com.jcraft.jsch.Session
 import com.jcraft.jsch.UserInfo
-import java.io.IOException
 import java.security.MessageDigest
 
 /**
@@ -52,7 +51,7 @@ internal class SshConnection(private val location: RemoteLocation) {
                 throw error
             }
         }
-        throw failure ?: JSchException("SSH channel failed")
+        throw SshException(SshError.CHANNEL, cause = failure)
     }
 
     fun close() {
@@ -77,7 +76,7 @@ internal class SshConnection(private val location: RemoteLocation) {
                     location.passphrase.takeIf { it.isNotEmpty() }?.toByteArray(Charsets.UTF_8),
                 )
             } catch (failure: Exception) {
-                throw IOException("Could not unlock the SSH private key; check its format and passphrase")
+                throw SshException(SshError.KEY_UNLOCK, cause = failure)
             }
         }
         val session = jsch.getSession(location.username, location.host, location.port)
@@ -106,7 +105,7 @@ internal class SshConnection(private val location: RemoteLocation) {
                     throw SshHostKeyChangedException(fingerprint(key))
                 }
             }
-            throw IOException("SSH connection or authentication failed; check the host, port and credentials", failure)
+            throw SshException(SshError.CONNECT, cause = failure)
         }
     }
 

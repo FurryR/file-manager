@@ -1,6 +1,5 @@
 package io.furryr.file.provider.web
 
-import io.furryr.file.core.ContentTypes
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.StreamFileSource
 import java.io.IOException
@@ -31,7 +30,7 @@ internal class HttpMeta(
  * into one request pair without hiding a fresh response for long.
  */
 internal object HttpFacts {
-    private const val PROBE_BYTES = ContentTypes.SNIFF_BYTES
+    private const val PROBE_BYTES = 8 * 1024
     private const val CACHE_TTL_MS = 30_000L
     private const val CACHE_ENTRIES = 32
 

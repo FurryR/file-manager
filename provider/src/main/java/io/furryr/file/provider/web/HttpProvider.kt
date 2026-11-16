@@ -1,6 +1,5 @@
 package io.furryr.file.provider.web
 
-import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.ContentTypes
 import io.furryr.file.core.FileProvider
 import io.furryr.file.core.Path
@@ -13,7 +12,6 @@ import io.furryr.file.core.model.ProviderStat
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
 import io.furryr.file.core.source.StreamFileSource
-import io.furryr.file.provider.ProviderSchemes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -33,8 +31,10 @@ import kotlinx.coroutines.withContext
  * `Failure` and the directory/capability paths already treat that as an
  * error instead of inventing an empty directory.
  */
-object HttpProvider : FileProvider {
-    override val schemes: Set<String> get() = ProviderSchemes.web
+class HttpProvider(
+    private val webSchemes: Set<String>,
+) : FileProvider {
+    override val schemes: Set<String> get() = webSchemes
 
     override val label: String get() = "Web"
 
@@ -63,71 +63,7 @@ object HttpProvider : FileProvider {
                     exists = true,
                     isDirectory = false,
                     size = facts?.size?.coerceAtLeast(0L) ?: 0L,
-                )
-            }
-        }
-
-    /**
-     * Content facts from the response itself, not from the address.
-     *
-     * A HEAD that names a decisive type is enough: a page (or a concrete
-     * non-text type) needs no body request, so the renderer can hand the URL to
-     * the WebView and the page is fetched exactly once. Everything else — an
-     * extensionless download, a server that mislabels HTML as `text/plain` — is
-     * probed for magic bytes.
-     */
-    suspend fun describe(path: String): Result<ContentInfo> = describe(path, null)
-
-    suspend fun describe(path: String, referer: String?): Result<ContentInfo> =
-        withContext(Dispatchers.IO) {
-            runCatching {
-                val headers = WebRequest.headers(path, referer)
-                val facts = HttpFacts.head(path, headers)
-                val name = facts?.fileName ?: WebRequest.displayName(path)
-                val declared = facts?.mime
-                val decisive = ContentTypes.isHtmlMime(declared) ||
-                    (!ContentTypes.isGenericMime(declared) && declared != "text/plain")
-                if (facts != null && decisive) {
-                    ContentTypes.describe(
-                        name = name,
-                        size = facts.size.coerceAtLeast(0L),
-                        head = ByteArray(0),
-                        seekable = false,
-                        declaredMime = declared,
-                    )
-                } else {
-                    val meta = HttpFacts.probe(path, headers)
-                    ContentTypes.describe(
-                        name = meta.fileName ?: name,
-                        size = meta.size.coerceAtLeast(0L),
-                        head = meta.head,
-                        seekable = meta.seekable,
-                        declaredMime = meta.mime,
-                    )
-                }
-            }
-        }
-
-    /**
-     * The type the server declares, from a HEAD only.
-     *
-     * The caller may already have the real request in flight — an optimistic
-     * page load hands the address to the browser before it knows what the
-     * address is — so nothing here may touch the body: it would be transferred
-     * twice. A server that refuses `HEAD`, or names no concrete type, fails
-     * instead of guessing, and the caller keeps what it already chose.
-     */
-    suspend fun peek(path: String, referer: String? = null): Result<ContentInfo> =
-        withContext(Dispatchers.IO) {
-            runCatching {
-                val facts = HttpFacts.head(path, WebRequest.headers(path, referer))
-                    ?: error("$path answered no headers")
-                ContentTypes.describe(
-                    name = facts.fileName ?: WebRequest.displayName(path),
-                    size = facts.size.coerceAtLeast(0L),
-                    head = ByteArray(0),
-                    seekable = false,
-                    declaredMime = facts.mime,
+                    mime = facts?.mime,
                 )
             }
         }
@@ -186,9 +122,9 @@ object HttpProvider : FileProvider {
      * must load and the referer its requests need.
      */
     override suspend fun node(path: Path, innerPath: String): Result<VNode> =
-        runCatching { HttpFile(innerPath) }
+        runCatching { HttpFile(this, innerPath) }
 
-    override fun liveFile(address: String, referer: String?): VFile = HttpFile(address, referer)
+    override fun liveFile(address: String, referer: String?): VFile = HttpFile(this, address, referer)
 
     private fun readOnly(path: String): Result<Unit> =
         Result.failure(UnsupportedOperationException("$path is read-only"))

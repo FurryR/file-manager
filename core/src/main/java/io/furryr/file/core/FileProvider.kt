@@ -1,5 +1,7 @@
 package io.furryr.file.core
 
+import io.furryr.file.core.exception.NodeNotFoundException
+
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
@@ -76,12 +78,6 @@ interface FileProvider {
         // the search/browser fallback instead of becoming a phantom file.
         if (!stat.exists) throw NodeNotFoundException("no such file or folder: $path")
         if (stat.isDirectory) Folder(path, this, innerPath) else File(path, this, innerPath)
-    }
-    suspend fun directoryCapabilities(path: String): DirectoryCapabilities {
-        return DirectoryCapabilities(
-            canCreate = (ProviderFeature.CREATE_FILE in features || ProviderFeature.CREATE_DIR in features) &&
-                list(path).isSuccess,
-        )
     }
     suspend fun createFile(path: String): Result<Unit>
     suspend fun createDirectory(path: String): Result<Unit>

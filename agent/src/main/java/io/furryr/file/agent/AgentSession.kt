@@ -37,6 +37,7 @@ class AgentSession(
     val cwd: String,
     var model: String,
     var effort: String,
+    private val world: io.furryr.file.core.FileWorld,
     private var emit: suspend (AgentEvent) -> Unit,
 ) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -473,6 +474,7 @@ class AgentSession(
                 name,
                 arguments,
                 ToolContext(
+                    world = world,
                     target = target,
                     targetName = targetName,
                     cwd = cwd,

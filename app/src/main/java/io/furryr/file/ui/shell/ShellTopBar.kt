@@ -19,6 +19,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -27,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
@@ -62,6 +64,7 @@ internal fun ShellTopBar(
     operationHidden: Boolean,
     copyMode: Boolean,
     remoteTransfers: List<WebTransfers.Progress>,
+    loadProgress: Int?,
     suggestionSource: PathSuggestionSource,
     suggestionAnchor: Rect?,
     onBounds: (Rect?) -> Unit,
@@ -74,8 +77,8 @@ internal fun ShellTopBar(
     onExit: () -> Unit,
 ) {
     val context = LocalContext.current
-    val webLoading = activeRenderer?.loading == true
-    val webProgress = (activeRenderer?.progress ?: 0) / 100f
+    val webLoading = loadProgress != null
+    val webProgress = (loadProgress ?: 0) / 100f
     // Idle handles stay registered until they close, so track the
     // one that produced the newest block instead of summing all.
     val transfer = remoteTransfers.maxByOrNull { it.updatedAt }
@@ -99,9 +102,14 @@ internal fun ShellTopBar(
     var showMoreMenu by remember { mutableStateOf(false) }
     var menuChildren by remember { mutableStateOf<List<RendererMenuItem>?>(null) }
     Column(
-        modifier = Modifier.onGloballyPositioned {
-            onBounds(it.boundsInWindow())
-        },
+        modifier = Modifier
+            // TopAppBar's own container animation is disabled below; the
+            // animated scheme surface is painted here instead, so the bar
+            // shares the theme transition with every other surface.
+            .background(MaterialTheme.colorScheme.surface)
+            .onGloballyPositioned {
+                onBounds(it.boundsInWindow())
+            },
     ) {
         if (operationProgress != null && !operationHidden) {
             Box(
@@ -151,12 +159,18 @@ internal fun ShellTopBar(
             }
         }
         TopAppBar(
+            // Material3 animates this container with its own spring. That
+            // spring would chase the already-animated scheme and lag behind
+            // the rest of the UI, so the bar stays transparent.
+            colors = TopAppBarDefaults.topAppBarColors(
+                containerColor = Color.Transparent,
+                scrolledContainerColor = Color.Transparent,
+            ),
             title = {
                 val titleSlot = activeRenderer?.titleSlot()
                 if (titleSlot != null) {
                     titleSlot(Modifier)
                 } else {
-                    val titleFolder = activeTab.folder
                     // Renderers own their path bar; the page caches
                     // the last projection so a closed/restored page
                     // still has a title and address.
@@ -164,18 +178,11 @@ internal fun ShellTopBar(
                     val rendererPath = titlePageState.pathInfo
                     val titleDisplay = rendererPath?.title
                         ?: titlePageState.path
-                        ?: titleFolder?.path?.toString()
                         ?: activeTab.path
-                    // Any location that round-trips through the
-                    // opener route is editable; a view without an
-                    // address stays a read-only breadcrumb.
-                    val titleEditable = rendererPath?.editable ?: (titleFolder == null ||
-                        runCatching {
-                            NodeAddress.format(titleFolder!!.path)
-                        }.getOrNull() != null)
+                    val titleEditable = rendererPath?.editable ?: true
                     TitleBlock(
                         path = activeTab.path,
-                        info = if (rendererPath == null && titlePageState.kind == PageKind.LOCATION) {
+                        info = if (rendererPath == null && titlePageState.location) {
                             tabRenderer?.locationInfo ?: DirectoryStats()
                         } else {
                             DirectoryStats()

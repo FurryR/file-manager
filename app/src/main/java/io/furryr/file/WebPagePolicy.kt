@@ -1,7 +1,7 @@
 package io.furryr.file
 
-import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.ContentTypes
+import io.furryr.file.core.MimeType
 
 /**
  * Whether an address belongs to the browser renderer, decided from what is
@@ -19,7 +19,7 @@ object WebPagePolicy {
         /** The browser renderer owns the address. */
         PAGE,
 
-        /** Nothing decisive yet; the body sniff has to answer. */
+        /** Nothing decisive yet; keep the browser and let it load. */
         UNDECIDED,
 
         /** A concrete type a browser cannot show: hand it back to the table. */
@@ -44,27 +44,18 @@ object WebPagePolicy {
     }
 
     /**
-     * What [content] says about the browser renderer's ownership.
-     *
-     * [settled] marks facts that came from the body (a magic-byte sniff), not
-     * from headers alone: a header can mislabel a page as `text/plain` or
-     * octet-stream, a sniffed body cannot.
+     * What the server's declared [mime] says about the browser renderer's
+     * ownership. No body sniff exists: an unhelpful type keeps the page.
      */
-    fun verdict(content: ContentInfo?, settled: Boolean): Verdict {
-        val mime = content?.mime
-            ?.substringBefore(';')
-            ?.trim()
-            ?.lowercase(java.util.Locale.ROOT)
-            ?.takeIf { it.isNotEmpty() }
-        if (ContentTypes.isHtmlMime(mime)) return Verdict.PAGE
+    fun verdict(mime: MimeType?, name: String?): Verdict {
+        val value = ContentTypes.normalizeMime(mime)
+        if (ContentTypes.isHtmlMime(value)) return Verdict.PAGE
         // No usable type, a generic one, or the classic mislabelling of a page
-        // as plain text: only the name, and after it the body, can decide.
-        val vague = mime == null || ContentTypes.isGenericMime(mime) || mime == "text/plain"
-        if (vague) {
-            if (isPageName(content?.name)) return Verdict.PAGE
-            return if (settled) Verdict.NOT_PAGE else Verdict.UNDECIDED
-        }
-        return Verdict.NOT_PAGE
+        // as plain text: only the name can decide. Without a body sniff, keep
+        // the page when even the name is inconclusive.
+        val vague = value == null || ContentTypes.isGenericMime(value) || value == "text/plain"
+        if (!vague) return Verdict.NOT_PAGE
+        return if (isPageName(name)) Verdict.PAGE else Verdict.UNDECIDED
     }
 
     private val pageSuffixes = listOf(".html", ".htm", ".xhtml")

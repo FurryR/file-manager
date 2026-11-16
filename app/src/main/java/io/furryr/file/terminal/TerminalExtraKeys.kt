@@ -102,7 +102,7 @@ internal fun TerminalExtraKeys(
                     val pressed by interactionSource.collectIsPressedAsState()
                     var repeated by remember { mutableStateOf(false) }
 
-                    LaunchedEffect(pressed, enabled, isModifier) {
+                    LaunchedEffect(pressed, enabled, isModifier, inputState) {
                         if (!pressed || !enabled || isModifier) return@LaunchedEffect
                         repeated = false
                         delay(KEY_REPEAT_DELAY_MS)
@@ -147,7 +147,7 @@ internal fun TerminalExtraKeys(
                 val enterPressed by enterSource.collectIsPressedAsState()
                 var enterRepeated by remember { mutableStateOf(false) }
 
-                LaunchedEffect(enterPressed, enabled, rowIndex) {
+                LaunchedEffect(enterPressed, enabled, rowIndex, inputState) {
                     if (!enterPressed || !enabled || rowIndex == 0) return@LaunchedEffect
                     enterRepeated = false
                     delay(KEY_REPEAT_DELAY_MS)

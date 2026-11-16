@@ -1,12 +1,12 @@
 package io.furryr.file.render
 
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.res.stringResource
-import io.furryr.file.R
-import io.furryr.file.core.PermissionDeniedException
-import io.furryr.file.core.ProviderUnavailableException
+import androidx.compose.ui.platform.LocalContext
+import io.furryr.file.core.exception.ErrorPresentation
+import io.furryr.file.core.exception.PresentableException
 import io.furryr.file.model.ErrorState
 import io.furryr.file.ui.components.ServiceUnavailableState
+import io.furryr.file.ui.util.errorText
 
 /**
  * Renderer-owned presentation policy for a failed content load. The list view
@@ -18,19 +18,19 @@ interface RendererErrorView {
 }
 
 /**
- * Default policy. This is the only place that maps provider failures to a
- * presentation.
+ * Default policy. Exceptions that implement [PresentableException] choose their
+ * presentation; every wording decision goes through [errorText], so provider
+ * failures are localized like any other app text.
  */
 object DefaultRendererErrorView : RendererErrorView {
     @Composable
     override fun Content(error: Throwable, retry: () -> Unit) {
-        when (error) {
-            is ProviderUnavailableException -> ServiceUnavailableState(
-                endpoint = error.endpoint,
+        when (val presentation = (error as? PresentableException)?.presentation) {
+            is ErrorPresentation.ServiceUnavailable -> ServiceUnavailableState(
+                endpoint = presentation.endpoint,
                 onRetry = retry,
             )
-            is PermissionDeniedException -> ErrorState(stringResource(R.string.permission_denied))
-            else -> ErrorState(error.localizedMessage ?: stringResource(R.string.permission_denied))
+            else -> ErrorState(LocalContext.current.errorText(error), retry)
         }
     }
 }

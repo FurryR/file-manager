@@ -12,10 +12,17 @@ import io.furryr.file.core.source.OpenMode
  */
 class Folder internal constructor(
     override val path: Path,
-    private val provider: FileProvider,
+    private val owner: FileProvider,
     private val innerPath: String,
 ) : VFolder {
-    override val name: String get() = path.name ?: provider.label
+    override val provider: FileProvider get() = owner
+
+    override val name: String
+        get() = path.name ?: when (path.scheme) {
+            // The local filesystem's root is its own name, not the provider label.
+            null, "file" -> "/"
+            else -> provider.label
+        }
 
     override val parent: VFolder?
         get() = path.parent()?.let { Folder(it, provider, innerPathFor(it)) }
@@ -28,13 +35,26 @@ class Folder internal constructor(
     override suspend fun listWithNodes(): Result<Pair<List<FileEntry>, List<VNode>>> =
         list().map { entries -> entries to entries.map(::nodeFor) }
 
-    override suspend fun stat(): Result<ProviderStat> = provider.stat(innerPath)
-
-    override suspend fun capabilities(): DirectoryCapabilities =
-        provider.directoryCapabilities(innerPath)
+    override suspend fun capabilities(): DirectoryCapabilities {
+        // A scheme root lists connections, not files: nothing below it is
+        // renameable or deleteable here.
+        if (path.scheme != null && path.isRoot && path.host == null) return DirectoryCapabilities()
+        val features = provider.features
+        val writable = provider.writable
+        return DirectoryCapabilities(
+            createFile = if (writable && ProviderFeature.CREATE_FILE in features) ::create else null,
+            createDirectory = if (writable && ProviderFeature.CREATE_DIR in features) ::mkdir else null,
+            rename = if (writable && ProviderFeature.RENAME in features) { name, newName ->
+                child(name).getOrThrow().rename(newName)
+            } else null,
+            delete = if (writable && ProviderFeature.DELETE in features) { name ->
+                child(name).getOrThrow().delete()
+            } else null,
+        )
+    }
 
     override suspend fun info(): DirectoryStats {
-        val stat = stat().getOrNull()
+        val stat = provider.stat(innerPath).getOrNull()
         return DirectoryStats(
             usableBytes = stat?.usableBytes ?: 0,
             totalBytes = stat?.totalBytes ?: 0,
@@ -105,7 +125,7 @@ class File internal constructor(
     override val path: Path,
     // Internal, not private: NodeOps.copyTo/moveTo hand the provider pair straight
     // to the provider copy without ever formatting a path.
-    internal val provider: FileProvider,
+    override val provider: FileProvider,
     internal val innerPath: String,
 ) : VFile {
     override val name: String get() = path.name ?: provider.label
@@ -115,19 +135,12 @@ class File internal constructor(
 
     override val writable: Boolean get() = provider.writable
 
-    override suspend fun stat(): Result<ProviderStat> = provider.stat(innerPath)
+    override suspend fun stat(): Result<ProviderStat> =
+        provider.stat(innerPath).map { stat ->
+            if (stat.mime == null) stat.copy(mime = ContentTypes.fromName(name)) else stat
+        }
 
     override suspend fun open(mode: OpenMode): Result<FileSource> = provider.open(innerPath, mode)
-
-    override suspend fun describe(): Result<ContentInfo> = runCatchingCancellable {
-        val stat = stat().getOrNull()
-        val source = if ((stat?.size ?: 0L) > 0L) open(OpenMode.READ).getOrNull() else null
-        try {
-            ContentTypes.describe(name, stat?.size ?: 0L, source)
-        } finally {
-            source?.close()
-        }
-    }
 
     override suspend fun rename(newName: String): Result<VNode> = runCatchingCancellable {
         requireValidName(newName)

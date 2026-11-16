@@ -45,7 +45,10 @@ import java.util.concurrent.ConcurrentHashMap
  * Request categories live in `HubAgentOps` (agent/history) and `HubExecOps`
  * (handshake/exec/PTY); this class owns the connection lifecycle.
  */
-class HubServer internal constructor(private val server: UdsServer) : Closeable {
+class HubServer internal constructor(
+    private val server: UdsServer,
+    internal val world: io.furryr.file.core.FileWorld,
+) : Closeable {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -181,7 +184,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
                                 val id = request.id
                                 val call = launch {
                                     try {
-                                        AgentMcp.request(request.remoteMcpCall, state.target) { event ->
+                                        AgentMcp.request(request.remoteMcpCall, state.target, world) { event ->
                                             send(
                                                 client,
                                                 Reply(
@@ -394,6 +397,7 @@ class HubServer internal constructor(private val server: UdsServer) : Closeable 
         private const val EXEC_WAIT_TIMEOUT_MS = 15 * 60 * 1000L
 
         /** Bind [endpoint] and start serving. */
-        fun listen(endpoint: UdsEndpoint): HubServer = HubServer(UdsServer.listen(endpoint))
+        fun listen(endpoint: UdsEndpoint, world: io.furryr.file.core.FileWorld): HubServer =
+            HubServer(UdsServer.listen(endpoint), world)
     }
 }

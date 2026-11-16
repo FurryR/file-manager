@@ -16,6 +16,8 @@ VERSION="${XKBCOMMON_VERSION:-1.11.0}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$ROOT_DIR/native/wayland/third_party/libxkbcommon"
 SRC_DIR="$WORK_DIR/libxkbcommon-$VERSION"
+CACHE_DIR="$ROOT_DIR/cache/file-manager"
+CACHE_TARBALL="$CACHE_DIR/libxkbcommon-$VERSION.tar.gz"
 
 ABIS=("${@:-}")
 if [[ -z "${ABIS[0]:-}" ]]; then
@@ -44,12 +46,18 @@ case "$(uname -s)" in
 esac
 TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG"
 
-mkdir -p "$WORK_DIR"
+mkdir -p "$WORK_DIR" "$CACHE_DIR"
 if [[ ! -d "$SRC_DIR" ]]; then
     echo "==> Fetching libxkbcommon $VERSION"
-    curl -fsSL --retry 2 \
-        "https://github.com/xkbcommon/libxkbcommon/archive/refs/tags/xkbcommon-$VERSION.tar.gz" \
-        | tar xz -C "$WORK_DIR"
+    URL="https://github.com/xkbcommon/libxkbcommon/archive/refs/tags/xkbcommon-$VERSION.tar.gz"
+    GH_PROXY="${GH_PROXY-https://gh-proxy.com}"
+    if [[ -n "$GH_PROXY" ]]; then URL="$GH_PROXY/$URL"; fi
+    if [[ ! -f "$CACHE_TARBALL" ]]; then
+        curl -fsSL --retry 2 --connect-timeout 20 --max-time 600 \
+            "$URL" -o "$CACHE_TARBALL.part"
+        mv "$CACHE_TARBALL.part" "$CACHE_TARBALL"
+    fi
+    tar xzf "$CACHE_TARBALL" -C "$WORK_DIR"
     # GitHub names the archive root after repo + tag (`libxkbcommon-xkbcommon-1.11.0`).
     extracted="$(ls -d "$WORK_DIR"/libxkbcommon-* 2>/dev/null | head -n 1)"
     if [[ -n "$extracted" && "$extracted" != "$SRC_DIR" ]]; then
@@ -94,18 +102,32 @@ cpu = '$abi'
 endian = 'little'
 EOF
 
-    rm -rf "$WORK_DIR/$builddir"
-    meson setup "$WORK_DIR/$builddir" "$SRC_DIR" \
-        --cross-file "$WORK_DIR/cross-$abi.ini" \
-        --default-library=static \
-        --buildtype=release \
-        -Denable-x11=false \
-        -Denable-wayland=false \
-        -Denable-docs=false \
-        -Denable-tools=false \
-        -Denable-xkbregistry=false \
-        -Denable-bash-completion=false
-    ninja -C "$WORK_DIR/$builddir"
+    if [[ -f "$WORK_DIR/$builddir/build.ninja" ]]; then
+        meson setup --reconfigure "$WORK_DIR/$builddir" "$SRC_DIR" \
+            --cross-file "$WORK_DIR/cross-$abi.ini" \
+            --default-library=static \
+            --buildtype=release \
+            -Denable-x11=false \
+            -Denable-wayland=false \
+            -Denable-docs=false \
+            -Denable-tools=false \
+            -Denable-xkbregistry=false \
+            -Denable-bash-completion=false
+    else
+        meson setup "$WORK_DIR/$builddir" "$SRC_DIR" \
+            --cross-file "$WORK_DIR/cross-$abi.ini" \
+            --default-library=static \
+            --buildtype=release \
+            -Denable-x11=false \
+            -Denable-wayland=false \
+            -Denable-docs=false \
+            -Denable-tools=false \
+            -Denable-xkbregistry=false \
+            -Denable-bash-completion=false
+    fi
+    # Only the library is linked into the compositor; tests and demo tools are
+    # not part of the APK and made a rebuild of the whole tree needlessly slow.
+    ninja -C "$WORK_DIR/$builddir" libxkbcommon.a
 done
 
 echo "==> Done: $WORK_DIR"

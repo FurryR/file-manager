@@ -29,4 +29,16 @@
     <string name="remote_save_open">Save and connect</string>
     <string name="remote_alist_help">AList v3 HTTP API. Use the server base URL, optionally including its URL prefix. Use an API token for accounts requiring 2FA, or leave credentials empty for guest access. Credentials are encrypted locally.</string>
     <string name="remote_ssh_help">Files are transferred through SSH command channels, without SFTP. The server needs a POSIX shell, find, stat (GNU/BusyBox or BSD), cat, wc, mkdir, rm, mv and chmod. Passwords and private keys are encrypted locally.</string>
+    <string name="remote_host_required">This SSH host key must be verified before connecting.</string>
+    <string name="ssh_error_key_unlock">Could not unlock the SSH private key. Check its format and passphrase.</string>
+    <string name="ssh_error_connect">SSH connection or authentication failed. Check the host, port and credentials.</string>
+    <string name="ssh_error_channel">SSH control channel failed. Retry the operation.</string>
+    <string name="ssh_error_timeout">SSH operation timed out.</string>
+    <string name="ssh_error_command">SSH command failed: %1$s</string>
+    <string name="ssh_error_transfer">SSH file transfer failed.</string>
+    <string name="ssh_error_transfer_detail">SSH file transfer failed: %1$s</string>
+    <string name="ssh_error_response">The SSH server sent an invalid response.</string>
+    <string name="ssh_error_file_changed">The SSH file changed during transfer.</string>
+    <string name="ssh_error_unavailable">The SSH data stream is unavailable.</string>
+    <string name="ssh_error_cancelled">Operation cancelled.</string>
 </resources>

@@ -68,6 +68,7 @@ import kotlinx.coroutines.delay
 fun FolderContent(
     listing: FolderListing,
     path: String,
+    worldId: String,
     committedPath: String = path,
     /** When set, this node is listed instead of resolving [path] through Vfs. */
     folderOverride: VFolder? = null,
@@ -85,8 +86,14 @@ fun FolderContent(
     onCancelOpening: () -> Unit = {},
     onFileDragStart: () -> Unit = {},
     onFileDragEnd: () -> Unit = {},
-    /** Renderer-owned policy for a failed load; the list only supplies retry. */
-    errorView: RendererErrorView,
+    /** Picker shells do not share the manager's copy/move payload. */
+    clipboardAware: Boolean = true,
+    /** A picker selects exactly one file; rows never become checkboxes. */
+    singleSelection: Boolean = false,
+    /** Optional MIME filter applied before the text filter. */
+    entryFilter: (FileEntry) -> Boolean = { true },
+    /** Picker shells navigate into a folder even while files are selected. */
+    navigateFoldersInSelection: Boolean = false,
 ) {
     var showOpeningSpinner by remember { mutableStateOf(false) }
     val spinnerVisible = listing.showSpinner || showOpeningSpinner
@@ -98,9 +105,12 @@ fun FolderContent(
     val currentOnNavigationCancelled by rememberUpdatedState(onNavigationCancelled)
     val currentOnCancelOpening by rememberUpdatedState(onCancelOpening)
 
-    val filteredEntries = remember(listing.entries, listing.filterText) {
-        if (listing.filterText.isBlank()) listing.entries
-        else listing.entries.filter { it.name.contains(listing.filterText, ignoreCase = true) }
+    val visibleEntries = remember(listing.entries, entryFilter) {
+        listing.entries.filter(entryFilter)
+    }
+    val filteredEntries = remember(visibleEntries, listing.filterText) {
+        if (listing.filterText.isBlank()) visibleEntries
+        else visibleEntries.filter { it.name.contains(listing.filterText, ignoreCase = true) }
     }
 
     LaunchedEffect(opening) {
@@ -159,28 +169,8 @@ fun FolderContent(
             modifier = Modifier.fillMaxSize()
         ) {
             when {
-                listing.error != null && listing.entries.isEmpty() -> item {
-                    val failure = listing.error
-                    if (failure != null) {
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier.fillParentMaxSize()
-                        ) {
-                            errorView.Content(failure) {
-                                listing.load(
-                                    path = path,
-                                    folderOverride = folderOverride,
-                                    animate = false,
-                                    highlightPath = null,
-                                    highlightDirectory = null,
-                                    onNavigationLoaded = onNavigationLoaded,
-                                    onHighlightConsumed = {},
-                                )
-                            }
-                        }
-                    }
-                }
-                listing.entries.isEmpty() && listing.loadedPath == path && !listing.isLoading -> item {
+                visibleEntries.isEmpty() && listing.loadedPath == path &&
+                    !listing.isLoading && listing.error == null -> item {
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier.fillParentMaxSize()
@@ -188,7 +178,17 @@ fun FolderContent(
                         Text(stringResource(R.string.empty_folder))
                     }
                 }
-                listing.entries.isNotEmpty() && filteredEntries.isEmpty() && listing.filterText.isNotBlank() -> item {
+                visibleEntries.isEmpty() && listing.entries.isNotEmpty() &&
+                    listing.loadedPath == path && !listing.isLoading &&
+                    listing.error == null -> item {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier.fillParentMaxSize()
+                    ) {
+                        Text(stringResource(R.string.no_results))
+                    }
+                }
+                visibleEntries.isNotEmpty() && filteredEntries.isEmpty() && listing.filterText.isNotBlank() -> item {
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier.fillParentMaxSize()
@@ -202,11 +202,15 @@ fun FolderContent(
                     contentType = { _, _ -> "file" },
                 ) { index, entry ->
                     val node = listing.nodesByName[entry.name]
-                    val selectionMode = listing.selectedPaths.isNotEmpty() &&
-                        !listing.selectionLocked && !ClipboardStore.state.inTransfer
+                    val selectionMode = !singleSelection &&
+                        listing.selectedPaths.isNotEmpty() &&
+                        !listing.selectionLocked &&
+                        (!clipboardAware || !ClipboardStore.state.inTransfer)
+                    val rowSelection = selectionMode &&
+                        !(navigateFoldersInSelection && entry.isDirectory)
                     val onClick = {
                         if (!listing.isLoading && path == committedPath) {
-                            if (selectionMode) {
+                            if (rowSelection) {
                                 listing.toggleSelection(entry)
                             } else {
                                 onOpenEntry(entry, node)
@@ -215,7 +219,8 @@ fun FolderContent(
                     }
                     val onRowLongPress = {
                         if (!listing.isLoading && !listing.selectionLocked &&
-                            !ClipboardStore.state.inTransfer && path == committedPath
+                            (!clipboardAware || !ClipboardStore.state.inTransfer) &&
+                            path == committedPath
                         ) {
                             onLongPress(entry)
                         }
@@ -224,10 +229,11 @@ fun FolderContent(
                         key(listing.activeAnimationRun, entry.path) {
                             AnimatedFileRow(
                                 entry = entry,
+                                worldId = worldId,
                                 isInternal = listing.isInternal,
                                 draggable = folderOverride == null,
                                 selected = entry.path in listing.selectedPaths,
-                                selectionMode = selectionMode,
+                                selectionMode = rowSelection,
                                 onFileDragStart = onFileDragStart,
                                 onFileDragEnd = onFileDragEnd,
                                 index = index - listing.animationStartIndex,
@@ -238,17 +244,22 @@ fun FolderContent(
                                     if (!listing.isLoading && path == committedPath) listing.toggleSelection(entry)
                                 },
                                 onRangeSelect = {
-                                    if (!listing.isLoading && path == committedPath) listing.rangeSelectTo(entry)
+                                    if (!singleSelection && !listing.isLoading &&
+                                        path == committedPath
+                                    ) {
+                                        listing.rangeSelectTo(entry)
+                                    }
                                 }
                             )
                         }
                     } else {
                         FileRow(
                             entry = entry,
+                            worldId = worldId,
                             isInternal = listing.isInternal,
                             draggable = folderOverride == null,
                             selected = entry.path in listing.selectedPaths,
-                            selectionMode = selectionMode,
+                            selectionMode = rowSelection,
                             onFileDragStart = onFileDragStart,
                             onFileDragEnd = onFileDragEnd,
                             onClick = onClick,
@@ -257,7 +268,11 @@ fun FolderContent(
                                 if (!listing.isLoading && path == committedPath) listing.toggleSelection(entry)
                             },
                             onRangeSelect = {
-                                if (!listing.isLoading && path == committedPath) listing.rangeSelectTo(entry)
+                                if (!singleSelection && !listing.isLoading &&
+                                    path == committedPath
+                                ) {
+                                    listing.rangeSelectTo(entry)
+                                }
                             }
                         )
                     }
@@ -306,6 +321,7 @@ fun FolderContent(
 @Composable
 private fun AnimatedFileRow(
     entry: FileEntry,
+    worldId: String,
     isInternal: Boolean,
     draggable: Boolean,
     selected: Boolean,
@@ -348,6 +364,7 @@ private fun AnimatedFileRow(
     ) {
         FileRow(
             entry = entry,
+            worldId = worldId,
             isInternal = isInternal,
             draggable = draggable,
             selected = selected,
@@ -366,6 +383,7 @@ private fun AnimatedFileRow(
 @Composable
 private fun FileRow(
     entry: FileEntry,
+    worldId: String,
     isInternal: Boolean,
     draggable: Boolean,
     selected: Boolean,
@@ -401,7 +419,7 @@ private fun FileRow(
             .graphicsLayer { translationX = swipeOffset }
             .background(backgroundColor)
             .combinedClickable(
-                onClick = { if (selectionMode) onToggleSelection() else onClick() },
+                onClick = { if (selectionMode && !isDir) onToggleSelection() else onClick() },
                 onLongClick = onLongPress
             )
             .pointerInput(entry.path, selectionMode) {
@@ -445,6 +463,7 @@ private fun FileRow(
                                 entry.name,
                                 ForwardFileProvider.buildUri(
                                     entry.path,
+                                    worldId = worldId,
                                     facts = ForwardFacts(entry.name, entry.size),
                                 ),
                             )

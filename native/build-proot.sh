@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Builds the modified PRoot binary used by the container daemon. This build
+# workflow, native/patches/proot/** and the resulting libproot.so are
+# GPL-2.0-only; see native/patches/proot/LICENSE.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -48,9 +53,12 @@ fi
 
 echo "NDK toolchain: $CC"
 
-# --- Clone sources ---
+# --- Prepare sources ---
 echo "==> Preparing sources"
 
+PROOT_VERSION="5.1.107.79"
+PROOT_URL="${PROOT_URL-https://gh-proxy.com/https://github.com/termux/proot.git}"
+PROOT_CACHE="$ROOT_DIR/cache/native/proot-$PROOT_VERSION"
 PROOT_SRC="$WORK_DIR/proot"
 TALLOC_SRC="$WORK_DIR/talloc"
 BUILD_DIR="$WORK_DIR/build"
@@ -58,15 +66,18 @@ mkdir -p "$BUILD_DIR"
 OBJ_DIR="$BUILD_DIR/obj"
 mkdir -p "$OBJ_DIR"
 
-PROOT_TAG="v5.1.107.79"
-PATCH_DIR="$NATIVE_DIR/patches/proot"
-
-if ! git clone --depth 1 --branch "$PROOT_TAG" \
-    https://gh-proxy.com/https://github.com/termux/proot.git \
-    "$PROOT_SRC" 2>/dev/null; then
-  echo "Failed to clone proot" >&2
-  exit 1
+# Clone once into the project cache; later builds copy the checkout to the
+# temp dir so patch application never dirties the cached source.
+if [[ ! -f "$PROOT_CACHE/src/loader/loader.c" ]]; then
+    echo "==> Cloning proot v$PROOT_VERSION"
+    rm -rf "$PROOT_CACHE"
+    mkdir -p "$(dirname "$PROOT_CACHE")"
+    git clone --depth 1 --branch "v$PROOT_VERSION" "$PROOT_URL" "$PROOT_CACHE"
 fi
+cp -a "$PROOT_CACHE/." "$PROOT_SRC/"
+rm -rf "$PROOT_SRC/.git"
+
+PATCH_DIR="$NATIVE_DIR/patches/proot"
 
 # Every patch is required: an unpatched proot has no `--cgroup` emulation and
 # the daemon would silently fall back to weaker container-lifetime guarantees.
@@ -80,26 +91,38 @@ if (( ${#patches[@]} == 0 )); then
 fi
 for patch in "${patches[@]}"; do
   echo "==> Applying $(basename "$patch")"
-  if ! git -C "$PROOT_SRC" apply --whitespace=nowarn "$patch"; then
+  if ! patch --batch -p1 -d "$PROOT_SRC" -i "$patch"; then
     echo "Failed to apply $patch" >&2
     exit 1
   fi
 done
 
-# Download talloc
+# Cache the talloc tarball: the build directory is temporary, the download is not.
 TALLOC_VER="2.4.3"
+TALLOC_SHA256="dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd"
 TALLOC_URL="https://download.samba.org/pub/talloc/talloc-${TALLOC_VER}.tar.gz"
-if ! curl -sL "$TALLOC_URL" | tar xz -C "$WORK_DIR"; then
-  echo "Failed to download talloc" >&2
-  exit 1
+TALLOC_CACHE="$ROOT_DIR/cache/file-manager/talloc-${TALLOC_VER}.tar.gz"
+mkdir -p "$(dirname "$TALLOC_CACHE")"
+if [[ -f "$TALLOC_CACHE" ]] &&
+   ! echo "$TALLOC_SHA256  $TALLOC_CACHE" | sha256sum --check --status; then
+  echo "cached talloc checksum mismatch; downloading it again" >&2
+  rm -f "$TALLOC_CACHE"
 fi
+if [[ ! -f "$TALLOC_CACHE" ]]; then
+  echo "==> Fetching talloc $TALLOC_VER"
+  curl -fL --retry 3 --connect-timeout 20 --max-time 600 \
+    "$TALLOC_URL" -o "$TALLOC_CACHE.part"
+  mv "$TALLOC_CACHE.part" "$TALLOC_CACHE"
+  echo "$TALLOC_SHA256  $TALLOC_CACHE" | sha256sum --check
+fi
+tar xzf "$TALLOC_CACHE" -C "$WORK_DIR"
 mv "$WORK_DIR/talloc-${TALLOC_VER}" "$TALLOC_SRC"
 
 # --- Create minimal build.h ---
-cat > "$BUILD_DIR/build.h" << 'EOF'
+cat > "$BUILD_DIR/build.h" << EOF
 #ifndef BUILD_H
 #define BUILD_H
-#define VERSION "5.1.107.79"
+#define VERSION "$PROOT_VERSION"
 #define HAVE_PROCESS_VM
 #define HAVE_SECCOMP_FILTER
 #endif /* BUILD_H */

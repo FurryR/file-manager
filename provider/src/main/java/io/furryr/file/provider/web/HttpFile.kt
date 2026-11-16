@@ -1,6 +1,5 @@
 package io.furryr.file.provider.web
 
-import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.Path
 import io.furryr.file.core.RemoteFile
 import io.furryr.file.core.VFile
@@ -22,6 +21,7 @@ import io.furryr.file.core.source.OpenMode
  * resolved by the platform against [address], and there is nothing to list.
  */
 internal class HttpFile(
+    private val http: HttpProvider,
     override val address: String,
     override val referer: String? = null,
 ) : RemoteFile {
@@ -31,15 +31,19 @@ internal class HttpFile(
 
     override val path: Path = Path.parse(address)
 
-    override suspend fun stat(): Result<ProviderStat> = HttpProvider.stat(address, referer)
-
-    override suspend fun describe(): Result<ContentInfo> = HttpProvider.describe(address, referer)
-
-    override suspend fun peek(): Result<ContentInfo> = HttpProvider.peek(address, referer)
+    override suspend fun stat(): Result<ProviderStat> =
+        http.stat(address, referer).map { stat ->
+            // The server's type is authoritative. Never infer a web page's
+            // type from its name: a dynamic `.asp`/`.php` URL is HTML, not
+            // whatever an extension table might guess.
+            val mime = stat.mime
+                ?: "text/html".takeIf { address.startsWith("https://", ignoreCase = true) }
+            if (mime == null) stat else stat.copy(mime = mime)
+        }
 
     override fun withReferer(referer: String?): VFile =
-        if (referer.isNullOrBlank() || referer == this.referer) this else HttpFile(address, referer)
+        if (referer.isNullOrBlank() || referer == this.referer) this else HttpFile(http, address, referer)
 
     override suspend fun open(mode: OpenMode): Result<FileSource> =
-        HttpProvider.source(address, referer, mode)
+        http.source(address, referer, mode)
 }

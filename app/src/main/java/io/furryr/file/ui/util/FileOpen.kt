@@ -7,15 +7,18 @@ import io.furryr.file.model.*
 import io.furryr.file.R
 
 import android.content.ClipData
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
+import io.furryr.file.MainActivity
 import io.furryr.file.ProviderAuthority
-import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.ContentTypes
 import io.furryr.file.core.VFile
+import io.furryr.file.core.VNode
 import io.furryr.file.core.model.FileEntry
+import io.furryr.file.core.model.ProviderStat
 import io.furryr.file.forward.ForwardFacts
 import io.furryr.file.forward.ForwardFileProvider
 import io.furryr.file.util.PrimaryStorage
@@ -36,12 +39,14 @@ fun openFile(
     context: Context,
     entry: FileEntry,
     file: VFile? = null,
-    content: ContentInfo? = null,
+    stat: ProviderStat? = null,
 ) {
+    val name = file?.name ?: entry.name
+    val mime = stat?.mime ?: ContentTypes.fromName(name)
     val facts = ForwardFacts(
-        name = content?.name ?: entry.name,
-        size = content?.size ?: entry.size,
-        mime = content?.mime,
+        name = name,
+        size = stat?.size ?: entry.size,
+        mime = mime,
     )
     val uri = if (file != null) {
         ForwardFileProvider.buildUri(file, facts)
@@ -53,8 +58,14 @@ fun openFile(
         return
     }
     val intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(uri, content?.mime ?: ContentTypes.fromName(entry.name) ?: mimeType(File(entry.path)))
+        setDataAndType(uri, mime ?: mimeType(File(entry.path)))
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        // This app is a file/app handler itself: never hand the file back to
+        // our own main activity, which would open the same file again.
+        putExtra(
+            Intent.EXTRA_EXCLUDE_COMPONENTS,
+            arrayOf(ComponentName(context, MainActivity::class.java)),
+        )
     }
     runCatching { context.startActivity(Intent.createChooser(intent, entry.name)) }.onFailure {
         Toast.makeText(context, context.getString(R.string.toast_no_app, entry.name), Toast.LENGTH_SHORT).show()
@@ -67,12 +78,12 @@ fun openFile(
  * both, keeping the page as referer so hotlink-protected hosts still answer the
  * range requests.
  */
-fun shareFile(context: Context, file: VFile, content: ContentInfo? = null) {
-    val display = content?.name?.takeIf { it.isNotBlank() } ?: file.name
-    val mime = content?.mime ?: ContentTypes.fromName(display) ?: "*/*"
+fun shareFile(context: Context, file: VFile, stat: ProviderStat? = null) {
+    val display = file.name
+    val mime = stat?.mime ?: ContentTypes.fromName(display) ?: "*/*"
     val uri = ForwardFileProvider.buildUri(
         file,
-        ForwardFacts(name = display, size = content?.size ?: -1L, mime = mime),
+        ForwardFacts(name = display, size = stat?.size ?: -1L, mime = mime),
     )
     val intent = Intent(Intent.ACTION_SEND).apply {
         type = mime
@@ -87,15 +98,10 @@ fun shareFile(context: Context, file: VFile, content: ContentInfo? = null) {
     }
 }
 
-suspend fun shareEntries(context: Context, entries: List<FileEntry>) {
-    val files = entries.filterNot { it.isDirectory }
+suspend fun shareEntries(context: Context, nodes: List<VNode>) {
+    val files = nodes.filterIsInstance<VFile>()
     if (files.isEmpty()) return
-    val resolved = files.mapNotNull { entry -> io.furryr.file.core.Vfs.file(entry.path).getOrNull() }
-    if (resolved.isEmpty()) {
-        Toast.makeText(context, context.getString(R.string.toast_failed), Toast.LENGTH_SHORT).show()
-        return
-    }
-    val uris = resolved.map { file ->
+    val uris = files.map { file ->
         ForwardFileProvider.buildUri(
             file,
             ForwardFacts(name = file.name, size = file.stat().getOrNull()?.size ?: -1L),
@@ -107,7 +113,7 @@ suspend fun shareEntries(context: Context, entries: List<FileEntry>) {
     }
     val intent = if (uris.size == 1) {
         Intent(Intent.ACTION_SEND).apply {
-            type = mimeType(File(files.first().path))
+            type = ContentTypes.fromName(files.first().name) ?: "application/octet-stream"
             putExtra(Intent.EXTRA_STREAM, uris.first())
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             runCatching {

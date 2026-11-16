@@ -5,9 +5,16 @@ import io.furryr.file.ui.components.*
 import io.furryr.file.ui.util.*
 import io.furryr.file.model.*
 
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -40,6 +47,64 @@ private fun Window.applyBarColors(surface: Int) {
     navigationBarColor = surface
 }
 
+// Root cause of the "top bar changes first" effect: Material3 1.3's
+// SingleRowTopAppBar animates its container color with
+// spring(stiffness = Spring.StiffnessMediumLow) (AppBar.kt, line 1888), while
+// every other surface reads the scheme and switches instantly. Animate the
+// scheme itself with the exact same spec so all roles share one curve.
+// ShellTopBar additionally makes the app bar transparent (and paints the
+// scheme surface behind it) so the app bar does not run a second spring on
+// top of this one.
+private val ThemeColorAnimation: AnimationSpec<Color> =
+    spring(stiffness = Spring.StiffnessMediumLow)
+
+@Composable
+private fun animatedThemeColor(target: Color): Color =
+    animateColorAsState(target, ThemeColorAnimation, label = "themeColor").value
+
+// MaterialTheme hands out one ColorScheme. Animating every role here makes the
+// whole UI cross-fade together on a light/dark or palette change, so no part
+// switches ahead of or behind the rest.
+@Composable
+private fun animatedColorScheme(target: ColorScheme): ColorScheme = target.copy(
+    primary = animatedThemeColor(target.primary),
+    onPrimary = animatedThemeColor(target.onPrimary),
+    primaryContainer = animatedThemeColor(target.primaryContainer),
+    onPrimaryContainer = animatedThemeColor(target.onPrimaryContainer),
+    inversePrimary = animatedThemeColor(target.inversePrimary),
+    secondary = animatedThemeColor(target.secondary),
+    onSecondary = animatedThemeColor(target.onSecondary),
+    secondaryContainer = animatedThemeColor(target.secondaryContainer),
+    onSecondaryContainer = animatedThemeColor(target.onSecondaryContainer),
+    tertiary = animatedThemeColor(target.tertiary),
+    onTertiary = animatedThemeColor(target.onTertiary),
+    tertiaryContainer = animatedThemeColor(target.tertiaryContainer),
+    onTertiaryContainer = animatedThemeColor(target.onTertiaryContainer),
+    background = animatedThemeColor(target.background),
+    onBackground = animatedThemeColor(target.onBackground),
+    surface = animatedThemeColor(target.surface),
+    onSurface = animatedThemeColor(target.onSurface),
+    surfaceVariant = animatedThemeColor(target.surfaceVariant),
+    onSurfaceVariant = animatedThemeColor(target.onSurfaceVariant),
+    surfaceTint = animatedThemeColor(target.surfaceTint),
+    inverseSurface = animatedThemeColor(target.inverseSurface),
+    inverseOnSurface = animatedThemeColor(target.inverseOnSurface),
+    error = animatedThemeColor(target.error),
+    onError = animatedThemeColor(target.onError),
+    errorContainer = animatedThemeColor(target.errorContainer),
+    onErrorContainer = animatedThemeColor(target.onErrorContainer),
+    outline = animatedThemeColor(target.outline),
+    outlineVariant = animatedThemeColor(target.outlineVariant),
+    scrim = animatedThemeColor(target.scrim),
+    surfaceBright = animatedThemeColor(target.surfaceBright),
+    surfaceDim = animatedThemeColor(target.surfaceDim),
+    surfaceContainer = animatedThemeColor(target.surfaceContainer),
+    surfaceContainerHigh = animatedThemeColor(target.surfaceContainerHigh),
+    surfaceContainerHighest = animatedThemeColor(target.surfaceContainerHighest),
+    surfaceContainerLow = animatedThemeColor(target.surfaceContainerLow),
+    surfaceContainerLowest = animatedThemeColor(target.surfaceContainerLowest),
+)
+
 @Composable
 fun FileManagerTheme(
     darkTheme: Boolean = true,
@@ -47,7 +112,8 @@ fun FileManagerTheme(
 ) {
     val palette = PaletteStore.current(LocalContext.current)
     val amoled = PaletteStore.amoled(LocalContext.current)
-    val colors = if (darkTheme) palette.darkColors(amoled) else palette.lightColors()
+    val targetColors = if (darkTheme) palette.darkColors(amoled) else palette.lightColors()
+    val colors = animatedColorScheme(targetColors)
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
@@ -55,12 +121,15 @@ fun FileManagerTheme(
             val surface = colors.surface.toArgb()
             // IME resize animations can expose the window behind the Compose surface.
             window.setBackgroundDrawable(ColorDrawable(surface))
-            // Keep the system bars in step with the Compose scheme, including the
-            // near-black or AMOLED dark surface and its light icons.
+            // Keep the system bars in step with the animated Compose surface,
+            // including the near-black or AMOLED dark surface and its light icons.
             window.applyBarColors(surface)
             WindowCompat.getInsetsController(window, window.decorView).apply {
-                isAppearanceLightStatusBars = !darkTheme
-                isAppearanceLightNavigationBars = !darkTheme
+                // The icon mode follows the surface that is actually on screen,
+                // so it flips where the cross-fade crosses over, not at its start.
+                val lightSurface = colors.surface.luminance() > 0.5f
+                isAppearanceLightStatusBars = lightSurface
+                isAppearanceLightNavigationBars = lightSurface
             }
         }
     }

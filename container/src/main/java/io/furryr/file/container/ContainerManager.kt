@@ -6,7 +6,6 @@ import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.util.Log
-import io.furryr.file.core.ContainerUriResolver
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.daemon.process.CommandSpec
@@ -269,7 +268,18 @@ object ContainerManager {
             // Validates that the container exists and has a manifest.
             loadContainer(getContainerDir(context, name))
 
-            val output = ContainerProvider.execContainer(name, command)
+            val output = withContext(Dispatchers.IO) {
+                val result = DaemonManager.execService(DaemonTarget.Named(name))
+                    .run(CommandSpec("/bin/sh", listOf("-c", command)))
+                    .getOrThrow()
+                if (result.exitCode != 0) {
+                    val message = result.stderrText.trim()
+                    throw RuntimeException(
+                        if (message.isNotEmpty()) message else "Command exited with code ${result.exitCode}"
+                    )
+                }
+                result.stdoutText.trim()
+            }
             Log.d(TAG, "execInContainer '$name': '$command'")
             Result.success(output)
         } catch (e: Exception) {
@@ -325,7 +335,7 @@ object ContainerManager {
             distroFile.writeText(json.toString(2))
 
             // Drop cached container daemons so the new mount takes effect.
-            ContainerProvider.resetConnections()
+            DaemonManager.closeNamedConnections()
 
             Log.i(TAG, "Bind mount added to '$name': $srcAndroidPath -> $dstContainerPath")
             Result.success(Unit)

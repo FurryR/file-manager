@@ -1,0 +1,2174 @@
+{
+  "components": [
+    {
+      "group": "Android / JVM",
+      "name": "androidx.activity:activity",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/activity#1.9.3"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.activity:activity-compose",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/activity#1.9.3"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.activity:activity-ktx",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/activity#1.9.3"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.annotation:annotation",
+      "version": "1.8.2",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/annotation#1.8.2"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.annotation:annotation-experimental",
+      "version": "1.4.1",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/annotation#1.4.1"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.annotation:annotation-jvm",
+      "version": "1.8.2",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/annotation#1.8.2"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.arch.core:core-common",
+      "version": "2.2.0",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/arch-core#2.2.0"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.arch.core:core-runtime",
+      "version": "2.2.0",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/arch-core#2.2.0"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.autofill:autofill",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.collection:collection",
+      "version": "1.4.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/collection#1.4.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.collection:collection-jvm",
+      "version": "1.4.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/collection#1.4.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.collection:collection-ktx",
+      "version": "1.4.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/collection#1.4.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.animation:animation",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-animation#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.animation:animation-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-animation#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.animation:animation-core",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-animation#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.animation:animation-core-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-animation#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.foundation:foundation",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-foundation#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.foundation:foundation-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-foundation#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.foundation:foundation-layout",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-foundation#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.foundation:foundation-layout-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-foundation#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.material3:material3",
+      "version": "1.3.0",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-material3#1.3.0"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.material3:material3-android",
+      "version": "1.3.0",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-material3#1.3.0"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.material:material-icons-core",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-material#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.material:material-icons-core-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-material#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.material:material-icons-extended",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-material#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.material:material-icons-extended-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-material#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.material:material-ripple",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-material#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.material:material-ripple-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-material#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.runtime:runtime",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-runtime#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.runtime:runtime-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-runtime#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.runtime:runtime-saveable",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-runtime#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.runtime:runtime-saveable-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-runtime#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.ui:ui",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-ui#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.ui:ui-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-ui#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.ui:ui-geometry",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-ui#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.ui:ui-geometry-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-ui#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.ui:ui-graphics",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-ui#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.ui:ui-graphics-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-ui#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.ui:ui-text",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-ui#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.ui:ui-text-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-ui#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.ui:ui-tooling-preview",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-ui#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.ui:ui-tooling-preview-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-ui#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.ui:ui-unit",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-ui#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.ui:ui-unit-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-ui#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.ui:ui-util",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-ui#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose.ui:ui-util-android",
+      "version": "1.7.4",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/compose-ui#1.7.4"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.compose:compose-bom",
+      "version": "2024.10.00",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.concurrent:concurrent-futures",
+      "version": "1.1.0",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/topic/libraries/architecture/index.html"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.core:core",
+      "version": "1.13.1",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/core#1.13.1"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.core:core-ktx",
+      "version": "1.13.1",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/core#1.13.1"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.customview:customview-poolingcontainer",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/customview#1.0.0"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.documentfile:documentfile",
+      "version": "1.0.1",
+      "license": "Apache-2.0",
+      "url": "http://developer.android.com/tools/extras/support-library.html"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.emoji2:emoji2",
+      "version": "1.3.0",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/emoji2#1.3.0"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.graphics:graphics-path",
+      "version": "1.0.1",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/graphics#1.0.1"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.interpolator:interpolator",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "url": "http://developer.android.com/tools/extras/support-library.html"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-common",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-common-java8",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-common-jvm",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-livedata-core",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-process",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-runtime",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-runtime-android",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-runtime-compose",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-runtime-compose-android",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-runtime-ktx",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-runtime-ktx-android",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-viewmodel",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-viewmodel-android",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-viewmodel-ktx",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.lifecycle:lifecycle-viewmodel-savedstate",
+      "version": "2.8.6",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/lifecycle#2.8.6"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.profileinstaller:profileinstaller",
+      "version": "1.3.1",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/profileinstaller#1.3.1"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.savedstate:savedstate",
+      "version": "1.2.1",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/savedstate#1.2.1"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.savedstate:savedstate-ktx",
+      "version": "1.2.1",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/savedstate#1.2.1"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.startup:startup-runtime",
+      "version": "1.1.1",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/startup#1.1.1"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.tracing:tracing",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/tracing#1.0.0"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "androidx.versionedparcelable:versionedparcelable",
+      "version": "1.1.1",
+      "license": "Apache-2.0",
+      "url": "http://developer.android.com/tools/extras/support-library.html"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "com.github.mwiede:jsch",
+      "version": "2.28.5",
+      "license": "BSD-3-Clause / ISC",
+      "url": "https://github.com/mwiede/jsch"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "com.google.code.gson:gson",
+      "version": "2.11.0",
+      "license": "Apache-2.0",
+      "url": "https://github.com/google/gson"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "com.google.errorprone:error_prone_annotations",
+      "version": "2.27.0",
+      "license": "Apache-2.0",
+      "url": "https://errorprone.info/error_prone_annotations"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "com.google.guava:listenablefuture",
+      "version": "1.0",
+      "license": "Apache-2.0",
+      "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "com.google.protobuf:protobuf-javalite",
+      "version": "4.28.2",
+      "license": "BSD-3-Clause",
+      "url": "https://developers.google.com/protocol-buffers/"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "com.termux.termux-app:terminal-emulator",
+      "version": "0.118.0",
+      "license": "GPL-3.0-only",
+      "url": "https://github.com/termux/termux-app"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "com.termux.termux-app:terminal-view",
+      "version": "0.118.0",
+      "license": "GPL-3.0-only",
+      "url": "https://github.com/termux/termux-app"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "commons-io:commons-io",
+      "version": "2.21.0",
+      "license": "Apache-2.0",
+      "url": "https://commons.apache.org/proper/commons-io/"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "commons-net:commons-net",
+      "version": "3.13.0",
+      "license": "Apache-2.0",
+      "url": "https://commons.apache.org/proper/commons-net/"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "dev.rikka.shizuku:aidl",
+      "version": "13.1.5",
+      "license": "MIT",
+      "url": "https://github.com/RikkaApps/Shizuku-API"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "dev.rikka.shizuku:api",
+      "version": "13.1.5",
+      "license": "MIT",
+      "url": "https://github.com/RikkaApps/Shizuku-API"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "dev.rikka.shizuku:provider",
+      "version": "13.1.5",
+      "license": "MIT",
+      "url": "https://github.com/RikkaApps/Shizuku-API"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "dev.rikka.shizuku:shared",
+      "version": "13.1.5",
+      "license": "MIT",
+      "url": "https://github.com/RikkaApps/Shizuku-API"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "io.github.Rosemoe.sora-editor:editor",
+      "version": "0.23.5",
+      "license": "LGPL-2.1-only",
+      "url": "https://github.com/Rosemoe/sora-editor"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "io.github.Rosemoe.sora-editor:language-textmate",
+      "version": "0.23.5",
+      "license": "LGPL-2.1-only",
+      "url": "https://github.com/Rosemoe/sora-editor"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "net.i2p.crypto:eddsa",
+      "version": "0.3.0",
+      "license": "CC0-1.0",
+      "url": "https://github.com/str4d/ed25519-java"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "org.jetbrains.kotlin:kotlin-stdlib",
+      "version": "2.0.21",
+      "license": "Apache-2.0",
+      "url": "https://kotlinlang.org/"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "org.jetbrains.kotlin:kotlin-stdlib-common",
+      "version": "2.0.21",
+      "license": "Apache-2.0",
+      "url": "https://kotlinlang.org/"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "org.jetbrains.kotlinx:kotlinx-coroutines-android",
+      "version": "1.9.0",
+      "license": "Apache-2.0",
+      "url": "https://github.com/Kotlin/kotlinx.coroutines"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "org.jetbrains.kotlinx:kotlinx-coroutines-bom",
+      "version": "1.9.0",
+      "license": "Apache-2.0",
+      "url": "https://github.com/Kotlin/kotlinx.coroutines"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "org.jetbrains.kotlinx:kotlinx-coroutines-core",
+      "version": "1.9.0",
+      "license": "Apache-2.0",
+      "url": "https://github.com/Kotlin/kotlinx.coroutines"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm",
+      "version": "1.9.0",
+      "license": "Apache-2.0",
+      "url": "https://github.com/Kotlin/kotlinx.coroutines"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "org.jetbrains:annotations",
+      "version": "23.0.0",
+      "license": "Apache-2.0",
+      "url": "https://github.com/JetBrains/java-annotations"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "org.jruby.jcodings:jcodings",
+      "version": "1.0.58",
+      "license": "MIT",
+      "url": "http://www.opensource.org/licenses/mit-license.php"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "org.jruby.joni:joni",
+      "version": "2.2.1",
+      "license": "MIT",
+      "url": "http://www.opensource.org/licenses/mit-license.php"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "org.lsposed.hiddenapibypass:hiddenapibypass",
+      "version": "6.1",
+      "license": "Apache-2.0",
+      "url": "https://github.com/LSPosed/AndroidHiddenApiBypass"
+    },
+    {
+      "group": "Android / JVM",
+      "name": "org.snakeyaml:snakeyaml-engine",
+      "version": "2.7",
+      "license": "Apache-2.0",
+      "url": "https://bitbucket.org/snakeyaml/snakeyaml-engine"
+    },
+    {
+      "group": "Rust",
+      "name": "aho-corasick",
+      "version": "1.1.4",
+      "license": "Unlicense OR MIT",
+      "url": "https://github.com/BurntSushi/aho-corasick"
+    },
+    {
+      "group": "Rust",
+      "name": "allocator-api2",
+      "version": "0.2.21",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/zakarumych/allocator-api2"
+    },
+    {
+      "group": "Rust",
+      "name": "android_log-sys",
+      "version": "0.3.2",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-mobile/android_log-sys-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "android_logger",
+      "version": "0.14.1",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-mobile/android_logger-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "anyhow",
+      "version": "1.0.102",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/dtolnay/anyhow"
+    },
+    {
+      "group": "Rust",
+      "name": "appendlist",
+      "version": "1.4.0",
+      "license": "MIT",
+      "url": "https://github.com/danieldulaney/appendlist"
+    },
+    {
+      "group": "Rust",
+      "name": "approx",
+      "version": "0.4.0",
+      "license": "Apache-2.0",
+      "url": "https://github.com/brendanzab/approx"
+    },
+    {
+      "group": "Rust",
+      "name": "atomic",
+      "version": "0.6.1",
+      "license": "Apache-2.0/MIT",
+      "url": "https://github.com/Amanieu/atomic-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "atomic_float",
+      "version": "1.1.0",
+      "license": "Apache-2.0 OR MIT OR Unlicense",
+      "url": "https://github.com/thomcc/atomic_float"
+    },
+    {
+      "group": "Rust",
+      "name": "base64",
+      "version": "0.22.1",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/marshallpierce/rust-base64"
+    },
+    {
+      "group": "Rust",
+      "name": "base64ct",
+      "version": "1.8.3",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/RustCrypto/formats"
+    },
+    {
+      "group": "Rust",
+      "name": "bit-set",
+      "version": "0.5.3",
+      "license": "MIT/Apache-2.0",
+      "url": "https://github.com/contain-rs/bit-set"
+    },
+    {
+      "group": "Rust",
+      "name": "bit-vec",
+      "version": "0.6.3",
+      "license": "MIT/Apache-2.0",
+      "url": "https://github.com/contain-rs/bit-vec"
+    },
+    {
+      "group": "Rust",
+      "name": "bitflags",
+      "version": "1.3.2",
+      "license": "MIT/Apache-2.0",
+      "url": "https://github.com/bitflags/bitflags"
+    },
+    {
+      "group": "Rust",
+      "name": "bitflags",
+      "version": "2.13.0",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/bitflags/bitflags"
+    },
+    {
+      "group": "Rust",
+      "name": "block-buffer",
+      "version": "0.10.4",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/RustCrypto/utils"
+    },
+    {
+      "group": "Rust",
+      "name": "bytemuck",
+      "version": "1.25.2",
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "url": "https://github.com/Lokathor/bytemuck"
+    },
+    {
+      "group": "Rust",
+      "name": "bytes",
+      "version": "1.11.1",
+      "license": "MIT",
+      "url": "https://github.com/tokio-rs/bytes"
+    },
+    {
+      "group": "Rust",
+      "name": "calloop",
+      "version": "0.14.5",
+      "license": "MIT",
+      "url": "https://github.com/Smithay/calloop"
+    },
+    {
+      "group": "Rust",
+      "name": "cassowary",
+      "version": "0.3.0",
+      "license": "MIT / Apache-2.0",
+      "url": "https://github.com/dylanede/cassowary-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "castaway",
+      "version": "0.2.4",
+      "license": "MIT",
+      "url": "https://github.com/sagebind/castaway"
+    },
+    {
+      "group": "Rust",
+      "name": "cesu8",
+      "version": "1.1.0",
+      "license": "Apache-2.0/MIT",
+      "url": "https://github.com/emk/cesu8-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "cfg-if",
+      "version": "1.0.4",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-lang/cfg-if"
+    },
+    {
+      "group": "Rust",
+      "name": "cgmath",
+      "version": "0.18.0",
+      "license": "Apache-2.0",
+      "url": "https://github.com/rustgd/cgmath"
+    },
+    {
+      "group": "Rust",
+      "name": "combine",
+      "version": "4.6.9",
+      "license": "MIT",
+      "url": "https://github.com/Marwes/combine"
+    },
+    {
+      "group": "Rust",
+      "name": "compact_str",
+      "version": "0.8.2",
+      "license": "MIT",
+      "url": "https://github.com/ParkMyCar/compact_str"
+    },
+    {
+      "group": "Rust",
+      "name": "const-oid",
+      "version": "0.9.6",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/RustCrypto/formats/tree/master/const-oid"
+    },
+    {
+      "group": "Rust",
+      "name": "cpufeatures",
+      "version": "0.2.17",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/RustCrypto/utils"
+    },
+    {
+      "group": "Rust",
+      "name": "crossterm",
+      "version": "0.28.1",
+      "license": "MIT",
+      "url": "https://github.com/crossterm-rs/crossterm"
+    },
+    {
+      "group": "Rust",
+      "name": "crypto-common",
+      "version": "0.1.7",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/RustCrypto/traits"
+    },
+    {
+      "group": "Rust",
+      "name": "csscolorparser",
+      "version": "0.6.2",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/mazznoer/csscolorparser-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "cursor-icon",
+      "version": "1.2.0",
+      "license": "MIT OR Apache-2.0 OR Zlib",
+      "url": "https://github.com/rust-windowing/cursor-icon"
+    },
+    {
+      "group": "Rust",
+      "name": "curve25519-dalek",
+      "version": "4.1.3",
+      "license": "BSD-3-Clause",
+      "url": "https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek"
+    },
+    {
+      "group": "Rust",
+      "name": "darling",
+      "version": "0.24.1",
+      "license": "MIT",
+      "url": "https://github.com/TedDriggs/darling"
+    },
+    {
+      "group": "Rust",
+      "name": "darling_core",
+      "version": "0.24.1",
+      "license": "MIT",
+      "url": "https://github.com/TedDriggs/darling"
+    },
+    {
+      "group": "Rust",
+      "name": "darling_macro",
+      "version": "0.24.1",
+      "license": "MIT",
+      "url": "https://github.com/TedDriggs/darling"
+    },
+    {
+      "group": "Rust",
+      "name": "deltae",
+      "version": "0.3.2",
+      "license": "MIT",
+      "url": "https://gitlab.com/ryanobeirne/deltae.git"
+    },
+    {
+      "group": "Rust",
+      "name": "der",
+      "version": "0.7.10",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/RustCrypto/formats/tree/master/der"
+    },
+    {
+      "group": "Rust",
+      "name": "digest",
+      "version": "0.10.7",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/RustCrypto/traits"
+    },
+    {
+      "group": "Rust",
+      "name": "downcast-rs",
+      "version": "1.2.1",
+      "license": "MIT/Apache-2.0",
+      "url": "https://github.com/marcianx/downcast-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "drm-fourcc",
+      "version": "2.2.0",
+      "license": "MIT",
+      "url": "https://github.com/danielzfranklin/drm-fourcc-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "ed25519",
+      "version": "2.2.3",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/RustCrypto/signatures/tree/master/ed25519"
+    },
+    {
+      "group": "Rust",
+      "name": "ed25519-dalek",
+      "version": "2.2.0",
+      "license": "BSD-3-Clause",
+      "url": "https://github.com/dalek-cryptography/curve25519-dalek/tree/main/ed25519-dalek"
+    },
+    {
+      "group": "Rust",
+      "name": "either",
+      "version": "1.16.0",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rayon-rs/either"
+    },
+    {
+      "group": "Rust",
+      "name": "env_filter",
+      "version": "0.1.4",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-cli/env_logger"
+    },
+    {
+      "group": "Rust",
+      "name": "equivalent",
+      "version": "1.0.2",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/indexmap-rs/equivalent"
+    },
+    {
+      "group": "Rust",
+      "name": "errno",
+      "version": "0.3.14",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/lambda-fairy/rust-errno"
+    },
+    {
+      "group": "Rust",
+      "name": "euclid",
+      "version": "0.22.14",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/servo/euclid"
+    },
+    {
+      "group": "Rust",
+      "name": "fancy-regex",
+      "version": "0.11.0",
+      "license": "MIT",
+      "url": "https://github.com/fancy-regex/fancy-regex"
+    },
+    {
+      "group": "Rust",
+      "name": "fastrand",
+      "version": "2.4.1",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/smol-rs/fastrand"
+    },
+    {
+      "group": "Rust",
+      "name": "filedescriptor",
+      "version": "0.8.3",
+      "license": "MIT",
+      "url": "https://github.com/wezterm/wezterm"
+    },
+    {
+      "group": "Rust",
+      "name": "finl_unicode",
+      "version": "1.5.0",
+      "license": "(MIT OR Apache-2.0) AND Unicode-DFS-2016",
+      "url": "https://github.com/dahosek/finl_unicode"
+    },
+    {
+      "group": "Rust",
+      "name": "fixedbitset",
+      "version": "0.4.2",
+      "license": "MIT/Apache-2.0",
+      "url": "https://github.com/petgraph/fixedbitset"
+    },
+    {
+      "group": "Rust",
+      "name": "fnv",
+      "version": "1.0.7",
+      "license": "Apache-2.0 / MIT",
+      "url": "https://github.com/servo/rust-fnv"
+    },
+    {
+      "group": "Rust",
+      "name": "foldhash",
+      "version": "0.1.5",
+      "license": "Zlib",
+      "url": "https://github.com/orlp/foldhash"
+    },
+    {
+      "group": "Rust",
+      "name": "generic-array",
+      "version": "0.14.7",
+      "license": "MIT",
+      "url": "https://github.com/fizyk20/generic-array.git"
+    },
+    {
+      "group": "Rust",
+      "name": "getrandom",
+      "version": "0.2.17",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-random/getrandom"
+    },
+    {
+      "group": "Rust",
+      "name": "getrandom",
+      "version": "0.3.4",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-random/getrandom"
+    },
+    {
+      "group": "Rust",
+      "name": "getrandom",
+      "version": "0.4.2",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-random/getrandom"
+    },
+    {
+      "group": "Rust",
+      "name": "hashbrown",
+      "version": "0.15.5",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-lang/hashbrown"
+    },
+    {
+      "group": "Rust",
+      "name": "hashbrown",
+      "version": "0.17.1",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-lang/hashbrown"
+    },
+    {
+      "group": "Rust",
+      "name": "heck",
+      "version": "0.5.0",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/withoutboats/heck"
+    },
+    {
+      "group": "Rust",
+      "name": "hex",
+      "version": "0.4.3",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/KokaKiwi/rust-hex"
+    },
+    {
+      "group": "Rust",
+      "name": "ident_case",
+      "version": "1.0.1",
+      "license": "MIT/Apache-2.0",
+      "url": "https://github.com/TedDriggs/ident_case"
+    },
+    {
+      "group": "Rust",
+      "name": "indexmap",
+      "version": "2.14.0",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/indexmap-rs/indexmap"
+    },
+    {
+      "group": "Rust",
+      "name": "indoc",
+      "version": "2.0.8",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/dtolnay/indoc"
+    },
+    {
+      "group": "Rust",
+      "name": "instability",
+      "version": "0.3.14",
+      "license": "MIT",
+      "url": "https://github.com/ratatui/instability"
+    },
+    {
+      "group": "Rust",
+      "name": "itertools",
+      "version": "0.13.0",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-itertools/itertools"
+    },
+    {
+      "group": "Rust",
+      "name": "itertools",
+      "version": "0.14.0",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-itertools/itertools"
+    },
+    {
+      "group": "Rust",
+      "name": "itoa",
+      "version": "1.0.18",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/dtolnay/itoa"
+    },
+    {
+      "group": "Rust",
+      "name": "jni",
+      "version": "0.21.1",
+      "license": "MIT/Apache-2.0",
+      "url": "https://github.com/jni-rs/jni-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "jni-sys",
+      "version": "0.3.1",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/jni-rs/jni-sys"
+    },
+    {
+      "group": "Rust",
+      "name": "jni-sys",
+      "version": "0.4.1",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/jni-rs/jni-sys"
+    },
+    {
+      "group": "Rust",
+      "name": "jni-sys-macros",
+      "version": "0.4.1",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/jni-rs/jni-sys"
+    },
+    {
+      "group": "Rust",
+      "name": "lab",
+      "version": "0.11.0",
+      "license": "MIT",
+      "url": "https://github.com/TooManyBees/lab"
+    },
+    {
+      "group": "Rust",
+      "name": "lazy_static",
+      "version": "1.5.1",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-lang-nursery/lazy-static.rs"
+    },
+    {
+      "group": "Rust",
+      "name": "libc",
+      "version": "0.2.186",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-lang/libc"
+    },
+    {
+      "group": "Rust",
+      "name": "libloading",
+      "version": "0.8.9",
+      "license": "ISC",
+      "url": "https://github.com/nagisa/rust_libloading/"
+    },
+    {
+      "group": "Rust",
+      "name": "linux-raw-sys",
+      "version": "0.12.1",
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "url": "https://github.com/sunfishcode/linux-raw-sys"
+    },
+    {
+      "group": "Rust",
+      "name": "linux-raw-sys",
+      "version": "0.4.15",
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "url": "https://github.com/sunfishcode/linux-raw-sys"
+    },
+    {
+      "group": "Rust",
+      "name": "lock_api",
+      "version": "0.4.14",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/Amanieu/parking_lot"
+    },
+    {
+      "group": "Rust",
+      "name": "log",
+      "version": "0.4.32",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-lang/log"
+    },
+    {
+      "group": "Rust",
+      "name": "lru",
+      "version": "0.12.5",
+      "license": "MIT",
+      "url": "https://github.com/jeromefroe/lru-rs.git"
+    },
+    {
+      "group": "Rust",
+      "name": "mac_address",
+      "version": "1.2.1",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/repnop/mac_address"
+    },
+    {
+      "group": "Rust",
+      "name": "memchr",
+      "version": "2.8.2",
+      "license": "Unlicense OR MIT",
+      "url": "https://github.com/BurntSushi/memchr"
+    },
+    {
+      "group": "Rust",
+      "name": "memmap2",
+      "version": "0.9.12",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/RazrFalcon/memmap2-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "memmem",
+      "version": "0.1.1",
+      "license": "MIT/Apache-2.0",
+      "url": "http://github.com/jneem/memmem"
+    },
+    {
+      "group": "Rust",
+      "name": "memoffset",
+      "version": "0.9.1",
+      "license": "MIT",
+      "url": "https://github.com/Gilnaa/memoffset"
+    },
+    {
+      "group": "Rust",
+      "name": "minimal-lexical",
+      "version": "0.2.1",
+      "license": "MIT/Apache-2.0",
+      "url": "https://github.com/Alexhuszagh/minimal-lexical"
+    },
+    {
+      "group": "Rust",
+      "name": "mio",
+      "version": "1.2.1",
+      "license": "MIT",
+      "url": "https://github.com/tokio-rs/mio"
+    },
+    {
+      "group": "Rust",
+      "name": "ndk-sys",
+      "version": "0.6.0+11769913",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-mobile/ndk"
+    },
+    {
+      "group": "Rust",
+      "name": "nix",
+      "version": "0.29.0",
+      "license": "MIT",
+      "url": "https://github.com/nix-rust/nix"
+    },
+    {
+      "group": "Rust",
+      "name": "nix",
+      "version": "0.31.3",
+      "license": "MIT",
+      "url": "https://github.com/nix-rust/nix"
+    },
+    {
+      "group": "Rust",
+      "name": "nom",
+      "version": "7.1.3",
+      "license": "MIT",
+      "url": "https://github.com/Geal/nom"
+    },
+    {
+      "group": "Rust",
+      "name": "num-derive",
+      "version": "0.4.2",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-num/num-derive"
+    },
+    {
+      "group": "Rust",
+      "name": "num-traits",
+      "version": "0.2.19",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-num/num-traits"
+    },
+    {
+      "group": "Rust",
+      "name": "once_cell",
+      "version": "1.21.4",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/matklad/once_cell"
+    },
+    {
+      "group": "Rust",
+      "name": "ordered-float",
+      "version": "4.6.0",
+      "license": "MIT",
+      "url": "https://github.com/reem/rust-ordered-float"
+    },
+    {
+      "group": "Rust",
+      "name": "parking_lot",
+      "version": "0.12.5",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/Amanieu/parking_lot"
+    },
+    {
+      "group": "Rust",
+      "name": "parking_lot_core",
+      "version": "0.9.12",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/Amanieu/parking_lot"
+    },
+    {
+      "group": "Rust",
+      "name": "paste",
+      "version": "1.0.15",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/dtolnay/paste"
+    },
+    {
+      "group": "Rust",
+      "name": "pest",
+      "version": "2.9.5",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/pest-parser/pest"
+    },
+    {
+      "group": "Rust",
+      "name": "pest_derive",
+      "version": "2.9.5",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/pest-parser/pest"
+    },
+    {
+      "group": "Rust",
+      "name": "pest_generator",
+      "version": "2.9.5",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/pest-parser/pest"
+    },
+    {
+      "group": "Rust",
+      "name": "pest_meta",
+      "version": "2.9.5",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/pest-parser/pest"
+    },
+    {
+      "group": "Rust",
+      "name": "pest_stack_guard",
+      "version": "1.0.0",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/pest-parser/pest_stack_guard"
+    },
+    {
+      "group": "Rust",
+      "name": "phf",
+      "version": "0.11.3",
+      "license": "MIT",
+      "url": "https://github.com/rust-phf/rust-phf"
+    },
+    {
+      "group": "Rust",
+      "name": "phf_generator",
+      "version": "0.11.3",
+      "license": "MIT",
+      "url": "https://github.com/rust-phf/rust-phf"
+    },
+    {
+      "group": "Rust",
+      "name": "phf_macros",
+      "version": "0.11.3",
+      "license": "MIT",
+      "url": "https://github.com/rust-phf/rust-phf"
+    },
+    {
+      "group": "Rust",
+      "name": "phf_shared",
+      "version": "0.11.3",
+      "license": "MIT",
+      "url": "https://github.com/rust-phf/rust-phf"
+    },
+    {
+      "group": "Rust",
+      "name": "pin-project-lite",
+      "version": "0.2.17",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/taiki-e/pin-project-lite"
+    },
+    {
+      "group": "Rust",
+      "name": "pkcs8",
+      "version": "0.10.2",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/RustCrypto/formats/tree/master/pkcs8"
+    },
+    {
+      "group": "Rust",
+      "name": "polling",
+      "version": "3.11.0",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/smol-rs/polling"
+    },
+    {
+      "group": "Rust",
+      "name": "ppv-lite86",
+      "version": "0.2.21",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/cryptocorrosion/cryptocorrosion"
+    },
+    {
+      "group": "Rust",
+      "name": "proc-macro2",
+      "version": "1.0.106",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/dtolnay/proc-macro2"
+    },
+    {
+      "group": "Rust",
+      "name": "profiling",
+      "version": "1.0.18",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/aclysma/profiling"
+    },
+    {
+      "group": "Rust",
+      "name": "profiling-procmacros",
+      "version": "1.0.18",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/aclysma/profiling"
+    },
+    {
+      "group": "Rust",
+      "name": "prost",
+      "version": "0.13.5",
+      "license": "Apache-2.0",
+      "url": "https://github.com/tokio-rs/prost"
+    },
+    {
+      "group": "Rust",
+      "name": "prost-derive",
+      "version": "0.13.5",
+      "license": "Apache-2.0",
+      "url": "https://github.com/tokio-rs/prost"
+    },
+    {
+      "group": "Rust",
+      "name": "quick-xml",
+      "version": "0.41.0",
+      "license": "MIT",
+      "url": "https://github.com/tafia/quick-xml"
+    },
+    {
+      "group": "Rust",
+      "name": "quote",
+      "version": "1.0.45",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/dtolnay/quote"
+    },
+    {
+      "group": "Rust",
+      "name": "rand",
+      "version": "0.8.8",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-random/rand"
+    },
+    {
+      "group": "Rust",
+      "name": "rand",
+      "version": "0.9.5",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-random/rand"
+    },
+    {
+      "group": "Rust",
+      "name": "rand_chacha",
+      "version": "0.9.0",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-random/rand"
+    },
+    {
+      "group": "Rust",
+      "name": "rand_core",
+      "version": "0.6.4",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-random/rand"
+    },
+    {
+      "group": "Rust",
+      "name": "rand_core",
+      "version": "0.9.5",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-random/rand"
+    },
+    {
+      "group": "Rust",
+      "name": "ratatui",
+      "version": "0.29.0",
+      "license": "MIT",
+      "url": "https://github.com/ratatui/ratatui"
+    },
+    {
+      "group": "Rust",
+      "name": "regex",
+      "version": "1.12.4",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-lang/regex"
+    },
+    {
+      "group": "Rust",
+      "name": "regex-automata",
+      "version": "0.4.14",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-lang/regex"
+    },
+    {
+      "group": "Rust",
+      "name": "regex-syntax",
+      "version": "0.8.11",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-lang/regex"
+    },
+    {
+      "group": "Rust",
+      "name": "rustix",
+      "version": "0.38.44",
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "url": "https://github.com/bytecodealliance/rustix"
+    },
+    {
+      "group": "Rust",
+      "name": "rustix",
+      "version": "1.1.4",
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "url": "https://github.com/bytecodealliance/rustix"
+    },
+    {
+      "group": "Rust",
+      "name": "rustversion",
+      "version": "1.0.23",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/dtolnay/rustversion"
+    },
+    {
+      "group": "Rust",
+      "name": "ryu",
+      "version": "1.0.23",
+      "license": "Apache-2.0 OR BSL-1.0",
+      "url": "https://github.com/dtolnay/ryu"
+    },
+    {
+      "group": "Rust",
+      "name": "scopeguard",
+      "version": "1.2.0",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/bluss/scopeguard"
+    },
+    {
+      "group": "Rust",
+      "name": "serde",
+      "version": "1.0.228",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/serde-rs/serde"
+    },
+    {
+      "group": "Rust",
+      "name": "serde_core",
+      "version": "1.0.228",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/serde-rs/serde"
+    },
+    {
+      "group": "Rust",
+      "name": "serde_derive",
+      "version": "1.0.228",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/serde-rs/serde"
+    },
+    {
+      "group": "Rust",
+      "name": "serde_json",
+      "version": "1.0.150",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/serde-rs/json"
+    },
+    {
+      "group": "Rust",
+      "name": "sha2",
+      "version": "0.10.9",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/RustCrypto/hashes"
+    },
+    {
+      "group": "Rust",
+      "name": "signal-hook",
+      "version": "0.3.18",
+      "license": "Apache-2.0/MIT",
+      "url": "https://github.com/vorner/signal-hook"
+    },
+    {
+      "group": "Rust",
+      "name": "signal-hook-mio",
+      "version": "0.2.5",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/vorner/signal-hook"
+    },
+    {
+      "group": "Rust",
+      "name": "signal-hook-registry",
+      "version": "1.4.8",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/vorner/signal-hook"
+    },
+    {
+      "group": "Rust",
+      "name": "signature",
+      "version": "2.2.0",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/RustCrypto/traits/tree/master/signature"
+    },
+    {
+      "group": "Rust",
+      "name": "siphasher",
+      "version": "1.0.4",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/jedisct1/rust-siphash"
+    },
+    {
+      "group": "Rust",
+      "name": "smallvec",
+      "version": "1.16.3",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/servo/rust-smallvec"
+    },
+    {
+      "group": "Rust",
+      "name": "smithay",
+      "version": "0.7.0",
+      "license": "MIT",
+      "url": "https://github.com/Smithay/smithay"
+    },
+    {
+      "group": "Rust",
+      "name": "socket2",
+      "version": "0.6.4",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/rust-lang/socket2"
+    },
+    {
+      "group": "Rust",
+      "name": "spki",
+      "version": "0.7.3",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/RustCrypto/formats/tree/master/spki"
+    },
+    {
+      "group": "Rust",
+      "name": "static_assertions",
+      "version": "1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/nvzqz/static-assertions-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "strsim",
+      "version": "0.11.1",
+      "license": "MIT",
+      "url": "https://github.com/rapidfuzz/strsim-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "strum",
+      "version": "0.26.3",
+      "license": "MIT",
+      "url": "https://github.com/Peternator7/strum"
+    },
+    {
+      "group": "Rust",
+      "name": "strum_macros",
+      "version": "0.26.4",
+      "license": "MIT",
+      "url": "https://github.com/Peternator7/strum"
+    },
+    {
+      "group": "Rust",
+      "name": "subtle",
+      "version": "2.6.1",
+      "license": "BSD-3-Clause",
+      "url": "https://github.com/dalek-cryptography/subtle"
+    },
+    {
+      "group": "Rust",
+      "name": "syn",
+      "version": "1.0.109",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/dtolnay/syn"
+    },
+    {
+      "group": "Rust",
+      "name": "syn",
+      "version": "2.0.117",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/dtolnay/syn"
+    },
+    {
+      "group": "Rust",
+      "name": "syn",
+      "version": "3.0.9",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/dtolnay/syn"
+    },
+    {
+      "group": "Rust",
+      "name": "tempfile",
+      "version": "3.27.0",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/Stebalien/tempfile"
+    },
+    {
+      "group": "Rust",
+      "name": "terminfo",
+      "version": "0.9.0",
+      "license": "WTFPL",
+      "url": "https://github.com/meh/rust-terminfo"
+    },
+    {
+      "group": "Rust",
+      "name": "termios",
+      "version": "0.3.3",
+      "license": "MIT",
+      "url": "https://github.com/dcuddeback/termios-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "termwiz",
+      "version": "0.23.3",
+      "license": "MIT",
+      "url": "https://github.com/wezterm/wezterm"
+    },
+    {
+      "group": "Rust",
+      "name": "thiserror",
+      "version": "1.0.69",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/dtolnay/thiserror"
+    },
+    {
+      "group": "Rust",
+      "name": "thiserror",
+      "version": "2.0.21",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/dtolnay/thiserror"
+    },
+    {
+      "group": "Rust",
+      "name": "thiserror-impl",
+      "version": "1.0.69",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/dtolnay/thiserror"
+    },
+    {
+      "group": "Rust",
+      "name": "thiserror-impl",
+      "version": "2.0.21",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/dtolnay/thiserror"
+    },
+    {
+      "group": "Rust",
+      "name": "tokio",
+      "version": "1.52.3",
+      "license": "MIT",
+      "url": "https://github.com/tokio-rs/tokio"
+    },
+    {
+      "group": "Rust",
+      "name": "tokio-macros",
+      "version": "2.7.0",
+      "license": "MIT",
+      "url": "https://github.com/tokio-rs/tokio"
+    },
+    {
+      "group": "Rust",
+      "name": "tracing",
+      "version": "0.1.44",
+      "license": "MIT",
+      "url": "https://github.com/tokio-rs/tracing"
+    },
+    {
+      "group": "Rust",
+      "name": "tracing-attributes",
+      "version": "0.1.31",
+      "license": "MIT",
+      "url": "https://github.com/tokio-rs/tracing"
+    },
+    {
+      "group": "Rust",
+      "name": "tracing-core",
+      "version": "0.1.36",
+      "license": "MIT",
+      "url": "https://github.com/tokio-rs/tracing"
+    },
+    {
+      "group": "Rust",
+      "name": "typenum",
+      "version": "1.20.1",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/paholg/typenum"
+    },
+    {
+      "group": "Rust",
+      "name": "ucd-trie",
+      "version": "0.1.7",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/BurntSushi/ucd-generate"
+    },
+    {
+      "group": "Rust",
+      "name": "unicode-ident",
+      "version": "1.0.24",
+      "license": "(MIT OR Apache-2.0) AND Unicode-3.0",
+      "url": "https://github.com/dtolnay/unicode-ident"
+    },
+    {
+      "group": "Rust",
+      "name": "unicode-segmentation",
+      "version": "1.13.3",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/unicode-rs/unicode-segmentation"
+    },
+    {
+      "group": "Rust",
+      "name": "unicode-truncate",
+      "version": "1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/Aetf/unicode-truncate"
+    },
+    {
+      "group": "Rust",
+      "name": "unicode-width",
+      "version": "0.1.14",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/unicode-rs/unicode-width"
+    },
+    {
+      "group": "Rust",
+      "name": "unicode-width",
+      "version": "0.2.0",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/unicode-rs/unicode-width"
+    },
+    {
+      "group": "Rust",
+      "name": "utf8parse",
+      "version": "0.2.2",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/alacritty/vte"
+    },
+    {
+      "group": "Rust",
+      "name": "uuid",
+      "version": "1.29.0",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/uuid-rs/uuid"
+    },
+    {
+      "group": "Rust",
+      "name": "vtparse",
+      "version": "0.6.2",
+      "license": "MIT",
+      "url": "https://github.com/wez/wezterm"
+    },
+    {
+      "group": "Rust",
+      "name": "wayland-backend",
+      "version": "0.3.17",
+      "license": "MIT",
+      "url": "https://github.com/smithay/wayland-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "wayland-protocols",
+      "version": "0.32.13",
+      "license": "MIT",
+      "url": "https://github.com/smithay/wayland-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "wayland-protocols-misc",
+      "version": "0.3.12",
+      "license": "MIT",
+      "url": "https://github.com/smithay/wayland-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "wayland-protocols-wlr",
+      "version": "0.3.12",
+      "license": "MIT",
+      "url": "https://github.com/smithay/wayland-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "wayland-scanner",
+      "version": "0.31.11",
+      "license": "MIT",
+      "url": "https://github.com/smithay/wayland-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "wayland-server",
+      "version": "0.31.14",
+      "license": "MIT",
+      "url": "https://github.com/smithay/wayland-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "wayland-sys",
+      "version": "0.31.11",
+      "license": "MIT",
+      "url": "https://github.com/smithay/wayland-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "wezterm-bidi",
+      "version": "0.2.3",
+      "license": "MIT AND Unicode-DFS-2016",
+      "url": "https://github.com/wez/wezterm"
+    },
+    {
+      "group": "Rust",
+      "name": "wezterm-blob-leases",
+      "version": "0.1.1",
+      "license": "MIT",
+      "url": "https://github.com/wezterm/wezterm"
+    },
+    {
+      "group": "Rust",
+      "name": "wezterm-color-types",
+      "version": "0.3.0",
+      "license": "MIT",
+      "url": "https://github.com/wez/wezterm"
+    },
+    {
+      "group": "Rust",
+      "name": "wezterm-dynamic",
+      "version": "0.2.1",
+      "license": "MIT",
+      "url": "https://github.com/wezterm/wezterm"
+    },
+    {
+      "group": "Rust",
+      "name": "wezterm-dynamic-derive",
+      "version": "0.1.1",
+      "license": "MIT",
+      "url": "https://github.com/wezterm/wezterm"
+    },
+    {
+      "group": "Rust",
+      "name": "wezterm-input-types",
+      "version": "0.1.0",
+      "license": "MIT",
+      "url": "https://github.com/wez/wezterm"
+    },
+    {
+      "group": "Rust",
+      "name": "xkbcommon",
+      "version": "0.8.0",
+      "license": "MIT",
+      "url": "https://github.com/rust-x-bindings/xkbcommon-rs"
+    },
+    {
+      "group": "Rust",
+      "name": "xkeysym",
+      "version": "0.2.1",
+      "license": "MIT OR Apache-2.0 OR Zlib",
+      "url": "https://github.com/notgull/xkeysym"
+    },
+    {
+      "group": "Rust",
+      "name": "zerocopy",
+      "version": "0.8.63",
+      "license": "BSD-2-Clause OR Apache-2.0 OR MIT",
+      "url": "https://github.com/google/zerocopy"
+    },
+    {
+      "group": "Rust",
+      "name": "zeroize",
+      "version": "1.9.1",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/RustCrypto/utils"
+    },
+    {
+      "group": "Rust",
+      "name": "zmij",
+      "version": "1.0.21",
+      "license": "MIT",
+      "url": "https://github.com/dtolnay/zmij"
+    },
+    {
+      "group": "Native",
+      "name": "File",
+      "version": null,
+      "license": "GPL-3.0-only",
+      "url": "https://github.com/FurryR/file-manager"
+    },
+    {
+      "group": "Native",
+      "name": "libepoxy",
+      "version": null,
+      "license": "MIT",
+      "url": "https://github.com/anholt/libepoxy"
+    },
+    {
+      "group": "Native",
+      "name": "libltdl",
+      "version": null,
+      "license": "LGPL-2.1-or-later",
+      "url": "https://www.gnu.org/software/libtool/"
+    },
+    {
+      "group": "Native",
+      "name": "libsepol",
+      "version": null,
+      "license": "LGPL-2.1-or-later",
+      "url": "https://github.com/SELinuxProject/selinux"
+    },
+    {
+      "group": "Native",
+      "name": "libsndfile",
+      "version": null,
+      "license": "LGPL-2.1-or-later",
+      "url": "https://libsndfile.github.io/libsndfile/"
+    },
+    {
+      "group": "Native",
+      "name": "libxkbcommon",
+      "version": null,
+      "license": "MIT",
+      "url": "https://github.com/xkbcommon/libxkbcommon"
+    },
+    {
+      "group": "Native",
+      "name": "PRoot",
+      "version": null,
+      "license": "GPL-2.0-only",
+      "url": "https://github.com/termux/proot"
+    },
+    {
+      "group": "Native",
+      "name": "PulseAudio",
+      "version": null,
+      "license": "LGPL-2.1-or-later",
+      "url": "https://www.freedesktop.org/wiki/Software/PulseAudio/"
+    },
+    {
+      "group": "Native",
+      "name": "xkeyboard-config",
+      "version": null,
+      "license": "MIT",
+      "url": "https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config"
+    }
+  ]
+}

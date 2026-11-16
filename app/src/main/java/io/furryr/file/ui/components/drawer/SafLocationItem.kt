@@ -139,7 +139,7 @@ internal fun SafLocationItem(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = "saf://$hexId/",
+                text = "saf:///$hexId",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,

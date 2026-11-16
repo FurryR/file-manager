@@ -107,6 +107,7 @@ import kotlinx.coroutines.withContext
 
 @Composable
 fun FileDrawer(
+    vfs: Vfs,
     darkTheme: Boolean,
     onToggleTheme: () -> Unit,
     onHomeClick: () -> Unit,
@@ -121,6 +122,12 @@ fun FileDrawer(
     onContainerKill: (name: String) -> Unit = {},
     sortMode: Boolean = false,
     onToggleSortMode: () -> Unit = {},
+    /** Picker shells get the same drawer without location CRUD. */
+    allowEdit: Boolean = true,
+    /** Picker shells do not need the container/toolbox entries. */
+    showTools: Boolean = true,
+    /** EXTRA_LOCAL_ONLY hides network locations and SAF trees. */
+    localOnly: Boolean = false,
     containerOrder: List<String> = emptyList(),
     onContainerReorder: (from: Int, to: Int) -> Unit = { _, _ -> },
     refreshKey: Int = 0,
@@ -177,6 +184,7 @@ fun FileDrawer(
     var homeStat by remember { mutableStateOf<ProviderStat?>(null) }
     var containers by remember { mutableStateOf<List<Container>>(emptyList()) }
     var showDrawerMenu by remember { mutableStateOf(false) }
+    var showAboutDialog by remember { mutableStateOf(false) }
     var contextMenuTarget by remember { mutableStateOf<Container?>(null) }
     var draggedContainerName by remember { mutableStateOf<String?>(null) }
     var dragOffsetDp by remember { mutableStateOf(0f) }
@@ -322,10 +330,10 @@ fun FileDrawer(
 
     LaunchedEffect(refreshKey, safRefreshKey) {
         rootStat = withContext(Dispatchers.IO) {
-            Vfs.stat("/").getOrNull()
+            vfs.stat("/").getOrNull()
         }
         homeStat = withContext(Dispatchers.IO) {
-            Vfs.stat(DefaultPath).getOrNull()
+            vfs.stat(DefaultPath).getOrNull()
         }
         containers = withContext(Dispatchers.IO) {
             ContainerManager.listContainers(context).getOrDefault(emptyList())
@@ -345,7 +353,9 @@ fun FileDrawer(
                         text = stringResource(R.string.drawer_title),
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { showAboutDialog = true }
                     )
                     if (!sortMode) {
                         IconButton(onClick = onToggleTheme) {
@@ -355,59 +365,61 @@ fun FileDrawer(
                             )
                         }
                     }
-                    Box {
-                        IconButton(onClick = {
-                            if (sortMode) {
-                                safContextMenuTarget = null
-                                onToggleSortMode()
-                            } else {
-                                showDrawerMenu = true
-                            }
-                        }) {
-                            Icon(
-                                if (sortMode) Icons.Default.Check else Icons.Default.MoreVert,
-                                contentDescription = stringResource(if (sortMode) R.string.cd_done_sorting else R.string.cd_more)
-                            )
-                        }
-                        if (!sortMode) {
-                            DropdownMenu(
-                                expanded = showDrawerMenu,
-                                onDismissRequest = { showDrawerMenu = false }
-                            ) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.drawer_add_unified_location)) },
-                                leadingIcon = { Icon(Icons.Default.FolderOpen, null) },
-                                onClick = {
-                                    showDrawerMenu = false
-                                    showAddLocationDialog = true
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.drawer_new_container)) },
-                                leadingIcon = { Icon(Icons.Default.Add, null) },
-                                onClick = {
-                                    showDrawerMenu = false
-                                    showContainerDialog = true
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.drawer_sort)) },
-                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
-                                onClick = {
-                                    showDrawerMenu = false
+                    if (allowEdit) {
+                        Box {
+                            IconButton(onClick = {
+                                if (sortMode) {
+                                    safContextMenuTarget = null
                                     onToggleSortMode()
+                                } else {
+                                    showDrawerMenu = true
                                 }
-                            )
-                            HorizontalDivider()
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.settings)) },
-                                leadingIcon = { Icon(Icons.Default.Settings, null) },
-                                onClick = {
-                                    showDrawerMenu = false
-                                    onSettingsClick()
+                            }) {
+                                Icon(
+                                    if (sortMode) Icons.Default.Check else Icons.Default.MoreVert,
+                                    contentDescription = stringResource(if (sortMode) R.string.cd_done_sorting else R.string.cd_more)
+                                )
+                            }
+                            if (!sortMode) {
+                                DropdownMenu(
+                                    expanded = showDrawerMenu,
+                                    onDismissRequest = { showDrawerMenu = false }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.drawer_add_unified_location)) },
+                                        leadingIcon = { Icon(Icons.Default.FolderOpen, null) },
+                                        onClick = {
+                                            showDrawerMenu = false
+                                            showAddLocationDialog = true
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.drawer_new_container)) },
+                                        leadingIcon = { Icon(Icons.Default.Add, null) },
+                                        onClick = {
+                                            showDrawerMenu = false
+                                            showContainerDialog = true
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.drawer_sort)) },
+                                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
+                                        onClick = {
+                                            showDrawerMenu = false
+                                            onToggleSortMode()
+                                        }
+                                    )
+                                    HorizontalDivider()
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.settings)) },
+                                        leadingIcon = { Icon(Icons.Default.Settings, null) },
+                                        onClick = {
+                                            showDrawerMenu = false
+                                            onSettingsClick()
+                                        }
+                                    )
                                 }
-                            )
-                        }
+                            }
                         }
                     }
                 }
@@ -461,7 +473,7 @@ fun FileDrawer(
                             name = loc.name,
                             path = loc.path,
                             onClick = { onLocalClick(loc) },
-                            onLongClick = { localContextMenuTarget = loc.id },
+                            onLongClick = { if (allowEdit) localContextMenuTarget = loc.id },
                             sortMode = sortMode,
                             isDragging = draggedLocalId == loc.id,
                             dragOffsetDp = if (draggedLocalId == loc.id) localDragOffsetDp else 0f,
@@ -525,395 +537,399 @@ fun FileDrawer(
                     }
                 }
                 // SAF locations (sortable among themselves)
-                itemsIndexed(
-                    displaySafLocations,
-                    key = { _, loc -> "saf_${loc.hexId}" }
-                ) { idx, loc ->
-                    Box(modifier = Modifier.fillMaxWidth()) {
-                        SafLocationItem(
-                            name = loc.name,
-                            hexId = loc.hexId,
-                            onClick = { onSafClick(loc.hexId) },
-                            onLongClick = { safContextMenuTarget = loc.hexId },
-                            sortMode = sortMode,
-                            isDragging = draggedSafHex == loc.hexId,
-                            dragOffsetDp = if (draggedSafHex == loc.hexId) safDragOffsetDp else 0f,
-                            dragHandleModifier = if (sortMode) {
-                                Modifier.pointerInput(loc.hexId) {
-                                    detectVerticalDragGestures(
-                                        onDragStart = { draggedSafHex = loc.hexId },
-                                        onVerticalDrag = { change, dragAmount ->
-                                            change.consume()
-                                            safDragOffsetDp += dragAmount.toDp().value
-                                        },
-                                        onDragEnd = {
-                                            val hex = draggedSafHex
-                                            if (hex != null) {
-                                                val from = currentSafOrder.indexOf(hex)
-                                                if (from >= 0) {
-                                                    val itemH = 56f
-                                                    val steps = (safDragOffsetDp / itemH).toInt()
-                                                    val to = (from + steps).coerceIn(currentSafOrder.indices)
-                                                    if (to != from) currentOnSafReorder(from, to)
+                if (!localOnly) {
+                    itemsIndexed(
+                        displaySafLocations,
+                        key = { _, loc -> "saf_${loc.hexId}" }
+                    ) { idx, loc ->
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            SafLocationItem(
+                                name = loc.name,
+                                hexId = loc.hexId,
+                                onClick = { onSafClick(loc.hexId) },
+                                onLongClick = { if (allowEdit) safContextMenuTarget = loc.hexId },
+                                sortMode = sortMode,
+                                isDragging = draggedSafHex == loc.hexId,
+                                dragOffsetDp = if (draggedSafHex == loc.hexId) safDragOffsetDp else 0f,
+                                dragHandleModifier = if (sortMode) {
+                                    Modifier.pointerInput(loc.hexId) {
+                                        detectVerticalDragGestures(
+                                            onDragStart = { draggedSafHex = loc.hexId },
+                                            onVerticalDrag = { change, dragAmount ->
+                                                change.consume()
+                                                safDragOffsetDp += dragAmount.toDp().value
+                                            },
+                                            onDragEnd = {
+                                                val hex = draggedSafHex
+                                                if (hex != null) {
+                                                    val from = currentSafOrder.indexOf(hex)
+                                                    if (from >= 0) {
+                                                        val itemH = 56f
+                                                        val steps = (safDragOffsetDp / itemH).toInt()
+                                                        val to = (from + steps).coerceIn(currentSafOrder.indices)
+                                                        if (to != from) currentOnSafReorder(from, to)
+                                                    }
                                                 }
-                                            }
-                                            draggedSafHex = null
-                                            safDragOffsetDp = 0f
-                                        },
-                                        onDragCancel = { draggedSafHex = null; safDragOffsetDp = 0f },
-                                    )
-                                }
-                            } else Modifier,
-                        )
-                        // Context menu for SAF items
-                        DropdownMenu(
-                            expanded = safContextMenuTarget == loc.hexId,
-                            onDismissRequest = { safContextMenuTarget = null }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.drawer_rename)) },
-                                leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
-                                onClick = {
-                                    safRenameTarget = loc.hexId
-                                    safRenameText = loc.name
-                                    safContextMenuTarget = null
-                                }
+                                                draggedSafHex = null
+                                                safDragOffsetDp = 0f
+                                            },
+                                            onDragCancel = { draggedSafHex = null; safDragOffsetDp = 0f },
+                                        )
+                                    }
+                                } else Modifier,
                             )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.drawer_delete)) },
-                                leadingIcon = { Icon(Icons.Default.Delete, null) },
-                                onClick = {
-                                    safDeleteTarget = loc.hexId
-                                    safContextMenuTarget = null
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.drawer_sort)) },
-                                             leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
-                                             onClick = {
-                                                 contextMenuTarget = null
-                                                 onToggleSortMode()
-                                             }
-                            )
+                            // Context menu for SAF items
+                            DropdownMenu(
+                                expanded = safContextMenuTarget == loc.hexId,
+                                onDismissRequest = { safContextMenuTarget = null }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.drawer_rename)) },
+                                    leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
+                                    onClick = {
+                                        safRenameTarget = loc.hexId
+                                        safRenameText = loc.name
+                                        safContextMenuTarget = null
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.drawer_delete)) },
+                                    leadingIcon = { Icon(Icons.Default.Delete, null) },
+                                    onClick = {
+                                        safDeleteTarget = loc.hexId
+                                        safContextMenuTarget = null
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.drawer_sort)) },
+                                                 leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
+                                                 onClick = {
+                                                     contextMenuTarget = null
+                                                     onToggleSortMode()
+                                                 }
+                                )
+                            }
                         }
                     }
                 }
             }
 
             // ── Group: 网络 (1) ─────────────────────────────────────────
-            item {
-                GroupHeader(
-                    labelResId = R.string.drawer_group_network,
-                    isCollapsed = 1 in collapsedGroups,
-                    onToggle = { toggleGroup(1) },
-                )
-            }
-            if (1 !in collapsedGroups) {
-                if (displayFtpLocations.isEmpty() && displaySftpLocations.isEmpty() &&
-                    displayRemoteLocations.isEmpty() && displayWebLocations.isEmpty()
-                ) {
-                    item {
-                        Text(
-                            text = stringResource(R.string.no_locations),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                        )
-                    }
-                } else {
-                    itemsIndexed(
-                        displayFtpLocations,
-                        key = { _, server -> "ftp_${server.host}" }
-                    ) { _, server ->
-                        Box(modifier = Modifier.fillMaxWidth()) {
-                            RemoteLocationItem(
-                                name = server.name,
-                                detail = "ftp://${server.host}/",
-                                onClick = { onFtpClick(server.host) },
-                                onLongClick = { ftpContextMenuTarget = server.host },
-                                sortMode = sortMode,
-                                isDragging = draggedFtpHost == server.host,
-                                dragOffsetDp = if (draggedFtpHost == server.host) ftpDragOffsetDp else 0f,
-                                dragHandleModifier = if (sortMode) {
-                                    Modifier.pointerInput(server.host) {
-                                        detectVerticalDragGestures(
-                                            onDragStart = { draggedFtpHost = server.host },
-                                            onVerticalDrag = { change, dragAmount ->
-                                                change.consume()
-                                                ftpDragOffsetDp += dragAmount.toDp().value
-                                            },
-                                            onDragEnd = {
-                                                val host = draggedFtpHost
-                                                if (host != null) {
-                                                    val from = currentFtpOrder.indexOf(host)
-                                                    if (from >= 0) {
-                                                        val itemH = 56f
-                                                        val steps = (ftpDragOffsetDp / itemH).toInt()
-                                                        val to = (from + steps).coerceIn(currentFtpOrder.indices)
-                                                        if (to != from) currentOnFtpReorder(from, to)
-                                                    }
-                                                }
-                                                draggedFtpHost = null
-                                                ftpDragOffsetDp = 0f
-                                            },
-                                            onDragCancel = { draggedFtpHost = null; ftpDragOffsetDp = 0f },
-                                        )
-                                    }
-                                } else Modifier,
+            if (!localOnly) {
+                item {
+                    GroupHeader(
+                        labelResId = R.string.drawer_group_network,
+                        isCollapsed = 1 in collapsedGroups,
+                        onToggle = { toggleGroup(1) },
+                    )
+                }
+                if (1 !in collapsedGroups) {
+                    if (displayFtpLocations.isEmpty() && displaySftpLocations.isEmpty() &&
+                        displayRemoteLocations.isEmpty() && displayWebLocations.isEmpty()
+                    ) {
+                        item {
+                            Text(
+                                text = stringResource(R.string.no_locations),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
                             )
-                            DropdownMenu(
-                                expanded = ftpContextMenuTarget == server.host,
-                                onDismissRequest = { ftpContextMenuTarget = null }
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.drawer_rename)) },
-                                    leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
-                                    onClick = {
-                                        ftpEditTarget = server.host
-                                        ftpContextMenuTarget = null
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.drawer_delete)) },
-                                    leadingIcon = { Icon(Icons.Default.Delete, null) },
-                                    onClick = {
-                                        ftpDeleteTarget = server.host
-                                        ftpContextMenuTarget = null
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.drawer_sort)) },
-                                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
-                                    onClick = {
-                                        ftpContextMenuTarget = null
-                                        onToggleSortMode()
-                                    }
-                                )
-                            }
                         }
-                    }
-                    itemsIndexed(
-                            displaySftpLocations,
-                            key = { _, server -> "sftp_${server.host}" }
+                    } else {
+                        itemsIndexed(
+                            displayFtpLocations,
+                            key = { _, server -> "ftp_${server.host}" }
                         ) { _, server ->
                             Box(modifier = Modifier.fillMaxWidth()) {
                                 RemoteLocationItem(
                                     name = server.name,
-                                    detail = "sftp://${server.host}/",
-                                    onClick = { onSftpClick(server.host) },
-                                    onLongClick = { sftpContextMenuTarget = server.host },
+                                    detail = "ftp://${server.host}/",
+                                    onClick = { onFtpClick(server.host) },
+                                    onLongClick = { if (allowEdit) ftpContextMenuTarget = server.host },
                                     sortMode = sortMode,
-                                    isDragging = draggedSftpHost == server.host,
-                                    dragOffsetDp = if (draggedSftpHost == server.host) sftpDragOffsetDp else 0f,
+                                    isDragging = draggedFtpHost == server.host,
+                                    dragOffsetDp = if (draggedFtpHost == server.host) ftpDragOffsetDp else 0f,
                                     dragHandleModifier = if (sortMode) {
                                         Modifier.pointerInput(server.host) {
                                             detectVerticalDragGestures(
-                                                onDragStart = { draggedSftpHost = server.host },
+                                                onDragStart = { draggedFtpHost = server.host },
                                                 onVerticalDrag = { change, dragAmount ->
                                                     change.consume()
-                                                    sftpDragOffsetDp += dragAmount.toDp().value
+                                                    ftpDragOffsetDp += dragAmount.toDp().value
                                                 },
                                                 onDragEnd = {
-                                                    val host = draggedSftpHost
+                                                    val host = draggedFtpHost
                                                     if (host != null) {
-                                                        val from = currentSftpOrder.indexOf(host)
+                                                        val from = currentFtpOrder.indexOf(host)
                                                         if (from >= 0) {
                                                             val itemH = 56f
-                                                            val steps = (sftpDragOffsetDp / itemH).toInt()
-                                                            val to = (from + steps).coerceIn(currentSftpOrder.indices)
-                                                            if (to != from) currentOnSftpReorder(from, to)
+                                                            val steps = (ftpDragOffsetDp / itemH).toInt()
+                                                            val to = (from + steps).coerceIn(currentFtpOrder.indices)
+                                                            if (to != from) currentOnFtpReorder(from, to)
                                                         }
                                                     }
-                                                    draggedSftpHost = null
-                                                    sftpDragOffsetDp = 0f
+                                                    draggedFtpHost = null
+                                                    ftpDragOffsetDp = 0f
                                                 },
-                                                onDragCancel = { draggedSftpHost = null; sftpDragOffsetDp = 0f },
+                                                onDragCancel = { draggedFtpHost = null; ftpDragOffsetDp = 0f },
                                             )
                                         }
                                     } else Modifier,
                                 )
                                 DropdownMenu(
-                                    expanded = sftpContextMenuTarget == server.host,
-                                    onDismissRequest = { sftpContextMenuTarget = null }
+                                    expanded = ftpContextMenuTarget == server.host,
+                                    onDismissRequest = { ftpContextMenuTarget = null }
                                 ) {
                                     DropdownMenuItem(
                                         text = { Text(stringResource(R.string.drawer_rename)) },
                                         leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
                                         onClick = {
-                                            sftpEditTarget = server.host
-                                            sftpContextMenuTarget = null
+                                            ftpEditTarget = server.host
+                                            ftpContextMenuTarget = null
                                         }
                                     )
                                     DropdownMenuItem(
                                         text = { Text(stringResource(R.string.drawer_delete)) },
                                         leadingIcon = { Icon(Icons.Default.Delete, null) },
                                         onClick = {
-                                            sftpDeleteTarget = server.host
-                                            sftpContextMenuTarget = null
+                                            ftpDeleteTarget = server.host
+                                            ftpContextMenuTarget = null
                                         }
                                     )
                                     DropdownMenuItem(
                                         text = { Text(stringResource(R.string.drawer_sort)) },
                                         leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
                                         onClick = {
-                                            sftpContextMenuTarget = null
+                                            ftpContextMenuTarget = null
                                             onToggleSortMode()
                                         }
                                     )
                                 }
                             }
                         }
-                    itemsIndexed(
-                        displayRemoteLocations,
-                        key = { _, location -> "remote_${location.id}" }
-                    ) { _, location ->
-                        Box(modifier = Modifier.fillMaxWidth()) {
-                            RemoteLocationItem(
-                                name = location.name,
-                                detail = if (location.kind == RemoteKind.ALIST) {
-                                    "AList · ${location.endpoint}"
-                                } else {
-                                    "SSH · ${location.username}@${location.host}:${location.port}"
-                                },
-                                onClick = { openRemote(location) },
-                                onLongClick = { remoteContextMenuTarget = location.id },
-                                sortMode = sortMode,
-                                isDragging = draggedRemoteId == location.id,
-                                dragOffsetDp = if (draggedRemoteId == location.id) remoteDragOffsetDp else 0f,
-                                dragHandleModifier = if (sortMode) {
-                                    Modifier.pointerInput(location.id) {
-                                        detectVerticalDragGestures(
-                                            onDragStart = { draggedRemoteId = location.id },
-                                            onVerticalDrag = { change, dragAmount ->
-                                                change.consume()
-                                                remoteDragOffsetDp += dragAmount.toDp().value
-                                            },
-                                            onDragEnd = {
-                                                val id = draggedRemoteId
-                                                if (id != null) {
-                                                    val from = currentRemoteOrder.indexOf(id)
-                                                    if (from >= 0) {
-                                                        val itemH = 56f
-                                                        val steps = (remoteDragOffsetDp / itemH).toInt()
-                                                        val to = (from + steps).coerceIn(currentRemoteOrder.indices)
-                                                        if (to != from) currentOnRemoteReorder(from, to)
-                                                    }
-                                                }
-                                                draggedRemoteId = null
-                                                remoteDragOffsetDp = 0f
-                                            },
-                                            onDragCancel = {
-                                                draggedRemoteId = null
-                                                remoteDragOffsetDp = 0f
-                                            },
+                        itemsIndexed(
+                                displaySftpLocations,
+                                key = { _, server -> "sftp_${server.host}" }
+                            ) { _, server ->
+                                Box(modifier = Modifier.fillMaxWidth()) {
+                                    RemoteLocationItem(
+                                        name = server.name,
+                                        detail = "sftp://${server.host}/",
+                                        onClick = { onSftpClick(server.host) },
+                                        onLongClick = { if (allowEdit) sftpContextMenuTarget = server.host },
+                                        sortMode = sortMode,
+                                        isDragging = draggedSftpHost == server.host,
+                                        dragOffsetDp = if (draggedSftpHost == server.host) sftpDragOffsetDp else 0f,
+                                        dragHandleModifier = if (sortMode) {
+                                            Modifier.pointerInput(server.host) {
+                                                detectVerticalDragGestures(
+                                                    onDragStart = { draggedSftpHost = server.host },
+                                                    onVerticalDrag = { change, dragAmount ->
+                                                        change.consume()
+                                                        sftpDragOffsetDp += dragAmount.toDp().value
+                                                    },
+                                                    onDragEnd = {
+                                                        val host = draggedSftpHost
+                                                        if (host != null) {
+                                                            val from = currentSftpOrder.indexOf(host)
+                                                            if (from >= 0) {
+                                                                val itemH = 56f
+                                                                val steps = (sftpDragOffsetDp / itemH).toInt()
+                                                                val to = (from + steps).coerceIn(currentSftpOrder.indices)
+                                                                if (to != from) currentOnSftpReorder(from, to)
+                                                            }
+                                                        }
+                                                        draggedSftpHost = null
+                                                        sftpDragOffsetDp = 0f
+                                                    },
+                                                    onDragCancel = { draggedSftpHost = null; sftpDragOffsetDp = 0f },
+                                                )
+                                            }
+                                        } else Modifier,
+                                    )
+                                    DropdownMenu(
+                                        expanded = sftpContextMenuTarget == server.host,
+                                        onDismissRequest = { sftpContextMenuTarget = null }
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.drawer_rename)) },
+                                            leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
+                                            onClick = {
+                                                sftpEditTarget = server.host
+                                                sftpContextMenuTarget = null
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.drawer_delete)) },
+                                            leadingIcon = { Icon(Icons.Default.Delete, null) },
+                                            onClick = {
+                                                sftpDeleteTarget = server.host
+                                                sftpContextMenuTarget = null
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.drawer_sort)) },
+                                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
+                                            onClick = {
+                                                sftpContextMenuTarget = null
+                                                onToggleSortMode()
+                                            }
                                         )
                                     }
-                                } else Modifier,
-                            )
-                            DropdownMenu(
-                                expanded = remoteContextMenuTarget == location.id,
-                                onDismissRequest = { remoteContextMenuTarget = null },
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.drawer_rename)) },
-                                    leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
-                                    onClick = {
-                                        remoteEditTarget = location.id
-                                        remoteContextMenuTarget = null
-                                    }
+                                }
+                            }
+                        itemsIndexed(
+                            displayRemoteLocations,
+                            key = { _, location -> "remote_${location.id}" }
+                        ) { _, location ->
+                            Box(modifier = Modifier.fillMaxWidth()) {
+                                RemoteLocationItem(
+                                    name = location.name,
+                                    detail = if (location.kind == RemoteKind.ALIST) {
+                                        "AList · ${location.endpoint}"
+                                    } else {
+                                        "SSH · ${location.username}@${location.host}:${location.port}"
+                                    },
+                                    onClick = { openRemote(location) },
+                                    onLongClick = { if (allowEdit) remoteContextMenuTarget = location.id },
+                                    sortMode = sortMode,
+                                    isDragging = draggedRemoteId == location.id,
+                                    dragOffsetDp = if (draggedRemoteId == location.id) remoteDragOffsetDp else 0f,
+                                    dragHandleModifier = if (sortMode) {
+                                        Modifier.pointerInput(location.id) {
+                                            detectVerticalDragGestures(
+                                                onDragStart = { draggedRemoteId = location.id },
+                                                onVerticalDrag = { change, dragAmount ->
+                                                    change.consume()
+                                                    remoteDragOffsetDp += dragAmount.toDp().value
+                                                },
+                                                onDragEnd = {
+                                                    val id = draggedRemoteId
+                                                    if (id != null) {
+                                                        val from = currentRemoteOrder.indexOf(id)
+                                                        if (from >= 0) {
+                                                            val itemH = 56f
+                                                            val steps = (remoteDragOffsetDp / itemH).toInt()
+                                                            val to = (from + steps).coerceIn(currentRemoteOrder.indices)
+                                                            if (to != from) currentOnRemoteReorder(from, to)
+                                                        }
+                                                    }
+                                                    draggedRemoteId = null
+                                                    remoteDragOffsetDp = 0f
+                                                },
+                                                onDragCancel = {
+                                                    draggedRemoteId = null
+                                                    remoteDragOffsetDp = 0f
+                                                },
+                                            )
+                                        }
+                                    } else Modifier,
                                 )
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.drawer_delete)) },
-                                    leadingIcon = { Icon(Icons.Default.Delete, null) },
-                                    onClick = {
-                                        remoteDeleteTarget = location.id
-                                        remoteContextMenuTarget = null
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.drawer_sort)) },
-                                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
-                                    onClick = {
-                                        remoteContextMenuTarget = null
-                                        onToggleSortMode()
-                                    }
-                                )
+                                DropdownMenu(
+                                    expanded = remoteContextMenuTarget == location.id,
+                                    onDismissRequest = { remoteContextMenuTarget = null },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.drawer_rename)) },
+                                        leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
+                                        onClick = {
+                                            remoteEditTarget = location.id
+                                            remoteContextMenuTarget = null
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.drawer_delete)) },
+                                        leadingIcon = { Icon(Icons.Default.Delete, null) },
+                                        onClick = {
+                                            remoteDeleteTarget = location.id
+                                            remoteContextMenuTarget = null
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.drawer_sort)) },
+                                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
+                                        onClick = {
+                                            remoteContextMenuTarget = null
+                                            onToggleSortMode()
+                                        }
+                                    )
+                                }
                             }
                         }
-                    }
-                    itemsIndexed(
-                        displayWebLocations,
-                        key = { _, location -> "web_${location.id}" }
-                    ) { _, location ->
-                        Box(modifier = Modifier.fillMaxWidth()) {
-                            RemoteLocationItem(
-                                name = location.name,
-                                detail = location.url,
-                                icon = Icons.Default.Language,
-                                onClick = { onWebClick(location.url) },
-                                onLongClick = { webContextMenuTarget = location.id },
-                                sortMode = sortMode,
-                                isDragging = draggedWebId == location.id,
-                                dragOffsetDp = if (draggedWebId == location.id) webDragOffsetDp else 0f,
-                                dragHandleModifier = if (sortMode) {
-                                    Modifier.pointerInput(location.id) {
-                                        detectVerticalDragGestures(
-                                            onDragStart = { draggedWebId = location.id },
-                                            onVerticalDrag = { change, dragAmount ->
-                                                change.consume()
-                                                webDragOffsetDp += dragAmount.toDp().value
-                                            },
-                                            onDragEnd = {
-                                                val id = draggedWebId
-                                                if (id != null) {
-                                                    val from = currentWebOrder.indexOf(id)
-                                                    if (from >= 0) {
-                                                        val itemH = 56f
-                                                        val steps = (webDragOffsetDp / itemH).toInt()
-                                                        val to = (from + steps).coerceIn(currentWebOrder.indices)
-                                                        if (to != from) currentOnWebReorder(from, to)
+                        itemsIndexed(
+                            displayWebLocations,
+                            key = { _, location -> "web_${location.id}" }
+                        ) { _, location ->
+                            Box(modifier = Modifier.fillMaxWidth()) {
+                                RemoteLocationItem(
+                                    name = location.name,
+                                    detail = location.url,
+                                    icon = Icons.Default.Language,
+                                    onClick = { onWebClick(location.url) },
+                                    onLongClick = { if (allowEdit) webContextMenuTarget = location.id },
+                                    sortMode = sortMode,
+                                    isDragging = draggedWebId == location.id,
+                                    dragOffsetDp = if (draggedWebId == location.id) webDragOffsetDp else 0f,
+                                    dragHandleModifier = if (sortMode) {
+                                        Modifier.pointerInput(location.id) {
+                                            detectVerticalDragGestures(
+                                                onDragStart = { draggedWebId = location.id },
+                                                onVerticalDrag = { change, dragAmount ->
+                                                    change.consume()
+                                                    webDragOffsetDp += dragAmount.toDp().value
+                                                },
+                                                onDragEnd = {
+                                                    val id = draggedWebId
+                                                    if (id != null) {
+                                                        val from = currentWebOrder.indexOf(id)
+                                                        if (from >= 0) {
+                                                            val itemH = 56f
+                                                            val steps = (webDragOffsetDp / itemH).toInt()
+                                                            val to = (from + steps).coerceIn(currentWebOrder.indices)
+                                                            if (to != from) currentOnWebReorder(from, to)
+                                                        }
                                                     }
-                                                }
-                                                draggedWebId = null
-                                                webDragOffsetDp = 0f
-                                            },
-                                            onDragCancel = {
-                                                draggedWebId = null
-                                                webDragOffsetDp = 0f
-                                            },
-                                        )
-                                    }
-                                } else Modifier,
-                            )
-                            DropdownMenu(
-                                expanded = webContextMenuTarget == location.id,
-                                onDismissRequest = { webContextMenuTarget = null },
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.drawer_rename)) },
-                                    leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
-                                    onClick = {
-                                        webRenameTarget = location.id
-                                        webRenameText = location.name
-                                        webContextMenuTarget = null
-                                    }
+                                                    draggedWebId = null
+                                                    webDragOffsetDp = 0f
+                                                },
+                                                onDragCancel = {
+                                                    draggedWebId = null
+                                                    webDragOffsetDp = 0f
+                                                },
+                                            )
+                                        }
+                                    } else Modifier,
                                 )
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.drawer_delete)) },
-                                    leadingIcon = { Icon(Icons.Default.Delete, null) },
-                                    onClick = {
-                                        webDeleteTarget = location.id
-                                        webContextMenuTarget = null
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.drawer_sort)) },
-                                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
-                                    onClick = {
-                                        webContextMenuTarget = null
-                                        onToggleSortMode()
-                                    }
-                                )
+                                DropdownMenu(
+                                    expanded = webContextMenuTarget == location.id,
+                                    onDismissRequest = { webContextMenuTarget = null },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.drawer_rename)) },
+                                        leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
+                                        onClick = {
+                                            webRenameTarget = location.id
+                                            webRenameText = location.name
+                                            webContextMenuTarget = null
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.drawer_delete)) },
+                                        leadingIcon = { Icon(Icons.Default.Delete, null) },
+                                        onClick = {
+                                            webDeleteTarget = location.id
+                                            webContextMenuTarget = null
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.drawer_sort)) },
+                                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.Sort, null) },
+                                        onClick = {
+                                            webContextMenuTarget = null
+                                            onToggleSortMode()
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
@@ -944,7 +960,7 @@ fun FileDrawer(
                             ContainerItem(
                                 container = container,
                                 onClick = { onContainerClick(container.name) },
-                                onLongClick = { contextMenuTarget = container },
+                                onLongClick = { if (allowEdit) contextMenuTarget = container },
                                 sortMode = sortMode,
                                 isDragging = draggedContainerName == container.name,
                                 dragOffsetDp = if (draggedContainerName == container.name) dragOffsetDp else 0f,
@@ -1023,40 +1039,42 @@ fun FileDrawer(
         }
 
             // ── Group: 工具 (3) ─────────────────────────────────────────
-            item {
-                GroupHeader(
-                    labelResId = R.string.drawer_group_tools,
-                    isCollapsed = 3 in collapsedGroups,
-                    onToggle = { toggleGroup(3) },
-                )
-            }
-            if (3 !in collapsedGroups) {
-                item(key = "_tool_wayland") {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                runCatching {
-                                    context.startActivity(
-                                        Intent(context, WaylandActivity::class.java)
-                                    )
+            if (showTools) {
+                item {
+                    GroupHeader(
+                        labelResId = R.string.drawer_group_tools,
+                        isCollapsed = 3 in collapsedGroups,
+                        onToggle = { toggleGroup(3) },
+                    )
+                }
+                if (3 !in collapsedGroups) {
+                    item(key = "_tool_wayland") {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    runCatching {
+                                        context.startActivity(
+                                            Intent(context, WaylandActivity::class.java)
+                                        )
+                                    }
                                 }
+                                .padding(horizontal = 20.dp, vertical = 12.dp),
+                        ) {
+                            Icon(Icons.Default.DesktopWindows, contentDescription = null)
+                            Spacer(Modifier.width(16.dp))
+                            Column {
+                                Text(
+                                    stringResource(R.string.drawer_tool_wayland),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                                Text(
+                                    stringResource(R.string.drawer_tool_wayland_desc),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
-                            .padding(horizontal = 20.dp, vertical = 12.dp),
-                    ) {
-                        Icon(Icons.Default.DesktopWindows, contentDescription = null)
-                        Spacer(Modifier.width(16.dp))
-                        Column {
-                            Text(
-                                stringResource(R.string.drawer_tool_wayland),
-                                style = MaterialTheme.typography.bodyLarge,
-                            )
-                            Text(
-                                stringResource(R.string.drawer_tool_wayland_desc),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
                         }
                     }
                 }
@@ -1101,5 +1119,9 @@ fun FileDrawer(
         onWebDelete = onWebDelete,
         onAddLocalPath = onAddLocalPath,
     )
+
+    if (showAboutDialog) {
+        AboutDialog(onDismiss = { showAboutDialog = false })
+    }
     }
 }

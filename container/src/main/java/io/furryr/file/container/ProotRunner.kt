@@ -69,11 +69,11 @@ object ProotRunner {
 
     /**
      * Full argv to launch the container daemon under proot:
-     *   proot -l -0 --cgroup -r rootfs -b ... -w / <daemon> --key <pub> --id <id> --proot --group <name>
+     *   proot -l -0 --cgroup -r rootfs -b ... -w / <daemon> --key <pub> --id <id> --proot
      *
      * `--cgroup` is the PRoot cgroup v2 emulation (the app UID cannot create
-     * real cgroups); the daemon's `--group` then uses that virtual hierarchy
-     * for its lifetime and shutdown guarantees.
+     * real cgroups); the daemon automatically owns a group named from its
+     * `--id` in that virtual hierarchy for its lifetime and shutdown guarantees.
      */
     fun buildProotDaemonCommand(
         context: Context,
@@ -106,8 +106,6 @@ object ProotRunner {
         args.add("--id")
         args.add(id)
         args.add("--proot")
-        args.add("--group")
-        args.add(container.name)
         return args
     }
 

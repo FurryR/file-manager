@@ -7,22 +7,23 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import io.furryr.file.Opener
 import io.furryr.file.R
 import io.furryr.file.clipboard.ClipboardAction
 import io.furryr.file.clipboard.ClipboardEntry
-import io.furryr.file.core.ContentInfo
 import io.furryr.file.core.DirectoryStats
 import io.furryr.file.core.VFile
 import io.furryr.file.core.VFolder
 import io.furryr.file.core.VNode
+import io.furryr.file.core.Vfs
 import io.furryr.file.core.model.FileEntry
+import io.furryr.file.core.model.ProviderStat
+import io.furryr.file.home.Bookmarks
 import io.furryr.file.home.HomeEntry
 import io.furryr.file.model.PageKind
 import io.furryr.file.terminal.TerminalTab
 import io.furryr.file.terminal.TermuxTerminalTab
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 
 /**
  * One item in the tab overflow menu. A non-empty [children] list turns the
@@ -62,35 +63,57 @@ typealias TitleSlot = @Composable (Modifier) -> Unit
 typealias RendererContent = @Composable (RendererContext, Boolean, Modifier) -> Unit
 
 /**
- * What a tab is asking a renderer to show: a node, plus its facts when the
- * caller already described it.
- *
- * A page address is a node like any other — the provider that answered
- * `Vfs.node` decided what it is — so renderers never receive an address string
- * or a synthetic scheme.
+ * Renderer-owned page actions. A null callback means that action is not
+ * available here; the shell only projects the ones the page supplies.
  */
-data class RenderTarget(
-    val node: VNode,
-    val content: ContentInfo? = null,
+data class RenderCapabilities(
+    /** Null when this page cannot create here. */
+    val create: (() -> Unit)? = null,
+    /** Null unless entries can be renamed in place. */
+    val rename: ((List<FileEntry>) -> Unit)? = null,
+    /** Null unless entries can be deleted in place. */
+    val delete: ((List<FileEntry>) -> Unit)? = null,
+    /** Null when this page has no folder to go up to. */
+    val up: (() -> Unit)? = null,
+    /** Null when this page cannot host a terminal. */
+    val terminal: TerminalFactory? = null,
+    /** Null when this page has no list to select from. */
+    val select: SelectCapabilities? = null,
 )
 
 /**
- * Capabilities surfaced to the shared toolbar. These are current-state gates
- * (dirty, loading, provider permission); whether a feature exists at all is a
- * nullable handle on the renderer, never a separate boolean.
+ * Which tab owns the page [RendererContext.open] is given. The mode never
+ * changes what the page is; it only decides where the stop is installed.
+ *
+ * Not [io.furryr.file.core.source.OpenMode]: that one says how bytes are
+ * opened, this one where a renderer is installed.
  */
-data class RenderCapabilities(
-    val canGoBack: Boolean = false,
-    val canGoForward: Boolean = false,
-    val canSave: Boolean = false,
-    val canUndo: Boolean = false,
-    val canEdit: Boolean = false,
-    /** Directory-only actions; a web/document view must keep these false. */
-    val canCreate: Boolean = false,
-)
+enum class OpenMode {
+    /** The calling tab: a new stop above the page that is showing. */
+    Current,
 
-/** Navigation and lifecycle services a renderer may ask the tab for. */
-interface NavigationHost {
+    /**
+     * A tab of its own, activated immediately. The calling tab keeps what it
+     * shows, and the new tab starts at the calling tab's location, so Back and
+     * Up still have a folder to return to.
+     */
+    NewTab,
+}
+
+/**
+ * Renderer-facing view of the shell. The real host is one shell object; this
+ * is a page-bound façade. A renderer requests navigation and title updates
+ * but must not mutate history or format an address itself.
+ *
+ * Bookmark reads and writes are deliberately absent: a renderer owns its own
+ * location entry ([RendererSession.bookmarkEntry]) and talks to
+ * [io.furryr.file.home.Bookmarks] directly. Home lists come straight from
+ * [io.furryr.file.home.HomeStore]; this context only carries navigation,
+ * page ownership, file actions and Home navigation.
+ */
+interface RendererContext {
+    // ── Navigation and lifecycle ────────────────────────────────────────────
+
     val scope: CoroutineScope
     fun navigate(node: VNode, rendererId: String? = null)
     fun updateTitle(title: String?)
@@ -106,75 +129,17 @@ interface NavigationHost {
      * provisional stop instead of pushing it into history.
      */
     fun onPageVisited(address: String, replacePrevious: String? = null) {}
-    fun updateCapabilities(capabilities: RenderCapabilities)
     fun reportError(error: Throwable)
-    fun requestClose()
 
-    /**
-     * Unified leave hook: a renderer that holds unsaved state asks the tab to
-     * confirm before navigating away. The tab shows one dialog for every
-     * renderer; [onLeave] runs only after confirmation, [onCancel] when the
-     * user decides to stay. The default proceeds without a prompt.
-     */
-    fun confirmLeave(
-        message: String?,
-        canSave: Boolean = false,
-        onSave: (suspend () -> Result<Unit>)? = null,
-        onLeave: () -> Unit,
-        onCancel: () -> Unit = {},
-    ) {
-        onLeave()
-    }
+    /** Report page load progress; null clears the indicator. */
+    fun setProgress(progress: Int?) {}
+    fun dismissPending()
 
     /** The directory view the shell wants this tab to draw, read on demand. */
     fun folderView(): FolderRendererState? = null
-}
 
-/** File actions a renderer may start; the shell owns the operation. */
-interface FileActionHost {
-    fun openFile(file: VFile, content: ContentInfo? = null)
-    fun copyFile(file: VFile, content: ContentInfo? = null)
-    fun shareFile(file: VFile, content: ContentInfo? = null)
+    // ── Page ownership ──────────────────────────────────────────────────────
 
-    /** Open a listed entry, with its node when the listing already has it. */
-    fun openEntry(entry: FileEntry, node: VNode?) {}
-    fun requestShare(entries: List<FileEntry>) {}
-    fun requestDelete(entries: List<FileEntry>) {}
-    fun requestRename(entries: List<FileEntry>) {}
-    fun requestProperties(entry: FileEntry) {}
-    fun putOnClipboard(entries: List<ClipboardEntry>, action: ClipboardAction) {}
-    fun onSelectionChanged(paths: Set<String>, lastIndex: Int, entries: List<ClipboardEntry>) {}
-    fun onFolderLoaded(path: String) {}
-    fun onFolderCancelled() {}
-    fun onScrollConsumed() {}
-    fun onHighlightConsumed() {}
-    fun onFileDragStart() {}
-    fun onFileDragEnd() {}
-}
-
-/** Home tab services; a page or editor renderer leaves them unused. */
-interface HomeHost {
-    /** The Home projection the shell wants this tab to draw, read on demand. */
-    fun homeView(): HomeRendererState? = null
-    fun openHome(entry: HomeEntry) {}
-    fun toggleBookmark(entry: HomeEntry) {}
-    fun removeRecent(key: String) {}
-    fun removeBookmark(key: String) {}
-    fun clearRecent() {}
-    fun clearBookmarks() {}
-    fun cancelOpening() {}
-
-    /** Address this tab would bookmark, or null when it is not bookmarkable. */
-    fun bookmarkEntry(): HomeEntry? = null
-    fun isBookmarked(entry: HomeEntry): Boolean = false
-}
-
-/**
- * Renderer-facing view of the shell. The real host is one shell object; this
- * is a page-bound façade. A renderer requests navigation and title updates
- * but must not mutate history or format an address itself.
- */
-interface RendererContext : NavigationHost, FileActionHost, HomeHost {
     /** The page this context currently serves; shell callbacks gate on it. */
     fun bindPage(pageId: String?) {}
 
@@ -191,47 +156,78 @@ interface RendererContext : NavigationHost, FileActionHost, HomeHost {
     /** Cache the renderer's tab title on its page. */
     fun submitTitle(title: String?) {}
 
-    /** App opener, used by a renderer to turn a node into a new renderer. */
-    val opener: NodeOpener? get() = null
-
     /** Android context for renderers that hand off outside the app. */
     val context: Context? get() = null
 
-    /** Append and activate a page for an already-created renderer. */
-    fun open(renderer: RendererBase<*>) {}
+    /** The world this page resolves through. Never a process-global router. */
+    val vfs: Vfs
+
+    /** Stable id of [vfs]'s world; forwarded URIs carry it. */
+    val worldId: String
+
+    /** The one open-with table of this world. Routing never needs a second table. */
+    val opener: Opener
+
+    /**
+     * Append and activate a page for an already-created renderer. The renderer
+     * is created cheaply; its [RendererBase.enter] does the loading behind the
+     * pending cover. [pushPage] false replaces the current stop in place; it
+     * has no meaning for [OpenMode.NewTab], which always gets a fresh tab.
+     */
+    fun open(
+        renderer: RendererBase<*>,
+        mode: OpenMode = OpenMode.Current,
+        pushPage: Boolean = true,
+    ) {}
+
+    /**
+     * Replace the current page with [renderer] instead of appending a stop.
+     * Used when a page turns out to be a different format and the tab must
+     * stay on the same address.
+     */
+    fun replace(renderer: RendererBase<*>) {
+        open(renderer, pushPage = false)
+    }
+
+    /**
+     * Show [content] as the one global popup and suspend until it calls
+     * `resolve(result)`. This is a one-shot promise: the popup settles once,
+     * and returning null means no result (another popup owns the slot, the
+     * page is gone, or the caller was cancelled).
+     */
+    suspend fun <T> popup(
+        content: @Composable (resolve: (T) -> Unit) -> Unit,
+    ): T? = null
 
     /**
      * Promote the pending renderer bound to this host into the tab's pages
-     * and store [content] for the composition layer to execute.
+     * and store [content] for the composition layer to execute. This is the
+     * only step that replaces the visible page, its title and its path.
      */
     fun commit(content: RendererContent)
-}
 
-/** What an opener returns for one node. */
-sealed interface Opened {
-    data class Renderer(val renderer: RendererBase<*>) : Opened
-    data class Failure(val message: String?) : Opened
-}
+    // ── File actions ────────────────────────────────────────────────────────
 
-/** Turns a node into a renderer without the renderer knowing the route table. */
-interface NodeOpener {
-    suspend fun open(node: VNode, content: ContentInfo?, host: RendererContext): Opened
-}
+    fun openFile(file: VFile, stat: ProviderStat? = null)
+    fun copyFile(file: VFile, stat: ProviderStat? = null)
+    fun shareFile(file: VFile, stat: ProviderStat? = null)
 
-/** Neutral host installed on reset so a session drops the old composition. */
-internal object DetachedRendererContext : RendererContext {
-    override val scope: CoroutineScope =
-        CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    /** Open a listed entry, with its node when the listing already has it. */
+    fun openEntry(entry: FileEntry, node: VNode?) {}
+    fun requestShare(entries: List<ClipboardEntry>) {}
+    fun requestProperties(entry: FileEntry) {}
+    fun putOnClipboard(entries: List<ClipboardEntry>, action: ClipboardAction) {}
+    fun onSelectionChanged(paths: Set<String>, lastIndex: Int, entries: List<ClipboardEntry>) {}
+    fun onFolderLoaded(path: String) {}
+    fun onFolderCancelled() {}
+    fun onScrollConsumed() {}
+    fun onHighlightConsumed() {}
+    fun onFileDragStart() {}
+    fun onFileDragEnd() {}
 
-    override fun navigate(node: VNode, rendererId: String?) {}
-    override fun updateTitle(title: String?) {}
-    override fun updateCapabilities(capabilities: RenderCapabilities) {}
-    override fun reportError(error: Throwable) {}
-    override fun requestClose() {}
-    override fun commit(content: RendererContent) {}
-    override fun openFile(file: VFile, content: ContentInfo?) {}
-    override fun copyFile(file: VFile, content: ContentInfo?) {}
-    override fun shareFile(file: VFile, content: ContentInfo?) {}
+    // ── Home ────────────────────────────────────────────────────────────────
+
+    fun cancelOpening() {}
 }
 
 /** Creates the body of a new terminal tab; null when the page cannot host one. */
@@ -248,16 +244,14 @@ abstract class PageSession<S : PageState>(
 }
 
 interface RendererSession : AutoCloseable {
-    val capabilities: RenderCapabilities
-
-    /** Durable, non-view page state; the renderer exposes this, never itself. */
-    val state: PageState
+    /** Callback handles the shared toolbar projects; null means unavailable. */
+    val capabilities: RenderCapabilities get() = RenderCapabilities()
 
     /** A directory/Home session is the tab location itself, not an overlay. */
     val isLocationRenderer: Boolean get() = false
 
     /** The page stopped being current; the session decides what to keep. */
-    fun leave() {}
+    fun blur() {}
 
     /**
      * Drop views, host references and view-bound jobs; keep model state.
@@ -290,36 +284,18 @@ interface RendererSession : AutoCloseable {
     /** True when [address] is a live/remote resource rather than a stored file. */
     val isLive: Boolean get() = false
 
-    /** A renderer drawn over the tab location: Back dismisses it first. */
-    val isOverlay: Boolean get() = false
-
-    /** Folder that owns [address], for Up and editor terminals. */
-    val parent: VFolder? get() = null
-
-    /** Directory a terminal should start in, when it differs from the tab. */
-    val terminalPath: String? get() = null
-
-    /**
-     * Creates the body for a new terminal tab spawned from this stop.
-     *
-     * The handle is the capability: null means this page cannot host a shell.
-     * The shell owns the tab; this only owns the body. A renderer that hosts a
-     * non-shell terminal (a web page's DevTools) overrides it.
-     */
-    open val terminalFactory: TerminalFactory? get() = terminalPath?.let { path ->
-        TerminalFactory { context ->
-            TermuxTerminalTab.start(
-                context = context,
-                path = path,
-            )
-        }
-    }
-
     /** The location itself is not offered as a Home bookmark. */
     val suppressBookmark: Boolean get() = false
 
+    /**
+     * The Home bookmark this session's current location represents. The
+     * renderer owns the entry; bookmark reads and edits go through
+     * [io.furryr.file.home.Bookmarks], never through the shell context.
+     */
+    fun bookmarkEntry(): HomeEntry? = null
+
     /** Navigation must ask this renderer before it lets go. */
-    val needsLeaveGuard: Boolean get() = false
+    val needsUnloadGuard: Boolean get() = false
 
     /**
      * Reuse this live session for a new open of the same kind. [next] is the
@@ -339,42 +315,17 @@ interface RendererSession : AutoCloseable {
     /** True when this renderer is the right view for [path] without a rebuild. */
     fun matchesLocation(path: String): Boolean = false
 
-    /** True while the renderer is still loading its document/page. */
-    val loading: Boolean get() = false
-
-    /** Load progress in the 0..100 range; only meaningful while [loading]. */
-    val progress: Int get() = 0
-
     /** The content consumes horizontal gestures; the drawer must not. */
     val consumesEdgeGestures: Boolean get() = false
 
-    /** Back dismisses this renderer as an overlay before tab history moves. */
-    val canDismiss: Boolean get() = false
-
-    /** The renderer is showing its own modal correction/confirmation UI. */
-    val modalActive: Boolean get() = false
-
-    /** Return false to veto tab close, e.g. unsaved editor content. */
-    fun canClose(): Boolean = true
-
     /**
-     * Close through the renderer's own leave hook. The shell passes the
-     * context for this page, so the prompt works even when the tab is not
-     * current. A renderer with no hook still closes.
+     * Ask this page to close. The renderer shows any prompt it needs and
+     * returns true when the shell may release it, false to keep the page.
      */
-    fun requestClose(context: RendererContext, action: () -> Unit) {
-        close()
-        action()
-    }
+    suspend fun requestUnload(context: RendererContext): Boolean = true
 
     /** Menu items this renderer contributes while it owns the tab. */
     fun menuItems(context: Context): List<RendererMenuItem> = emptyList()
-
-    /**
-     * The renderer's own creation UI for the fixed "+" slot. The shell only
-     * projects the action and never opens a dialog on the renderer's behalf.
-     */
-    fun requestCreate() {}
 
     /**
      * Clipboard receiver. A renderer that returns non-null can be a paste
@@ -397,19 +348,18 @@ interface RendererSession : AutoCloseable {
 }
 
 /**
- * The one bookmark row a renderer appends to its own menu. Persistence lives
- * in the host; whether the row exists and what it says is the renderer's view
- * of its own location.
+ * The one bookmark row a renderer appends to its own menu. The renderer
+ * supplies the entry from its own session; persistence is [Bookmarks].
  */
-fun RendererContext.bookmarkMenuItem(context: Context): RendererMenuItem? {
-    val entry = bookmarkEntry() ?: return null
-    val bookmarked = isBookmarked(entry)
+fun bookmarkMenuItem(context: Context, entry: HomeEntry?): RendererMenuItem? {
+    entry ?: return null
+    val bookmarked = Bookmarks.isBookmarked(entry)
     return RendererMenuItem(
         title = context.getString(
             if (bookmarked) R.string.bookmark_remove else R.string.bookmark_add,
         ),
         icon = if (bookmarked) Icons.Default.Star else Icons.Default.StarBorder,
-        onClick = { toggleBookmark(entry) },
+        onClick = { Bookmarks.toggle(entry) },
     )
 }
 
@@ -423,9 +373,10 @@ interface SessionView {
 }
 
 /**
- * The listing operations the shell may use without seeing the session.
+ * The selection/listing operations a renderer offers through
+ * [RenderCapabilities.select]. The shell never sees the session that backs it.
  */
-interface ListingHandle {
+interface SelectCapabilities {
     val entries: List<FileEntry>
     val selectedEntries: List<FileEntry>
     val selectedPaths: Set<String>
@@ -440,51 +391,4 @@ interface ListingHandle {
         highlightPath: String? = null,
         highlightDirectory: String? = null,
     )
-}
-
-/**
- * Content-selection capability. The shell uses this instead of knowing the
- * concrete directory renderer, exactly like [ClipboardSink] for paste targets.
- */
-interface ListingSession : RendererSession, ListingHandle
-
-interface RendererFactory {
-    val id: String
-
-    /** Cheap check: node kind, content info and capabilities only. */
-    fun supports(target: RenderTarget): Boolean
-
-    suspend fun create(
-        target: RenderTarget,
-        host: RendererContext,
-    ): Result<RendererBase<*>>
-}
-
-/**
- * Renderer registry, ordered by priority. Explicit user choice is applied by
- * the tab before this fallback order is consulted.
- */
-object Renderers {
-    private val entries = mutableListOf<Pair<Int, RendererFactory>>()
-
-    @Synchronized
-    fun register(priority: Int, factory: RendererFactory) {
-        entries.removeAll { it.second.id == factory.id }
-        entries += priority to factory
-        entries.sortByDescending { it.first }
-    }
-
-    @Synchronized
-    fun unregister(id: String) {
-        entries.removeAll { it.second.id == id }
-    }
-
-    @Synchronized
-    fun candidates(target: RenderTarget): List<RendererFactory> =
-        entries.asSequence()
-            .map { it.second }
-            .filter { it.supports(target) }
-            .toList()
-
-    fun resolve(target: RenderTarget): RendererFactory? = candidates(target).firstOrNull()
 }

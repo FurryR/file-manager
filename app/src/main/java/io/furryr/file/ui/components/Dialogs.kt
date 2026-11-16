@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -57,10 +59,14 @@ import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Surface
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 
 @Composable
 fun FrontEllipsisText(
@@ -180,44 +186,75 @@ fun ContextMenu(
     onDelete: () -> Unit,
     onProperties: () -> Unit,
     onShare: () -> Unit,
+    canCopy: Boolean = true,
+    canMove: Boolean = true,
     canShare: Boolean = true,
     canModify: Boolean = true
 ) {
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        text = {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    ActionButton(stringResource(R.string.copy), Icons.Default.ContentCopy, onCopy, Modifier.weight(1f), enabled = canModify)
-                    ActionButton(stringResource(R.string.move_), Icons.Default.ContentCut, onMove, Modifier.weight(1f), enabled = canModify)
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            shape = MaterialTheme.shapes.extraLarge,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .widthIn(max = 340.dp),
+        ) {
+            Column(
+                modifier = Modifier.padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Row(Modifier.fillMaxWidth()) {
+                    ActionRow(stringResource(R.string.copy), Icons.Default.ContentCopy, onCopy, Modifier.weight(1f), enabled = canCopy)
+                    ActionRow(stringResource(R.string.move_), Icons.Default.ContentCut, onMove, Modifier.weight(1f), enabled = canMove)
                 }
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    ActionButton(stringResource(R.string.rename), Icons.Default.DriveFileRenameOutline, onRename, Modifier.weight(1f), enabled = canModify)
-                    ActionButton(stringResource(R.string.delete), Icons.Default.Delete, onDelete, Modifier.weight(1f), enabled = canModify)
+                Row(Modifier.fillMaxWidth()) {
+                    ActionRow(stringResource(R.string.rename), Icons.Default.DriveFileRenameOutline, onRename, Modifier.weight(1f), enabled = canModify)
+                    ActionRow(stringResource(R.string.delete), Icons.Default.Delete, onDelete, Modifier.weight(1f), enabled = canModify)
                 }
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    ActionButton(stringResource(R.string.properties), Icons.Default.Info, onProperties, Modifier.weight(1f))
-                    ActionButton(stringResource(R.string.share), Icons.Default.Share, onClick = onShare, modifier = Modifier.weight(1f), enabled = canShare)
+                Row(Modifier.fillMaxWidth()) {
+                    ActionRow(stringResource(R.string.properties), Icons.Default.Info, onProperties, Modifier.weight(1f))
+                    ActionRow(stringResource(R.string.share), Icons.Default.Share, onClick = onShare, modifier = Modifier.weight(1f), enabled = canShare)
                 }
             }
-        },
-        confirmButton = {},
-        dismissButton = {}
-    )
+        }
+    }
 }
 
 @Composable
-private fun ActionButton(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit, modifier: Modifier, enabled: Boolean = true) {
+private fun ActionRow(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    modifier: Modifier,
+    enabled: Boolean = true,
+) {
     val alpha = if (enabled) 1f else 0.38f
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
             .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(vertical = 5.dp)
+            .padding(horizontal = 10.dp, vertical = 9.dp),
     ) {
-        Icon(icon, contentDescription = label, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha))
-        Spacer(Modifier.height(1.dp))
-        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha))
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
+            modifier = Modifier.size(20.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
     }
 }
 

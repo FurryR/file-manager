@@ -148,13 +148,12 @@
               echo "Android NDK: $ANDROID_NDK_HOME"
               echo "JDK: $JAVA_HOME"
               echo "Gradle: $(gradle --version | awk '/^Gradle / { print $2; exit }')"
-              echo "Full native + APK build:"
-              echo "  bash native/build-xkbcommon.sh aarch64"
-              echo "  bash scripts/fetch-xkbdata.sh"
-              echo "  bash native/build-android-aarch64.sh"
-              echo "  bash native/build-proot.sh"
-              echo "  bash native/build-pulse.sh"
+              echo "Build APK (native artifacts run through preBuild):"
               echo "  gradle :app:assembleDebug"
+              echo "Manual native-only rebuild:"
+              echo "  bash scripts/build-native.sh"
+              echo "Skipping the native hook for an IDE-only build:"
+              echo "  gradle :app:assembleDebug -PskipNativeBuild=true"
             '';
           };
         });

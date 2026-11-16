@@ -1,6 +1,5 @@
 package io.furryr.file.render
 
-import io.furryr.file.core.ContentTypes
 import io.furryr.file.core.Path
 import io.furryr.file.core.VFile
 import io.furryr.file.core.VFolder
@@ -20,6 +19,7 @@ import java.net.URI
  * the origin, exactly like a browser.
  */
 class HtmlDocument(
+    private val vfs: Vfs,
     val file: VFile,
 ) : DocumentView {
     override val origin: Path get() = file.path
@@ -35,15 +35,15 @@ class HtmlDocument(
             // against the address and fetch it as a node like any other file.
             val url = runCatching { URI(live).resolve(relative).toString() }
                 .getOrElse { live }
-            Vfs.node(url).getOrThrow() as? VFile
+            vfs.node(url).getOrThrow() as? VFile
                 ?: error("not a file: $relative")
         } else {
             locate(relative)
         }
         val source = target.open(OpenMode.READ).getOrThrow()
-        val info = target.describe().getOrNull()
+        val mime = target.stat().getOrNull()?.mime
         DocumentResource(
-            mime = info?.mime ?: ContentTypes.fromName(target.name),
+            mime = mime,
             encoding = "utf-8",
             stream = FileSourceInputStream(source),
         )
@@ -66,7 +66,7 @@ class HtmlDocument(
                 }
                 current as? VFolder ?: error("html file has no view root: ${file.name}")
             } else {
-                Vfs.folder(file.path.providerPath().root).getOrThrow()
+                vfs.folder(file.path.providerPath().root).getOrThrow()
             }
         } else {
             file.parent ?: error("html file has no parent folder: ${file.name}")

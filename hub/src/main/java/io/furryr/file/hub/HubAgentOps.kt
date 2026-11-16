@@ -43,6 +43,7 @@ internal suspend fun HubServer.dispatchAgentOps(
                 cwd = attach.cwd.ifBlank { "/" },
                 model = attach.model,
                 effort = attach.effort,
+                world = world,
                 emit = { event ->
                     send(
                         client,
@@ -157,7 +158,7 @@ internal suspend fun HubServer.dispatchAgentOps(
         )
 
         HubRequest.OpCase.GET_CAPABILITIES -> {
-            val servers = AgentMcp.servers(state.target, request.getCapabilities.cwd)
+            val servers = AgentMcp.servers(state.target, request.getCapabilities.cwd, world)
                 .filter { it.enabled && it.url.isNotBlank() }
             Reply(
                 HubResponse.newBuilder().setId(id).setOk(true)

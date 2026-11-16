@@ -17,11 +17,8 @@ import java.io.File
 
 /** Which daemon a caller wants to talk to. */
 sealed interface DaemonTarget {
-    /** The host daemon (elevated via `su`/Shizuku when available, otherwise the app daemon). */
+    /** The one host daemon (root via `su` when available, otherwise the app UID). */
     data object Host : DaemonTarget
-
-    /** A daemon forced to run under the app UID (never elevated). */
-    data object App : DaemonTarget
 
     /** A named daemon (e.g. a container), launched by a registered [DaemonLauncher]. */
     data class Named(val name: String) : DaemonTarget
@@ -57,8 +54,8 @@ data class DaemonCommand(
 )
 
 /**
- * SPI for launching a *named* daemon. Core owns the app / privileged (root or
- * Shizuku) launch strategies; hosts register a launcher for names they own
+ * SPI for launching a *named* daemon. Core owns the host (root, Shizuku or app
+ * UID) launch strategies; hosts register a launcher for names they own
  * (e.g. containers via proot or chroot). Returning `null` means "not handled by
  * this launcher".
  *
@@ -78,18 +75,16 @@ object DaemonManager {
     private const val TAG = "DaemonManager"
     private const val DaemonBinaryName = "libfiledaemon.so"
 
-    /** Target ids the daemon socket names are derived from. The elevated
-     *  daemon is a single target: launched with `su` when root is available,
-     *  otherwise via Shizuku. */
-    private const val PrivilegedId = "privileged"
-    private const val AppId = "app"
+    /** Target id the primary daemon socket name is derived from (and the
+     *  automatic cgroup name). One launch strategy: `su` when root is
+     *  available, otherwise the app UID. */
+    private const val HostId = "host"
 
     private lateinit var appContext: Context
     private var executableFile: File? = null
 
     private val lock = Any()
     @Volatile private var primary: DaemonConnection? = null
-    @Volatile private var app: DaemonConnection? = null
     private val named = mutableMapOf<String, DaemonConnection>()
     private val startingNamed = mutableSetOf<String>()
     private val namedChangeListeners = mutableSetOf<() -> Unit>()
@@ -163,9 +158,6 @@ object DaemonManager {
         primary?.takeIf { it.isAlive() }?.let {
             list.add(DaemonEndpoint(HOST_ID, it.socketName, rootActive))
         }
-        app?.takeIf { it.isAlive() }?.let {
-            list.add(DaemonEndpoint(APP_ID, it.socketName, false))
-        }
         named.forEach { (name, connection) ->
             if (connection.isAlive()) {
                 list.add(DaemonEndpoint("${CONTAINER_PREFIX}$name", connection.socketName, false))
@@ -177,11 +169,8 @@ object DaemonManager {
     /** Hub id prefix for a named (container) daemon. */
     const val CONTAINER_PREFIX = "container-"
 
-    /** Hub id of the host daemon (root when available, else app UID). */
+    /** Hub id of the one host daemon. */
     const val HOST_ID = "host"
-
-    /** Hub id of the app-UID daemon. */
-    const val APP_ID = "app"
 
     /** One execution target as every consumer (agent, hub, prompt) sees it. */
     data class TargetInfo(
@@ -194,20 +183,19 @@ object DaemonManager {
     )
 
     /**
-     * The one target catalog: host, app, live daemons and known containers,
+     * The one target catalog: host, live daemons and known containers,
      * ordered the same way in the agent prompt, the tools and the hub.
      */
     fun targetCatalog(): List<TargetInfo> {
         val live = liveEndpoints().associateBy { it.name }
         val names = LinkedHashSet<String>()
         names.add(HOST_ID)
-        names.add(APP_ID)
         names.addAll(live.keys)
         runCatching { HubActions.containerIds?.invoke().orEmpty() }
             .getOrDefault(emptyList())
             .let(names::addAll)
-        val ordered = names.filter { it == HOST_ID || it == APP_ID } +
-            names.filterNot { it == HOST_ID || it == APP_ID }.sorted()
+        val ordered = names.filter { it == HOST_ID } +
+            names.filterNot { it == HOST_ID }.sorted()
         return ordered.map { name ->
             val endpoint = live[name]
             TargetInfo(
@@ -221,7 +209,7 @@ object DaemonManager {
         }
     }
 
-    /** The VFS root that addresses [id]'s filesystem; app has no separate root. */
+    /** The VFS root that addresses [id]'s filesystem. */
     fun targetRoot(id: String): String = when {
         id == HOST_ID -> "file:///"
         isContainerHubId(id) -> io.furryr.file.core.Path.of(
@@ -234,7 +222,6 @@ object DaemonManager {
     /** Resolve a hub id back to its daemon target. */
     fun targetForId(id: String): DaemonTarget = when (id) {
         HOST_ID -> DaemonTarget.Host
-        APP_ID -> DaemonTarget.App
         else -> {
             require(isContainerHubId(id)) { "invalid target id '$id'" }
             DaemonTarget.Named(hubDisplayName(id))
@@ -246,17 +233,15 @@ object DaemonManager {
 
     fun isContainerHubId(id: String): Boolean = id.startsWith(CONTAINER_PREFIX)
 
-    /** Stable hub id for a target: `host`, `app`, or `container-<name>`. */
+    /** Stable hub id for a target: `host` or `container-<name>`. */
     fun hubId(target: DaemonTarget): String = when (target) {
         DaemonTarget.Host -> HOST_ID
-        DaemonTarget.App -> APP_ID
         is DaemonTarget.Named -> "$CONTAINER_PREFIX${target.name}"
     }
 
     /** Resolve the per-daemon key to a live target, if any. */
     fun targetForKey(key: String): DaemonTarget? = synchronized(lock) {
         primary?.takeIf { it.isAlive() && it.key == key }?.let { return DaemonTarget.Host }
-        app?.takeIf { it.isAlive() && it.key == key }?.let { return DaemonTarget.App }
         named.entries.firstOrNull { it.value.isAlive() && it.value.key == key }?.let {
             return DaemonTarget.Named(it.key)
         }
@@ -304,9 +289,8 @@ object DaemonManager {
     fun reset() {
         val hadNamed = synchronized(lock) {
             val had = named.isNotEmpty()
-            (listOfNotNull(primary, app) + named.values).distinct().forEach { it.shutdown() }
+            (listOfNotNull(primary) + named.values).distinct().forEach { it.shutdown() }
             primary = null
-            app = null
             named.clear()
             updateNamedSnapshot()
             rootActive = false
@@ -369,7 +353,6 @@ object DaemonManager {
     fun exit(target: DaemonTarget = DaemonTarget.Host) = synchronized(lock) {
         when (target) {
             DaemonTarget.Host -> primary?.exit()
-            DaemonTarget.App -> app?.exit()
             is DaemonTarget.Named -> named[target.name]?.exit()
         }
     }
@@ -379,8 +362,13 @@ object DaemonManager {
     fun fileService(target: DaemonTarget = DaemonTarget.Host): FileService =
         FileService { connection(target) }
 
+    /**
+     * Exec facade for [target]. Children inherit the daemon's credentials, so
+     * a host shell started by a root daemon is a root shell and can enter any
+     * directory the daemon itself can reach.
+     */
     fun execService(target: DaemonTarget = DaemonTarget.Host): ExecService =
-        ExecService { connection(target) }
+        ExecService(resolve = { connection(target) })
 
     // ── Internal ──────────────────────────────────────────────────────
 
@@ -389,13 +377,6 @@ object DaemonManager {
         val result = synchronized(lock) {
             when (target) {
                 DaemonTarget.Host -> primary?.takeIf { it.isAlive() } ?: startPrimaryLocked()
-                DaemonTarget.App -> {
-                    if (!rootEnabled && !shellEnabled) {
-                        primary?.takeIf { it.isAlive() } ?: startPrimaryLocked()
-                    } else {
-                        startAppDaemon()
-                    }
-                }
                 is DaemonTarget.Named -> named[target.name]?.takeIf { it.isAlive() } ?: run {
                     startingNamed.add(target.name)
                     updateNamedSnapshot()
@@ -433,7 +414,9 @@ object DaemonManager {
     }
 
     private fun startPrimary(): DaemonConnection {
-        // Prefer root, then Shizuku, then the cached app-UID daemon.
+        // Root can both serve privileged file operations and drop a terminal to
+        // the app's uid/domain. Shizuku (shell UID) is the middle fallback; a
+        // shell daemon can only serve terminals when it runs as root.
         if (rootEnabled && suPath.isNotBlank()) {
             if (isSuAvailable(suPath)) {
                 runCatching { return startRootDaemon() }
@@ -446,23 +429,27 @@ object DaemonManager {
             runCatching { return startShizukuDaemon() }
                 .onFailure { Log.w(TAG, "Shizuku daemon start failed; falling back", it) }
         }
-        return startAppDaemon()
+        return startDirectDaemon()
     }
 
-    private fun startAppDaemon(): DaemonConnection {
-        app?.let { if (it.isAlive()) return it; it.close(); app = null }
-        val identity = DaemonIdentity(AppId)
+    /**
+     * The host daemon under the app UID (no `su`). Terminals already run as the
+     * app; file operations keep the app's own credentials.
+     */
+    private fun startDirectDaemon(): DaemonConnection {
+        primary?.let { if (it.isAlive()) return it; it.close(); primary = null }
+        val identity = DaemonIdentity(HostId)
         val executable = getExecutable()
         Log.i(TAG, "Starting daemon: ${executable.absolutePath} --id ${identity.id}")
         val process = ProcessBuilder(
             executable.absolutePath, "--key", identity.publicKeyHex(), "--id", identity.id,
         ).directory(appContext.filesDir).redirectErrorStream(true)
             .apply { environment()["PATH"] = daemonPath() }.start()
-        return connectStarted(identity, process).also { app = it }
+        return connectStarted(identity, process)
     }
 
     private fun startRootDaemon(): DaemonConnection {
-        val identity = DaemonIdentity(PrivilegedId)
+        val identity = DaemonIdentity(HostId)
         val executable = getExecutable()
         val cmd = "export PATH=${shellQuote(daemonPath())}; exec ${shellQuote(executable.absolutePath)} --key ${shellQuote(identity.publicKeyHex())} --id ${shellQuote(identity.id)}"
         Log.i(TAG, "Starting root daemon: $suPath -c $cmd")
@@ -474,7 +461,7 @@ object DaemonManager {
     }
 
     private fun startShizukuDaemon(): DaemonConnection {
-        val identity = DaemonIdentity(PrivilegedId)
+        val identity = DaemonIdentity(HostId)
         val executable = getExecutable()
         Log.i(TAG, "Starting daemon via Shizuku: ${executable.absolutePath} --id ${identity.id}")
         val process = shizukuNewProcess(
@@ -486,7 +473,7 @@ object DaemonManager {
 
     private fun startNamedDaemon(name: String): DaemonConnection {
         // Prefix the id so container names can never collide with the reserved
-        // primary ids (privileged/app).
+        // host id.
         val identity = DaemonIdentity("$CONTAINER_PREFIX$name")
         val activeLauncher = launcher
             ?: throw IllegalStateException("No DaemonLauncher registered for '$name'")

@@ -33,13 +33,25 @@ enum class PageKind {
 class Page(
     val id: String = java.util.UUID.randomUUID().toString(),
     /** Vfs address or page URL this page shows. */
-    val path: String,
-    /** The view behind a folder page, when it is not a plain provider path. */
-    val folder: VFolder? = null,
-    val kind: PageKind = PageKind.LOCATION,
+    path: String,
+    /** Icon kind only; never a navigation decision. */
+    kind: PageKind = PageKind.LOCATION,
+    /** Structural stop: the tab's location, not an overlay page. */
+    location: Boolean = false,
     title: String? = null,
     pathInfo: io.furryr.file.render.RendererPath? = null,
 ) {
+    /**
+     * Address fields are mutable so a page keeps its identity when the page it
+     * shows moves (a redirect, a same-document URL rewrite, a stop that turns
+     * out to be a folder). Rebuilding the Page would drop its renderer.
+     */
+    var path: String by mutableStateOf(path)
+
+    var kind: PageKind by mutableStateOf(kind)
+
+    var location: Boolean by mutableStateOf(location)
+
     /** Last title a renderer reported; kept after the session is gone. */
     var title: String? by mutableStateOf(title)
 
@@ -50,7 +62,7 @@ class Page(
     var restoring: Boolean = false
 
     /** The renderer that owns this page's session; null until first opened. */
-    var renderer: io.furryr.file.render.RendererBase<*>? = null
+    var renderer: io.furryr.file.render.RendererBase<*>? by mutableStateOf(null)
 
     /** Drop views; the next render rebuilds them from the session. */
     fun reset() {
@@ -64,14 +76,6 @@ class Page(
         runCatching { current.onRelease() }
         current.close()
     }
-
-    /** Copy the address fields, keeping the identity and leaving the renderer. */
-    fun copy(
-        path: String = this.path,
-        folder: VFolder? = this.folder,
-        kind: PageKind = this.kind,
-        title: String? = this.title,
-    ): Page = Page(id, path, folder, kind, title)
 }
 
 /** Newest pages a tab keeps; the current location always stays in the list. */
@@ -84,13 +88,11 @@ data class FileTab(
      */
     val id: String = java.util.UUID.randomUUID().toString(),
     val path: String,
-    /** Non-null while this tab is inside a container (zip, ...). */
-    val folder: VFolder? = null,
     /**
      * Every page of this tab, oldest first. The current one is at
      * [pageIndex]; Back and Forward only move that index.
      */
-    val pages: List<Page> = listOf(Page(path = path)),
+    val pages: List<Page> = listOf(Page(path = path, location = true)),
     val pageIndex: Int = 0,
     val selectedPaths: Set<String> = emptySet(),
     val lastSelectedIndex: Int = -1,
@@ -102,7 +104,7 @@ data class FileTab(
     /** The page this tab is showing. Pages are never empty in practice. */
     val currentPage: Page
         get() = pages.getOrNull(pageIndex)
-            ?: Page(id = "tab-$id", path = path)
+            ?: Page(id = "tab-$id", path = path, location = true)
 
     val canGoBack: Boolean get() = pageIndex > 0
     val canGoForward: Boolean get() = pageIndex < pages.lastIndex
@@ -122,9 +124,8 @@ data class FileTab(
             pages = next,
             pageIndex = index,
             // A location is the tab's own address; an overlay keeps the
-            // folder it was opened from underneath.
-            path = if (page.kind == PageKind.LOCATION) page.path else path,
-            folder = if (page.kind == PageKind.LOCATION) page.folder else folder,
+            // location it was opened from underneath.
+            path = if (page.location) page.path else path,
             selectedPaths = emptySet(),
             lastSelectedIndex = -1,
         )
@@ -138,8 +139,7 @@ data class FileTab(
         next[index] = page
         return copy(
             pages = next,
-            path = if (page.kind == PageKind.LOCATION) page.path else path,
-            folder = if (page.kind == PageKind.LOCATION) page.folder else folder,
+            path = if (page.location) page.path else path,
         )
     }
 
@@ -148,16 +148,11 @@ data class FileTab(
         if (pages.isEmpty()) return this
         val targetIndex = index.coerceIn(0, pages.lastIndex)
         val target = pages[targetIndex]
-        val base = if (target.kind == PageKind.LOCATION) target
-        else pages.subList(0, targetIndex).lastOrNull { it.kind == PageKind.LOCATION }
+        val base = if (target.location) target
+        else pages.subList(0, targetIndex).lastOrNull { it.location }
         return copy(
             pageIndex = targetIndex,
             path = base?.path ?: path,
-            folder = when {
-                target.kind == PageKind.LOCATION -> target.folder
-                base != null -> base.folder
-                else -> folder
-            },
             selectedPaths = emptySet(),
             lastSelectedIndex = -1,
         )

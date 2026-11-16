@@ -1,7 +1,7 @@
 package io.furryr.file.agent
 
+import io.furryr.file.core.FileWorld
 import io.furryr.file.core.Path
-import io.furryr.file.core.Vfs
 import io.furryr.file.core.source.OpenMode
 import io.furryr.file.daemon.DaemonTarget
 import org.json.JSONArray
@@ -19,7 +19,7 @@ object McpConfig {
     private const val MAX_CONFIG_BYTES = 1024 * 1024
     private const val CHUNK = 64 * 1024
 
-    suspend fun servers(target: DaemonTarget, cwd: String): List<AgentMcpServer> {
+    suspend fun servers(target: DaemonTarget, cwd: String, world: FileWorld): List<AgentMcpServer> {
         val merged = LinkedHashMap<String, AgentMcpServer>()
         runCatching { AgentEnvironment.globalMcpServers?.invoke().orEmpty() }
             .getOrDefault(emptyList())
@@ -27,7 +27,7 @@ object McpConfig {
         if (AgentEnvironment.workspaceMcpEnabled?.invoke() == true) {
             val chain = ancestorChain(target, cwd)
             for (directory in chain.asReversed()) {
-                for (server in readWorkspace(directory, merged)) {
+                for (server in readWorkspace(directory, merged, world)) {
                     merged[server.name] = server
                 }
             }
@@ -49,9 +49,10 @@ object McpConfig {
     private suspend fun readWorkspace(
         directory: Path,
         known: Map<String, AgentMcpServer>,
+        world: FileWorld,
     ): List<AgentMcpServer> {
         val path = directory.child(".agent").child("mcp.json").toString()
-        val text = runCatching { readText(path) }.getOrNull() ?: return emptyList()
+        val text = runCatching { readText(path, world) }.getOrNull() ?: return emptyList()
         val root = runCatching { JSONObject(text) }.getOrNull() ?: return emptyList()
         val servers = root.optJSONObject("mcpServers") ?: return emptyList()
         val result = ArrayList<AgentMcpServer>()
@@ -88,8 +89,8 @@ object McpConfig {
         return result
     }
 
-    private suspend fun readText(path: String): String {
-        val source = Vfs.file(path).getOrThrow().open(OpenMode.READ).getOrThrow()
+    private suspend fun readText(path: String, world: FileWorld): String {
+        val source = world.vfs.file(path).getOrThrow().open(OpenMode.READ).getOrThrow()
         return source.use {
             val output = StringBuilder()
             var offset = 0L

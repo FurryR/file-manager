@@ -3,6 +3,7 @@ use std::env;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
@@ -23,7 +24,7 @@ mod list;
 mod protocol;
 mod pty;
 mod reaper;
-mod shmgate;
+mod sepolicy;
 mod socket;
 
 use exec::ExecManager;
@@ -94,7 +95,11 @@ async fn main() -> io::Result<()> {
     let chroot_rootfs = parse_value_arg("--chroot");
     let proot_mode = has_flag("--proot");
     let container_mode = chroot_rootfs.is_some() || proot_mode;
-    let group_name = parse_value_arg("--group");
+    // One group per daemon. `--group` stays an override for diagnostics, but
+    // the id derived at launch is enough: host and chroot/proot daemons all
+    // own a cgroup without the caller spelling it out.
+    let group_name = parse_value_arg("--group").unwrap_or_else(|| id.clone());
+    cgroup::set_container_mode(container_mode);
 
     eprintln!(
         "[file-daemon] v{} pid={}",
@@ -119,38 +124,45 @@ async fn main() -> io::Result<()> {
         list::set_container_mode(true);
     }
 
-    // Bind the container's lifetime to this daemon. Membership is inherited by
-    // every descendant, so one write covers everything the container will ever
-    // spawn: processes that ignore signals, sessions that call setsid(), and
-    // binaries this daemon never sees. Installed before the chroot because
-    // cgroupfs disappears from view afterwards (see `cgroup`).
-    //
-    // A chroot daemon is launched as `su -c 'exec <daemon>'`, so its parent is
-    // the su daemon rather than the app: an Android force-stop (which kills by
-    // uid, and this daemon runs as root in its own session) cannot take it down.
-    // It outlives the app on purpose — that is what gives it the chance to end
-    // the container when its last client goes away.
-    if let Some(name) = &group_name {
-        match cgroup::install(name) {
-            Ok(()) => eprintln!("[file-daemon] cgroup {name} owned"),
-            Err(error) => eprintln!("[file-daemon] cgroup {name} unavailable: {error}"),
-        }
+    // Bind the daemon's lifetime to this cgroup. Membership is inherited by
+    // every descendant, so one write covers everything it will ever spawn:
+    // processes that ignore signals, sessions that call setsid(), and binaries
+    // this daemon never sees. The host daemon gets the same guarantee as a
+    // container, so the app dying ends every shell and command it started.
+    // Installed before the chroot because cgroupfs disappears from view
+    // afterwards (see `cgroup`).
+    match cgroup::install(&group_name) {
+        Ok(()) => eprintln!("[file-daemon] cgroup {group_name} owned"),
+        Err(error) => eprintln!("[file-daemon] cgroup {group_name} unavailable: {error}"),
     }
 
     // chroot backend: isolate the mount tree and enter the rootfs here. The
     // proot backend is already inside the container (launched via proot), so it
     // does no setup.
     if let Some(rootfs) = chroot_rootfs {
+        // Derive the container domain before the chroot: selinuxfs is the host's
+        // here, and the image is loaded once per container daemon. A disabled
+        // or failed injection caches no exec context, so children stay in the
+        // daemon's domain instead of failing to start.
+        let policy_root = rootfs.clone();
+        match tokio::task::spawn_blocking(move || sepolicy::install(Path::new(&policy_root))).await
+        {
+            Ok(Ok(sepolicy::Apply::Applied)) => {
+                eprintln!("[file-daemon] container domain injected")
+            }
+            Ok(Ok(sepolicy::Apply::Present)) => {
+                eprintln!("[file-daemon] container domain present")
+            }
+            Ok(Ok(sepolicy::Apply::Disabled)) => {
+                eprintln!("[file-daemon] container domain disabled")
+            }
+            Ok(Err(error)) => eprintln!("[file-daemon] container domain failed: {error}"),
+            Err(error) => eprintln!("[file-daemon] container domain task failed: {error}"),
+        }
         let binds = parse_bind_args();
         container::enter_chroot(&rootfs, &binds)?;
     }
 
-    // Container shm gate: see `shmgate`. Armed before the first child is
-    // spawned, because every container process must inherit the filter, and it
-    // is a no-op when this daemon already shares the compositor's SELinux domain.
-    if shmgate::install() {
-        eprintln!("[file-daemon] shm gate armed");
-    }
 
     let listener = socket::create_abstract_server(&socket_name)?;
     unsafe {

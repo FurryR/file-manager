@@ -257,7 +257,7 @@ impl PtyManager {
 
         // 4. Build command/args/env as CStrings in the parent so they are
         //    safely accessible after fork (fork duplicates memory).
-        // Resolve the requested run-as user up front, so an unknown user is a
+        // Resolve the requested user up front, so an unknown user is a
         // clean request error rather than a child that dies after fork. A
         // non-root daemon can only "switch" to its own uid.
         let run_as = match req.user.as_deref() {
@@ -274,6 +274,8 @@ impl PtyManager {
             }
         }
 
+        // Every child here is exactly what the client asked for: no implicit
+        // identity switch, so a root daemon's children stay root.
         let own_user = if req.command.is_empty() && run_as.is_none() {
             Some(resolve_user(&unsafe { libc::geteuid() }.to_string())?)
         } else {
@@ -281,7 +283,7 @@ impl PtyManager {
         };
         let target = run_as.as_ref().or(own_user.as_ref());
         let command = if req.command.is_empty() {
-            resolve_shell(target.unwrap().shell.as_deref())?
+            resolve_shell(target.and_then(|target| target.shell.as_deref()))?
         } else {
             req.command.clone()
         };
@@ -407,6 +409,13 @@ impl PtyManager {
                 // container root shares uid 0 and the PID namespace with us).
                 crate::cgroup::isolate_view();
 
+                // Enter the container domain for the coming exec. A context
+                // was cached only when policy injection succeeded. Host daemons
+                // have none and keep their own domain.
+                if !crate::sepolicy::apply_exec_context() {
+                    libc::_exit(126);
+                }
+
                 // Create new session (child becomes session leader, no ctty)
                 libc::setsid();
 
@@ -445,8 +454,8 @@ impl PtyManager {
                     libc::setpriority(libc::PRIO_PROCESS, 0, value);
                 }
 
-                // Drop to the requested user, if any. Refuse to run with the
-                // wrong credentials if the switch fails.
+                // Drop to the explicitly requested user, if any (container
+                // shells). Host children inherit the daemon's credentials.
                 if let Some(ref target) = run_as {
                     libc::initgroups(target.name.as_ptr(), target.gid);
                     if libc::setgid(target.gid) != 0 {

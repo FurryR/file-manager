@@ -1,5 +1,6 @@
 package io.furryr.file.agent
 
+import io.furryr.file.core.FileWorld
 import io.furryr.file.daemon.DaemonTarget
 import io.furryr.file.proto.hub.RemoteMcpCall
 import io.furryr.file.proto.hub.RemoteMcpCallEvent
@@ -23,9 +24,10 @@ object McpProxy {
     suspend fun request(
         request: RemoteMcpCall,
         target: DaemonTarget,
+        world: FileWorld,
         emit: suspend (RemoteMcpCallEvent) -> Unit,
     ) {
-        val server = McpConfig.servers(target, request.cwd)
+        val server = McpConfig.servers(target, request.cwd, world)
             .firstOrNull { it.name == request.server }
             ?: error("MCP server '${request.server}' is not configured")
         require(server.enabled) { "MCP server '${request.server}' is disabled" }

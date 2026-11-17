@@ -15,7 +15,6 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ProgressBar
 import android.widget.Toast
-import android.webkit.ConsoleMessage
 import android.webkit.JsResult
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -49,8 +48,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -77,7 +74,6 @@ import io.furryr.file.home.HomeEntry
 import io.furryr.file.home.HomeEntryKind
 import io.furryr.file.model.PageKind
 import io.furryr.file.ui.util.BrowseAddress
-import io.furryr.file.terminal.DevToolsLog
 import io.furryr.file.terminal.TerminalTab
 import io.furryr.file.terminal.WebDevToolsHost
 import io.furryr.file.terminal.WebDevToolsTab
@@ -93,7 +89,6 @@ import java.io.ByteArrayInputStream
 private const val ASSET_HOST = "file.local"
 private const val DOCUMENT_PATH = "__document__"
 private const val LOADING_TAG = "web-loading"
-private const val DEVTOOLS_MAX_LOGS = 1000
 
 /** `scheme:` prefix: a hit-test URL that already stands on its own. */
 private val ABSOLUTE_URL = Regex("^[a-zA-Z][a-zA-Z0-9+.\\-]*:")
@@ -278,12 +273,14 @@ internal class WebRendererSession(
     var hitTarget by mutableStateOf<WebHitTarget?>(null)
         private set
 
-    /** Console lines for the DevTools tab opened from this page. */
-    override val devToolsLogs = mutableStateListOf<DevToolsLog>()
-
-    /** False once the page is gone; the DevTools tab keeps its history. */
+    /** False once the page is gone; the DevTools tab shows its closed state. */
     override var devToolsAlive by mutableStateOf(true)
         private set
+
+    override fun devToolsView(context: Context): WebView? {
+        if (closing) return null
+        return ensureView(context)
+    }
 
     private var webView: WebView? = null
     private var darkTheme = true
@@ -376,36 +373,6 @@ internal class WebRendererSession(
             setPageProgress(0)
             contentVisible = false
         }
-    }
-
-    /** Append one DevTools console line, keeping the tab bounded. */
-    internal fun appendDevToolsLog(entry: DevToolsLog) {
-        if (devToolsLogs.size >= DEVTOOLS_MAX_LOGS) devToolsLogs.removeAt(0)
-        devToolsLogs += entry
-    }
-
-    override fun clearDevToolsLogs() {
-        devToolsLogs.clear()
-    }
-
-    /** Run a script in the current page and echo its result to the console. */
-    override fun evaluateJs(script: String) {
-        val code = script.trim()
-        if (code.isEmpty()) return
-        appendDevToolsLog(DevToolsLog("input", code))
-        val view = webView
-        if (view == null) {
-            appendDevToolsLog(DevToolsLog("result", "page is closed"))
-            return
-        }
-        view.evaluateJavascript(code) { result ->
-            appendDevToolsLog(DevToolsLog("result", result ?: "undefined"))
-        }
-    }
-
-    override fun refreshPage(): Boolean {
-        reload()
-        return true
     }
 
     override fun reset() {
@@ -586,18 +553,6 @@ internal class WebRendererSession(
                 }
             }
             webChromeClient = object : WebChromeClient() {
-                override fun onConsoleMessage(message: ConsoleMessage?): Boolean {
-                    message ?: return false
-                    appendDevToolsLog(
-                        DevToolsLog(
-                            level = message.messageLevel().name.lowercase(),
-                            message = message.message(),
-                            source = message.sourceId(),
-                            line = message.lineNumber(),
-                        ),
-                    )
-                    return true
-                }
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                     setPageProgress(if (newProgress >= 100) null else newProgress)
                 }

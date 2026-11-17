@@ -55,6 +55,7 @@
     <string name="licenses_title">オープンソースライセンス</string>
     <string name="licenses_group_android">Android / JVM</string>
     <string name="licenses_group_rust">Rust</string>
+    <string name="licenses_group_web">Web コンポーネント</string>
     <string name="licenses_group_native">ネイティブ</string>
     <string name="about">このアプリについて</string>
     <string name="about_desc">アプリ情報と法的通知</string>
@@ -196,12 +197,10 @@
     <string name="terminal_empty">利用可能なターミナルはありません</string>
     <string name="terminal_retry">再試行</string>
     <string name="retry">再試行</string>
-    <string name="devtools_console">コンソール</string>
-    <string name="devtools_clear">クリア</string>
-    <string name="devtools_reload">再読み込み</string>
-    <string name="devtools_input">JavaScript</string>
-    <string name="devtools_run">実行</string>
-    <string name="devtools_page_closed">ページは閉じられました。履歴は読み取り専用です。</string>
+    <string name="devtools_connecting">Chrome DevTools を起動しています…</string>
+    <string name="devtools_unavailable">DevTools をこのページに接続できませんでした。</string>
+    <string name="devtools_retry">再試行</string>
+    <string name="devtools_page_closed">ページは閉じられました。DevTools は接続されていません。</string>
     <string name="terminal_key_enter">Enter</string>
     <string name="terminal_drop_hint">ここにドロップしてパスを挿入</string>
     <string name="terminal_no_shell">このターミナルにはシェルがありません</string>
@@ -255,6 +254,7 @@
     <string name="settings_search_suggestions">インターネットからの検索候補</string>
     <string name="settings_search_suggestions_desc">入力中に検索エンジンの候補を表示します</string>
     <string name="suggestion_internet">インターネット検索候補</string>
+    <string name="suggestion_path">パス</string>
     <string name="settings_color_scheme">配色</string>
     <string name="settings_amoled_black">AMOLED ブラック</string>
     <string name="settings_amoled_black_desc">ダークモードを純黒で表示し、AMOLED での消費電力を抑えます</string>

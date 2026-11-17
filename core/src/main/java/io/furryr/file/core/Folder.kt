@@ -1,5 +1,6 @@
 package io.furryr.file.core
 
+import io.furryr.file.core.exception.NodeNotFoundException
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
 import io.furryr.file.core.source.FileSource
@@ -65,6 +66,11 @@ class Folder internal constructor(
         requireValidName(name)
         val childPath = path.child(name)
         val stat = provider.stat(innerPathFor(childPath)).getOrThrow()
+        // Providers answer `exists = false` for a missing child instead of
+        // failing. A node is an *existing* entry, so a missing name must not
+        // become a phantom file; destination resolution relies on this to
+        // create the child on demand.
+        if (!stat.exists) throw NodeNotFoundException("no such file or folder: $childPath")
         nodeAt(childPath, stat.isDirectory)
     }
 

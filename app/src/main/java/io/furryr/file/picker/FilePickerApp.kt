@@ -335,12 +335,16 @@ fun FilePickerApp(
     val homeRevision = HomeStore.revision()
     val homeRecent = remember(homeRevision) { HomeStore.recent() }
     val homeBookmarks = remember(homeRevision) { HomeStore.bookmarks() }
-    val pathSuggestionSource = remember(homeBookmarks, homeRecent) {
+    val pathSuggestionSource = remember(homeBookmarks, homeRecent, world) {
         object : PathSuggestionSource {
             override fun local(query: String): List<PathSuggestion> =
                 PathSuggestions.local(query, homeBookmarks, homeRecent)
 
             override suspend fun remote(query: String): List<PathSuggestion> = emptyList()
+
+            // A picker lands on folders; a typed file is not a browsable stop.
+            override suspend fun listing(query: String): List<PathSuggestion> =
+                PathSuggestions.listing(world.files, query, includeFiles = false)
         }
     }
 
@@ -402,7 +406,9 @@ fun FilePickerApp(
 
     ModalNavigationDrawer(
         drawerState = drawerState,
-        gesturesEnabled = true,
+        // The path edit scrim dims everything below the top bar; letting the
+        // drawer's edge gesture open over it leaves two overlays active.
+        gesturesEnabled = !titleEditing,
         drawerContent = {
             FileDrawer(
                 vfs = world.vfs,
@@ -529,7 +535,10 @@ fun FilePickerApp(
                                 )
                             },
                             navigationIcon = {
-                                IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                IconButton(
+                                    onClick = { scope.launch { drawerState.open() } },
+                                    enabled = !titleEditing,
+                                ) {
                                     Icon(
                                         Icons.Default.Menu,
                                         contentDescription = stringResource(R.string.cd_menu),

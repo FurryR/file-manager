@@ -19,8 +19,8 @@ class NodeOps(private val vfs: Vfs) {
 
     /**
      * Copy [source] onto [target]. Both nodes already exist: the caller takes
-     * the destination from [VFolder.destination] / [VFolder.destinationFolder]
-     * (or resolved it), and a page link is a [VFile] like any other.
+     * the destination from [VFolder.destination] (or resolved it), and a page
+     * link is a [VFile] like any other.
      */
     fun copyTo(source: VNode, target: VNode): Flow<CopyProgress> =
         copyNode(source, target, isCopy = true)
@@ -74,13 +74,22 @@ class NodeOps(private val vfs: Vfs) {
     ): Flow<CopyProgress> = flow {
         for (child in source.listNodes().getOrThrow()) {
             val destination = when (child) {
-                is VFolder -> target.destinationFolder(child.name).getOrThrow()
+                is VFolder -> destinationFolder(target, child.name)
                 is VFile -> target.destination(child.name).getOrThrow()
                 else -> continue
             }
             copyNode(child, destination, isCopy).collect { emit(it) }
         }
     }.flowOn(Dispatchers.IO)
+
+    /** The child folder [name] of [folder], created when missing. */
+    private suspend fun destinationFolder(folder: VFolder, name: String): VFolder =
+        when (val node = folder.child(name).getOrNull()) {
+            null -> folder.mkdir(name).getOrThrow()
+            is VFolder -> node
+            is VFile -> error("$name is a file")
+            else -> error("unsupported child: $name")
+        }
 
     private fun copyFile(source: VFile, target: VFile, isCopy: Boolean): Flow<CopyProgress> = flow {
         val native = sameProviderCopy(source, target, isCopy)

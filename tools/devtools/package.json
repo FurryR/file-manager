@@ -1,0 +1,13 @@
+{
+  "name": "file-manager-devtools",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Vendors the official Chrome DevTools frontend into the app assets served by the WebView DevTools bridge.",
+  "type": "module",
+  "scripts": {
+    "sync": "node scripts/sync.mjs"
+  },
+  "dependencies": {
+    "@devtools-anywhere/devtools-frontend": "0.3.0"
+  }
+}

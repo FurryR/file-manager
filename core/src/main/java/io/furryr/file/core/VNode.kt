@@ -132,12 +132,4 @@ interface VFolder : VNode {
             else -> Result.failure(IllegalStateException("unsupported child: $name"))
         }
 
-    /** The child folder [name], created when missing. */
-    suspend fun destinationFolder(name: String): Result<VFolder> =
-        when (val node = child(name).getOrNull()) {
-            null -> mkdir(name)
-            is VFolder -> Result.success(node)
-            is VFile -> Result.failure(IllegalStateException("$name is a file"))
-            else -> Result.failure(IllegalStateException("unsupported child: $name"))
-        }
 }

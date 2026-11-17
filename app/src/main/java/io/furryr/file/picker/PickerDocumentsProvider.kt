@@ -153,7 +153,7 @@ class PickerDocumentsProvider : DocumentsProvider() {
                 throw java.nio.file.FileAlreadyExistsException(name)
             }
             if (mimeType == Document.MIME_TYPE_DIR) {
-                folder.destinationFolder(name).getOrThrow()
+                folder.mkdir(name).getOrThrow()
             } else {
                 folder.destination(name).getOrThrow()
             }

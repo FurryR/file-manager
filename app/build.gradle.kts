@@ -187,6 +187,58 @@ if (!skipNativeBuild) {
     tasks.named("preBuild").configure { dependsOn(buildNative) }
 }
 
+// ── Chrome DevTools frontend assets ──────────────────────────────────
+// tools/devtools pins the official frontend build; its output is generated
+// into src/main/assets/devtools so the runtime bridge can serve it offline.
+val skipDevToolsBuild = providers.gradleProperty("skipDevToolsBuild")
+    .orNull
+    ?.toBoolean() == true
+val devToolsDir = rootProject.layout.projectDirectory.dir("tools/devtools")
+val appResDir = rootProject.layout.projectDirectory.dir("app/src/main/res")
+
+val installDevTools = tasks.register<Exec>("installDevTools") {
+    group = "build"
+    description = "Installs the pinned Chrome DevTools frontend npm package."
+    workingDir = devToolsDir.asFile
+    commandLine("npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund")
+
+    inputs.file(devToolsDir.file("package.json"))
+    inputs.file(devToolsDir.file("package-lock.json"))
+    outputs.dir(devToolsDir.dir("node_modules"))
+}
+
+val syncDevTools = tasks.register<Exec>("syncDevTools") {
+    group = "build"
+    description = "Copies the pinned Chrome DevTools frontend into app assets."
+    dependsOn(installDevTools)
+    workingDir = devToolsDir.asFile
+    commandLine("npm", "run", "sync")
+
+    inputs.files(
+        devToolsDir.file("package.json"),
+        devToolsDir.file("package-lock.json"),
+        devToolsDir.file("scripts/sync.mjs"),
+    )
+    // The sync stages one DevTools locale per app translation, so a new
+    // values-* folder must invalidate this task even though no input file
+    // under tools/devtools changed.
+    inputs.property(
+        "appLocaleDirs",
+        providers.provider {
+            appResDir.asFile.listFiles().orEmpty()
+                .map { it.name }
+                .filter { it.startsWith("values-") }
+                .sorted()
+                .joinToString(",")
+        },
+    )
+    outputs.dir(assetsDir.dir("devtools"))
+}
+
+if (!skipDevToolsBuild) {
+    tasks.named("preBuild").configure { dependsOn(syncDevTools) }
+}
+
 androidComponents {
     onVariants(selector().all()) { variant ->
         variant.instrumentation.transformClassesWith(

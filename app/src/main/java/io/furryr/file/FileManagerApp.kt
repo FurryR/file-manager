@@ -1768,13 +1768,16 @@ fun FileManagerApp(
     val homeRevision = HomeStore.revision()
     val homeRecent = remember(homeRevision) { HomeStore.recent() }
     val homeBookmarks = remember(homeRevision) { HomeStore.bookmarks() }
-    val pathSuggestionSource = remember(homeBookmarks, homeRecent) {
+    val pathSuggestionSource = remember(homeBookmarks, homeRecent, world) {
         object : PathSuggestionSource {
             override fun local(query: String): List<PathSuggestion> =
                 PathSuggestions.local(query, homeBookmarks, homeRecent)
 
             override suspend fun remote(query: String): List<PathSuggestion> =
                 PathSuggestions.remote(context, query)
+
+            override suspend fun listing(query: String): List<PathSuggestion> =
+                PathSuggestions.listing(world.files, query)
         }
     }
     fun chooseTitleSuggestion(suggestion: PathSuggestion) {
@@ -2013,9 +2016,11 @@ fun FileManagerApp(
         drawerState = drawerState,
         // A WebView consumes horizontal scrolling itself, and the editor uses
         // horizontal gestures for selection, so the open-from-edge gesture
-        // stays off for both. An already open drawer keeps the gesture so it
-        // can still be swiped shut.
-        gesturesEnabled = activeRenderer?.consumesEdgeGestures != true || drawerState.isOpen,
+        // stays off for both. A path edit dims the content from below the top
+        // bar, so its drawer must not open over the scrim either. An already
+        // open drawer keeps the gesture so it can still be swiped shut.
+        gesturesEnabled = !titleEditing &&
+            (activeRenderer?.consumesEdgeGestures != true || drawerState.isOpen),
         drawerContent = {
             FileDrawerHost(
                 vfs = world.vfs,
@@ -2105,6 +2110,7 @@ fun FileManagerApp(
                     onSuggestion = ::chooseTitleSuggestion,
                     onEditingChange = { titleEditing = it },
                     onOpenDrawer = { scope.launch { drawerState.open() } },
+                    drawerEnabled = !titleEditing,
                     onSettings = {
                         context.startActivity(Intent(context, SettingsActivity::class.java))
                     },

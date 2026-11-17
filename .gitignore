@@ -42,5 +42,11 @@ Thumbs.db
 # Native download/build cache (scripts/build-native.sh, native/build-*.sh)
 /cache/
 
+# Chrome DevTools frontend npm install + generated assets
+node_modules/
+/tools/devtools/.dist/
+/tools/devtools/.locale-cache/
+/app/src/main/assets/devtools/
+
 # Local environment
 .env

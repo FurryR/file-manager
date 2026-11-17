@@ -90,7 +90,7 @@ fun LicensesScreen(modifier: Modifier = Modifier) {
     val generated = remember { loadGeneratedLicenses(context) }
     val rows = generated.ifEmpty { FALLBACK_LICENSES }
     val sections = remember(rows) {
-        val order = listOf("Android / JVM", "Rust", "Native")
+        val order = listOf("Android / JVM", "Rust", "Bundled web", "Native")
         rows.groupBy { it.group }
             .entries
             .sortedBy { (group, _) -> order.indexOf(group).let { if (it < 0) order.size else it } }
@@ -136,6 +136,7 @@ fun LicensesScreen(modifier: Modifier = Modifier) {
 private fun groupLabel(group: String): String = when (group) {
     "Android / JVM" -> stringResource(R.string.licenses_group_android)
     "Rust" -> stringResource(R.string.licenses_group_rust)
+    "Bundled web" -> stringResource(R.string.licenses_group_web)
     "Native" -> stringResource(R.string.licenses_group_native)
     else -> group
 }

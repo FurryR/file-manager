@@ -58,7 +58,28 @@ internal object Terminal {
         if (requester != null) requester(id) else unload(id)
     }
 
+    /**
+     * Unload a tab whose backing resource ended on its own.
+     *
+     * Unlike [requestClose] this never reaches the shell, so a sheet that is
+     * open at that moment stays open: it creates the terminal for the current
+     * page instead of retracting as if the user closed the last tab. The
+     * tab's own veto still applies through [unload].
+     */
+    fun discard(id: String): Boolean = unload(id)
+
     fun contentFor(id: String): TerminalContent? = contents[id]
+
+    /** Reset each tab's non-persistable, Activity-bound resources. */
+    fun resetTabs() {
+        tabs.forEach { tab ->
+            try {
+                tab.reset()
+            } catch (error: Throwable) {
+                Log.w(TAG, "cannot reset terminal tab", error)
+            }
+        }
+    }
 
     fun open(tab: TerminalTab) {
         tabs += tab
@@ -103,8 +124,27 @@ internal object Terminal {
     private fun launchEnter(tab: TerminalTab) {
         enterJobs.remove(tab.id)?.cancel()
         val job = scope.launch {
+            // Commit is the tab's "I have a body" signal. A content tab that
+            // does not commit (its page is gone) is discarded; the sheet then
+            // creates the terminal the user asked for instead of retracting.
+            var committed = false
+            val context = object : TerminalContext {
+                override fun commit(content: TerminalContent) {
+                    committed = true
+                    contents[tab.id] = content
+                }
+
+                override fun requestOpenDrawer() {
+                    drawerOpener?.invoke()
+                }
+
+                override fun requestClose() {
+                    Terminal.requestClose(tab.id)
+                }
+            }
             try {
-                tab.enter(contextFor(tab.id))
+                tab.enter(context)
+                if (tab !is TerminalViewTab && !committed) discard(tab.id)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -114,20 +154,6 @@ internal object Terminal {
         enterJobs[tab.id] = job
         job.invokeOnCompletion {
             if (enterJobs[tab.id] === job) enterJobs.remove(tab.id)
-        }
-    }
-
-    private fun contextFor(id: String): TerminalContext = object : TerminalContext {
-        override fun commit(content: TerminalContent) {
-            contents[id] = content
-        }
-
-        override fun requestOpenDrawer() {
-            drawerOpener?.invoke()
-        }
-
-        override fun requestClose() {
-            Terminal.requestClose(id)
         }
     }
 }

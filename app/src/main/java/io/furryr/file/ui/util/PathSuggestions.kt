@@ -1,6 +1,10 @@
 package io.furryr.file.ui.util
 
 import android.content.Context
+import io.furryr.file.core.FileWorld
+import io.furryr.file.core.Path
+import io.furryr.file.core.VFolder
+import io.furryr.file.core.VNode
 import io.furryr.file.home.HomeEntry
 import io.furryr.file.home.HomeEntryKind
 import org.json.JSONArray
@@ -8,30 +12,36 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.Locale
 
 /** Where a path-bar suggestion came from. */
-enum class SuggestionSource { BOOKMARK, RECENT, INTERNET }
+enum class SuggestionSource { PATH, BOOKMARK, RECENT, INTERNET }
 
 /**
  * One row in the address-bar overlay. [target] is what selecting the row
- * navigates to: a stored location for a bookmark/recent entry, or the search
- * term for an internet suggestion.
+ * navigates to: an address under the typed folder, a stored location for a
+ * bookmark/recent entry, or the search term for an internet suggestion.
  */
 data class PathSuggestion(
     val source: SuggestionSource,
     val title: String,
     val subtitle: String = "",
     val target: String = title,
+    /** Path rows use this to pick a folder or file icon. */
+    val isDirectory: Boolean = false,
 )
 
 /**
  * Where the address bar gets rows while the user types: saved/visited
- * locations are synchronous, internet completions suspend. One source keeps
- * both halves behind the same call site.
+ * locations are synchronous, entries under the typed path and internet
+ * completions suspend. One source keeps every half behind the same call site.
  */
 interface PathSuggestionSource {
     fun local(query: String): List<PathSuggestion>
     suspend fun remote(query: String): List<PathSuggestion>
+
+    /** Entries in the folder the typed address names, best match first. */
+    suspend fun listing(query: String): List<PathSuggestion> = emptyList()
 }
 
 /**
@@ -43,6 +53,7 @@ interface PathSuggestionSource {
  * leaves the device, matching a browser's behaviour.
  */
 object PathSuggestions {
+    private const val MAX_PATH = 8
     private const val MAX_LOCAL = 8
     private const val MAX_REMOTE = 8
     private const val TIMEOUT_MS = 1500
@@ -82,6 +93,75 @@ object PathSuggestions {
             .filterNot { it.location in savedLocations }
             .map { it.toSuggestion(SuggestionSource.RECENT) }
         return (saved + visited).take(MAX_LOCAL)
+    }
+
+    /**
+     * Entries in the folder the typed address points at.
+     *
+     * `/storage/emulated/0/Doc` lists `/storage/emulated/0` and keeps names
+     * starting with `Doc`; a trailing slash lists every child. The folder is
+     * resolved through [FileWorld], so local, SAF, FTP, SFTP, remote,
+     * container and archive view paths all suggest their own entries. Rows
+     * are directories first, then by name, so completion beats bookmark and
+     * search rows.
+     */
+    suspend fun listing(
+        files: FileWorld,
+        query: String,
+        includeFiles: Boolean = true,
+    ): List<PathSuggestion> {
+        val text = query.trim()
+        if (!isListingAddress(text)) return emptyList()
+        val (parent, prefix) = splitListingAddress(text) ?: return emptyList()
+        val parentPath = runCatching { Path.parse(parent) }.getOrNull() ?: return emptyList()
+        val folder = files.vfs.folder(parentPath).getOrElse { return emptyList() }
+        val nodes = folder.listNodes().getOrElse { return emptyList() }
+        val needle = prefix.trim()
+        return nodes.asSequence()
+            .filter { includeFiles || it is VFolder }
+            .filter { needle.isEmpty() || it.name.startsWith(needle, ignoreCase = true) }
+            .sortedWith(
+                compareByDescending<VNode> { it is VFolder }
+                    .thenBy { it.name.lowercase(Locale.ROOT) },
+            )
+            .take(MAX_PATH)
+            .map { node ->
+                val address = node.path.toString()
+                PathSuggestion(
+                    source = SuggestionSource.PATH,
+                    title = node.name,
+                    subtitle = address,
+                    target = address,
+                    isDirectory = node is VFolder,
+                )
+            }
+            .toList()
+    }
+
+    /**
+     * Only Vfs-addressed text lists its folder. Web addresses (including a
+     * bare host) stay with the browser and internet suggestions.
+     */
+    private fun isListingAddress(text: String): Boolean {
+        if (text.isEmpty() || BrowseAddress.isWebUrl(text)) return false
+        return text.startsWith('/') || text.contains("://")
+    }
+
+    /**
+     * Split typed text into the folder to list and the name being completed.
+     * A trailing slash means "list this folder"; a bare authority has no
+     * folder to list yet.
+     */
+    private fun splitListingAddress(text: String): Pair<String, String>? {
+        val authority = text.indexOf("://")
+        val searchFrom = if (authority >= 0) authority + 3 else 0
+        val slash = text.lastIndexOf('/')
+        if (slash < searchFrom) return null
+        return if (slash == text.lastIndex) {
+            text to ""
+        } else {
+            text.substring(0, slash + 1) to text.substring(slash + 1)
+        }
     }
 
     suspend fun remote(context: Context, query: String): List<PathSuggestion> {

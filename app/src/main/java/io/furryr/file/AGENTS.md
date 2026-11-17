@@ -11,7 +11,8 @@ platform services and calls the library.
 | `.` (root) | `MainActivity.kt`, `FileManagerApp.kt`, `AppWorld.kt`, `Constants.kt`, `Opener.kt`, `Providers.kt`, `FileManagerApplication.kt` |
 | `agent/` | Agent settings (MCP/model/provider), no terminal code |
 | `crash/` | `CrashReporter.kt` (uncaught handler + pending report) and `CrashActivity.kt` (report screen, copy/share/export/restart) |
-| `terminal/` | Terminal subsystem: `Terminal` tab owner, sheet, PTY `SessionManager`, Termux view/input, tab implementations, DevTools |
+| `devtools/` | Official Chrome DevTools frontend bridge: loopback asset server, CDP WebSocket proxy, WebView target discovery |
+| `terminal/` | Terminal subsystem: `Terminal` tab owner, sheet, PTY `SessionManager`, Termux view/input, tab implementations, DevTools tab |
 | `forward/` | `ForwardFileProvider` + persistent share-token signing |
 | `open/` | `IncomingOpen` — system VIEW/SEND intents as addresses and `content://` documents |
 | `picker/` | `FilePickerActivity` + `FilePickerApp` (single-folder shell), `PickerDocumentsProvider` (persistent document/tree URIs), `PickerTokens` (persisted id HMAC), `PickerSelection` (generic select opener) |
@@ -51,6 +52,7 @@ platform services and calls the library.
 - **Container provider**: `:container/ContainerProvider.kt` — one provider for all containers
 - **Container daemon launch**: `:container/ContainerDaemonLauncher.kt` — proot/chroot argv
 - **Terminal panel**: `terminal/TerminalSheet.kt` — bottom sheet over `terminal/Terminal.kt`; `RuntimeForegroundService.kt` keeps sessions and container daemons alive
+- **Web DevTools**: `devtools/DevToolsServer.kt` serves the generated frontend from `app/src/main/assets/devtools` and proxies its CDP WebSocket to the abstract `webview_devtools_remote_<pid>` socket; it also injects a bootstrap script that seeds the frontend `ui-theme`/`language` settings from the app theme and locale, and `terminal/WebDevToolsTab.kt` re-applies live theme changes. `devtools/DevToolsTargets.kt` resolves the page target and `terminal/WebDevToolsTab.kt` owns the frontend WebView. The npm pin and asset sync live in `tools/devtools/`; the sync stages one DevTools locale per app `values-*` translation, so a new app language needs no DevTools code change.
 - **Exec/PTY**: `:daemon/process/ExecService.kt` — `CommandSpec` → `ProcessChannel` (one path for terminal + command exec)
 - **Native daemon entry**: `:daemon/DaemonManager.kt` — starts `libfiledaemon.so` from `nativeLibraryDir`
 - **Add a location store**: implement a `LocationSources.kt` interface in `store/`, wire it through `LocationStores.init` and the matching provider `init()`
@@ -73,6 +75,8 @@ platform services and calls the library.
 
 ## TODO - Bug checks
 
+- [ ] `clipboard/Clipboard.kt` + `picker/PickerDocumentsProvider.kt`: verify copy/move destination folder creation after inlining the removed `VFolder.destinationFolder(name)` (new folder, merge, file collision) and that picker `CREATE_DOCUMENT` with `MIME_TYPE_DIR` still creates the directory and rejects an existing name.
+
 - [ ] `render/FolderRenderer.kt` + `editor/EditorRenderer.kt` + `ui/shell/FileDrawerHost.kt` + `ui/components/drawer/SafLocationItem.kt`: verify create/rename/delete use folder callbacks, `saf:///` greys modify actions, SAF locations open as `saf:///<hex>`, and Up returns to `saf:///`.
 - [ ] `render/FolderRenderer.kt` + `editor/EditorRenderer.kt`: verify terminal availability uses `ExecProvider.terminalPath(folder, folder)` so `container:///` and `ssh:///` stay closed while real folders stay open.
 - [ ] `render/ErrorRenderer.kt` + `FileManagerApp.kt` + `render/HomeRendererSession.kt`: verify unreachable local/FTP/SFTP/SSH/AList addresses open a retryable error page, Retry replaces it on success, Back returns to the previous folder, and operation failures still toast.
@@ -89,7 +93,8 @@ platform services and calls the library.
 - [ ] `terminal/TermuxTerminalTab.kt` + `res/values*/strings.xml`: verify an SSH entry under the same connection inserts its remote path (no double-slash rejection), a path from another SSH connection shows the localized rejection, and no terminal drop/creation message falls back to English.
 - [ ] `FileManagerApp.kt` + `ui/screens/HomeScreen.kt`: verify the top strip stays visible while a copy/move payload is frozen, and the merged recent list keeps HomeStore visit order.
 - [ ] `FileManagerApp.kt`: verify tapping a Home file/web entry shows the opening overlay after 300 ms, Cancel aborts the resolve, and a folder row still shows the directory spinner.
-- [ ] `FileManagerApp.kt`: verify the path-suggestion scrim covers tabs, content and the bottom toolbar but leaves the path field and popup interactive, including AMOLED dark mode and after rotation.
+- [ ] `FileManagerApp.kt` + `picker/FilePickerApp.kt`: verify the path-suggestion scrim covers tabs, content and the bottom toolbar but leaves the path field and popup interactive, including AMOLED dark mode and after rotation; while editing, the drawer button and edge swipe stay inactive so no drawer opens over the scrim.
+- [ ] `ui/util/PathSuggestions.kt` + `ui/components/TopBarContent.kt`: verify typing an address lists the folders/files under its parent before bookmarks, recent locations and internet rows (folders first, case-insensitive prefix), a trailing slash lists the whole folder, archive/container/remote paths suggest their own entries, the picker lists only folders, and selecting a row opens the node.
 - [ ] `res/values*/strings.xml`: verify `home_recent` renders in all four locales.
 - [ ] `ui/components/FileDrawer.kt`: verify remote/SSH location tap closes the drawer immediately and the file list spinner (delayed) covers slow loads.
 - [ ] `ui/components/FileDrawer.kt`: verify SSH host-key approval and connect-error dialogs still appear after the drawer closes, and that trusting a key navigates into the location.
@@ -154,7 +159,7 @@ platform services and calls the library.
 - [ ] `ui/components/drawer/DrawerDialogs.kt` + `FileDrawer.kt`: verify every drawer rename/delete/add dialog, SSH host-key approval and add-location flow after the `DrawerDialogState` move.
 - [ ] `hub/.../HubAgentOps.kt` + `hub/.../HubExecOps.kt` + `HubServer.kt`: verify agent attach/prompt/cancel/approval/MCP, exec/PTY wait/resize/signal/close, hello and target listing over a live hub connection.
 - [ ] `terminal/TerminalSheet.kt`: verify terminal tab create/switch/close, active-id fallback after closing a middle tab, sheet drag heights, drawer swipe and tab toasts, and that the drawer/close hooks installed on the process-scoped `Terminal` are cleared when the sheet leaves composition.
-- [ ] `terminal/Terminal.kt`: verify tabs and the active id survive activity recreate, a finished session prunes only its own tab, and DevTools is dropped when its page closes.
+- [ ] `terminal/Terminal.kt`: verify tabs and the active id survive activity recreate, a finished session prunes only its own tab, and a DevTools tab unloads itself when its page closes.
 - [ ] `terminal/TerminalTabUi.kt`: verify drawer rows/labels and the empty state after the tab split.
 - [ ] `terminal/TermuxTerminalTab.kt`: verify `terminalSpecFor` labels for local, container and SSH addresses and the retry path after a failed spawn.
 - [ ] `terminal/TermuxTerminalTab.kt` + `terminal/Terminal.kt`: verify a normal shell exit (status 0) closes its own tab, including a background tab and the last tab (sheet dismisses), while an abnormal end still shows the connection-lost overlay.
@@ -163,10 +168,12 @@ platform services and calls the library.
 - [ ] `FileManagerApp.kt`: verify opening the terminal uses the active renderer spec, web/Home tabs create no terminal tab, and the sheet no longer changes the window soft-input mode when hidden.
 - [ ] `terminal/SessionManager.kt`: verify `sessionIdOf` maps restored Termux sessions after an activity recreate.
 - [ ] `res/values*/strings.xml`: verify `terminal_retry` resolves in all four locales.
-- [ ] `terminal/WebDevToolsTab.kt` + `render/WebRenderer.kt`: verify the web tab terminal action opens a DevTools tab, console logs and JS results render, clear/reload work, a closed page shows the read-only state, no PTY is created, and the shell prunes the tab when the page closes.
+- [ ] `terminal/WebDevToolsTab.kt` + `render/WebRenderer.kt` + `devtools/`: verify the web tab terminal action opens a DevTools tab with the official frontend, Console/Elements/Network/Application work against the page, reload/clear and source navigation work, closing the page unloads the DevTools tab from the background, opening the terminal from a folder while that page dies keeps the sheet open and creates the folder terminal (one automatic fill, no retracting), a page that cannot create a terminal keeps the sheet's empty state instead of dismissing it, no PTY is created, and each DevTools tab stops its own loopback server when released.
+- [ ] `devtools/DevToolsServer.kt` + `devtools/DevToolsTargets.kt` + `terminal/WebDevToolsTab.kt`: verify the per-tab asset server rejects paths outside its token prefix, serves `inspector.html`/locale/bundle assets offline, strips `Origin` on the CDP upgrade, relays text and binary frames, finds the page target by URL/title/marker when several WebViews share an address, and closes its listener with the tab.
+- [ ] `tools/devtools/` + `app/build.gradle.kts`: verify `npm ci`/`npm run sync` are up-to-date on the second build, `-PskipDevToolsBuild=true` skips them, and `BUILD_INFO.json` matches the pinned package and Chrome version.
 - [ ] `MainActivity.kt`: verify `chrome://inspect` over adb lists the WebView and the target disappears with the process.
 - [ ] `terminal/TerminalSheet.kt` + `terminal/Terminal.kt`: verify the terminal tab list is independent of file tabs, survives file-tab switches, and is not rebuilt from `SessionManager`.
-- [ ] `res/values*/strings.xml`: verify the six `devtools_*` strings resolve in all four locales.
+- [ ] `res/values*/strings.xml`: verify the four `devtools_*` strings (connecting, unavailable, retry, page closed) resolve in all four locales.
 - [ ] `FileManagerApp.kt` + `render/RendererBase.kt`: verify pending renderers stay out of pages/history, the 300ms loading overlay and its Cancel button, and `commit` only after `enter` finishes.
 - [ ] `render/RendererBase.kt`: verify each renderer's `enter` and the Composable content lambda committed by `host.commit`.
 - [ ] `render/WebRenderer.kt` + `FileManagerApp.kt`: verify pending WebView loading after commit, optimistic hand-back, and that `adopt` is not used; restore WebView reuse later.
@@ -193,7 +200,7 @@ platform services and calls the library.
 - [ ] `terminal/TerminalViewComposable.kt`: verify the terminal repaints while typing after the connecting→connected swap and after switching away and back (the text-changed listener must be re-registered on view attach), including sheet hide/show and activity recreate.
 - [ ] `terminal/TerminalViewComposable.kt` + `terminal/TerminalInputState.kt`: verify every terminal tab accepts IME text after switching (not only the first), the connecting spinner no longer disposes the shared wrapper, focus/IME survive a tab switch, and extra keys still target the active session.
 - [ ] `FileManagerApp.kt` + `render/HomeSessionRenderer.kt` + `render/HomeRendererSession.kt` + `render/RendererSessions.kt`: verify the initial Home tab shows the localized title/path immediately (no `home://` flash), the tab label is localized after a language change, and new Home tabs/here navigation still render.
-- [ ] `terminal/TerminalTab.kt` + `terminal/Terminal.kt` + `terminal/TerminalSheet.kt` + `terminal/TermuxTerminalTab.kt` + `render/Renderer.kt` + `render/WebRenderer.kt`: verify the extra-key menu opens the sheet drawer on every tab (including after activity recreate), and `TerminalFactory` callers still create local/DevTools tabs.
+- [ ] `terminal/TerminalTab.kt` + `terminal/Terminal.kt` + `terminal/TerminalSheet.kt` + `terminal/TermuxTerminalTab.kt` + `render/Renderer.kt` + `render/WebRenderer.kt`: verify the extra-key menu opens the sheet drawer on every tab (including after activity recreate), a right swipe opens it on Termux tabs and from the DevTools left edge, and `TerminalFactory` callers still create local/DevTools tabs.
 - [ ] `terminal/TerminalInputState.kt`: verify Ctrl+IME Enter sends LF both as an Enter key event and as committed newline text, Alt+Enter sends ESC+CR, and plain IME Enter still sends CR.
 - [ ] `terminal/TerminalInputState.kt` + `terminal/TerminalViewComposable.kt`: verify an IME's own paste reaches the terminal through all three paths — committed text, `performContextMenuAction(R.id.paste/R.id.pasteAsPlainText)` and `KEYCODE_PASTE` — each using the terminal paste path (bracketed paste, CR newlines, control characters stripped) and not typing into the placeholder editor.
 - [ ] `ui/shell/FileTabStrip.kt` + `FileManagerApp.kt`: verify tab select/close/drag-reorder, the add button, long-press session manager, and the narrow-screen `ScrollableTabRow` fallback still behave after the tab strip extraction.

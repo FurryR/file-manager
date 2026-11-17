@@ -46,6 +46,12 @@ interface TerminalTab {
     /** The tab stopped being current; release the view, IME and focus. */
     fun blur() {}
 
+    /**
+     * Reset non-persistable, Activity-bound resources. The tab stays in the
+     * process-scoped list and rebuilds those resources on next entry.
+     */
+    fun reset() {}
+
     /** Paste a dropped entry into this tab; false when it cannot take it. */
     fun acceptDrop(entry: FileEntry): Boolean
 

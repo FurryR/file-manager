@@ -92,6 +92,9 @@ file-manager/
 ├── proto/               # Protobuf IPC (generated into :daemon)
 │   ├── file_daemon.proto  # daemon protocol
 │   └── hub.proto          # run0 hub attach handshake
+├── tools/devtools/      # npm pin + sync for the official Chrome DevTools frontend
+│   ├── package.json / package-lock.json
+│   └── scripts/sync.mjs   # dist → app/src/main/assets/devtools
 └── build-android-aarch64.sh  # Cross-compile Rust → Android ARM64
 ```
 
@@ -157,6 +160,18 @@ file-manager/
 - `:app` is the UI shell and platform wiring: Compose, terminal/session,
   `ForwardFileProvider`, provider registration and the Android renderer layer
   under `app/.../render/`. It must not implement routing.
+- The in-app DevTools tab uses the **official Chrome DevTools frontend**, not a
+  hand-written JS console. `tools/devtools/` pins the prebuilt frontend and
+  copies it to `app/src/main/assets/devtools`; `app/.../devtools/` serves those
+  assets from a tokenized `127.0.0.1` server and proxies the frontend's CDP
+  WebSocket to the WebView debugging socket
+  (`webview_devtools_remote_<pid>`). No new Gradle module and no runtime npm
+  dependency is involved. The bridge serves `inspector.html` with a
+  same-origin bootstrap script that writes the frontend `ui-theme` and
+  `language` settings before its module runs, so a DevTools tab starts in the
+  app's light/dark theme and locale (the sync stages one DevTools locale per
+  app translation, fetched from the pinned revision) instead of starting
+  English/light and flipping.
 
 ## WORLDS
 
@@ -429,6 +444,7 @@ file-manager/
 ./gradlew :core:compileKotlin                    # Compile the pure VFS abstraction
 ./gradlew :proxy:compileKotlin                   # Compile the archive proxy + zip view
 ./gradlew :app:generateLicenses                  # Regenerate app/src/main/assets/licenses.json (Gradle + Cargo + native)
+./gradlew :app:syncDevTools                      # Install + copy the pinned Chrome DevTools frontend into app assets
 bash scripts/build-native.sh                    # Build every native artifact (libsepol, daemon, compositor, utilities, proot, PulseAudio, xkb data)
 bash native/build-android-aarch64.sh             # Cross-compile Rust daemon only
 bash native/build-proot.sh                       # Cross-compile proot binary
@@ -442,6 +458,11 @@ adb install -r app/build/outputs/apk/debug/*.apk # Install
 `./gradlew assembleDebug` now runs `scripts/build-native.sh` through the app
 `preBuild` hook, so Rust changes cannot be left out of the APK. Pass
 `-PskipNativeBuild=true` for an IDE-only build that reuses the staged binaries.
+
+The same `preBuild` hook runs `npm ci` + `npm run sync` in `tools/devtools/`
+and stages the official DevTools frontend under
+`app/src/main/assets/devtools/` (gitignored). Pass
+`-PskipDevToolsBuild=true` to reuse the staged assets.
 
 `./gradlew :app:generateLicenses` runs the dependency-license-report plugin,
 reads `cargo metadata` and `licenses/native.json`, and rewrites
@@ -695,6 +716,9 @@ Gradle, Cargo or native component; the app ships the generated asset.
   engine in place for changes; preserve the listener and its socket inode.
 
 ## TODO - Bug checks
+
+- [ ] `core/.../Folder.kt`: verify `Folder.child` rejects a missing name with `NodeNotFoundException` (providers returning `exists=false`) and that copy/move destination creation, typed-address navigation and rename/delete target lookup still behave on local/SAF/FTP/SFTP/SSH/AList/container targets.
+- [ ] `core/.../VNode.kt` + `core/.../NodeOps.kt` + `app/.../clipboard/Clipboard.kt` + `app/.../picker/PickerDocumentsProvider.kt`: verify folder copy/move and picker directory creation after removing `VFolder.destinationFolder(name)` — new destination folder, merge into an existing folder, existing file collision, and missing-child creation on local/SAF/FTP/SFTP/SSH/AList/container targets.
 
 - [ ] `core/.../DirectoryCapabilities.kt` + `core/.../Folder.kt` + `core/.../Vfs.kt` + `provider/...`: verify folder operation callbacks replace the deleted `directoryCapabilities` API; scheme roots expose no modify callbacks, archives stay read-only, and `Vfs.stat` still reports `canCreateChildren`.
 - [ ] `AppProviders`: verify `container:///` and `ssh:///` expose no terminal while `container://alpine`, `ssh://host` and local `/` still do; `canEnter` was removed from `ProviderStat`, proto and native stat.

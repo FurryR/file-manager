@@ -229,10 +229,25 @@ fun TerminalSheet(
     }
 
     LaunchedEffect(visible) {
-        if (!visible) return@LaunchedEffect
+        if (visible) DaemonManager.warmUp()
+    }
+
+    // A tab can retire itself when its page closes (DevTools). When that
+    // leaves an open sheet empty, create the terminal for the current page
+    // instead of retracting the sheet. A page that cannot host a terminal
+    // keeps the empty state; one automatic fill per opening prevents a
+    // factory that cannot keep a tab from spinning.
+    var autoFillUsed by remember { mutableStateOf(false) }
+    LaunchedEffect(visible, tabs.size) {
+        if (!visible) {
+            autoFillUsed = false
+            return@LaunchedEffect
+        }
+        if (tabs.isNotEmpty() || autoFillUsed) return@LaunchedEffect
+        autoFillUsed = true
+        if (newTerminal == null) return@LaunchedEffect
         DaemonManager.warmUp()
-        if (tabs.isEmpty()) newTab()
-        if (tabs.isEmpty()) onDismiss()
+        newTab()
     }
 
     DisposableEffect(Unit) {
@@ -242,6 +257,7 @@ fun TerminalSheet(
             // composition (and its Activity) reachable.
             Terminal.setDrawerOpener(null)
             Terminal.setCloseRequester(null)
+            Terminal.resetTabs()
             currentToast?.cancel()
             currentToast = null
         }
@@ -300,8 +316,11 @@ fun TerminalSheet(
                         .fillMaxWidth()
                         .height(32.dp)
                         .pointerInput(smallTargetPx, largeTargetPx) {
+                            var horizontalDrag = 0f
                             detectDragGestures(
+                                onDragStart = { horizontalDrag = 0f },
                                 onDragEnd = {
+                                    horizontalDrag = 0f
                                     val current = sheetHeightPx.value
                                     val target = when {
                                         current >= (smallTargetPx + largeTargetPx) / 2 -> largeTargetPx
@@ -319,9 +338,13 @@ fun TerminalSheet(
                                         }
                                     }
                                 },
+                                onDragCancel = { horizontalDrag = 0f },
                                 onDrag = { change, dragAmount ->
                                     change.consume()
-                                    if (!showDrawer && abs(dragAmount.x) > DRAWER_DRAG_THRESHOLD) {
+                                    // Touch slop and frame deltas are small; the
+                                    // gesture must accumulate before it counts.
+                                    horizontalDrag += dragAmount.x
+                                    if (!showDrawer && abs(horizontalDrag) > DRAWER_DRAG_THRESHOLD) {
                                         showDrawer = true
                                     }
                                     scope.launch {
@@ -350,20 +373,29 @@ fun TerminalSheet(
                 }
 
                 Box(Modifier.weight(1f).fillMaxWidth()) {
+                    val drawerGesture = Terminal.active is TerminalViewTab
+                    val drawerDrag = Modifier.pointerInput(Unit) {
+                        var dragged = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { dragged = 0f },
+                            onDragEnd = { dragged = 0f },
+                            onDragCancel = { dragged = 0f },
+                            onHorizontalDrag = { change, dragAmount ->
+                                // A drag is delivered as small per-frame deltas;
+                                // only the accumulated distance crosses the
+                                // threshold that opens the tab drawer.
+                                dragged += dragAmount
+                                if (!showDrawer && dragged > DRAWER_DRAG_THRESHOLD) {
+                                    change.consume()
+                                    showDrawer = true
+                                }
+                            },
+                        )
+                    }
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .pointerInput(Unit) {
-                                detectHorizontalDragGestures(
-                                    onDragEnd = { },
-                                    onHorizontalDrag = { change, dragAmount ->
-                                        if (!showDrawer && dragAmount > DRAWER_DRAG_THRESHOLD) {
-                                            change.consume()
-                                            showDrawer = true
-                                        }
-                                    },
-                                )
-                            },
+                            .then(if (drawerGesture) drawerDrag else Modifier),
                     ) {
                         val active = Terminal.active
                         if (active != null) {
@@ -380,6 +412,18 @@ fun TerminalSheet(
                                 onNewTab = ::newTab,
                             )
                         }
+                    }
+
+                    // A DevTools body owns the whole surface, so only its left
+                    // edge opens the tab drawer; panels use horizontal drags.
+                    if (!drawerGesture) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterStart)
+                                .fillMaxHeight()
+                                .width(24.dp)
+                                .then(drawerDrag),
+                        )
                     }
 
                     // Overlay to dismiss drawer when tapping right half

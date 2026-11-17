@@ -76,8 +76,8 @@ class MainActivity : ComponentActivity() {
         }
 
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-        // chrome://inspect over adb; the in-app terminal tab uses the console
-        // bridge instead, this keeps the full Chrome DevTools available.
+        // chrome://inspect over adb; the in-app DevTools tab serves the
+        // official frontend from a loopback bridge over the same socket.
         WebView.setWebContentsDebuggingEnabled(true)
         val world = AppRuntime.appWorld(this)
 

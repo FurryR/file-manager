@@ -55,6 +55,7 @@
     <string name="licenses_title">開放原始碼授權</string>
     <string name="licenses_group_android">Android / JVM</string>
     <string name="licenses_group_rust">Rust</string>
+    <string name="licenses_group_web">網頁元件</string>
     <string name="licenses_group_native">原生</string>
     <string name="about">關於</string>
     <string name="about_desc">應用程式資訊與法律聲明</string>
@@ -196,12 +197,10 @@
     <string name="terminal_empty">沒有可用的終端機</string>
     <string name="terminal_retry">重試</string>
     <string name="retry">重試</string>
-    <string name="devtools_console">主控台</string>
-    <string name="devtools_clear">清除</string>
-    <string name="devtools_reload">重新載入</string>
-    <string name="devtools_input">JavaScript</string>
-    <string name="devtools_run">執行</string>
-    <string name="devtools_page_closed">頁面已關閉，主控台歷史唯讀。</string>
+    <string name="devtools_connecting">正在啟動 Chrome DevTools…</string>
+    <string name="devtools_unavailable">無法將 DevTools 連線到此頁面。</string>
+    <string name="devtools_retry">重試</string>
+    <string name="devtools_page_closed">頁面已關閉，DevTools 已中斷連線。</string>
     <string name="terminal_key_enter">Enter</string>
     <string name="terminal_drop_hint">拖到此處插入路徑</string>
     <string name="terminal_no_shell">此終端機沒有可用的 shell</string>
@@ -255,6 +254,7 @@
     <string name="settings_search_suggestions">來自網際網路的搜尋建議</string>
     <string name="settings_search_suggestions_desc">輸入時顯示搜尋引擎的查詢建議</string>
     <string name="suggestion_internet">網際網路搜尋建議</string>
+    <string name="suggestion_path">路徑</string>
     <string name="settings_color_scheme">顏色方案</string>
     <string name="settings_amoled_black">AMOLED 黑色</string>
     <string name="settings_amoled_black_desc">深色模式將以純黑顯示，以節省 AMOLED 電力</string>

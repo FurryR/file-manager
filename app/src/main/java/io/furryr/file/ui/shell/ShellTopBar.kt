@@ -73,6 +73,7 @@ internal fun ShellTopBar(
     onSuggestion: (PathSuggestion) -> Unit,
     onEditingChange: (Boolean) -> Unit,
     onOpenDrawer: () -> Unit,
+    drawerEnabled: Boolean,
     onSettings: () -> Unit,
     onExit: () -> Unit,
 ) {
@@ -201,7 +202,7 @@ internal fun ShellTopBar(
                 }
             },
             navigationIcon = {
-                IconButton(onClick = onOpenDrawer) {
+                IconButton(onClick = onOpenDrawer, enabled = drawerEnabled) {
                     Icon(Icons.Default.Menu, contentDescription = stringResource(R.string.cd_menu))
                 }
             },

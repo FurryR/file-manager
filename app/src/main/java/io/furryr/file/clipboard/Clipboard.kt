@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.furryr.file.core.NodeOps
+import io.furryr.file.core.VFile
 import io.furryr.file.core.VFolder
 import io.furryr.file.core.VNode
 import io.furryr.file.core.model.CopyProgress
@@ -99,7 +100,7 @@ object ClipboardTransfer {
         for (entry in state.entries) {
             currentCoroutineContext().ensureActive()
             val target = when (entry.node) {
-                is VFolder -> folder.destinationFolder(entry.name).getOrThrow()
+                is VFolder -> destinationFolder(folder, entry.name)
                 else -> folder.destination(entry.name).getOrThrow()
             }
             require(target.path != entry.node.path) {
@@ -123,4 +124,13 @@ object ClipboardTransfer {
             }
         }
     }
+
+    /** The child folder [name] of [folder], created when missing. */
+    private suspend fun destinationFolder(folder: VFolder, name: String): VFolder =
+        when (val node = folder.child(name).getOrNull()) {
+            null -> folder.mkdir(name).getOrThrow()
+            is VFolder -> node
+            is VFile -> error("$name is a file")
+            else -> error("unsupported child: $name")
+        }
 }

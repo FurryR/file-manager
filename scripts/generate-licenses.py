@@ -171,7 +171,7 @@ def native_components() -> list[dict]:
     entries = json.loads(NATIVE_MANIFEST.read_text())
     return [
         {
-            "group": "Native",
+            "group": entry.get("group", "Native"),
             "name": entry["name"],
             "version": entry.get("version"),
             "license": entry.get("license", "Unknown"),
@@ -182,7 +182,7 @@ def native_components() -> list[dict]:
 
 
 def main() -> None:
-    group_order = {"Android / JVM": 0, "Rust": 1, "Native": 2}
+    group_order = {"Android / JVM": 0, "Rust": 1, "Bundled web": 2, "Native": 3}
     components = gradle_components() + rust_components() + native_components()
     unique: dict[tuple, dict] = {}
     for component in components:

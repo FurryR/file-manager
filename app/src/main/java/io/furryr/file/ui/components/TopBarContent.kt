@@ -24,6 +24,8 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
@@ -117,7 +119,8 @@ fun TitleBlock(
     // edit; otherwise the first unfocused callback would close it instantly.
     var focusedOnce by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
-    var remoteResult by remember { mutableStateOf<RemoteSuggestions?>(null) }
+    var pathResult by remember { mutableStateOf<FetchedSuggestions?>(null) }
+    var remoteResult by remember { mutableStateOf<FetchedSuggestions?>(null) }
 
     fun selectAll() {
         field = field.copy(selection = TextRange(0, field.text.length))
@@ -134,9 +137,22 @@ fun TitleBlock(
     // The current address is not a query: suggestions start only after the
     // user changes the text, so tapping the bar does not cover the content.
     val typing = editing && query.isNotEmpty() && query != editText.trim()
+    val pathRows = pathResult?.takeIf { it.query == query }?.rows.orEmpty()
     val localRows = if (typing) suggestionSource.local(query) else emptyList()
     val remoteRows = remoteResult?.takeIf { it.query == query }?.rows.orEmpty()
-    val rows = localRows + remoteRows
+    // The folder the user is typing into wins over saved and internet rows;
+    // the same target never appears twice.
+    val rows = (pathRows + localRows + remoteRows).distinctBy { it.target.trimEnd('/') }
+
+    LaunchedEffect(editing, query, editText) {
+        pathResult = null
+        if (!editing || query.isEmpty() || query == editText.trim()) return@LaunchedEffect
+        delay(120)
+        val fetched = withContext(Dispatchers.IO) {
+            runCatching { suggestionSource.listing(query) }.getOrDefault(emptyList())
+        }
+        pathResult = FetchedSuggestions(query, fetched)
+    }
 
     LaunchedEffect(editing, query, editText) {
         remoteResult = null
@@ -145,7 +161,7 @@ fun TitleBlock(
         val fetched = withContext(Dispatchers.IO) {
             runCatching { suggestionSource.remote(query) }.getOrDefault(emptyList())
         }
-        remoteResult = RemoteSuggestions(query, fetched)
+        remoteResult = FetchedSuggestions(query, fetched)
     }
 
     fun choose(suggestion: PathSuggestion) {
@@ -252,6 +268,7 @@ fun TitleBlock(
                             if (index == 0 || rows[index - 1].source != suggestion.source) {
                                 Text(
                                     text = when (suggestion.source) {
+                                        SuggestionSource.PATH -> stringResource(R.string.suggestion_path)
                                         SuggestionSource.BOOKMARK -> stringResource(R.string.home_bookmarks)
                                         SuggestionSource.RECENT -> stringResource(R.string.home_recent_locations)
                                         SuggestionSource.INTERNET -> stringResource(R.string.suggestion_internet)
@@ -310,6 +327,8 @@ private fun SuggestionRow(
     ) {
         Icon(
             imageVector = when (suggestion.source) {
+                SuggestionSource.PATH ->
+                    if (suggestion.isDirectory) Icons.Default.Folder else Icons.AutoMirrored.Filled.InsertDriveFile
                 SuggestionSource.BOOKMARK -> Icons.Default.Star
                 SuggestionSource.RECENT -> Icons.Default.History
                 SuggestionSource.INTERNET -> Icons.Default.Search
@@ -342,7 +361,7 @@ private fun SuggestionRow(
     }
 }
 
-private data class RemoteSuggestions(
+private data class FetchedSuggestions(
     val query: String,
     val rows: List<PathSuggestion>,
 )

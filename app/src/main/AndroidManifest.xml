@@ -22,7 +22,8 @@
         android:requestLegacyExternalStorage="true"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.FileManager">
+        android:theme="@style/Theme.FileManager"
+        android:usesCleartextTraffic="true">
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="io.furryr.file.provider"

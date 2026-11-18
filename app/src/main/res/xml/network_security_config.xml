@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The DevTools bridge serves the official frontend and its CDP WebSocket
-     from a random loopback port. Everything else keeps the platform default. -->
+<!-- A file manager opens arbitrary addresses the user types or links to:
+     intranet NAS pages, router UIs, localhost dev servers. There is no fixed
+     host list to allowlist, so cleartext HTTP must be permitted app-wide for
+     both the WebView and the HTTP provider. The DevTools loopback bridge is
+     covered by the same rule. -->
 <network-security-config>
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="false">127.0.0.1</domain>
-        <domain includeSubdomains="false">localhost</domain>
-    </domain-config>
+    <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

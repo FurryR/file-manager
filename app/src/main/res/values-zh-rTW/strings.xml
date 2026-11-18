@@ -62,6 +62,7 @@
     <string name="about_description">支援本機、網路、容器與終端機的檔案管理器。</string>
     <string name="version">版本 %1$s</string>
     <string name="source_code">原始碼</string>
+    <string name="about_sponsor">贊助</string>
     <string name="create_title">建立</string>
     <string name="file_button">檔案</string>
     <string name="folder_button">資料夾</string>

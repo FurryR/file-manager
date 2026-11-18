@@ -174,6 +174,13 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+
+/**
+ * How long an optimistic page waits for the server's type before the browser
+ * keeps the address. A hanging HEAD must not pin the loading cover forever.
+ */
+private const val PAGE_CONFIRM_TIMEOUT_MS = 5_000L
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -687,31 +694,71 @@ fun FileManagerApp(
         tabId: String,
         live: VFile,
         session: RendererSession,
+        host: RendererContext,
         reopen: suspend (MimeType?) -> Unit,
     ) {
         val expected = session.address ?: return
         val guessedStop = pendingOf(tabId)?.currentPage?.id
             ?: tabs.firstOrNull { it.id == tabId }?.currentPage?.id
             ?: return
+        if (!isActiveSession(tabId, session)) return
         // Keep the page's body behind the loading cover until the server has
         // said what it is, so a hand-back never flashes a frame of it.
         session.beginConfirmation()
         scope.launch {
-            val declared = withContext(Dispatchers.IO) { live.stat().getOrNull()?.mime }
-            // Something else may have taken the tab while the server answered;
-            // only the page this probe belongs to may be handed back.
-            if (!isActiveSession(tabId, session) || session.address != expected) return@launch
-            if (WebPagePolicy.verdict(declared, live.name) != WebPagePolicy.Verdict.NOT_PAGE) {
-                // A page, or an address whose type nobody named: the browser
-                // keeps it, exactly where the eager path would have put it.
-                session.settleConfirmation()
-                return@launch
+            // The stat runs on its own job: a blocking HEAD cannot be
+            // interrupted by a timeout, so the cover waits on a deferred
+            // instead of on the call itself.
+            val verdict = CompletableDeferred<MimeType?>()
+            val probe = scope.launch(Dispatchers.IO) {
+                val mime = try {
+                    live.stat().getOrNull()?.mime
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    null
+                }
+                verdict.complete(mime)
             }
-            // Not a page: reopen the same stop with the real type. If the
-            // route hands it to an external viewer, no renderer replaced the
-            // guess and the stop is dropped here.
-            reopen(declared)
-            if (pageOf(guessedStop)?.renderer === session) closeRenderer(tabId)
+            var handedBack = false
+            try {
+                // A page that already moved on (a redirect, a link) no longer
+                // waits for this verdict; the timeout keeps a hanging HEAD from
+                // pinning the cover either.
+                val declared = withTimeoutOrNull(PAGE_CONFIRM_TIMEOUT_MS) { verdict.await() }
+                // Something else may have taken the tab while the server
+                // answered; only the page this probe belongs to may be handed
+                // back.
+                if (!isActiveSession(tabId, session) || session.address != expected) {
+                    return@launch
+                }
+                if (WebPagePolicy.verdict(declared, live.name) != WebPagePolicy.Verdict.NOT_PAGE) {
+                    // A page, or an address whose type nobody named: the browser
+                    // keeps it, exactly where the eager path would have put it.
+                    return@launch
+                }
+                // Not a page: reopen the same stop with the real type. If the
+                // route hands it to an external viewer, no renderer replaced the
+                // guess and the stop is dropped here.
+                handedBack = true
+                reopen(declared)
+                if (pageOf(guessedStop)?.renderer === session) closeRenderer(tabId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                // The hand-back could not replace the guess; the browser keeps
+                // the address and the failure is reported like any other open.
+                handedBack = false
+                host.reportError(error)
+            } finally {
+                if (!verdict.isCompleted) probe.cancel()
+                // The cover was only waiting on this verdict. A page that moved
+                // away, a probe that timed out, or a hand-back that failed must
+                // never leave the spinner up for good.
+                if (!handedBack && isActiveSession(tabId, session)) {
+                    session.settleConfirmation()
+                }
+            }
         }
     }
 
@@ -762,7 +809,7 @@ fun FileManagerApp(
             // The renderer that took the tab is the one whose address is a
             // page; the optimistic open made it the current stop already.
             val page = pendingOf(tabId)?.currentPage?.renderer ?: activeSession(tabId)
-            if (page?.webAddress != null) confirmPage(tabId, file, page) { facts ->
+            if (page?.webAddress != null) confirmPage(tabId, file, page, host) { facts ->
                 // The reopen carries the MIME, so the table cannot guess a
                 // second time. It pushes no page and records no home row:
                 // the optimistic open already made this address the current

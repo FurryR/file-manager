@@ -16,6 +16,7 @@ import android.widget.FrameLayout
 import android.widget.ProgressBar
 import android.widget.Toast
 import android.webkit.JsResult
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -236,6 +237,11 @@ internal class WebRendererSession(
      * has said what it is, so the cover must outlive the first committed frame:
      * a response that turns out to be an archive or an image is handed back to
      * the opener, and its bytes must never flash on the way out.
+     *
+     * The flag is owned by one address. As soon as the WebView moves to another
+     * document (a redirect, a link, the page's own pushState) the verdict no
+     * longer describes what is on screen, so the cover is released instead of
+     * waiting for an answer that can never settle it.
      */
     var probing by mutableStateOf(false)
         internal set
@@ -285,6 +291,10 @@ internal class WebRendererSession(
     private var webView: WebView? = null
     private var darkTheme = true
     private var closing = false
+
+    /** True once the WebView was released; no view may be rebuilt after that. */
+    internal val closed: Boolean get() = closing
+
     /** A page's beforeunload prompt waiting for the shared popup. */
     private var pendingUnload: JsResult? = null
     /** Non-null while a tab unload is driving about:blank to trigger beforeunload. */
@@ -329,6 +339,7 @@ internal class WebRendererSession(
      * classifying it a second time (and asking the server again).
      */
     fun load(url: String) {
+        if (closing) return
         unloadResult?.complete(false)
         unloadResult = null
         pendingUnload?.cancel()
@@ -368,6 +379,7 @@ internal class WebRendererSession(
     }
 
     fun reload() {
+        if (closing) return
         // A web tab always owns reload, even before its view is re-attached.
         webView?.reload() ?: run {
             setPageProgress(0)
@@ -388,7 +400,13 @@ internal class WebRendererSession(
         contentVisible = false
         probing = false
         view.stopLoading()
-        view.loadUrl("about:blank")
+        // destroy() must never run while the WebView is still in a view tree:
+        // a path switch releases a page from inside a composition callback,
+        // where the AndroidView holder has not removed the child yet. Detach
+        // first, then destroy, so a destroyed view cannot be drawn, measured
+        // or reached by a late Chromium callback.
+        (view.parent as? ViewGroup)?.removeView(view)
+        view.removeAllViews()
         view.destroy()
     }
 
@@ -455,31 +473,40 @@ internal class WebRendererSession(
                 ): WebResourceResponse? {
                     // Only a projected document is served through this host; a
                     // live page fetches its own resources from its origin and
-                    // never reaches this branch.
+                    // never reaches this branch. A request from a view this
+                    // session no longer owns (a released or replaced WebView)
+                    // must not read the document.
+                    if (closing || view == null || view !== webView) return null
                     val uri = request?.url ?: return null
                     if (uri.host != ASSET_HOST) return null
-                    val path = uri.path.orEmpty().trimStart('/')
-                    val relative = if (path.isEmpty() || path == DOCUMENT_PATH) null else path
-                    val resource = runBlocking { document.open(relative) }.getOrNull()
-                        ?: return notFound()
-                    val text = resource.mime?.let {
-                        it.startsWith("text/") || it.contains("json") ||
-                            it.contains("xml") || it.contains("javascript")
-                    } ?: false
-                    return WebResourceResponse(
-                        resource.mime ?: "application/octet-stream",
-                        if (text) resource.encoding else null,
-                        200,
-                        "OK",
-                        emptyMap<String, String>(),
-                        resource.openStream(),
-                    )
+                    // The body read happens on Chromium's request thread and can
+                    // fail (a vanished archive, a provider that went away). The
+                    // callback must answer with a response, never throw.
+                    return runCatching {
+                        val path = uri.path.orEmpty().trimStart('/')
+                        val relative = if (path.isEmpty() || path == DOCUMENT_PATH) null else path
+                        val resource = runBlocking { document.open(relative) }.getOrNull()
+                            ?: return@runCatching notFound()
+                        val text = resource.mime?.let {
+                            it.startsWith("text/") || it.contains("json") ||
+                                it.contains("xml") || it.contains("javascript")
+                        } ?: false
+                        WebResourceResponse(
+                            resource.mime ?: "application/octet-stream",
+                            if (text) resource.encoding else null,
+                            200,
+                            "OK",
+                            emptyMap<String, String>(),
+                            resource.openStream(),
+                        )
+                    }.getOrElse { notFound() }
                 }
 
                 override fun shouldOverrideUrlLoading(
                     view: WebView?,
                     request: WebResourceRequest?,
                 ): Boolean {
+                    if (closing || view == null || view !== webView) return false
                     // Only user-facing main-frame navigations are candidates;
                     // resources and POST submissions stay with the WebView.
                     if (request == null || !request.isForMainFrame) return false
@@ -499,9 +526,8 @@ internal class WebRendererSession(
                     selfDriven.clear()
                     if (approvedNavigations.remove(url)) return false
                     // Same-document fragment jumps must not start a request.
-                    val current = view?.url
+                    val current = view.url
                     if (current != null && stripFragment(current) == stripFragment(url)) return false
-                    if (view == null) return false
                     // A link is just a node at an address: hand it to the same
                     // route table an address-bar open uses, with no facts. A page
                     // comes back as this session (reused and loaded), an archive
@@ -510,26 +536,32 @@ internal class WebRendererSession(
                     // navigation the WebView can already start. The tab settles
                     // the guess against the server and reopens the node if it was
                     // not a page.
-                    val files = host?.vfs ?: return false
-                    val file = files.liveFile(url, referer = current).getOrThrow()
+                    val currentHost = host ?: return false
+                    // A hit-test/web address that the router cannot parse is not
+                    // a reason to kill the process: leave it to the WebView.
+                    val file = currentHost.vfs.liveFile(url, referer = current).getOrNull()
+                        ?: return false
                     setPageProgress(0)
-                    host?.openFile(file)
+                    currentHost.openFile(file)
                     return true
                 }
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    if (closing || view == null || view !== webView) return
                     updateAddress(url)
                     setPageProgress(0)
                     contentVisible = false
                 }
 
                 override fun onPageCommitVisible(view: WebView?, url: String?) {
+                    if (closing || view == null || view !== webView) return
                     updateAddress(url)
                     contentVisible = true
                     committedAddress = url?.let(::displayAddress) ?: address
                 }
 
                 override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                    if (closing || view == null || view !== webView) return
                     // pushState/replaceState update the page's history without
                     // a new document; there is no commit callback to follow, so
                     // this URL becomes the committed page now.
@@ -539,6 +571,7 @@ internal class WebRendererSession(
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
+                    if (closing || view == null || view !== webView) return
                     val unloading = unloadResult
                     if (unloading != null && url == "about:blank") {
                         unloadResult = null
@@ -549,19 +582,42 @@ internal class WebRendererSession(
                     setPageProgress(null)
                     contentVisible = true
                     committedAddress = url?.let(::displayAddress) ?: address
-                    view?.let { injectColorScheme(it) }
+                    injectColorScheme(view)
+                }
+
+                override fun onRenderProcessGone(
+                    view: WebView?,
+                    detail: RenderProcessGoneDetail?,
+                ): Boolean {
+                    // Chromium's renderer process died (OOM, a crashed page).
+                    // The default outcome is the app being killed; drop the
+                    // dead view instead and let the next render rebuild one
+                    // from the address that was showing.
+                    if (view == null || view !== webView) return true
+                    webView = null
+                    unloadResult?.complete(false)
+                    unloadResult = null
+                    pendingUnload = null
+                    setPageProgress(null)
+                    contentVisible = false
+                    probing = false
+                    (view.parent as? ViewGroup)?.removeView(view)
+                    runCatching { view.destroy() }
+                    return true
                 }
             }
             webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    if (closing || view == null || view !== webView) return
                     setPageProgress(if (newProgress >= 100) null else newProgress)
                 }
 
                 override fun onReceivedTitle(view: WebView?, title: String?) {
+                    if (closing || view == null || view !== webView) return
                     if (unloadResult != null) return
                     // Some pages report the URL as the title; keep the address
                     // fallback in the tab instead of duplicating it.
-                    val clean = title?.takeIf { it.isNotBlank() && it != view?.url }
+                    val clean = title?.takeIf { it.isNotBlank() && it != view.url }
                     pageTitle = clean
                     host?.updateTitle(clean)
                 }
@@ -574,24 +630,25 @@ internal class WebRendererSession(
                 ): Boolean {
                     val target = result ?: return false
                     if (closing) {
-                        target.cancel()
+                        runCatching { target.cancel() }
                         return true
                     }
+                    if (view != null && view !== webView) return false
                     // A page without a real beforeunload prompt must keep the
                     // normal close path; waiting for our dialog here strands
                     // navigations that never registered the hook.
                     if (message == null) {
-                        target.confirm()
+                        runCatching { target.confirm() }
                         return true
                     }
                     // The page is asking to leave; use this renderer's own
                     // popup instead of WebView's default one.
-                    pendingUnload?.cancel()
+                    runCatching { pendingUnload?.cancel() }
                     pendingUnload = target
                     val currentHost = host
                     if (currentHost == null) {
                         pendingUnload = null
-                        target.confirm()
+                        runCatching { target.confirm() }
                         return true
                     }
                     val unloading = unloadResult
@@ -616,9 +673,12 @@ internal class WebRendererSession(
                         if (pendingUnload === target) {
                             pendingUnload = null
                             if (leave == true) {
-                                target.confirm()
+                                runCatching { target.confirm() }
                             } else {
-                                target.cancel()
+                                // A dismissed popup answers null; treat it as a
+                                // cancel so the WebView is not left waiting for
+                                // a verdict that will never come.
+                                runCatching { target.cancel() }
                                 if (unloading != null) {
                                     if (unloadResult === unloading) unloadResult = null
                                     unloading.complete(false)
@@ -657,9 +717,12 @@ internal class WebRendererSession(
                     ?: return@setOnLongClickListener false
                 val url = absoluteUrl(raw)
                 // The link is a node: the page it came from is the referer the
-                // probe and the forward provider must carry.
+                // probe and the forward provider must carry. A hit-test URL the
+                // router cannot turn into a live file (a data: image, a
+                // javascript: anchor) simply keeps Chromium's own behaviour.
                 val files = host?.vfs ?: return@setOnLongClickListener false
-                val file = files.liveFile(url, referer = target.url).getOrThrow()
+                val file = files.liveFile(url, referer = target.url).getOrNull()
+                    ?: return@setOnLongClickListener false
                 this@WebRendererSession.hitTarget = WebHitTarget(
                     file = file,
                     text = null,
@@ -695,6 +758,7 @@ internal class WebRendererSession(
     internal val currentView: WebView? get() = webView
 
     internal fun applyTheme(view: WebView, dark: Boolean, surface: Int) {
+        if (closing || view !== webView) return
         // Paint the WebView itself, so the window never flashes white before
         // the first frame of a dark page.
         view.setBackgroundColor(surface)
@@ -715,11 +779,14 @@ internal class WebRendererSession(
     }
 
     private fun injectColorScheme(view: WebView) {
+        if (closing || view !== webView) return
         val scheme = if (darkTheme) "dark" else "light"
-        view.evaluateJavascript(
-            "(function(){var d=document.documentElement;if(d){d.style.colorScheme='$scheme';}})()",
-            null,
-        )
+        runCatching {
+            view.evaluateJavascript(
+                "(function(){var d=document.documentElement;if(d){d.style.colorScheme='$scheme';}})()",
+                null,
+            )
+        }
     }
 
     private fun updateAddress(url: String?) {
@@ -734,6 +801,15 @@ internal class WebRendererSession(
         // stop instead of pushing it into history.
         val replacePrevious = previous.takeIf { committedAddress != previous }
         address = next
+        // A WebView rebuilt after an activity recreate must come back to the
+        // document that is showing, not to the address this session first
+        // opened.
+        initialUrl = next
+        // An optimistic probe belongs to the address that was opened. Once the
+        // WebView moves to another document (a redirect, a link, pushState) the
+        // verdict no longer describes what is on screen; holding the loading
+        // cover for it would leave the spinner up for good.
+        probing = false
         // A retrace lands on a stop the tab already made. Anything else is a
         // visit, and the tab decides what it becomes: a new stop, a stop it
         // already holds, or nothing. Keep the previous title while the new
@@ -779,7 +855,8 @@ internal class WebRendererSession(
                 "var a=e.closest?e.closest('a'):null;var t=a||e;" +
                 "return (t.innerText||t.textContent||'').trim();})()"
         }
-        view.evaluateJavascript(script) { value -> onResult(decodeJsString(value)) }
+        if (closing || view !== webView) return
+        runCatching { view.evaluateJavascript(script) { value -> onResult(decodeJsString(value)) } }
     }
 
     /** Unwrap the JSON-encoded string `evaluateJavascript` hands back. */
@@ -860,43 +937,12 @@ internal fun WebContent(
                 FrameLayout(context).apply {
                     clipChildren = true
                     setBackgroundColor(surfaceArgb)
-                }
-            },
-            onRelease = { host ->
-                val web = session.currentView
-                if (web != null && web.parent === host) host.removeView(web)
-            },
-            update = { host ->
-                host.setBackgroundColor(surfaceArgb)
-                val spinner = host.findViewWithTag<View>(LOADING_TAG)
-                val view = session.currentView
-                if (view != null && view.parent === host) {
-                    session.applyTheme(view, dark, surfaceArgb)
-                    spinner?.let {
-                        it.setBackgroundColor(surfaceArgb)
-                        it.visibility = if (settled) View.GONE else View.VISIBLE
-                    }
-                } else if (host.tag == null && host.childCount == 0) {
-                    host.tag = Unit
-                    host.post {
-                        host.tag = null
-                        if (!host.isAttachedToWindow) return@post
-                        val web = session.ensureView(host.context)
-                        (web.parent as? ViewGroup)?.removeView(web)
-                        host.addView(
-                            web,
-                            FrameLayout.LayoutParams(
-                                FrameLayout.LayoutParams.MATCH_PARENT,
-                                FrameLayout.LayoutParams.MATCH_PARENT,
-                            ),
-                        )
-                        session.applyTheme(web, dark, surfaceArgb)
-                        // A blank WebView must not replace the page background
-                        // while a remote document or a slow page is loading.
-                        // The cover sits above the WebView with the real
-                        // surface colour, so Chromium keeps rendering and its
-                        // first white frame never reaches the screen.
-                        val cover = FrameLayout(host.context).apply {
+                    // The cover exists from the first frame and independent of
+                    // the WebView: the loading state can never outlive a missed
+                    // attach pass, and updating it never depends on Chromium
+                    // already being a child of this holder.
+                    addView(
+                        FrameLayout(context).apply {
                             tag = LOADING_TAG
                             setBackgroundColor(surfaceArgb)
                             layoutParams = FrameLayout.LayoutParams(
@@ -914,11 +960,49 @@ internal fun WebContent(
                                     )
                                 },
                             )
+                        },
+                    )
+                }
+            },
+            onRelease = { host ->
+                val web = session.currentView
+                if (web != null && web.parent === host) host.removeView(web)
+            },
+            update = { host ->
+                host.setBackgroundColor(surfaceArgb)
+                val view = session.currentView
+                if (!session.closed) {
+                    if (view != null && view.parent === host) {
+                        session.applyTheme(view, dark, surfaceArgb)
+                    } else if (host.tag == null) {
+                        host.tag = Unit
+                        host.post {
+                            host.tag = null
+                            if (!host.isAttachedToWindow || session.closed) return@post
+                            val web = session.currentView ?: session.ensureView(host.context)
+                            if (web.parent === host) return@post
+                            (web.parent as? ViewGroup)?.removeView(web)
+                            // Index 0 keeps the loading cover above Chromium,
+                            // so a remote document or a slow page never shows
+                            // a blank first frame through the app surface.
+                            host.addView(
+                                web,
+                                0,
+                                FrameLayout.LayoutParams(
+                                    FrameLayout.LayoutParams.MATCH_PARENT,
+                                    FrameLayout.LayoutParams.MATCH_PARENT,
+                                ),
+                            )
+                            session.applyTheme(web, dark, surfaceArgb)
                         }
-                        host.addView(cover)
-                        cover.visibility =
-                            if (session.settled) View.GONE else View.VISIBLE
                     }
+                }
+                // The cover is updated even when there is no WebView yet: a
+                // page that finished loading while its view was detached must
+                // not keep the spinner once it is shown again.
+                host.findViewWithTag<View>(LOADING_TAG)?.let { cover ->
+                    cover.setBackgroundColor(surfaceArgb)
+                    cover.visibility = if (settled) View.GONE else View.VISIBLE
                 }
             },
         )

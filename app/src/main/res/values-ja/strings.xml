@@ -62,6 +62,7 @@
     <string name="about_description">ローカル、ネットワーク、コンテナ、ターミナルに対応したファイルマネージャーです。</string>
     <string name="version">バージョン %1$s</string>
     <string name="source_code">ソースコード</string>
+    <string name="about_sponsor">スポンサー</string>
     <string name="create_title">作成</string>
     <string name="file_button">ファイル</string>
     <string name="folder_button">フォルダー</string>

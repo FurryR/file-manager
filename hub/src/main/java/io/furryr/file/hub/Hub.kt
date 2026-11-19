@@ -18,10 +18,10 @@ import java.util.UUID
  */
 object Hub {
     /** Environment variable carrying the hub's abstract socket name and key. */
-    const val SOCKET_ENV = "HUB_SOCKET"
+    const val SOCKET_ENV = DaemonManager.HUB_SOCKET_ENV
 
     /** Separates the open hub address from its per-daemon credential. */
-    const val KEY_SEPARATOR = '@'
+    const val KEY_SEPARATOR = DaemonManager.HUB_KEY_SEPARATOR
 
     @Volatile private var directory: File? = null
     @Volatile private var server: HubServer? = null
@@ -33,11 +33,8 @@ object Hub {
     val binDir: File? get() = directory
 
     /** App-owned discovery information, independent of the client environment. */
-    fun environment(target: DaemonTarget): Map<String, String> = buildMap {
-        val name = socketName ?: return@buildMap
-        val key = DaemonManager.hubKey(target)
-        put(SOCKET_ENV, "$name$KEY_SEPARATOR$key")
-    }
+    fun environment(target: DaemonTarget): Map<String, String> =
+        DaemonManager.hubEnvironment(target)
 
     /** Bring the hub up. Idempotent until the hub is stopped. */
     fun start(context: Context, world: FileWorld) {

@@ -165,14 +165,22 @@ class ContainerProvider(
 
     // ── Internal ───────────────────────────────────────────────────
 
-    override suspend fun terminal(cwd: VFolder, rows: Int, cols: Int): Result<TerminalProcess> =
+    override suspend fun terminal(
+        cwd: VFolder,
+        rows: Int,
+        cols: Int,
+        terminalId: String,
+    ): Result<TerminalProcess> =
         runCatching {
             val segments = containerSegments(innerPath(cwd.path))
             val name = segments.first()
             DaemonManager.warmNamed(name).getOrThrow()
+            // Login profiles replace PATH even with `login -p`; the generated
+            // /etc/profile.d/hub.sh appends HUB_PATH after they have run.
             val env = PulseManager.environment() + WaylandManager.environment(appContext) + mapOf(
                 "PATH" to ContainerDaemonLauncher.DEFAULT_PATH,
-            )
+                "HUB_PATH" to DaemonManager.nativeLibraryDir,
+            ) + DaemonManager.hubEnvironment(DaemonTarget.Named(name), terminalId)
             val channel = exec(name).spawn(
                 CommandSpec(
                     command = "",

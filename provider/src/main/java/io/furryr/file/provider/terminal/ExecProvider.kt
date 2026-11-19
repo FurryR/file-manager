@@ -11,8 +11,16 @@ import io.furryr.file.core.VNode
  * interface. A provider that cannot host a shell simply does not implement it.
  */
 interface ExecProvider : FileProvider {
-    /** Start a shell at [cwd]; the provider resolves its own inner path. */
-    suspend fun terminal(cwd: VFolder, rows: Int, cols: Int): Result<TerminalProcess>
+    /**
+     * Start a shell at [cwd]; the provider resolves its own inner path.
+     * [terminalId] is the session id the hub uses to associate nested clients.
+     */
+    suspend fun terminal(
+        cwd: VFolder,
+        rows: Int,
+        cols: Int,
+        terminalId: String,
+    ): Result<TerminalProcess>
 
     /**
      * The path to insert into the shell started at [cwd] for [node], or null

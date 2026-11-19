@@ -190,7 +190,12 @@ private class RemoteProvider(
         } finally { staged.delete() }
     }.flowOn(Dispatchers.IO)
 
-    override suspend fun terminal(cwd: VFolder, rows: Int, cols: Int): Result<TerminalProcess> =
+    override suspend fun terminal(
+        cwd: VFolder,
+        rows: Int,
+        cols: Int,
+        terminalId: String,
+    ): Result<TerminalProcess> =
         runInterruptible(Dispatchers.IO) {
             runCatching {
                 require(kind == RemoteKind.SSH) { "AList has no terminal" }

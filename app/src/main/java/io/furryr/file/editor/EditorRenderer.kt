@@ -233,8 +233,8 @@ internal class EditorRendererSession(
             val terminal = parentFolder?.let { folder ->
                 (folder.provider as? ExecProvider)?.let { exec ->
                     TerminalFactory { ctx ->
-                        TermuxTerminalTab.start(ctx, folder.name, exec, folder, vfs = vfs) { rows, cols ->
-                            exec.terminal(folder, rows, cols)
+                        TermuxTerminalTab.start(ctx, folder.name, exec, folder, vfs = vfs) { rows, cols, terminalId ->
+                            exec.terminal(folder, rows, cols, terminalId)
                         }
                     }
                 }

@@ -36,7 +36,7 @@ private data class TerminalSpec(
     val provider: ExecProvider,
     val cwd: VFolder,
     val vfs: Vfs,
-    val create: suspend (rows: Int, cols: Int) -> Result<TerminalProcess>,
+    val create: suspend (rows: Int, cols: Int, terminalId: String) -> Result<TerminalProcess>,
 )
 
 private fun sanitizedTitle(raw: String?): String? =
@@ -113,8 +113,8 @@ internal class TermuxTerminalTab private constructor(
         connectionLost = false
         error = null
         scope.launch {
-            spec.create(24, 80)
-                .mapCatching { SessionManager.createSession(it, context).getOrThrow() }
+            withContext(Dispatchers.IO) { spec.create(24, 80, id) }
+                .mapCatching { SessionManager.createSession(it, context, id).getOrThrow() }
                 .onSuccess {
                     bind(it)
                     ready.complete(Unit)
@@ -242,7 +242,7 @@ internal class TermuxTerminalTab private constructor(
             cwd: VFolder,
             remote: Boolean = false,
             vfs: Vfs,
-            create: suspend (rows: Int, cols: Int) -> Result<TerminalProcess>,
+            create: suspend (rows: Int, cols: Int, terminalId: String) -> Result<TerminalProcess>,
         ): TermuxTerminalTab =
             TermuxTerminalTab(
                 context.applicationContext,

@@ -115,11 +115,14 @@ object SessionManager {
      * session around it. The process token is the only thing Termux carries;
      * I/O goes through [TerminalBridge].
      */
-    suspend fun createSession(process: TerminalProcess, context: Context): Result<TerminalSession> =
+    suspend fun createSession(
+        process: TerminalProcess,
+        context: Context,
+        sessionId: String = UUID.randomUUID().toString(),
+    ): Result<TerminalSession> =
         withContext(Dispatchers.Main) {
             if (appContext == null) appContext = context.applicationContext
             try {
-                val sessionId = UUID.randomUUID().toString()
                 val token = TerminalBridge.register(process)
                 val session = TerminalSession(
                     TerminalBridge.commandFor(token),

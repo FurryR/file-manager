@@ -204,10 +204,23 @@ async fn serve(
     // working as a plain shell container. Spawn after the SIGCHLD stream exists
     // so an init that exits immediately is still reaped, and off the runtime
     // thread so metadata + fork/exec never delay accept().
+    //
+    // Use a fresh thread, not tokio's blocking pool: the pool may hand back a
+    // thread created before `enter_chroot`. That thread keeps the app's mount
+    // namespace and would run the host `/init`, whose first-stage mounts land
+    // in the app namespace (`/dev` becomes a tmpfs, so `/dev/ptmx` loses its
+    // `ptmx_device` label). A new thread is created after the chroot and shares
+    // the private mount namespace and root.
     let init_slot = Arc::new(container::InitSlot::new());
     if container_mode {
         let slot = init_slot.clone();
-        tokio::task::spawn_blocking(move || container::spawn_init(&slot));
+        std::thread::Builder::new()
+            .name("container-init".into())
+            .spawn(move || container::spawn_init(&slot))
+            .map_err(|error| {
+                eprintln!("[file-daemon] cannot start the container init thread: {error}");
+            })
+            .ok();
     }
 
     loop {

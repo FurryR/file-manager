@@ -16,6 +16,11 @@ import io.furryr.file.core.source.OpenMode
 import kotlinx.coroutines.flow.Flow
 import java.io.File
 
+/** Host shell search path; the packaged utilities directory is appended at spawn time. */
+private const val HOST_SHELL_PATH =
+    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:" +
+        "/system/bin:/system/xbin:/vendor/bin"
+
 /**
  * Local filesystem provider, backed by the one host daemon (root when
  * configured, otherwise the app UID). All work is delegated to [FileService];
@@ -60,11 +65,18 @@ class LocalProvider : FileProvider, ExecProvider, HostPathProvider {
     override fun copy(src: FileSource, destPath: String, isCopy: Boolean): Flow<CopyProgress> =
         files.copyFromSource(src, destPath, isCopy)
 
-    override suspend fun terminal(cwd: VFolder, rows: Int, cols: Int): Result<TerminalProcess> =
+    override suspend fun terminal(
+        cwd: VFolder,
+        rows: Int,
+        cols: Int,
+        terminalId: String,
+    ): Result<TerminalProcess> =
         runCatching {
             val channel = DaemonManager.execService(DaemonTarget.Host).spawn(
                 CommandSpec(
                     command = "/system/bin/sh",
+                    env = DaemonManager.hubEnvironment(DaemonTarget.Host, terminalId) +
+                        mapOf("PATH" to "$HOST_SHELL_PATH:${DaemonManager.nativeLibraryDir}"),
                     cwd = innerPath(cwd.path),
                     rows = rows,
                     cols = cols,

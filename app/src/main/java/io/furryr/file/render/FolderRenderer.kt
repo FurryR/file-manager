@@ -385,8 +385,8 @@ class FolderRenderer(
                     return@let null
                 }
                 TerminalFactory { ctx ->
-                    TermuxTerminalTab.start(ctx, current.name, exec, current, vfs = vfs) { rows, cols ->
-                        exec.terminal(current, rows, cols)
+                    TermuxTerminalTab.start(ctx, current.name, exec, current, vfs = vfs) { rows, cols, terminalId ->
+                        exec.terminal(current, rows, cols, terminalId)
                     }
                 }
             }

@@ -81,6 +81,11 @@ class MainActivity : ComponentActivity() {
         WebView.setWebContentsDebuggingEnabled(true)
         val world = AppRuntime.appWorld(this)
 
+        // A terminal inherits HUB_SOCKET when its PTY is spawned, so the hub
+        // must be listening before the shell can be opened.
+        runCatching { Hub.start(applicationContext, world.files) }
+            .onFailure { Log.w("FileManager", "hub start failed", it) }
+
         // Bind the resident PulseAudio listener as early as possible. It binds its
         // socket immediately, so a container launch only reuses an existing
         // socket; the audio core itself is started later, on demand.
@@ -97,8 +102,6 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 Log.w("FileManager", "Daemon pre-start failed (will retry on first operation)", e)
             }
-            runCatching { Hub.start(applicationContext, world.files) }
-                .onFailure { Log.w("FileManager", "hub start failed", it) }
         }
 
         setContent {

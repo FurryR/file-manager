@@ -80,6 +80,15 @@ object DaemonManager {
      *  available, otherwise the app UID. */
     private const val HostId = "host"
 
+    /** Environment variable carrying the hub socket name and daemon key. */
+    const val HUB_SOCKET_ENV = "HUB_SOCKET"
+
+    /** Environment variable tying a nested hub client to its terminal. */
+    const val HUB_TERMINAL_ENV = "HUB_TERMINAL"
+
+    /** Separator between the hub address and its per-daemon key. */
+    const val HUB_KEY_SEPARATOR = '@'
+
     private lateinit var appContext: Context
     private var executableFile: File? = null
 
@@ -111,6 +120,9 @@ object DaemonManager {
 
     /** Set once a root daemon has actually connected. */
     @Volatile private var rootActive = false
+
+    /** Directory holding the packaged native utilities (`run0`, `here`, `agent`). */
+    val nativeLibraryDir: String get() = appContext.applicationInfo.nativeLibraryDir
 
     // ── Configuration ─────────────────────────────────────────────────
 
@@ -250,6 +262,20 @@ object DaemonManager {
 
     /** Key of the live daemon for [target], starting it if necessary. */
     fun hubKey(target: DaemonTarget): String = connection(target).key
+
+    /**
+     * Environment a spawned shell needs to reach the hub on behalf of
+     * [target]. Returns an empty map until the hub is attached; [terminalId]
+     * identifies the shell for nested `run0` requests.
+     */
+    fun hubEnvironment(target: DaemonTarget, terminalId: String? = null): Map<String, String> {
+        val name = hubSocketName ?: return emptyMap()
+        val key = hubKey(target)
+        return buildMap {
+            put(HUB_SOCKET_ENV, "$name$HUB_KEY_SEPARATOR$key")
+            terminalId?.takeIf { it.isNotEmpty() }?.let { put(HUB_TERMINAL_ENV, it) }
+        }
+    }
 
     /** Publish the hub socket name; the :hub module owns the server. */
     fun attachHub(socketName: String) {

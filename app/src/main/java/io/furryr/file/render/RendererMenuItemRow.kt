@@ -1,7 +1,6 @@
 package io.furryr.file.render
 
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ChevronRight
+import io.furryr.file.ui.icons.Icons
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon

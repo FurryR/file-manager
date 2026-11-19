@@ -8,10 +8,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Sort
-import androidx.compose.material.icons.filled.FilterAlt
-import androidx.compose.material.icons.filled.Refresh
+import io.furryr.file.ui.icons.Icons
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import io.furryr.file.R

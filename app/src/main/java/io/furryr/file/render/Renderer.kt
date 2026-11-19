@@ -2,9 +2,7 @@ package io.furryr.file.render
 
 import android.content.Context
 import androidx.compose.runtime.Composable
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.filled.StarBorder
+import io.furryr.file.ui.icons.Icons
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import io.furryr.file.Opener

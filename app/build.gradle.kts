@@ -75,8 +75,12 @@ android {
 
     buildTypes {
         release {
+            // Only a debuggable APK extracts lib/<abi>/{run0,here,agent} into
+            // nativeLibraryDir, so this stays on; obfuscation stays off and R8
+            // contributes shrinking only.
             isDebuggable = true
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -187,6 +191,41 @@ if (!skipNativeBuild) {
     tasks.named("preBuild").configure { dependsOn(buildNative) }
 }
 
+// ── Release APK post-processing ──────────────────────────────────────
+// AGP deflates every entry at zlib level 1 and aapt2 stores resources.arsc,
+// so the packaged release APK is ~2 MB larger than a level-9 rewrite. The
+// rewrite invalidates any signature, so recompress + zipalign + apksigner run
+// as one step after packaging. The script signs with keystore.properties,
+// ANDROID_KEYSTORE* env vars, or the debug keystore (sideload only).
+// The input name assumes no AGP signingConfig; adding one changes it to
+// app-release.apk and this task must be updated (the script strips and
+// rebuilds signatures either way).
+val postprocessReleaseApk = tasks.register<Exec>("postprocessReleaseApk") {
+    group = "build"
+    description = "Recompresses, aligns and signs the release APK."
+    dependsOn("packageRelease")
+    workingDir = rootProject.projectDir
+    val unsignedApk = layout.buildDirectory.file("outputs/apk/release/app-release-unsigned.apk")
+    val signedApk = layout.buildDirectory.file("outputs/apk/release/app-release-signed.apk")
+    val postprocessScript = rootProject.layout.projectDirectory.file("scripts/postprocess-release.py")
+    inputs.file(unsignedApk)
+    inputs.file(postprocessScript)
+    outputs.file(signedApk)
+    commandLine(
+        "python3",
+        postprocessScript.asFile.absolutePath,
+        unsignedApk.get().asFile.absolutePath,
+        signedApk.get().asFile.absolutePath,
+    )
+}
+
+// The assemble task is created by AGP after this script is evaluated.
+tasks.configureEach {
+    if (name == "assembleRelease") {
+        finalizedBy(postprocessReleaseApk)
+    }
+}
+
 // ── Chrome DevTools frontend assets ──────────────────────────────────
 // tools/devtools pins the official frontend build; its output is generated
 // into src/main/assets/devtools so the runtime bridge can serve it offline.
@@ -272,7 +311,7 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.10.00"))
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")

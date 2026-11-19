@@ -44,13 +44,7 @@ import io.furryr.file.model.OperationProgress
 import io.furryr.file.ui.util.formatSize
 
 import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.ContentCut
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.DriveFileRenameOutline
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Share
+import io.furryr.file.ui.icons.Icons
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api

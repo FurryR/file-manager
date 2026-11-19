@@ -170,20 +170,6 @@
     },
     {
       "group": "Android / JVM",
-      "name": "androidx.compose.material:material-icons-extended",
-      "version": "1.7.4",
-      "license": "Apache-2.0",
-      "url": "https://developer.android.com/jetpack/androidx/releases/compose-material#1.7.4"
-    },
-    {
-      "group": "Android / JVM",
-      "name": "androidx.compose.material:material-icons-extended-android",
-      "version": "1.7.4",
-      "license": "Apache-2.0",
-      "url": "https://developer.android.com/jetpack/androidx/releases/compose-material#1.7.4"
-    },
-    {
-      "group": "Android / JVM",
       "name": "androidx.compose.material:material-ripple",
       "version": "1.7.4",
       "license": "Apache-2.0",

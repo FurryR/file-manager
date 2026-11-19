@@ -513,6 +513,30 @@ Gradle, Cargo or native component; the app ships the generated asset.
   pipeline also drops any non-`.so` entry, so the `lib*.so` names are what let
   the daemon/proot binaries ship and be extracted without a custom staging step.
 - Build scripts under `native/` copy the compiled binaries into `jniLibs/`.
+  Rust release artifacts are built with `strip = "symbols"`
+  (`native/Cargo.toml` `[profile.release]`); the symbols were ~0.8 MB of the
+  compressed APK and nothing in the app consumes them.
+- The app's Compose icons are vendored in `app/.../ui/icons/AppIcons.kt`
+  (`object Icons` with `Filled`/`AutoMirrored.Filled`); `material-icons-extended`
+  is not a dependency. Adding an icon means adding its `ImageVector` there
+  (path data copied from the Material Icons set), never re-adding the artifact:
+  it ships 22k generated classes, about 5 MB of compressed dex.
+- `release` enables R8 shrinking (`isMinifyEnabled` and `isShrinkResources`)
+  but stays `isDebuggable = true`, because only a debuggable APK extracts
+  `lib/<abi>/{run0,here,agent}` into `nativeLibraryDir`. A debuggable build
+  disables R8 optimization and obfuscation, so release savings come from
+  dead-code/resource removal; `app/proguard-rules.pro` keeps the
+  reflective surfaces (Shizuku, JSch, commons-net, protobuf, Termux ASM,
+  tm4e clone, JNI callbacks) that shrinking would otherwise delete.
+- Release packaging ends with `:app:postprocessReleaseApk` (an
+  `assembleRelease` finalizer running `scripts/postprocess-release.py`):
+  rewrite every entry at deflate level 9 (AGP uses level 1 and stores
+  `resources.arsc`), `zipalign -p 4`, then `apksigner sign`. The rewrite
+  invalidates signatures, so it has to run after packaging and before
+  signing; it saves about 2 MB. The script reads `keystore.properties`
+  (gitignored) first, then `ANDROID_KEYSTORE*`, then the debug keystore at
+  `ANDROID_USER_HOME/debug.keystore` (the nix shell redirects that to
+  `~/.local/state/android`).
 - Daemon sockets use the **abstract namespace** with names derived from the
   public key and target id. Each daemon launch creates a fresh in-memory Ed25519
   identity ([`daemon/DaemonIdentity.kt`]), owned by its connection, and receives

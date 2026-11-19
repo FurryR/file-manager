@@ -2,6 +2,11 @@
 members = ["run0", "here", "agent", "hub-client", "wayland"]
 resolver = "2"
 
+# The APK ships these binaries; their symbols are ~5 MB uncompressed and
+# nothing in the app consumes them (tombstones are the only loss).
+[profile.release]
+strip = "symbols"
+
 [package]
 name = "file_daemon"
 version = "0.1.0"

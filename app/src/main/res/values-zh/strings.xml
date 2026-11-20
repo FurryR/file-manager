@@ -252,6 +252,17 @@
     <string name="settings_search_engine">搜索引擎</string>
     <string name="settings_search_suggestions">来自互联网的搜索建议</string>
     <string name="settings_search_suggestions_desc">输入时显示搜索引擎的查询建议</string>
+    <string name="search_engines_title">搜索引擎</string>
+    <string name="search_engine_add">添加引擎</string>
+    <string name="search_engine_edit">编辑搜索引擎</string>
+    <string name="search_engine_name">名称</string>
+    <string name="search_engine_url">搜索地址</string>
+    <string name="search_engine_url_hint">https://example.com/search?q=%s</string>
+    <string name="search_engine_suggestion">建议地址（可选）</string>
+    <string name="search_engine_suggestion_hint">包含 %s 的 JSON 地址</string>
+    <string name="search_engine_name_required">请输入名称。</string>
+    <string name="search_engine_url_invalid">请使用包含 %s 的 http(s) 地址。</string>
+    <string name="search_engine_suggestion_invalid">请使用包含 %s 的 http(s) 地址，或留空。</string>
     <string name="suggestion_internet">互联网搜索建议</string>
     <string name="suggestion_path">路径</string>
     <string name="settings_color_scheme">颜色方案</string>
@@ -331,6 +342,8 @@
     <string name="agent_provider_type_opencode_go">OpenCode Go</string>
     <string name="agent_provider_type_opencode_zen">OpenCode Zen</string>
     <string name="agent_provider_type_new_api">New API</string>
+    <string name="agent_provider_type_ollama">Ollama</string>
+    <string name="agent_provider_type_ollama_cloud">Ollama Cloud</string>
     <string name="agent_provider_type_openrouter">OpenRouter</string>
     <string name="agent_provider_type_glm">GLM</string>
     <string name="agent_provider_type_deepseek">DeepSeek</string>
@@ -339,6 +352,8 @@
     <string name="agent_provider_hint_opencode_go">OpenCode Go 订阅</string>
     <string name="agent_provider_hint_opencode_zen">OpenCode Zen 按量付费</string>
     <string name="agent_provider_hint_new_api">自建 New API 网关</string>
+    <string name="agent_provider_hint_ollama">本地 Ollama 服务</string>
+    <string name="agent_provider_hint_ollama_cloud">Ollama 云端 API</string>
     <string name="agent_provider_hint_openrouter">OpenRouter 聚合模型</string>
     <string name="agent_provider_hint_glm">智谱 GLM</string>
     <string name="agent_provider_hint_deepseek">DeepSeek 平台</string>

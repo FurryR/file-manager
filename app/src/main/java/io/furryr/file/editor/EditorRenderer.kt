@@ -1,10 +1,10 @@
 package io.furryr.file.editor
 
 import android.content.Context
+import android.util.Log
 import android.view.KeyEvent
 import android.view.ViewGroup
 import android.widget.Toast
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,11 +18,15 @@ import io.furryr.file.ui.icons.Icons
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -65,6 +69,9 @@ import io.furryr.file.render.RendererMenuItem
 import io.furryr.file.render.RendererPath
 import io.furryr.file.render.RendererSession
 import io.furryr.file.render.SessionView
+import io.furryr.file.lsp.LspDiagnostic
+import io.furryr.file.lsp.LspDocumentHandle
+import io.furryr.file.lsp.LspRuntimeFacade
 import io.furryr.file.ui.util.errorText
 import io.github.rosemoe.sora.event.ContentChangeEvent
 import io.github.rosemoe.sora.event.EditorKeyEvent
@@ -155,9 +162,6 @@ internal class EditorRendererSession(
     var showDiagnostics by mutableStateOf(false)
     var showGoto by mutableStateOf(false)
     var gotoLine by mutableStateOf("")
-    var lspStatus by mutableStateOf("")
-    var connecting by mutableStateOf(false)
-        private set
     var diagnostics by mutableStateOf<List<LspDiagnostic>>(emptyList())
         private set
     private var cursorLineState by mutableIntStateOf(state.cursorLine)
@@ -257,7 +261,7 @@ internal class EditorRendererSession(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var appContext: Context? = null
     private var editorView: CodeEditor? = null
-    private var lsp: LspSession? = null
+    private var lsp: LspDocumentHandle? = null
     private var lspJob: Job? = null
     private var lspGeneration = 0
     private var changeJob: Job? = null
@@ -432,7 +436,6 @@ internal class EditorRendererSession(
     fun ensureEditor(context: Context, dark: Boolean = true): CodeEditor {
         appContext = context.applicationContext
         editorView?.let { return it }
-        lspStatus = context.getString(R.string.editor_lsp_disconnected)
         completionsEnabled = EditorPreferences.completionEnabled(context)
         val typeface = EditorPreferences.typeface(context)
         val editor = CodeEditor(context).apply {
@@ -465,7 +468,7 @@ internal class EditorRendererSession(
                                 server.changed(snapshot, version)
                             } catch (failure: Exception) {
                                 if (failure is CancellationException) throw failure
-                                lspStatus = failure.message ?: appContext?.getString(R.string.editor_lsp_disconnected).orEmpty()
+                                Log.d("Lsp", "Language server did not accept the change", failure)
                             }
                         }
                     }
@@ -497,7 +500,7 @@ internal class EditorRendererSession(
                 }
             }
         }
-        LspSettings.forFile(context, address, languageId)?.let { connect(it) }
+        connectLsp(context)
         return editor
     }
 
@@ -565,6 +568,15 @@ internal class EditorRendererSession(
                 return Result.failure(EditorConflictException())
             }
             withContext(Dispatchers.IO) { EditorFiles.write(file, encoded) }
+            val configChanged = appContext?.let { context ->
+                withContext(Dispatchers.IO) { LspRuntimeFacade.refreshIfChanged(context, vfs) }
+            } == true
+            if (configChanged) {
+                // Saving a file may follow a settings change that bumped the
+                // config generation; this page reconnects with the new catalog.
+                disconnectLsp()
+                appContext?.let { connectLsp(it) }
+            }
             val updated = withContext(Dispatchers.IO) { TextDocument.decode(encoded) }
             document = updated
             dirty = editor.text.toString() != updated.text
@@ -578,7 +590,7 @@ internal class EditorRendererSession(
                     server.saved(updated.text, documentRevision)
                 } catch (failure: Exception) {
                     if (failure is CancellationException) throw failure
-                    lspStatus = failure.message ?: appContext?.getString(R.string.editor_lsp_disconnected).orEmpty()
+                    Log.d("Lsp", "Language server did not accept the save", failure)
                 }
             }
             appContext?.let { context ->
@@ -671,7 +683,7 @@ internal class EditorRendererSession(
         disconnectLsp()
         val editor = editorView?.takeIf { !it.isReleased } ?: return
         EditorLanguages.configure(context, editor, id, dark) { lsp }
-        LspSettings.forFile(context, address, id)?.let { connect(it) }
+        connectLsp(context)
     }
 
     fun applySearch() {
@@ -705,84 +717,81 @@ internal class EditorRendererSession(
         editor.searcher.replaceAll(replacement)
     }
 
-    fun connect(settings: LspSettings) {
-        val context = appContext ?: return
+    private fun connectLsp(context: Context) {
         val editor = editorView ?: return
         if (document == null) return
-        lspJob?.cancel()
-        lsp?.close()
-        lsp = null
+        disconnectLsp()
         diagnostics = emptyList()
         editor.diagnostics = null
-        connecting = true
-        lspStatus = context.getString(R.string.editor_lsp_connecting)
         val generation = ++lspGeneration
         val initialText = editor.text.toString()
         val initialRevision = editor.text.documentVersion
+        val initialLanguage = languageId
         lspJob = scope.launch {
-            try {
-                val server = LspSession.start(settings, languageId, initialText, initialRevision,
-                    diagnostics = { items, serverRevision ->
-                        scope.launch {
-                            if (closed) return@launch
-                            val view = editorView
-                            if (view != null && !view.isReleased && view.text.documentVersion == serverRevision) {
-                                diagnostics = items
-                                val marks = DiagnosticsContainer()
-                                items.forEach { item ->
-                                    val content = view.text
-                                    if (item.startLine in 0 until content.lineCount && item.endLine in 0 until content.lineCount) {
-                                        val start = content.getCharIndex(
-                                            item.startLine,
-                                            item.startColumn.coerceIn(0, content.getColumnCount(item.startLine)),
-                                        )
-                                        val end = content.getCharIndex(
-                                            item.endLine,
-                                            item.endColumn.coerceIn(0, content.getColumnCount(item.endLine)),
-                                        )
-                                        if (end >= start) marks.addDiagnostic(DiagnosticRegion(start, end,
-                                            when (item.severity) {
-                                                1 -> DiagnosticRegion.SEVERITY_ERROR
-                                                2 -> DiagnosticRegion.SEVERITY_WARNING
-                                                else -> DiagnosticRegion.SEVERITY_TYPO
-                                            },
-                                            0, DiagnosticDetail(item.message)))
-                                    }
+            val server = try {
+                LspRuntimeFacade.attach(
+                    context = context,
+                    vfs = vfs,
+                    file = file,
+                    editorLanguageId = initialLanguage,
+                    text = initialText,
+                    revision = initialRevision,
+                ) { items, serverRevision ->
+                    scope.launch {
+                        if (closed) return@launch
+                        val view = editorView
+                        if (view != null && !view.isReleased && view.text.documentVersion == serverRevision) {
+                            diagnostics = items
+                            val marks = DiagnosticsContainer()
+                            items.forEach { item ->
+                                val content = view.text
+                                if (item.startLine in 0 until content.lineCount && item.endLine in 0 until content.lineCount) {
+                                    val start = content.getCharIndex(
+                                        item.startLine,
+                                        item.startColumn.coerceIn(0, content.getColumnCount(item.startLine)),
+                                    )
+                                    val end = content.getCharIndex(
+                                        item.endLine,
+                                        item.endColumn.coerceIn(0, content.getColumnCount(item.endLine)),
+                                    )
+                                    if (end >= start) marks.addDiagnostic(DiagnosticRegion(start, end,
+                                        when (item.severity) {
+                                            1 -> DiagnosticRegion.SEVERITY_ERROR
+                                            2 -> DiagnosticRegion.SEVERITY_WARNING
+                                            else -> DiagnosticRegion.SEVERITY_TYPO
+                                        },
+                                        0, DiagnosticDetail(item.message)))
                                 }
-                                view.diagnostics = marks
                             }
+                            view.diagnostics = marks
                         }
-                    },
-                    status = { message ->
-                        scope.launch { if (!closed) lspStatus = message }
-                    },
-                )
-                if (generation != lspGeneration || closed) {
-                    server.close()
-                    return@launch
+                    }
                 }
-                lsp = server
-                lspStatus = context.getString(R.string.editor_lsp_connected, settings.container)
-                server.changed(editor.text.toString(), editor.text.documentVersion)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (failure: Exception) {
-                if (failure is CancellationException) throw failure
-                lspStatus = failure.localizedMessage ?: context.getString(R.string.editor_lsp_disconnected)
-            } finally {
-                if (generation == lspGeneration) connecting = false
+                Log.d("Lsp", "Language server unavailable", failure)
+                null
+            }
+            if (closed || generation != lspGeneration) {
+                server?.close()
+                return@launch
+            }
+            lsp = server
+            if (server != null) {
+                runCatching { server.changed(editor.text.toString(), editor.text.documentVersion) }
             }
         }
     }
 
-    fun disconnectLsp() {
+    private fun disconnectLsp() {
         lspGeneration++
         lspJob?.cancel()
         lspJob = null
         lsp?.close()
         lsp = null
-        connecting = false
         editorView?.diagnostics = null
         diagnostics = emptyList()
-        appContext?.let { lspStatus = it.getString(R.string.editor_lsp_disconnected) }
     }
 
     fun openDiagnostic(diagnostic: LspDiagnostic) {
@@ -843,6 +852,7 @@ class EditorFactory(private val files: io.furryr.file.core.FileWorld, label: Str
 }
 
 /** Compose projection of an [EditorRendererSession]; the session owns all state. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun EditorContent(
     session: EditorRendererSession,
@@ -1006,27 +1016,44 @@ internal fun EditorContent(
         )
     }
     if (session.showLanguagePicker) {
+        var languageExpanded by remember { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = { session.showLanguagePicker = false },
             title = { Text(stringResource(R.string.editor_file_type)) },
             text = {
-                Column(Modifier.verticalScroll(rememberScrollState())) {
-                    EditorLanguages.languageIds.forEach { id ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
+                ExposedDropdownMenuBox(
+                    expanded = languageExpanded,
+                    onExpandedChange = { languageExpanded = it },
+                ) {
+                    OutlinedTextField(
+                        value = EditorLanguages.label(context, session.languageId),
+                        onValueChange = {},
+                        readOnly = true,
+                        singleLine = true,
+                        trailingIcon = {
+                            ExposedDropdownMenuDefaults.TrailingIcon(expanded = languageExpanded)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(MenuAnchorType.PrimaryNotEditable),
+                    )
+                    ExposedDropdownMenu(
+                        expanded = languageExpanded,
+                        onDismissRequest = { languageExpanded = false },
+                    ) {
+                        EditorLanguages.languageIds.forEach { id ->
+                            DropdownMenuItem(
+                                text = { Text(EditorLanguages.label(context, id)) },
+                                leadingIcon = if (session.languageId == id) {
+                                    { Icon(Icons.Default.Check, contentDescription = null) }
+                                } else {
+                                    null
+                                },
+                                onClick = {
                                     session.setLanguage(context, id, darkTheme)
                                     session.showLanguagePicker = false
-                                }
-                                .padding(vertical = 4.dp),
-                        ) {
-                            RadioButton(
-                                selected = session.languageId == id,
-                                onClick = null,
+                                },
                             )
-                            Text(EditorLanguages.label(context, id))
                         }
                     }
                 }

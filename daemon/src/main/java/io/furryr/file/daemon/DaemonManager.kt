@@ -80,6 +80,14 @@ object DaemonManager {
      *  available, otherwise the app UID. */
     private const val HostId = "host"
 
+    /**
+     * Internal app-UID daemon for app-private files. It is deliberately not a
+     * [DaemonTarget] and never appears in the hub target catalog: the provider
+     * uses it only when the host daemon's identity (root or Shizuku shell)
+     * cannot reach `filesDir`/`cacheDir`.
+     */
+    private const val AppId = "app"
+
     /** Environment variable carrying the hub socket name and daemon key. */
     const val HUB_SOCKET_ENV = "HUB_SOCKET"
 
@@ -94,6 +102,8 @@ object DaemonManager {
 
     private val lock = Any()
     @Volatile private var primary: DaemonConnection? = null
+    /** App-UID daemon for app-private storage; never exposed as a hub target. */
+    private var appDaemon: DaemonConnection? = null
     private val named = mutableMapOf<String, DaemonConnection>()
     private val startingNamed = mutableSetOf<String>()
     private val namedChangeListeners = mutableSetOf<() -> Unit>()
@@ -315,8 +325,9 @@ object DaemonManager {
     fun reset() {
         val hadNamed = synchronized(lock) {
             val had = named.isNotEmpty()
-            (listOfNotNull(primary) + named.values).distinct().forEach { it.shutdown() }
+            (listOfNotNull(primary, appDaemon) + named.values).distinct().forEach { it.shutdown() }
             primary = null
+            appDaemon = null
             named.clear()
             updateNamedSnapshot()
             rootActive = false
@@ -389,6 +400,16 @@ object DaemonManager {
         FileService { connection(target) }
 
     /**
+     * File service for app-private storage. A root or Shizuku host daemon may
+     * not be able to read `filesDir`; this connection always runs as the app
+     * UID and is intentionally absent from [targetCatalog] and the hub.
+     */
+    fun appFileService(): FileService = FileService { appConnection() }
+
+    /** Exec facade for app-private storage; same internal app-UID daemon. */
+    fun appExecService(): ExecService = ExecService(resolve = { appConnection() })
+
+    /**
      * Exec facade for [target]. Children inherit the daemon's credentials, so
      * a host shell started by a root daemon is a root shell and can enter any
      * directory the daemon itself can reach.
@@ -397,6 +418,19 @@ object DaemonManager {
         ExecService(resolve = { connection(target) })
 
     // ── Internal ──────────────────────────────────────────────────────
+
+    /**
+     * Start or reuse the app-UID daemon. It has its own identity and socket, so
+     * it coexists with a root or Shizuku host daemon without sharing a target
+     * id or a process tree.
+     */
+    private fun appConnection(): DaemonConnection = synchronized(lock) {
+        appDaemon?.takeIf { it.isAlive() } ?: run {
+            appDaemon?.close()
+            appDaemon = null
+            startAppDaemon().also { appDaemon = it }
+        }
+    }
 
     fun connection(target: DaemonTarget): DaemonConnection {
         var namedAdded = false
@@ -464,7 +498,13 @@ object DaemonManager {
      */
     private fun startDirectDaemon(): DaemonConnection {
         primary?.let { if (it.isAlive()) return it; it.close(); primary = null }
-        val identity = DaemonIdentity(HostId)
+        return startDirectDaemon(HostId)
+    }
+
+    private fun startAppDaemon(): DaemonConnection = startDirectDaemon(AppId)
+
+    private fun startDirectDaemon(id: String): DaemonConnection {
+        val identity = DaemonIdentity(id)
         val executable = getExecutable()
         Log.i(TAG, "Starting daemon: ${executable.absolutePath} --id ${identity.id}")
         val process = ProcessBuilder(

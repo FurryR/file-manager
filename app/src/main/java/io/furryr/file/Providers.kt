@@ -15,7 +15,10 @@ import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.daemon.HubActions
 import io.furryr.file.daemon.HubLocation
 import io.furryr.file.editor.EditorFactory
+import io.furryr.file.editor.EditorLanguages
 import io.furryr.file.forward.ShareToken
+import io.furryr.file.lsp.LspCatalog
+import io.furryr.file.lsp.LspConfigStore
 import io.furryr.file.home.HomeStore
 import io.furryr.file.provider.DocumentFileProvider
 import io.furryr.file.provider.FtpProvider
@@ -61,6 +64,18 @@ fun ensureProcessServices(context: Context) {
     WebTransfers.init { WebTransferService.start(appContext) }
     AgentSettings.install(appContext)
     PulseSettings.install(appContext)
+    // Bridge the old per-language command store once. Container/root were
+    // workarounds; the new runtime derives both from the file's VFS node.
+    LspConfigStore.migrateLegacy(appContext)
+    // Languages added through the settings page still get an editor entry, so
+    // a new extension is editable before any TextMate grammar exists.
+    LspCatalog.load(appContext).editorLanguages().forEach { language ->
+        if (language.id !in EditorLanguages.languageIds) {
+            EditorLanguages.registerLanguage(
+                EditorLanguages.LanguageSpec(language.id, language.extensions, language.label),
+            )
+        }
+    }
     // Shared content:// URIs outlive the activity and the process, like picker
     // document ids; keep their signing key in app-private storage.
     ShareToken.install(java.io.File(appContext.filesDir, "share-token.bin"))
@@ -96,7 +111,7 @@ fun buildAppWorld(context: Context, id: String, manager: Boolean): AppWorld {
     ensureProcessServices(context)
     val appContext = context.applicationContext
 
-    val local = LocalProvider()
+    val local = LocalProvider(appContext)
     val providers = mutableListOf<FileProvider>(
         local,
         ContainerProvider(appContext),

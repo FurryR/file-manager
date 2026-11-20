@@ -178,6 +178,7 @@ val buildNative = tasks.register<Exec>("buildNative") {
         assetsDir.file("native-licenses/LGPL-2.1"),
         assetsDir.file("native-licenses/COPYING-libsndfile"),
         assetsDir.file("native-licenses/COPYING-libltdl"),
+        assetsDir.file("native-licenses/COPYING-talloc"),
         rootProject.layout.projectDirectory.file(
             "native/sepolicy/prefix/aarch64-linux-android/lib/libfile_container.a",
         ),

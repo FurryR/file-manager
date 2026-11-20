@@ -32,17 +32,31 @@
     <string name="editor_diagnostics">诊断（%1$d）</string>
     <string name="editor_no_diagnostics">当前没有诊断信息。</string>
     <string name="editor_lsp_settings">语言服务器</string>
-    <string name="editor_lsp_settings_desc">容器和服务器命令</string>
-    <string name="editor_lsp_container">容器</string>
-    <string name="editor_lsp_command">服务器命令（stdio）</string>
-    <string name="editor_lsp_root">容器内工作区路径</string>
-    <string name="editor_lsp_document">容器内文档路径</string>
-    <string name="editor_lsp_hint">通过原始标准输入输出启动已安装的服务器，如 clangd、rust-analyzer 或 pylsp。在配置的容器内打开文件时会自动连接。清空命令可停用服务器。</string>
-    <string name="editor_lsp_connect">连接</string>
-    <string name="editor_lsp_disconnect">断开语言服务器</string>
-    <string name="editor_lsp_disconnected">LSP 未连接 · 可使用语法高亮</string>
-    <string name="editor_lsp_connecting">正在启动语言服务器…</string>
-    <string name="editor_lsp_connected">LSP 已连接 · %1$s</string>
+    <string name="editor_lsp_settings_desc">配置语言和工作区覆盖</string>
+    <string name="lsp_languages">语言</string>
+    <string name="lsp_overrides">覆盖项</string>
+    <string name="lsp_add_language">添加语言</string>
+    <string name="lsp_add_override">添加覆盖项</string>
+    <string name="lsp_empty_languages">没有自定义语言。内置语言无需配置。</string>
+    <string name="lsp_empty_overrides">没有位置覆盖项。</string>
+    <string name="lsp_language_id">语言 ID</string>
+    <string name="lsp_label">名称</string>
+    <string name="lsp_extensions">扩展名</string>
+    <string name="lsp_exact_names">精确文件名</string>
+    <string name="lsp_markers">工作区标记</string>
+    <string name="lsp_command">命令</string>
+    <string name="lsp_args">参数（每行一个）</string>
+    <string name="lsp_language_ids">LSP 语言 ID（ext=id，每行一个）</string>
+    <string name="lsp_env">环境变量（KEY=VALUE，每行一个）</string>
+    <string name="lsp_initialization_options">初始化选项（JSON 对象）</string>
+    <string name="lsp_settings">设置（JSON 对象）</string>
+    <string name="lsp_invalid_json">JSON 对象无效</string>
+    <string name="lsp_workspace">工作区模式</string>
+    <string name="lsp_root_mode">根目录模式</string>
+    <string name="lsp_prefix">VFS 前缀</string>
+    <string name="lsp_language">语言（可选）</string>
+    <string name="lsp_enabled">启用</string>
+    <string name="lsp_inherit">继承</string>
     <string name="editor_saving_wait">请等待当前保存完成。</string>
     <string name="editor_read_only">只读</string>
 </resources>

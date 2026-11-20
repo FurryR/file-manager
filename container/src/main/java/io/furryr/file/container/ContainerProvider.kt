@@ -10,6 +10,7 @@ import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
 import io.furryr.file.daemon.process.CommandSpec
+import io.furryr.file.daemon.process.PipeChannel
 import io.furryr.file.provider.terminal.DaemonTerminalProcess
 import io.furryr.file.provider.terminal.ExecProvider
 import io.furryr.file.provider.terminal.TerminalProcess
@@ -193,6 +194,12 @@ class ContainerProvider(
                 ),
             ).getOrThrow()
             DaemonTerminalProcess(channel, containerName = name)
+        }
+
+    override suspend fun spawnPipes(cwd: VFolder, spec: CommandSpec): Result<PipeChannel> =
+        runCatching {
+            val segments = containerSegments(innerPath(cwd.path))
+            exec(segments.first()).spawnPipes(spec).getOrThrow()
         }
 
     /**

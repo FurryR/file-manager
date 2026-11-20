@@ -1,13 +1,18 @@
 [
   {
     "name": "File",
-    "license": "GPL-3.0-only",
+    "license": "GPL-3.0-or-later",
     "url": "https://github.com/FurryR/file-manager"
   },
   {
     "name": "PRoot",
-    "license": "GPL-2.0-only",
+    "license": "GPL-2.0-or-later",
     "url": "https://github.com/termux/proot"
+  },
+  {
+    "name": "talloc",
+    "license": "LGPL-3.0-or-later",
+    "url": "https://www.samba.org/ftp/talloc/"
   },
   {
     "name": "PulseAudio",

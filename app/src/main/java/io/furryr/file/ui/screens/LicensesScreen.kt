@@ -55,7 +55,7 @@ private fun loadGeneratedLicenses(context: Context): List<LicenseRecord> = runCa
 
 /** Shown only when the generated asset is absent (for example in a bare IDE checkout). */
 private val FALLBACK_LICENSES = listOf(
-    LicenseRecord(name = "File", license = "GNU GPLv3", url = "https://www.gnu.org/licenses/gpl-3.0.html"),
+    LicenseRecord(name = "File", license = "GNU GPLv3 or later", url = "https://www.gnu.org/licenses/gpl-3.0.html"),
     LicenseRecord(name = "AndroidX Activity", license = "Apache License 2.0", url = "https://developer.android.com/jetpack/androidx/releases/activity"),
     LicenseRecord(name = "AndroidX Compose", license = "Apache License 2.0", url = "https://developer.android.com/jetpack/compose"),
     LicenseRecord(name = "AndroidX Lifecycle", license = "Apache License 2.0", url = "https://developer.android.com/jetpack/androidx/releases/lifecycle"),
@@ -70,7 +70,8 @@ private val FALLBACK_LICENSES = listOf(
     LicenseRecord(name = "Kotlin Coroutines", license = "Apache License 2.0", url = "https://github.com/Kotlin/kotlinx.coroutines"),
     LicenseRecord(name = "Prost", license = "Apache License 2.0", url = "https://github.com/tokio-rs/prost"),
     LicenseRecord(name = "Rust", license = "Apache License 2.0 / MIT", url = "https://www.rust-lang.org"),
-    LicenseRecord(name = "PRoot", license = "GNU GPLv2", url = "https://github.com/termux/proot"),
+    LicenseRecord(name = "PRoot", license = "GNU GPLv2 or later", url = "https://github.com/termux/proot"),
+    LicenseRecord(name = "talloc", license = "GNU LGPLv3 or later (see native-licenses/COPYING-talloc)", url = "https://www.samba.org/ftp/talloc/"),
     LicenseRecord(name = "PulseAudio", license = "GNU LGPLv2.1 or later (see native-licenses/LICENSE-PulseAudio)", url = "https://www.freedesktop.org/wiki/Software/PulseAudio/"),
     LicenseRecord(name = "libsndfile", license = "GNU LGPLv2.1 or later", url = "https://libsndfile.github.io/libsndfile/"),
     LicenseRecord(name = "libltdl", license = "GNU LGPLv2.1 or later", url = "https://www.gnu.org/software/libtool/"),

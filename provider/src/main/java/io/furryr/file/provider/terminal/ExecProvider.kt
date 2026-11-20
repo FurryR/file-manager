@@ -3,6 +3,8 @@ package io.furryr.file.provider.terminal
 import io.furryr.file.core.FileProvider
 import io.furryr.file.core.VFolder
 import io.furryr.file.core.VNode
+import io.furryr.file.daemon.process.CommandSpec
+import io.furryr.file.daemon.process.PipeChannel
 
 /**
  * A provider that can start a terminal for one of its folders.
@@ -33,4 +35,14 @@ interface ExecProvider : FileProvider {
      */
     fun terminalPath(cwd: VFolder, node: VNode): String? =
         if (node.provider === this) innerPath(node.path) else null
+
+    /**
+     * Start a byte-transparent process on the same host as [terminal].
+     *
+     * LSP and other protocol clients need separate stdout/stderr pipes, not a
+     * PTY. A provider without a usable process namespace returns a failure and
+     * the caller degrades silently.
+     */
+    suspend fun spawnPipes(cwd: VFolder, spec: CommandSpec): Result<PipeChannel> =
+        Result.failure(UnsupportedOperationException("${javaClass.simpleName} cannot spawn pipe processes"))
 }

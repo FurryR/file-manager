@@ -2104,7 +2104,7 @@
       "group": "Native",
       "name": "File",
       "version": null,
-      "license": "GPL-3.0-only",
+      "license": "GPL-3.0-or-later",
       "url": "https://github.com/FurryR/file-manager"
     },
     {
@@ -2146,7 +2146,7 @@
       "group": "Native",
       "name": "PRoot",
       "version": null,
-      "license": "GPL-2.0-only",
+      "license": "GPL-2.0-or-later",
       "url": "https://github.com/termux/proot"
     },
     {
@@ -2155,6 +2155,13 @@
       "version": null,
       "license": "LGPL-2.1-or-later",
       "url": "https://www.freedesktop.org/wiki/Software/PulseAudio/"
+    },
+    {
+      "group": "Native",
+      "name": "talloc",
+      "version": null,
+      "license": "LGPL-3.0-or-later",
+      "url": "https://www.samba.org/ftp/talloc/"
     },
     {
       "group": "Native",

@@ -23,10 +23,11 @@ platform services and calls the library.
 | `settings/` | `PulseSettings.kt` — app-owned PulseAudio preference store |
 | `store/` | Location stores + `LocationStores` + `LocationsRepository` (all persistence) |
 | `ui/components/` | `BottomToolbar.kt`, `TopBarContent.kt`, `FileDrawer.kt`, `Dialogs.kt`, `ServiceUnavailableState.kt` |
-| `ui/screens/` | `SettingsActivity.kt`, `LicensesScreen.kt` (reads the generated `assets/licenses.json`), `LicensesActivity` |
+| `ui/screens/` | `SettingsActivity.kt`, `LspSettingsActivity.kt`, `SearchEngineSettingsActivity.kt`, `LicensesScreen.kt` (reads the generated `assets/licenses.json`), `LicensesActivity` |
 | `ui/theme/` | `FileManagerTheme.kt` (Material3 dark/light), `Color.kt` (palettes + AMOLED canvas), `PaletteStore.kt` |
 | `ui/util/` | `Formatters.kt`, `FileIcons.kt`, `FileOpen.kt`, `OperationNotification.kt` |
-| `editor/` | Tab-owned Sora text editor, text codec, TextMate grammars and container LSP |
+| `editor/` | Tab-owned Sora text editor, text codec, TextMate grammars and the editor's LSP adapter |
+| `lsp/` | Declarative language catalog, VFS workspace discovery and per-workspace LSP sessions; no status/management UI |
 
 > The VFS abstraction lives in `:core`; protocol providers (Local/FTP/SFTP/
 > SAF/remote) live in `:provider`; containers and the single `ContainerProvider`
@@ -53,12 +54,15 @@ platform services and calls the library.
 - **Container daemon launch**: `:container/ContainerDaemonLauncher.kt` — proot/chroot argv
 - **Terminal panel**: `terminal/TerminalSheet.kt` — bottom sheet over `terminal/Terminal.kt`; `RuntimeForegroundService.kt` keeps sessions and container daemons alive
 - **Web DevTools**: `devtools/DevToolsServer.kt` serves the generated frontend from `app/src/main/assets/devtools` and proxies its CDP WebSocket to the abstract `webview_devtools_remote_<pid>` socket; it also injects a bootstrap script that seeds the frontend `ui-theme`/`language` settings from the app theme and locale, and `terminal/WebDevToolsTab.kt` re-applies live theme changes. `devtools/DevToolsTargets.kt` resolves the page target and `terminal/WebDevToolsTab.kt` owns the frontend WebView. The npm pin and asset sync live in `tools/devtools/`; the sync stages one DevTools locale per app `values-*` translation, so a new app language needs no DevTools code change.
+- **Language servers**: `lsp/LspRuntime.kt` + `lsp/LspCatalog.kt` + `lsp/WorkspaceFinder.kt` — built-in `assets/lsp/catalog.json`, user rules in `SharedPreferences("lsp_settings")` through `LspSettingsActivity`; the server runs in the file's own provider namespace, workspace roots come from VFS markers, and there is no installation/status/container UI
+- **Search engines**: `ui/util/SearchEngines.kt` — DuckDuckGo first and by default, fixed Google/Bing/Baidu plus user engines in one `SharedPreferences("search_settings")` JSON object (same shape as LSP user rules); `ui/screens/SearchEngineSettingsActivity.kt` edits them, and `ui/util/PathSuggestions.kt` uses the selected engine's optional suggestion endpoint
 - **Exec/PTY**: `:daemon/process/ExecService.kt` — `CommandSpec` → `ProcessChannel` (one path for terminal + command exec)
 - **Native daemon entry**: `:daemon/DaemonManager.kt` — starts `libfiledaemon.so` from `nativeLibraryDir`
 - **Add a location store**: implement a `LocationSources.kt` interface in `store/`, wire it through `LocationStores.init` and the matching provider `init()`
 
 ## CONVENTIONS
 
+- **LSP is invisible**: only completion and diagnostics surface. There is no status bar, server/container/workspace list, connect action or install prompt. Server execution follows the file's VFS provider; workspace roots come from VFS markers (`.lsp-root` wins). Runtime state is memory-only; user rules live in `SharedPreferences("lsp_settings")` and are edited by `LspSettingsActivity`, never as a file or JSON tab. The stored shape uses `languages.<id>.markers` + `command` and an `overrides` array whose entries match by `prefix`; there are no aliases for those keys.
 - **State hoisting**: all state in `:app`, passed down as params/callbacks.
 - **`:core` is `internal`-guarded** — UI touches only `DaemonManager`, `ExecService`,
   `FileService`, sources/models; never `DaemonConnection`/proto/sockets.
@@ -233,4 +237,5 @@ platform services and calls the library.
 - [ ] `model/Models.kt` + `FileManagerApp.kt`: verify mutating `Page.path`/`kind`/`location` in place (redirect, pending retarget, folder restore) keeps the renderer and the tab path, and Back/Forward/history still work without `Page.copy`.
 - [ ] `ui/util/ErrorText.kt` + `render/FolderRenderer.kt` + `shell/ClipboardController.kt` + `editor/EditorRenderer.kt` + `FileManagerApp.kt`: verify `PresentableException` failures show localized text (permission denied, service not running) in toasts and editor errors, and non-presentable errors keep their message.
 - [ ] `core/.../exception/PresentableException.kt` + `provider/.../remote/SshException.kt` + `ui/util/ErrorText.kt` + `res/values*/remote_strings.xml`: verify SSH failures (host key changed/required, connect/auth, channel, timeout, command, transfer, file changed, cancelled) show localized text in the file error page, toasts and drawer, and `zh`/`en` strings resolve.
+- [ ] `ui/screens/LicensesScreen.kt`: verify the fallback list (generated asset absent) shows GPLv3-or-later for File, GPLv2-or-later for PRoot and the talloc LGPLv3 row.
 

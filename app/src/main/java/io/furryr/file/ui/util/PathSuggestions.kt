@@ -9,9 +9,9 @@ import io.furryr.file.home.HomeEntry
 import io.furryr.file.home.HomeEntryKind
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 import java.net.HttpURLConnection
 import java.net.URL
-import java.net.URLEncoder
 import java.util.Locale
 
 /** Where a path-bar suggestion came from. */
@@ -170,9 +170,10 @@ object PathSuggestions {
         if (!SearchSettings.suggestionsEnabled(context)) return emptyList()
         // A legal address keeps the overlay local, exactly like a browser.
         if (isAddress(text)) return emptyList()
-        val engine = SearchSettings.current(context)
-        val body = fetch(suggestUrl(engine, text)) ?: return emptyList()
-        return parse(engine, body)
+        val engine = SearchEngines.current(context)
+        val url = SearchEngines.suggestionUrl(context, text) ?: return emptyList()
+        val body = fetch(url) ?: return emptyList()
+        return parse(body)
             .map { it.trim() }
             .filter { it.isNotEmpty() && it != text }
             .distinct()
@@ -190,20 +191,6 @@ object PathSuggestions {
     private fun isAddress(text: String): Boolean =
         text.startsWith('/') || text.contains("://") || BrowseAddress.normalize(text) != null
 
-    private fun suggestUrl(engine: SearchEngine, query: String): String {
-        val encoded = URLEncoder.encode(query, "UTF-8")
-        return when (engine) {
-            SearchEngine.GOOGLE ->
-                "https://suggestqueries.google.com/complete/search?client=firefox&q=$encoded"
-            SearchEngine.BING ->
-                "https://api.bing.com/osjson.aspx?query=$encoded"
-            SearchEngine.DUCKDUCKGO ->
-                "https://duckduckgo.com/ac/?type=list&q=$encoded"
-            SearchEngine.BAIDU ->
-                "https://www.baidu.com/sugrec?json=1&prod=pc&wd=$encoded"
-        }
-    }
-
     private fun fetch(url: String): String? = runCatching {
         val connection = URL(url).openConnection() as HttpURLConnection
         try {
@@ -219,28 +206,40 @@ object PathSuggestions {
         }
     }.getOrNull()
 
-    private fun parse(engine: SearchEngine, body: String): List<String> = runCatching {
-        when (engine) {
-            SearchEngine.DUCKDUCKGO -> {
-                val rows = JSONArray(body)
-                (0 until rows.length()).mapNotNull { index ->
-                    rows.optJSONObject(index)?.optString("phrase")
-                }
-            }
-            SearchEngine.BAIDU -> {
-                val rows = JSONObject(body).optJSONArray("g") ?: JSONArray()
-                (0 until rows.length()).mapNotNull { index ->
-                    rows.optJSONObject(index)?.optString("q")
-                }
-            }
-            // Google and Bing share the OpenSearch suggestion shape:
-            // ["query", ["suggestion", ...]].
-            else -> {
-                val rows = JSONArray(body).optJSONArray(1) ?: JSONArray()
-                (0 until rows.length()).mapNotNull { index ->
-                    rows.optString(index).takeIf { it.isNotEmpty() }
-                }
-            }
+    /**
+     * Accept the suggestion shapes real engines return:
+     * OpenSearch `["query", ["row", ...]]`, DuckDuckGo `[{"phrase": "..."}]`,
+     * Baidu `{"g":[{"q": "..."}]}` and a plain string array. User engines may
+     * use any of them.
+     */
+    private fun parse(body: String): List<String> = runCatching {
+        when (val root = JSONTokener(body).nextValue()) {
+            is JSONObject -> objectSuggestions(root)
+            is JSONArray -> arraySuggestions(root)
+            else -> emptyList()
         }
     }.getOrDefault(emptyList())
+
+    private fun objectSuggestions(value: JSONObject): List<String> =
+        value.optJSONArray("g")?.let(::rowSuggestions)
+            ?: value.optJSONArray("suggestions")?.let(::rowSuggestions)
+            ?: emptyList()
+
+    private fun arraySuggestions(value: JSONArray): List<String> {
+        value.optJSONArray(1)?.let { return rowSuggestions(it) }
+        return (0 until value.length()).mapNotNull { index ->
+            suggestionText(value.opt(index))
+        }
+    }
+
+    private fun rowSuggestions(rows: JSONArray): List<String> =
+        (0 until rows.length()).mapNotNull { index -> suggestionText(rows.opt(index)) }
+
+    private fun suggestionText(value: Any?): String? = when (value) {
+        is String -> value.takeIf { it.isNotEmpty() }
+        is JSONObject -> value.optString("phrase").takeIf { it.isNotEmpty() }
+            ?: value.optString("q").takeIf { it.isNotEmpty() }
+        is JSONArray -> value.optString(0).takeIf { it.isNotEmpty() }
+        else -> null
+    }
 }

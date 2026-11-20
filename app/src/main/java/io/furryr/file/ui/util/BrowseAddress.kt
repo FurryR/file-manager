@@ -1,8 +1,5 @@
 package io.furryr.file.ui.util
 
-import android.content.Context
-import java.net.URLEncoder
-
 /**
  * Decides whether typed address-bar text is a web address and turns it into a
  * full URL. Bare hosts (`github.com`, `localhost:8080`) get HTTPS; explicit
@@ -49,40 +46,4 @@ object BrowseAddress {
     }.getOrNull()
 }
 
-enum class SearchEngine(val label: String, val template: String) {
-    GOOGLE("Google", "https://www.google.com/search?q=%s"),
-    BING("Bing", "https://www.bing.com/search?q=%s"),
-    DUCKDUCKGO("DuckDuckGo", "https://duckduckgo.com/?q=%s"),
-    BAIDU("百度", "https://www.baidu.com/s?wd=%s"),
-}
 
-object SearchSettings {
-    private const val PREFS = "settings"
-    private const val KEY = "search_engine"
-    private const val SUGGESTIONS_KEY = "search_suggestions"
-
-    fun current(context: Context): SearchEngine {
-        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null)
-        return SearchEngine.entries.firstOrNull { it.name == raw } ?: SearchEngine.GOOGLE
-    }
-
-    fun select(context: Context, engine: SearchEngine) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY, engine.name).apply()
-    }
-
-    /** Internet suggestions are on unless the user turns them off. */
-    fun suggestionsEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(SUGGESTIONS_KEY, true)
-
-    fun setSuggestionsEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putBoolean(SUGGESTIONS_KEY, enabled).apply()
-    }
-
-    fun searchUrl(context: Context, query: String): String {
-        val encoded = URLEncoder.encode(query, "UTF-8")
-        return current(context).template.replace("%s", encoded)
-    }
-}

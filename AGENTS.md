@@ -546,8 +546,12 @@ Gradle, Cargo or native component; the app ships the generated asset.
   ([`daemon/DaemonAuth.kt`] ↔ `native/src/auth.rs`) — the derived name is public,
   so it is not a credential. The run0 hub keeps its random name. Ids are
   `host` (the one primary daemon: `su` when root is available, else Shizuku,
-  else direct) and `container-<name>` for named daemons (the prefix avoids
-  colliding with the reserved id). There is no second app-UID daemon.
+  else direct), `container-<name>` for named daemons (the prefix avoids
+  colliding with the reserved id) and the internal `app` daemon. `app` runs
+  as the app UID and serves only app-private storage (`filesDir`, `cacheDir`
+  and siblings) through `LocalProvider`; it is intentionally absent from
+  `targetCatalog` and the hub, so a root/Shizuku host never needs access to
+  app data.
 - Daemon priority: `su` (root) > `Shizuku` (shell) > direct (app UID). One
   `host` target regardless of mechanism. File operations and every child (PTY
   terminal, agent/run0 exec) inherit the daemon's credentials: a root daemon

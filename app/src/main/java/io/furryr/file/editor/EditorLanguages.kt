@@ -20,6 +20,7 @@ import io.github.rosemoe.sora.text.Content
 import io.github.rosemoe.sora.text.ContentReference
 import io.github.rosemoe.sora.widget.CodeEditor
 import io.github.rosemoe.sora.widget.schemes.EditorColorScheme
+import io.furryr.file.lsp.LspDocumentHandle
 import kotlinx.coroutines.runBlocking
 import org.eclipse.tm4e.core.registry.IThemeSource
 import org.json.JSONObject
@@ -132,7 +133,7 @@ internal object EditorLanguages {
         editor: CodeEditor,
         languageId: String,
         dark: Boolean,
-        session: () -> LspSession?,
+        session: () -> LspDocumentHandle?,
     ) {
         if (!ready) {
             FileProviderRegistry.getInstance().addFileProvider(AssetsFileResolver(context.applicationContext.assets))
@@ -210,7 +211,7 @@ internal object EditorLanguages {
     }
 }
 
-private class ServerLanguage(private val base: Language, private val session: () -> LspSession?) : Language by base {
+private class ServerLanguage(private val base: Language, private val session: () -> LspDocumentHandle?) : Language by base {
     override fun getInterruptionLevel(): Int = Language.INTERRUPTION_LEVEL_STRONG
 
     override fun requireAutoComplete(content: ContentReference, position: CharPosition, publisher: CompletionPublisher, extraArguments: Bundle) {
@@ -232,6 +233,8 @@ private class ServerLanguage(private val base: Language, private val session: ()
             Log.d("EditorLsp", "Completion unavailable", error)
         } catch (error: InterruptedException) {
             Thread.currentThread().interrupt()
+        } catch (error: Exception) {
+            Log.d("EditorLsp", "Completion unavailable", error)
         }
     }
 }

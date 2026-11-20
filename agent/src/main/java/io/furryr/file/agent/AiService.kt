@@ -32,6 +32,11 @@ object AiService {
     private const val MODELS_DEV_TTL = 6 * 60 * 60 * 1000L
     private const val MAX_MODELS_DEV = 16 * 1024 * 1024
 
+    // OpenCode Go rejects a request without a routing session ID with HTTP 400
+    // (`MissingSessionID`), so every conversation must send a stable one.
+    private const val OPENCODE_HOST = "opencode.ai"
+    private const val USER_AGENT = "file-manager-agent/1.0"
+
     @Volatile
     private var modelsDevCache: Pair<Long, JSONObject>? = null
 
@@ -69,12 +74,13 @@ object AiService {
         system: String,
         history: JSONArray,
         toolsJson: String,
+        session: String = "",
         emit: suspend (ChatEvent) -> Unit,
     ): ChatResult? {
         val config = requireNotNull(AgentEnvironment.aiConfigProvider) {
             "AI configuration is unavailable"
         }.invoke()
-        return perform(config, model, effort, system, history, toolsJson, emit)
+        return perform(config, model, effort, system, history, toolsJson, session, emit)
     }
 
     private suspend fun perform(
@@ -84,6 +90,7 @@ object AiService {
         system: String,
         history: JSONArray,
         toolsJson: String,
+        session: String,
         emit: suspend (ChatEvent) -> Unit,
     ): ChatResult? {
         val resolved = resolve(config, model)
@@ -117,8 +124,12 @@ object AiService {
                 readTimeout = 600_000
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "text/event-stream")
+                setRequestProperty("User-Agent", USER_AGENT)
                 if (provider.apiKey.isNotEmpty()) {
                     setRequestProperty("Authorization", "Bearer ${provider.apiKey}")
+                }
+                opencodeSession(provider.baseUrl, session)?.let {
+                    setRequestProperty("x-opencode-session", it)
                 }
             }
             val cancelWatcher = launch(start = CoroutineStart.UNDISPATCHED) {
@@ -186,7 +197,7 @@ object AiService {
         }
     }
 
-    private fun generateTitle(model: String, firstUser: String): String? {
+    private fun generateTitle(model: String, firstUser: String, session: String): String? {
         val config = runCatching { AgentEnvironment.aiConfigProvider?.invoke() }.getOrNull()
             ?: return null
         val selected = config.titleModel.ifBlank { model.ifBlank { config.model } }
@@ -221,8 +232,12 @@ object AiService {
             readTimeout = 20_000
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Accept", "application/json")
+            setRequestProperty("User-Agent", USER_AGENT)
             if (resolved.provider.apiKey.isNotEmpty()) {
                 setRequestProperty("Authorization", "Bearer ${resolved.provider.apiKey}")
+            }
+            opencodeSession(resolved.provider.baseUrl, session)?.let {
+                setRequestProperty("x-opencode-session", it)
             }
         }
         return try {
@@ -260,7 +275,8 @@ object AiService {
         }
     }
 
-    suspend fun titleFor(model: String, firstUser: String): String? = generateTitle(model, firstUser)
+    suspend fun titleFor(model: String, firstUser: String, session: String): String? =
+        generateTitle(model, firstUser, session)
 
     suspend fun catalog(): String {
         val config = requireNotNull(AgentEnvironment.aiConfigProvider) {
@@ -573,6 +589,21 @@ object AiService {
         return address
     }
 
+    /**
+     * The routing session header OpenCode Go requires. The native agent session
+     * id is reused as-is when possible, so every request of one conversation
+     * shares a routing key and prompt cache. Null means the provider is not
+     * OpenCode and gets no such header.
+     */
+    private fun opencodeSession(baseUrl: String, session: String): String? {
+        val host = runCatching { URL(baseUrl.trim()).host }.getOrNull() ?: return null
+        if (!host.equals(OPENCODE_HOST, ignoreCase = true)) return null
+        val cleaned = session.trim().map { ch ->
+            if (ch.isLetterOrDigit() || ch == '_' || ch == '-') ch else '-'
+        }.joinToString("").trim('-', '_').ifEmpty { "agent" }
+        return if (cleaned.startsWith("ses_")) cleaned else "ses_$cleaned"
+    }
+
     private fun responsesEndpoint(base: String): String {
         val trimmed = base.trim().trimEnd('/')
         val address = if (trimmed.endsWith("/responses")) trimmed else "$trimmed/responses"
@@ -645,6 +676,7 @@ object AiService {
             readTimeout = 30_000
             setRequestProperty("Accept", "application/json")
             setRequestProperty("Accept-Encoding", "gzip")
+            setRequestProperty("User-Agent", USER_AGENT)
             if (key.isNotEmpty()) setRequestProperty("Authorization", "Bearer $key")
         }
         return try {

@@ -95,6 +95,49 @@ private data class ProviderPreset(
 )
 
 private val PRESETS = listOf(
+    // Generic and self-hosted endpoints first; vendor-specific services last.
+    ProviderPreset(
+        id = "compatible",
+        label = R.string.agent_provider_type_compatible,
+        hint = R.string.agent_provider_hint_compatible,
+        baseUrl = "https://api.openai.com/v1",
+        kind = AGENT_PROVIDER_COMPATIBLE,
+        fixedUrl = false,
+        generic = true,
+    ),
+    ProviderPreset(
+        id = "responses",
+        label = R.string.agent_provider_type_responses,
+        hint = R.string.agent_provider_hint_responses,
+        baseUrl = "https://api.openai.com/v1",
+        kind = AGENT_PROVIDER_RESPONSES,
+        fixedUrl = false,
+        generic = true,
+    ),
+    ProviderPreset(
+        id = "new_api",
+        label = R.string.agent_provider_type_new_api,
+        hint = R.string.agent_provider_hint_new_api,
+        baseUrl = "",
+        kind = AGENT_PROVIDER_COMPATIBLE,
+        fixedUrl = false,
+    ),
+    ProviderPreset(
+        id = "ollama",
+        label = R.string.agent_provider_type_ollama,
+        hint = R.string.agent_provider_hint_ollama,
+        baseUrl = "http://localhost:11434/v1",
+        kind = AGENT_PROVIDER_COMPATIBLE,
+        fixedUrl = false,
+    ),
+    ProviderPreset(
+        id = "ollama_cloud",
+        label = R.string.agent_provider_type_ollama_cloud,
+        hint = R.string.agent_provider_hint_ollama_cloud,
+        baseUrl = "https://ollama.com/v1",
+        kind = AGENT_PROVIDER_COMPATIBLE,
+        fixedUrl = true,
+    ),
     ProviderPreset(
         id = "opencode_go",
         label = R.string.agent_provider_type_opencode_go,
@@ -113,22 +156,6 @@ private val PRESETS = listOf(
         legacyBaseUrls = listOf("https://opencode.ai/zen/v1"),
     ),
     ProviderPreset(
-        id = "new_api",
-        label = R.string.agent_provider_type_new_api,
-        hint = R.string.agent_provider_hint_new_api,
-        baseUrl = "",
-        kind = AGENT_PROVIDER_COMPATIBLE,
-        fixedUrl = false,
-    ),
-    ProviderPreset(
-        id = "openrouter",
-        label = R.string.agent_provider_type_openrouter,
-        hint = R.string.agent_provider_hint_openrouter,
-        baseUrl = "https://openrouter.ai/api/v1",
-        kind = AGENT_PROVIDER_COMPATIBLE,
-        fixedUrl = true,
-    ),
-    ProviderPreset(
         id = "glm",
         label = R.string.agent_provider_type_glm,
         hint = R.string.agent_provider_hint_glm,
@@ -145,22 +172,12 @@ private val PRESETS = listOf(
         fixedUrl = true,
     ),
     ProviderPreset(
-        id = "compatible",
-        label = R.string.agent_provider_type_compatible,
-        hint = R.string.agent_provider_hint_compatible,
-        baseUrl = "https://api.openai.com/v1",
+        id = "openrouter",
+        label = R.string.agent_provider_type_openrouter,
+        hint = R.string.agent_provider_hint_openrouter,
+        baseUrl = "https://openrouter.ai/api/v1",
         kind = AGENT_PROVIDER_COMPATIBLE,
-        fixedUrl = false,
-        generic = true,
-    ),
-    ProviderPreset(
-        id = "responses",
-        label = R.string.agent_provider_type_responses,
-        hint = R.string.agent_provider_hint_responses,
-        baseUrl = "https://api.openai.com/v1",
-        kind = AGENT_PROVIDER_RESPONSES,
-        fixedUrl = false,
-        generic = true,
+        fixedUrl = true,
     ),
 )
 

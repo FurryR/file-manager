@@ -254,6 +254,17 @@
     <string name="settings_search_engine">検索エンジン</string>
     <string name="settings_search_suggestions">インターネットからの検索候補</string>
     <string name="settings_search_suggestions_desc">入力中に検索エンジンの候補を表示します</string>
+    <string name="search_engines_title">検索エンジン</string>
+    <string name="search_engine_add">エンジンを追加</string>
+    <string name="search_engine_edit">検索エンジンを編集</string>
+    <string name="search_engine_name">名前</string>
+    <string name="search_engine_url">検索 URL</string>
+    <string name="search_engine_url_hint">https://example.com/search?q=%s</string>
+    <string name="search_engine_suggestion">候補 URL（任意）</string>
+    <string name="search_engine_suggestion_hint">%s を含む JSON エンドポイント</string>
+    <string name="search_engine_name_required">名前を入力してください。</string>
+    <string name="search_engine_url_invalid">%s を含む http(s) URL を使用してください。</string>
+    <string name="search_engine_suggestion_invalid">%s を含む http(s) URL を使用するか、空欄にしてください。</string>
     <string name="suggestion_internet">インターネット検索候補</string>
     <string name="suggestion_path">パス</string>
     <string name="settings_color_scheme">配色</string>
@@ -333,6 +344,8 @@
     <string name="agent_provider_type_opencode_go">OpenCode Go</string>
     <string name="agent_provider_type_opencode_zen">OpenCode Zen</string>
     <string name="agent_provider_type_new_api">New API</string>
+    <string name="agent_provider_type_ollama">Ollama</string>
+    <string name="agent_provider_type_ollama_cloud">Ollama Cloud</string>
     <string name="agent_provider_type_openrouter">OpenRouter</string>
     <string name="agent_provider_type_glm">GLM</string>
     <string name="agent_provider_type_deepseek">DeepSeek</string>
@@ -341,6 +354,8 @@
     <string name="agent_provider_hint_opencode_go">OpenCode Go サブスクリプション</string>
     <string name="agent_provider_hint_opencode_zen">OpenCode Zen 従量課金</string>
     <string name="agent_provider_hint_new_api">セルフホスト New API ゲートウェイ</string>
+    <string name="agent_provider_hint_ollama">ローカル Ollama サーバー</string>
+    <string name="agent_provider_hint_ollama_cloud">Ollama クラウド API</string>
     <string name="agent_provider_hint_openrouter">OpenRouter の集約モデル</string>
     <string name="agent_provider_hint_glm">Zhipu GLM</string>
     <string name="agent_provider_hint_deepseek">DeepSeek プラットフォーム</string>

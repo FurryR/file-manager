@@ -64,14 +64,12 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import io.furryr.file.R
 import io.furryr.file.AppLocale
 import io.furryr.file.terminal.SessionManager
 import io.furryr.file.daemon.DaemonManager
-import io.furryr.file.container.ContainerManager
-import io.furryr.file.editor.EditorLanguages
 import io.furryr.file.editor.EditorPreferences
-import io.furryr.file.editor.LspConfig
 import io.furryr.file.pulse.PulseManager
 import io.furryr.file.settings.PulseSettings
 import io.furryr.file.ui.theme.FileManagerTheme
@@ -153,11 +151,9 @@ private fun SettingsMainPage(
     var editorFont by remember { mutableStateOf(EditorPreferences.fontPath(context)) }
     var editorFontSize by remember { mutableStateOf(EditorPreferences.fontSize(context).toString()) }
     var showEditorFontSizeDialog by remember { mutableStateOf(false) }
-    var showLanguageServerDialog by remember { mutableStateOf(false) }
     var showLanguageDialog by remember { mutableStateOf(false) }
     var showColorSchemeDialog by remember { mutableStateOf(false) }
-    var showSearchEngineDialog by remember { mutableStateOf(false) }
-    var searchEngine by remember { mutableStateOf(SearchSettings.current(context)) }
+    var searchEngine by remember { mutableStateOf(SearchEngines.current(context)) }
     var searchSuggestions by remember { mutableStateOf(SearchSettings.suggestionsEnabled(context)) }
     var amoledBlack by remember { mutableStateOf(PaletteStore.amoled(context)) }
     var showAboutDialog by remember { mutableStateOf(false) }
@@ -190,6 +186,11 @@ private fun SettingsMainPage(
         } else {
             applyPermissionChange(change)
         }
+    }
+
+    LifecycleResumeEffect(Unit) {
+        searchEngine = SearchEngines.current(context)
+        onPauseOrDispose { }
     }
 
     LaunchedEffect(shizukuPermissionGranted, applyingPermissions) {
@@ -264,7 +265,9 @@ private fun SettingsMainPage(
             SettingsValueRow(
                 title = stringResource(R.string.settings_search_engine),
                 value = searchEngine.label,
-                onClick = { showSearchEngineDialog = true },
+                onClick = {
+                    context.startActivity(Intent(context, SearchEngineSettingsActivity::class.java))
+                },
             )
             SettingsDivider()
             SettingsToggleRow(
@@ -458,7 +461,9 @@ private fun SettingsMainPage(
             SettingsValueRow(
                 title = stringResource(R.string.editor_lsp_settings),
                 value = stringResource(R.string.editor_lsp_settings_desc),
-                onClick = { showLanguageServerDialog = true },
+                onClick = {
+                    context.startActivity(Intent(context, LspSettingsActivity::class.java))
+                },
             )
             SettingsDivider()
             SettingsSection(stringResource(R.string.settings_other))
@@ -570,37 +575,6 @@ private fun SettingsMainPage(
                 TextButton(onClick = {
                     showColorSchemeDialog = false
                     PaletteStore.select(context, selected)
-                }) { Text(stringResource(R.string.confirm)) }
-            },
-        )
-    }
-
-    if (showSearchEngineDialog) {
-        var selected by remember { mutableStateOf(searchEngine) }
-        AlertDialog(
-            onDismissRequest = { showSearchEngineDialog = false },
-            title = { Text(stringResource(R.string.settings_search_engine)) },
-            text = {
-                Column(Modifier.verticalScroll(rememberScrollState())) {
-                    SearchEngine.entries.forEach { engine ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth().clickable { selected = engine }
-                        ) {
-                            RadioButton(selected = selected == engine, onClick = { selected = engine })
-                            Text(engine.label, modifier = Modifier.weight(1f))
-                        }
-                    }
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showSearchEngineDialog = false }) { Text(stringResource(R.string.cancel)) }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    showSearchEngineDialog = false
-                    searchEngine = selected
-                    SearchSettings.select(context, selected)
                 }) { Text(stringResource(R.string.confirm)) }
             },
         )
@@ -759,126 +733,6 @@ private fun SettingsMainPage(
         )
     }
 
-    if (showLanguageServerDialog) {
-        LanguageServerSettingsDialog(onDismiss = { showLanguageServerDialog = false })
-    }
-}
-
-/**
- * Per-language language-server configuration. Editors connect automatically
- * when the opened file lives in the configured container.
- */
-@Composable
-private fun LanguageServerSettingsDialog(onDismiss: () -> Unit) {
-    val context = LocalContext.current
-    val languages = remember { EditorLanguages.languageIds.filter { it != "plaintext" } }
-    var language by remember {
-        mutableStateOf(languages.firstOrNull { LspConfig.configured(context, it) } ?: "shellscript")
-    }
-    var container by remember { mutableStateOf("") }
-    var command by remember { mutableStateOf("") }
-    var root by remember { mutableStateOf("/") }
-    var containers by remember { mutableStateOf<List<String>>(emptyList()) }
-    var languageMenu by remember { mutableStateOf(false) }
-    var containerMenu by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        containers = withContext(Dispatchers.IO) {
-            ContainerManager.listContainers(context).getOrDefault(emptyList()).map { it.name }
-        }
-    }
-    LaunchedEffect(language) {
-        val config = LspConfig.load(context, language)
-        container = config?.container.orEmpty()
-        command = config?.command.orEmpty()
-        root = config?.root ?: "/"
-    }
-    val config = LspConfig(container.trim(), command.trim(), root.trim())
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.editor_lsp_settings)) },
-        text = {
-            Column(
-                Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(stringResource(R.string.editor_lsp_hint), style = MaterialTheme.typography.bodySmall)
-                Box {
-                    OutlinedTextField(
-                        value = EditorLanguages.label(context, language),
-                        onValueChange = {},
-                        readOnly = true,
-                        singleLine = true,
-                        label = { Text(stringResource(R.string.editor_language)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        trailingIcon = { TextButton(onClick = { languageMenu = true }) { Text("▾") } },
-                    )
-                    DropdownMenu(expanded = languageMenu, onDismissRequest = { languageMenu = false }) {
-                        languages.forEach { id ->
-                            DropdownMenuItem(
-                                text = { Text(EditorLanguages.label(context, id)) },
-                                onClick = {
-                                    language = id
-                                    languageMenu = false
-                                },
-                            )
-                        }
-                    }
-                }
-                Box {
-                    OutlinedTextField(
-                        value = container,
-                        onValueChange = { container = it },
-                        singleLine = true,
-                        label = { Text(stringResource(R.string.editor_lsp_container)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        trailingIcon = { TextButton(onClick = { containerMenu = true }) { Text("▾") } },
-                    )
-                    DropdownMenu(expanded = containerMenu, onDismissRequest = { containerMenu = false }) {
-                        containers.forEach { name ->
-                            DropdownMenuItem(
-                                text = { Text(name) },
-                                onClick = {
-                                    container = name
-                                    containerMenu = false
-                                },
-                            )
-                        }
-                    }
-                }
-                OutlinedTextField(
-                    value = command,
-                    onValueChange = { command = it },
-                    label = { Text(stringResource(R.string.editor_lsp_command)) },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = root,
-                    onValueChange = { root = it },
-                    label = { Text(stringResource(R.string.editor_lsp_root)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = config.command.isBlank() || config.valid,
-                onClick = {
-                    if (config.command.isBlank()) {
-                        LspConfig.clear(context, language)
-                    } else {
-                        LspConfig.save(context, language, config)
-                    }
-                    onDismiss()
-                },
-            ) {
-                Text(stringResource(R.string.editor_save))
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
-        },
-    )
 }
 
 private fun colorSchemeLabel(palette: ColorPalette): Int = when (palette) {

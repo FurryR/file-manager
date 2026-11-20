@@ -254,6 +254,17 @@
     <string name="settings_search_engine">搜尋引擎</string>
     <string name="settings_search_suggestions">來自網際網路的搜尋建議</string>
     <string name="settings_search_suggestions_desc">輸入時顯示搜尋引擎的查詢建議</string>
+    <string name="search_engines_title">搜尋引擎</string>
+    <string name="search_engine_add">新增引擎</string>
+    <string name="search_engine_edit">編輯搜尋引擎</string>
+    <string name="search_engine_name">名稱</string>
+    <string name="search_engine_url">搜尋網址</string>
+    <string name="search_engine_url_hint">https://example.com/search?q=%s</string>
+    <string name="search_engine_suggestion">建議網址（選填）</string>
+    <string name="search_engine_suggestion_hint">包含 %s 的 JSON 端點</string>
+    <string name="search_engine_name_required">請輸入名稱。</string>
+    <string name="search_engine_url_invalid">請使用包含 %s 的 http(s) 網址。</string>
+    <string name="search_engine_suggestion_invalid">請使用包含 %s 的 http(s) 網址，或留空。</string>
     <string name="suggestion_internet">網際網路搜尋建議</string>
     <string name="suggestion_path">路徑</string>
     <string name="settings_color_scheme">顏色方案</string>
@@ -333,6 +344,8 @@
     <string name="agent_provider_type_opencode_go">OpenCode Go</string>
     <string name="agent_provider_type_opencode_zen">OpenCode Zen</string>
     <string name="agent_provider_type_new_api">New API</string>
+    <string name="agent_provider_type_ollama">Ollama</string>
+    <string name="agent_provider_type_ollama_cloud">Ollama Cloud</string>
     <string name="agent_provider_type_openrouter">OpenRouter</string>
     <string name="agent_provider_type_glm">GLM</string>
     <string name="agent_provider_type_deepseek">DeepSeek</string>
@@ -341,6 +354,8 @@
     <string name="agent_provider_hint_opencode_go">OpenCode Go 訂閱</string>
     <string name="agent_provider_hint_opencode_zen">OpenCode Zen 按量計費</string>
     <string name="agent_provider_hint_new_api">自架 New API 閘道</string>
+    <string name="agent_provider_hint_ollama">本機 Ollama 服務</string>
+    <string name="agent_provider_hint_ollama_cloud">Ollama 雲端 API</string>
     <string name="agent_provider_hint_openrouter">OpenRouter 彙整模型</string>
     <string name="agent_provider_hint_glm">智譜 GLM</string>
     <string name="agent_provider_hint_deepseek">DeepSeek 平台</string>

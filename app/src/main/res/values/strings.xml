@@ -255,6 +255,17 @@
     <string name="settings_search_engine">Search engine</string>
     <string name="settings_search_suggestions">Search suggestions from the internet</string>
     <string name="settings_search_suggestions_desc">Show query suggestions from your search engine while typing</string>
+    <string name="search_engines_title">Search engines</string>
+    <string name="search_engine_add">Add engine</string>
+    <string name="search_engine_edit">Edit search engine</string>
+    <string name="search_engine_name">Name</string>
+    <string name="search_engine_url">Search URL</string>
+    <string name="search_engine_url_hint">https://example.com/search?q=%s</string>
+    <string name="search_engine_suggestion">Suggestion URL (optional)</string>
+    <string name="search_engine_suggestion_hint">JSON endpoint containing %s</string>
+    <string name="search_engine_name_required">Enter a name.</string>
+    <string name="search_engine_url_invalid">Use an http(s) URL containing %s.</string>
+    <string name="search_engine_suggestion_invalid">Use an http(s) URL containing %s, or leave it empty.</string>
     <string name="suggestion_internet">Internet suggestions</string>
     <string name="suggestion_path">Paths</string>
     <string name="settings_color_scheme">Color scheme</string>
@@ -334,6 +345,8 @@
     <string name="agent_provider_type_opencode_go">OpenCode Go</string>
     <string name="agent_provider_type_opencode_zen">OpenCode Zen</string>
     <string name="agent_provider_type_new_api">New API</string>
+    <string name="agent_provider_type_ollama">Ollama</string>
+    <string name="agent_provider_type_ollama_cloud">Ollama Cloud</string>
     <string name="agent_provider_type_openrouter">OpenRouter</string>
     <string name="agent_provider_type_glm">GLM</string>
     <string name="agent_provider_type_deepseek">DeepSeek</string>
@@ -342,6 +355,8 @@
     <string name="agent_provider_hint_opencode_go">OpenCode Go subscription</string>
     <string name="agent_provider_hint_opencode_zen">OpenCode Zen pay-as-you-go</string>
     <string name="agent_provider_hint_new_api">Self-hosted New API gateway</string>
+    <string name="agent_provider_hint_ollama">Local Ollama server</string>
+    <string name="agent_provider_hint_ollama_cloud">Ollama Cloud API</string>
     <string name="agent_provider_hint_openrouter">OpenRouter aggregated models</string>
     <string name="agent_provider_hint_glm">Zhipu GLM</string>
     <string name="agent_provider_hint_deepseek">DeepSeek platform</string>

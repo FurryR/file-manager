@@ -79,6 +79,18 @@
             android:theme="@style/Theme.FileManager" />
 
         <activity
+            android:name=".ui.screens.LspSettingsActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:exported="false"
+            android:theme="@style/Theme.FileManager" />
+
+        <activity
+            android:name=".ui.screens.SearchEngineSettingsActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:exported="false"
+            android:theme="@style/Theme.FileManager" />
+
+        <activity
             android:name=".ui.screens.LicensesActivity"
             android:enableOnBackInvokedCallback="true"
             android:exported="false"

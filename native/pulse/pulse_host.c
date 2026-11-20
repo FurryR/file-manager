@@ -2,7 +2,7 @@
  * Embedded PulseAudio 17.0 host. The native protocol, mixer, resampler and
  * Android devices live in one library; Kotlin owns the only socket inode,
  * AudioTrack, AudioRecord and microphone foreground-service policy.
- * SPDX-License-Identifier: LGPL-2.1-or-later
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 #include <config.h>
 #include <jni.h>

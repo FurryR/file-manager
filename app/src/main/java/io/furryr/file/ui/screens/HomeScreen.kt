@@ -1,7 +1,13 @@
 package io.furryr.file.ui.screens
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,16 +26,20 @@ import io.furryr.file.ui.icons.Icons
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -38,6 +48,7 @@ import io.furryr.file.R
 import io.furryr.file.home.HomeEntry
 import io.furryr.file.home.HomeEntryKind
 import io.furryr.file.ui.components.OpeningOverlay
+import kotlinx.coroutines.launch
 
 /**
  * Landing view: recent files, recent locations and bookmarks. It draws only
@@ -174,36 +185,61 @@ private fun SwipeableHomeRow(
     onToggleBookmark: () -> Unit,
     onRemove: () -> Unit,
 ) {
-    val state = rememberSwipeToDismissBoxState()
-    // Let the dismissal animation finish before the list drops the row.
-    LaunchedEffect(state.currentValue) {
-        if (state.currentValue == SwipeToDismissBoxValue.EndToStart) onRemove()
+    val density = LocalDensity.current
+    val dismissThreshold = with(density) { 56.dp.toPx() }
+    val dismissVelocity = with(density) { 125.dp.toPx() }
+    var rowWidth by remember { mutableFloatStateOf(0f) }
+    val offset = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    // End to start only: the drag is clamped at 0, so a rightward swipe never
+    // moves the row or reveals the delete background.
+    val dragState = rememberDraggableState { delta ->
+        scope.launch {
+            offset.snapTo((offset.value + delta).coerceIn(-rowWidth, 0f))
+        }
     }
-    SwipeToDismissBox(
-        state = state,
-        enableDismissFromStartToEnd = false,
-        backgroundContent = {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.errorContainer)
-                    .padding(horizontal = 20.dp),
-                contentAlignment = Alignment.CenterEnd,
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Delete,
-                    contentDescription = stringResource(R.string.delete),
-                    tint = MaterialTheme.colorScheme.onErrorContainer,
-                )
-            }
-        },
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .onSizeChanged { rowWidth = it.width.toFloat() },
     ) {
-        HomeRow(
-            entry = entry,
-            bookmarked = bookmarked,
-            onOpen = onOpen,
-            onToggleBookmark = onToggleBookmark,
-        )
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(MaterialTheme.colorScheme.errorContainer)
+                .padding(horizontal = 20.dp),
+            contentAlignment = Alignment.CenterEnd,
+        ) {
+            Icon(
+                imageVector = Icons.Default.Delete,
+                contentDescription = stringResource(R.string.delete),
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+            )
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .graphicsLayer { translationX = offset.value }
+                .draggable(
+                    state = dragState,
+                    orientation = Orientation.Horizontal,
+                    onDragStopped = { velocity ->
+                        if (offset.value <= -dismissThreshold || velocity <= -dismissVelocity) {
+                            offset.animateTo(-rowWidth, tween(durationMillis = 160))
+                            onRemove()
+                        } else {
+                            offset.animateTo(0f, spring())
+                        }
+                    },
+                ),
+        ) {
+            HomeRow(
+                entry = entry,
+                bookmarked = bookmarked,
+                onOpen = onOpen,
+                onToggleBookmark = onToggleBookmark,
+            )
+        }
     }
 }
 

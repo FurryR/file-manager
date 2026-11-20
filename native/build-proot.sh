@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-#
-# Builds the modified PRoot binary used by the container daemon. This build
-# workflow, native/patches/proot/** and the resulting libproot.so are
-# GPL-2.0-only; see native/patches/proot/LICENSE.
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Builds the modified PRoot binary used by the container daemon.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -298,6 +295,9 @@ echo "==> Stripping and installing"
 
 mkdir -p "$JNI_DIR"
 cp "$OUT_BIN" "$JNI_DIR/libproot.so"
+
+mkdir -p "$ROOT_DIR/app/src/main/assets/native-licenses"
+cp "$TALLOC_SRC/LICENSE" "$ROOT_DIR/app/src/main/assets/native-licenses/COPYING-talloc"
 
 echo "==> Done"
 echo "Binary: $JNI_DIR/libproot.so"

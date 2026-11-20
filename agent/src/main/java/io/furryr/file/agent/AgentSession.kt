@@ -131,6 +131,7 @@ class AgentSession(
                 JSONObject().put("role", "user").put("content", transcriptText(history)),
             ),
             toolsJson = "[]",
+            session = sessionId,
             emit = { event ->
                 if (event.hasUsage()) lastUsage = event.usage
             },
@@ -357,6 +358,7 @@ class AgentSession(
                     system = SystemPrompt.build(target, targetName, cwd),
                     history = contextMessages(),
                     toolsJson = toolsJson(),
+                    session = sessionId,
                 ) { event -> mapChatEvent(event, onToolCalls = { toolCalls = it }, onError = { error = it }) }
                     ?: run {
                         throw IllegalStateException(error ?: "the model returned no reply")
@@ -579,7 +581,7 @@ class AgentSession(
             runCatching { AgentEnvironment.aiConfigProvider?.invoke()?.model }.getOrNull().orEmpty()
         }
         scope.launch {
-            val title = AiService.titleFor(titleModel, prompt) ?: return@launch
+            val title = AiService.titleFor(titleModel, prompt, sessionId) ?: return@launch
             AgentEnvironment.sessionAutoTitle?.invoke(sessionId, title)
         }
     }

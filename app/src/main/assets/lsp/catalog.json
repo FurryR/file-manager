@@ -1,0 +1,167 @@
+{
+  "version": 1,
+  "languages": {
+    "c": {
+      "label": "C",
+      "extensions": ["c", "h"],
+      "markers": ["compile_commands.json", "CMakeLists.txt", "Makefile", ".git"],
+      "command": ["clangd"]
+    },
+    "cpp": {
+      "label": "C++",
+      "extensions": ["cc", "cpp", "cxx", "hpp", "hxx"],
+      "markers": ["compile_commands.json", "CMakeLists.txt", "Makefile", ".git"],
+      "command": ["clangd"]
+    },
+    "csharp": {
+      "label": "C#",
+      "extensions": ["cs"],
+      "markers": ["global.json", ".git"],
+      "command": ["csharp-ls"]
+    },
+    "css": {
+      "label": "CSS",
+      "extensions": ["css", "scss", "sass", "less"],
+      "command": ["vscode-css-language-server"],
+      "args": ["--stdio"],
+      "workspace": "virtual"
+    },
+    "dart": {
+      "label": "Dart",
+      "extensions": ["dart"],
+      "markers": ["pubspec.yaml", ".git"],
+      "command": ["dart"],
+      "args": ["language-server"]
+    },
+    "dockerfile": {
+      "label": "Dockerfile",
+      "extensions": ["dockerfile"],
+      "exactNames": ["dockerfile"],
+      "command": ["dockerfile-language-server-nodejs"],
+      "args": ["--stdio"],
+      "workspace": "virtual"
+    },
+    "go": {
+      "label": "Go",
+      "extensions": ["go"],
+      "markers": ["go.mod", "go.work", ".git"],
+      "command": ["gopls"]
+    },
+    "html": {
+      "label": "HTML",
+      "extensions": ["html", "htm", "xhtml", "vue"],
+      "command": ["vscode-html-language-server"],
+      "args": ["--stdio"],
+      "workspace": "virtual"
+    },
+    "java": {
+      "label": "Java",
+      "extensions": ["java"],
+      "markers": ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", ".git"],
+      "command": ["jdtls"]
+    },
+    "javascript": {
+      "label": "JavaScript",
+      "extensions": ["js", "mjs", "cjs", "jsx"],
+      "markers": ["package.json", "jsconfig.json", "tsconfig.json", ".git"],
+      "lspLanguageIds": {
+        "js": "javascript",
+        "mjs": "javascript",
+        "cjs": "javascript",
+        "jsx": "javascriptreact"
+      },
+      "command": ["typescript-language-server"],
+      "args": ["--stdio"]
+    },
+    "json": {
+      "label": "JSON",
+      "extensions": ["json", "jsonc"],
+      "command": ["vscode-json-language-server"],
+      "args": ["--stdio"],
+      "workspace": "virtual"
+    },
+    "kotlin": {
+      "label": "Kotlin",
+      "extensions": ["kt", "kts"],
+      "markers": ["settings.gradle.kts", "build.gradle.kts", "settings.gradle", "build.gradle", ".git"],
+      "command": ["kotlin-language-server"]
+    },
+    "lua": {
+      "label": "Lua",
+      "extensions": ["lua"],
+      "markers": [".luarc.json", ".git"],
+      "command": ["lua-language-server"]
+    },
+    "markdown": {
+      "label": "Markdown",
+      "extensions": ["md", "markdown"],
+      "markers": [".git"],
+      "command": ["marksman"],
+      "args": ["server"]
+    },
+    "php": {
+      "label": "PHP",
+      "extensions": ["php"],
+      "markers": ["composer.json", ".git"],
+      "command": ["phpactor"],
+      "args": ["language-server"]
+    },
+    "python": {
+      "label": "Python",
+      "extensions": ["py", "pyw"],
+      "markers": ["pyproject.toml", "setup.py", "requirements.txt", "tox.ini", ".git"],
+      "command": ["basedpyright-langserver"],
+      "args": ["--stdio"]
+    },
+    "ruby": {
+      "label": "Ruby",
+      "extensions": ["rb"],
+      "markers": ["Gemfile", ".git"],
+      "command": ["solargraph"],
+      "args": ["stdio"]
+    },
+    "rust": {
+      "label": "Rust",
+      "extensions": ["rs"],
+      "markers": ["Cargo.toml", "rust-toolchain.toml", ".git"],
+      "command": ["rust-analyzer"]
+    },
+    "shellscript": {
+      "label": "Shell",
+      "extensions": ["sh", "bash", "zsh", "fish"],
+      "markers": [".shellcheckrc", ".git"],
+      "command": ["bash-language-server"],
+      "args": ["start"]
+    },
+    "sql": {
+      "label": "SQL",
+      "extensions": ["sql"],
+      "command": ["sqls"],
+      "workspace": "virtual"
+    },
+    "swift": {
+      "label": "Swift",
+      "extensions": ["swift"],
+      "markers": ["Package.swift", ".git"],
+      "command": ["sourcekit-lsp"]
+    },
+    "typescript": {
+      "label": "TypeScript",
+      "extensions": ["ts", "tsx"],
+      "markers": ["tsconfig.json", "jsconfig.json", "package.json", ".git"],
+      "lspLanguageIds": {
+        "ts": "typescript",
+        "tsx": "typescriptreact"
+      },
+      "command": ["typescript-language-server"],
+      "args": ["--stdio"]
+    },
+    "yaml": {
+      "label": "YAML",
+      "extensions": ["yaml", "yml"],
+      "command": ["yaml-language-server"],
+      "args": ["--stdio"],
+      "workspace": "virtual"
+    }
+  }
+}

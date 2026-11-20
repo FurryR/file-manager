@@ -192,10 +192,11 @@ and PulseAudio build trees live under `cache/native`, and the proot source is
 cloned once into `cache/native/proot-<version>` (copied to `/tmp` per build so
 patches never dirty the cache).
 
-`native/build-proot.sh`, `native/patches/proot/**` and the generated
-`libproot.so` are **GPL-2.0-only**; PRoot is a standalone executable, not
-linked into the app. See `native/patches/proot/README.md` and
-`native/patches/proot/LICENSE`.
+`native/build-proot.sh` and `native/patches/proot/**` are part of this
+project and licensed GPL-3.0-or-later (root `LICENSE`). PRoot is a
+standalone executable, not linked into the app; upstream PRoot is
+GPL-2.0-or-later, and the generated `libproot.so` statically links talloc
+(LGPL-3.0-or-later).
 
 ## TODO - Bug checks
 
@@ -221,4 +222,5 @@ linked into the app. See `native/patches/proot/README.md` and
 - [ ] `daemon/process/ExecService.kt` + `DaemonManager.kt`: verify the direct app-UID daemon sends plain commands, container daemons keep container root, and file operations still use the daemon's own credentials.
 - [ ] `src/cgroup.rs` + `src/main.rs`: verify the host daemon owns `ct/host` without `--group`, every PTY/exec child joins it, the last client disconnect kills the tree, and a SIGKILLed daemon's group is swept by the next launch.
 - [ ] `src/cgroup.rs`: verify chroot/proot containers still own a group without the removed `--group` argument and that `isolate_view` is a no-op in the host daemon.
+- [ ] `native/build-proot.sh`: verify a clean build stages talloc's LICENSE as `app/src/main/assets/native-licenses/COPYING-talloc` and the rebuilt `libproot.so` still provides the `--cgroup` emulation.
 

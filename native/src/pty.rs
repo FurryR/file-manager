@@ -15,7 +15,10 @@ fn reopen_cwd(fd: RawFd) -> io::Result<OwnedFd> {
     if unsafe { libc::fstat(fd, &mut original) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    if original.st_mode & libc::S_IFMT != libc::S_IFDIR {
+    // st_mode and the S_IF* constants have different widths across libc targets
+    // (e.g. st_mode: u32 while S_IFMT: u16), so normalize both through mode_t.
+    let mode = original.st_mode as libc::mode_t;
+    if mode & libc::S_IFMT as libc::mode_t != libc::S_IFDIR as libc::mode_t {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "cwd fd is not a directory"));
     }
     let path = std::fs::read_link(format!("/proc/self/fd/{fd}"))?;

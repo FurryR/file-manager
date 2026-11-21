@@ -191,6 +191,11 @@ EOF
 #define HAVE_STRDUP 1
 #define HAVE_STRNDUP 1
 
+/* The NDK <stdarg.h> always provides va_copy. Without this talloc.c falls
+ * back to "#define va_copy(dest, src) (dest) = (src)", which fails to
+ * compile where va_list is an array type (e.g. x86_64). */
+#define HAVE_VA_COPY 1
+
 #ifndef MIN
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 #endif

@@ -43,20 +43,38 @@ jobs:
             set -euo pipefail
             gradle clean :app:assembleDebug -Pabi=universal --no-daemon
           '
+          # Every later gradle invocation rewrites the same
+          # app/build/outputs/apk/debug/app-debug.apk, so park the universal APK
+          # outside the build directory. Verification and the uploads must never
+          # read whichever single-ABI build happened to finish last.
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/app-debug-universal.apk
 
       - name: Build per-ABI debug APKs
         run: |
           set -euo pipefail
+          mkdir -p dist
           for abi in arm64-v8a armeabi-v7a x86 x86_64; do
             nix develop --command gradle :app:assembleDebug \
               -Pabi="$abi" -PskipNativeBuild -PskipDevToolsBuild --no-daemon
-            cp app/build/outputs/apk/debug/app-debug.apk "app-debug-$abi.apk"
+            cp app/build/outputs/apk/debug/app-debug.apk "dist/app-debug-$abi.apk"
           done
 
       - name: Verify packaged native artifacts
         run: |
           set -euo pipefail
-          universal=app/build/outputs/apk/debug/app-debug.apk
+
+          # `grep -q` exits silently, leaving no clue about which entry was
+          # missing from which APK, so name both on failure.
+          require() {
+            local listing="$1" entry="$2" apk="$3"
+            if ! grep -Fxq "$entry" <<< "$listing"; then
+              echo "missing $entry in $apk" >&2
+              exit 1
+            fi
+          }
+
+          universal=dist/app-debug-universal.apk
           test -f "$universal"
           listing="$(unzip -Z1 "$universal")"
 
@@ -70,17 +88,14 @@ jobs:
               "lib/$abi/librun0.so" \
               "lib/$abi/libhere.so" \
               "lib/$abi/libagent.so"; do
-              grep -Fxq "$entry" <<< "$listing"
+              require "$listing" "$entry" "$universal"
             done
 
-            per_abi="app-debug-$abi.apk"
+            per_abi="dist/app-debug-$abi.apk"
             test -f "$per_abi"
             per_listing="$(unzip -Z1 "$per_abi")"
-            for entry in \
-              "lib/$abi/libfiledaemon.so" \
-              "lib/$abi/libproot.so" \
-              "lib/$abi/libpulsehost.so"; do
-              grep -Fxq "$entry" <<< "$per_listing"
+            for lib in libfiledaemon libproot libpulsehost; do
+              require "$per_listing" "lib/$abi/$lib.so" "$per_abi"
             done
           done
 
@@ -88,7 +103,7 @@ jobs:
             assets/xkb/rules/evdev \
             assets/xkb/rules/evdev.xml \
             assets/xkb/symbols/us; do
-            grep -Fxq "$entry" <<< "$listing"
+            require "$listing" "$entry" "$universal"
           done
 
           # The daemon must carry the chroot container policy backend; a stale
@@ -101,7 +116,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: app-debug-universal-${{ github.sha }}
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: dist/app-debug-universal.apk
           if-no-files-found: error
           retention-days: 14
 
@@ -109,6 +124,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: app-debug-abis-${{ github.sha }}
-          path: app-debug-*.apk
+          path: |
+            dist/app-debug-arm64-v8a.apk
+            dist/app-debug-armeabi-v7a.apk
+            dist/app-debug-x86.apk
+            dist/app-debug-x86_64.apk
           if-no-files-found: error
           retention-days: 14

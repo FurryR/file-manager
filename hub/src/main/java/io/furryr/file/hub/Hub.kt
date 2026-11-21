@@ -39,7 +39,7 @@ object Hub {
     /** Bring the hub up. Idempotent until the hub is stopped. */
     fun start(context: Context, world: FileWorld) {
         synchronized(this) {
-            directory = File(context.applicationContext.applicationInfo.nativeLibraryDir)
+            directory = File(DaemonManager.binDir)
             if (server != null) return
             val endpointName = "file-hub-${UUID.randomUUID()}"
             server = HubServer.listen(UdsEndpoint.Abstract(endpointName), world)

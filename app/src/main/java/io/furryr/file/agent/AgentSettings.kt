@@ -95,6 +95,7 @@ object AgentSettings {
         AgentEnvironment.sessionSave = { sessionId, messages ->
             saveSession(appContext, sessionId, messages)
         }
+        // Move the short-lived database store back into session files.
         AgentEnvironment.sessionTitle = { sessionId -> sessionTitle(appContext, sessionId) }
         AgentEnvironment.globalMcpServers = {
             mcpServers(appContext).map { server ->

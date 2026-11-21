@@ -87,5 +87,5 @@ object ContainerDaemonLauncher {
     }
 
     private fun daemonPath(context: Context): String =
-        "$DEFAULT_PATH:${context.applicationInfo.nativeLibraryDir}"
+        "$DEFAULT_PATH:${DaemonManager.binDir}"
 }

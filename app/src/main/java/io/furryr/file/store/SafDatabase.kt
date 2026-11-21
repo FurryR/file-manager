@@ -88,6 +88,20 @@ class SafDatabase(context: Context) : SQLiteOpenHelper(context, "saf_locations.d
 
     override fun safLocation(hexId: String): SafLocation? = findByHexId(hexId)
 
+    /** Merge backup rows with their original hex id, so `saf://hex` addresses survive. */
+    fun restore(locations: List<SafLocation>) {
+        for (location in locations) {
+            writableDatabase.execSQL(
+                "DELETE FROM locations WHERE tree_uri=? AND hex_id<>?",
+                arrayOf(location.treeUri, location.hexId),
+            )
+            writableDatabase.execSQL(
+                "INSERT OR REPLACE INTO locations (hex_id, name, tree_uri, sort_order) VALUES (?, ?, ?, ?)",
+                arrayOf(location.hexId, location.name, location.treeUri, location.sortOrder),
+            )
+        }
+    }
+
     private fun guessName(treeUri: String): String {
         val decoded = java.net.URLDecoder.decode(treeUri, "UTF-8")
         val lastSegment = decoded.substringAfterLast("primary:").substringAfterLast('%')

@@ -196,6 +196,9 @@ pub fn enter_chroot(rootfs: &str, binds: &[(String, String)]) -> io::Result<()> 
 /// child: the user picks the init system by installing it in the rootfs, and it
 /// runs as a non-PID 1 process. Missing, non-executable or failing `/init` is
 /// not an error — the container keeps working as a plain shell rootfs.
+/// Must run after `enter_chroot` (a fresh thread, never the blocking pool):
+/// `/init` and the cgroup view are resolved in the container, and only a thread
+/// created after the chroot inherits its root and private mount namespace.
 pub fn spawn_init(slot: &InitSlot) {
     if slot.closed() || !executable(INIT).unwrap_or(false) {
         return;

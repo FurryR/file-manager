@@ -13,6 +13,7 @@
 set -euo pipefail
 
 VERSION="${XKBCOMMON_VERSION:-1.11.0}"
+XKBCOMMON_SHA256="78a6b14f16e9a55025978c252e53ce9e16a02bfdb929550b9a0db5af87db7e02"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$ROOT_DIR/native/wayland/third_party/libxkbcommon"
 SRC_DIR="$WORK_DIR/libxkbcommon-$VERSION"
@@ -21,7 +22,7 @@ CACHE_TARBALL="$CACHE_DIR/libxkbcommon-$VERSION.tar.gz"
 
 ABIS=("${@:-}")
 if [[ -z "${ABIS[0]:-}" ]]; then
-    ABIS=(aarch64)
+    ABIS=(aarch64 armv7 x86 x86_64)
 fi
 
 SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
@@ -50,13 +51,14 @@ mkdir -p "$WORK_DIR" "$CACHE_DIR"
 if [[ ! -d "$SRC_DIR" ]]; then
     echo "==> Fetching libxkbcommon $VERSION"
     URL="https://github.com/xkbcommon/libxkbcommon/archive/refs/tags/xkbcommon-$VERSION.tar.gz"
-    GH_PROXY="${GH_PROXY-https://gh-proxy.com}"
+    GH_PROXY="${GH_PROXY-}"
     if [[ -n "$GH_PROXY" ]]; then URL="$GH_PROXY/$URL"; fi
     if [[ ! -f "$CACHE_TARBALL" ]]; then
         curl -fsSL --retry 2 --connect-timeout 20 --max-time 600 \
             "$URL" -o "$CACHE_TARBALL.part"
         mv "$CACHE_TARBALL.part" "$CACHE_TARBALL"
     fi
+    echo "$XKBCOMMON_SHA256  $CACHE_TARBALL" | sha256sum --check
     tar xzf "$CACHE_TARBALL" -C "$WORK_DIR"
     # GitHub names the archive root after repo + tag (`libxkbcommon-xkbcommon-1.11.0`).
     extracted="$(ls -d "$WORK_DIR"/libxkbcommon-* 2>/dev/null | head -n 1)"
@@ -74,10 +76,26 @@ for abi in "${ABIS[@]}"; do
         aarch64)
             triple="aarch64-linux-android"
             builddir="builddir-aarch64"
+            cpu_family="aarch64"
+            cpu="aarch64"
+            ;;
+        armv7)
+            triple="armv7a-linux-androideabi"
+            builddir="builddir-armv7"
+            cpu_family="arm"
+            cpu="armv7"
+            ;;
+        x86)
+            triple="i686-linux-android"
+            builddir="builddir-x86"
+            cpu_family="x86"
+            cpu="i686"
             ;;
         x86_64)
             triple="x86_64-linux-android"
             builddir="builddir-x86_64"
+            cpu_family="x86_64"
+            cpu="x86_64"
             ;;
         *)
             echo "unsupported ABI: $abi" >&2
@@ -95,10 +113,16 @@ c = '$TOOLCHAIN/bin/${triple}26-clang'
 ar = '$TOOLCHAIN/bin/llvm-ar'
 strip = '$TOOLCHAIN/bin/llvm-strip'
 
+[built-in options]
+# This archive is linked into the Rust compositor. Do not emit LTO bitcode
+# (rustc's LLVM and the NDK clang do not match); section flags let the final
+# Rust link drop unused C functions.
+c_args = ['-Oz', '-ffunction-sections', '-fdata-sections']
+
 [host_machine]
 system = 'android'
-cpu_family = '$abi'
-cpu = '$abi'
+cpu_family = '$cpu_family'
+cpu = '$cpu'
 endian = 'little'
 EOF
 
@@ -106,7 +130,7 @@ EOF
         meson setup --reconfigure "$WORK_DIR/$builddir" "$SRC_DIR" \
             --cross-file "$WORK_DIR/cross-$abi.ini" \
             --default-library=static \
-            --buildtype=release \
+            --buildtype=minsize \
             -Denable-x11=false \
             -Denable-wayland=false \
             -Denable-docs=false \
@@ -117,7 +141,7 @@ EOF
         meson setup "$WORK_DIR/$builddir" "$SRC_DIR" \
             --cross-file "$WORK_DIR/cross-$abi.ini" \
             --default-library=static \
-            --buildtype=release \
+            --buildtype=minsize \
             -Denable-x11=false \
             -Denable-wayland=false \
             -Denable-docs=false \

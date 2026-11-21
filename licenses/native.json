@@ -6,48 +6,51 @@
   },
   {
     "name": "PRoot",
+    "version": "5.1.107.79",
     "license": "GPL-2.0-or-later",
     "url": "https://github.com/termux/proot"
   },
   {
     "name": "talloc",
+    "version": "2.4.3",
     "license": "LGPL-3.0-or-later",
     "url": "https://www.samba.org/ftp/talloc/"
   },
   {
     "name": "PulseAudio",
+    "version": "17.0",
     "license": "LGPL-2.1-or-later",
     "url": "https://www.freedesktop.org/wiki/Software/PulseAudio/"
   },
   {
     "name": "libsndfile",
+    "version": "1.2.2",
     "license": "LGPL-2.1-or-later",
     "url": "https://libsndfile.github.io/libsndfile/"
   },
   {
     "name": "libltdl",
+    "version": "2.4.7",
     "license": "LGPL-2.1-or-later",
     "url": "https://www.gnu.org/software/libtool/"
   },
   {
     "name": "libsepol",
+    "version": "3.11",
     "license": "LGPL-2.1-or-later",
     "url": "https://github.com/SELinuxProject/selinux"
   },
   {
     "name": "libxkbcommon",
+    "version": "1.11.0",
     "license": "MIT",
     "url": "https://github.com/xkbcommon/libxkbcommon"
   },
   {
     "name": "xkeyboard-config",
+    "version": "2.44",
     "license": "MIT",
     "url": "https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config"
-  },
-  {
-    "name": "libepoxy",
-    "license": "MIT",
-    "url": "https://github.com/anholt/libepoxy"
   },
   {
     "group": "Bundled web",

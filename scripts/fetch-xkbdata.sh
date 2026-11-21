@@ -13,6 +13,7 @@
 set -euo pipefail
 
 VERSION="${XKEYBOARD_CONFIG_VERSION:-2.44}"
+XKEYBOARD_CONFIG_SHA256="b617b23234bc75cd838c9fee8b5101cbf81d57a1851dc7fbeadabc11ba6d254e"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST_DIR="$ROOT_DIR/app/src/main/assets/xkb"
 CACHE_DIR="$ROOT_DIR/cache/file-manager"
@@ -37,6 +38,7 @@ if [[ ! -f "$CACHE_TARBALL" ]]; then
         -o "$CACHE_TARBALL.part" "$URL"
     mv "$CACHE_TARBALL.part" "$CACHE_TARBALL"
 fi
+echo "$XKEYBOARD_CONFIG_SHA256  $CACHE_TARBALL" | sha256sum --check
 tar xzf "$CACHE_TARBALL" -C "$WORK_DIR"
 
 SRC_DIR="$(ls -d "$WORK_DIR"/xkeyboard-config-* | head -n 1)"

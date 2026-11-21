@@ -32,6 +32,10 @@ import io.furryr.file.ui.util.ContainerNotification
 class MainActivity : ComponentActivity() {
     companion object {
         const val ACTION_OPEN_TERMINAL = "io.furryr.file.action.OPEN_TERMINAL"
+        const val EXTRA_OPEN_PATH = "open_path"
+
+        /** Install [EXTRA_OPEN_PATH] in a new tab instead of the current one. */
+        const val EXTRA_OPEN_NEW_TAB = "open_path_new_tab"
         var pendingReopenOperation = false
     }
 
@@ -145,9 +149,16 @@ class MainActivity : ComponentActivity() {
         if (intent == null) return
         containerErrorRequest = intent.getStringExtra("container_error")
         if (intent.action == ACTION_OPEN_TERMINAL) terminalOpenRequest++
-        val addresses = IncomingOpen.addresses(intent)
+        val explicitPath = intent.getStringExtra(EXTRA_OPEN_PATH)?.takeIf { it.isNotBlank() }
+        val newTab = explicitPath != null &&
+            intent.getBooleanExtra(EXTRA_OPEN_NEW_TAB, false)
+        if (explicitPath != null) {
+            intent.removeExtra(EXTRA_OPEN_PATH)
+            intent.removeExtra(EXTRA_OPEN_NEW_TAB)
+        }
+        val addresses = IncomingOpen.addresses(intent) + listOfNotNull(explicitPath)
         if (addresses.isEmpty()) return
-        openRequest = OpenRequest(++openRequestId, addresses)
+        openRequest = OpenRequest(++openRequestId, addresses, newTab)
         intent.data = null
         intent.clipData = null
         intent.removeExtra(android.content.Intent.EXTRA_STREAM)

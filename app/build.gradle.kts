@@ -19,20 +19,10 @@ plugins {
     id("com.github.jk1.dependency-license-report")
 }
 
-/** Short git hash for the versionName build metadata. */
-fun gitCommitShortHash(): String {
-    System.getenv("GIT_COMMIT")?.trim()?.takeIf { it.isNotEmpty() }?.let {
-        return it.take(7)
-    }
-    return runCatching {
-        val process = ProcessBuilder("git", "rev-parse", "--short=7", "HEAD")
-            .directory(rootProject.projectDir)
-            .redirectErrorStream(true)
-            .start()
-        val hash = process.inputStream.bufferedReader().use { it.readText() }.trim()
-        process.waitFor()
-        hash
-    }.getOrDefault("").ifBlank { "unknown" }
+/** Gradle flags are conventionally passed as -Pname (empty value) or -Pname=true. */
+fun flag(name: String): Boolean {
+    val value = providers.gradleProperty(name).orNull ?: return false
+    return value.isEmpty() || value.toBoolean()
 }
 
 licenseReport {
@@ -52,6 +42,38 @@ val generateLicenses = tasks.register<Exec>("generateLicenses") {
 // A dependency change must not leave the manually generated report stale.
 tasks.named("generateLicenseReport") { outputs.upToDateWhen { false } }
 
+// ── ABI packaging ────────────────────────────────────────────────────
+// Debug is a fast single-ABI build by default; release is universal and is
+// what F-Droid and GitHub releases use. A specific ABI can always be forced
+// with -Pabi=..., and -Pabi=universal (or all) makes debug universal too.
+//
+//   ./gradlew assembleDebug                         arm64-v8a only
+//   ./gradlew assembleDebug -Pabi=x86_64           one ABI (emulator)
+//   ./gradlew assembleDebug -Pabi=universal        all ABIs
+//   ./gradlew assembleRelease                      all ABIs + universal
+//
+// `android.injected.build.abi` is the property an IDE sets when it targets a
+// connected device, so a deploy build is filtered the same way.
+val allAbis = listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+val requestedAbis = providers.gradleProperty("abi").orNull
+    ?: providers.gradleProperty("android.injected.build.abi").orNull
+val requestedUniversal = requestedAbis
+    ?.split(',')
+    ?.any { it.trim().equals("universal", ignoreCase = true) || it.trim().equals("all", ignoreCase = true) }
+    ?: false
+val abiSelection: List<String> = requestedAbis
+    ?.split(',')
+    ?.map { it.trim() }
+    ?.filter { it.isNotEmpty() }
+    ?.filterNot { it.equals("universal", ignoreCase = true) || it.equals("all", ignoreCase = true) }
+    .orEmpty()
+val debugAbis: List<String> = when {
+    requestedAbis == null -> listOf("arm64-v8a")
+    requestedUniversal -> allAbis
+    else -> abiSelection
+}
+val releaseAbis: List<String> = if (abiSelection.isNotEmpty()) abiSelection else allAbis
+
 android {
     namespace = "io.furryr.file"
     compileSdk = 35
@@ -60,10 +82,21 @@ android {
         applicationId = "io.furryr.file"
         minSdk = 26
         targetSdk = 28
-        versionCode = 1
-        // SemVer build metadata: the exact source revision is visible in
-        // About/Crash reports, not just the numeric app version.
-        versionName = "1.0.0+${gitCommitShortHash()}"
+        // F-Droid reads these values with a regex and checks them against
+        // the built APK. Keep them literal and bump both for every release;
+        // a generated suffix (git hash, timestamp) breaks `fdroid
+        // checkupdates` and the APK version check.
+        versionCode = 10000
+        versionName = "1.0.0"
+
+        // A single-ABI build must not inherit AAR-provided libs for the other
+        // ABIs (libandroidx.graphics.path.so ships all four). No filter means
+        // universal: every ABI any source provides stays in the APK.
+        if (abiSelection.isNotEmpty()) {
+            ndk {
+                abiFilters += abiSelection
+            }
+        }
     }
 
     // HiddenApiBypass (LSPosed) is used to reach android.system.Os.recvmsg so we
@@ -74,11 +107,20 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Keep the default debug loop to one ABI. Without this the
+            // universal release filter would package AAR libs for ABIs whose
+            // native daemon was not built.
+            if (requestedAbis == null) {
+                ndk {
+                    abiFilters.addAll(debugAbis)
+                }
+            }
+        }
         release {
-            // Only a debuggable APK extracts lib/<abi>/{run0,here,agent} into
-            // nativeLibraryDir, so this stays on; obfuscation stays off and R8
-            // contributes shrinking only.
-            isDebuggable = true
+            // Utilities ship as lib<name>.so, so extraction into
+            // nativeLibraryDir no longer needs a debuggable APK.
+            isDebuggable = false
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -107,89 +149,115 @@ android {
         jniLibs.excludes.add("**/libtermux.so")
     }
 
-    // Package standalone executables before signing, preserving lib/<abi>/<name>.
-    // The JNI input pipeline filters out filenames without a .so suffix.
-    sourceSets.getByName("main").resources.srcDir("src/main/executables")
+    androidResources {
+        // DevTools ships precompressed Brotli streams (`*.br`). Deflating an
+        // already-compressed asset only burns packaging time.
+        noCompress += "br"
+    }
+
+    lint {
+        // targetSdk 28 is intentional: the app needs unrestricted storage and
+        // root/container features. Play's target-level policy only applies to
+        // store distribution; keep it from failing release lint.
+        disable += "ExpiredTargetSdkVersion"
+    }
+
+    // Native utilities are packaged as lib/<abi>/lib<name>.so so Android
+    // extracts them into nativeLibraryDir for both debuggable and release APKs.
 }
 
 // ── Native build hook ────────────────────────────────────────────────
 // Gradle only packages what is already staged under src/main/jniLibs, so a
 // Rust change (or the chroot SELinux backend) silently stayed out of the APK.
-// Build every native artifact before packaging; -PskipNativeBuild=true opts
-// out for IDE-only builds.
-val skipNativeBuild = providers.gradleProperty("skipNativeBuild")
-    .orNull
-    ?.toBoolean() == true
+// Debug builds only the default device ABI (or -Pabi=...); release builds
+// every ABI for a universal APK. -PskipNativeBuild skips both for IDE-only
+// builds that reuse staged binaries.
+val skipNativeBuild = flag("skipNativeBuild")
 
 val nativeDir = rootProject.layout.projectDirectory.dir("native")
 val scriptsDir = rootProject.layout.projectDirectory.dir("scripts")
-val jniDir = layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a")
-val executablesDir = layout.projectDirectory.dir("src/main/executables/lib/arm64-v8a")
+val jniRoot = layout.projectDirectory.dir("src/main/jniLibs")
 val assetsDir = layout.projectDirectory.dir("src/main/assets")
 
-val buildNative = tasks.register<Exec>("buildNative") {
-    group = "build"
-    description = "Builds and stages libsepol, the daemon, compositor, utilities, proot and PulseAudio."
-    workingDir = rootProject.projectDir
-    commandLine("bash", scriptsDir.file("build-native.sh").asFile.absolutePath)
+fun registerNativeBuild(name: String, abis: List<String>, descriptionText: String) =
+    tasks.register<Exec>(name) {
+        group = "build"
+        description = descriptionText
+        workingDir = rootProject.projectDir
+        commandLine(
+            "bash",
+            scriptsDir.file("build-native.sh").asFile.absolutePath,
+            *abis.toTypedArray(),
+        )
 
-    inputs.files(
-        scriptsDir.file("build-native.sh"),
-        scriptsDir.file("fetch-xkbdata.sh"),
-        nativeDir.file("Cargo.toml"),
-        nativeDir.file("Cargo.lock"),
-        nativeDir.file("build.rs"),
-        nativeDir.file("egl_shim.c"),
-        nativeDir.file("wayland/Cargo.toml"),
-        nativeDir.file("run0/Cargo.toml"),
-        nativeDir.file("here/Cargo.toml"),
-        nativeDir.file("agent/Cargo.toml"),
-        nativeDir.file("hub-client/Cargo.toml"),
-        nativeDir.file("build-libsepol.sh"),
-        nativeDir.file("build-xkbcommon.sh"),
-        nativeDir.file("build-android-aarch64.sh"),
-        nativeDir.file("build-proot.sh"),
-        nativeDir.file("patches/proot/LICENSE"),
-        nativeDir.file("build-pulse.sh"),
-        nativeDir.file("sepolicy/shim.c"),
-        rootProject.layout.projectDirectory.file("proto/file_daemon.proto"),
-    ).withPathSensitivity(PathSensitivity.RELATIVE)
-    inputs.dir(nativeDir.dir("src"))
-    inputs.dir(nativeDir.dir("wayland/src"))
-    inputs.dir(nativeDir.dir("run0/src"))
-    inputs.dir(nativeDir.dir("here/src"))
-    inputs.dir(nativeDir.dir("agent/src"))
-    inputs.dir(nativeDir.dir("hub-client/src"))
-    inputs.dir(nativeDir.dir("patches"))
-    inputs.dir(nativeDir.dir("pulse"))
+        inputs.property("abis", abis.joinToString(","))
+        inputs.files(
+            scriptsDir.file("build-native.sh"),
+            scriptsDir.file("fetch-xkbdata.sh"),
+            rootProject.layout.projectDirectory.file("rust-toolchain.toml"),
+            rootProject.layout.projectDirectory.file(".cargo/config.toml"),
+            nativeDir.file("Cargo.toml"),
+            nativeDir.file("Cargo.lock"),
+            nativeDir.file("build.rs"),
+            nativeDir.file("egl_shim.c"),
+            nativeDir.file("wayland/Cargo.toml"),
+            nativeDir.file("wayland/build.rs"),
+            nativeDir.file("wayland/native/egl_shim.c"),
+            nativeDir.file("run0/Cargo.toml"),
+            nativeDir.file("here/Cargo.toml"),
+            nativeDir.file("agent/Cargo.toml"),
+            nativeDir.file("hub-client/Cargo.toml"),
+            nativeDir.file("adblock/Cargo.toml"),
+            nativeDir.file("build-libsepol.sh"),
+            nativeDir.file("build-xkbcommon.sh"),
+            nativeDir.file("build-android.sh"),
+            nativeDir.file("build-android-aarch64.sh"),
+            nativeDir.file("build-proot.sh"),
+            nativeDir.file("patches/proot/LICENSE"),
+            nativeDir.file("build-pulse.sh"),
+            nativeDir.file("sepolicy/shim.c"),
+            rootProject.layout.projectDirectory.file("proto/file_daemon.proto"),
+        ).withPathSensitivity(PathSensitivity.RELATIVE)
+        inputs.dir(nativeDir.dir("src"))
+        inputs.dir(nativeDir.dir("wayland/src"))
+        inputs.dir(nativeDir.dir("run0/src"))
+        inputs.dir(nativeDir.dir("here/src"))
+        inputs.dir(nativeDir.dir("agent/src"))
+        inputs.dir(nativeDir.dir("hub-client/src"))
+        inputs.dir(nativeDir.dir("adblock/src"))
+        inputs.dir(nativeDir.dir("patches"))
+        inputs.dir(nativeDir.dir("pulse"))
 
-    outputs.dir(assetsDir.dir("xkb"))
-    outputs.files(
-        jniDir.file("libfiledaemon.so"),
-        jniDir.file("libwayland_compositor.so"),
-        jniDir.file("libproot.so"),
-        jniDir.file("libpulsehost.so"),
-        jniDir.file("libeglshim.so"),
-        executablesDir.file("run0"),
-        executablesDir.file("here"),
-        executablesDir.file("agent"),
-        assetsDir.file("native-licenses/LICENSE-libsepol"),
-        assetsDir.file("native-licenses/LICENSE-PulseAudio"),
-        assetsDir.file("native-licenses/LGPL-2.1"),
-        assetsDir.file("native-licenses/COPYING-libsndfile"),
-        assetsDir.file("native-licenses/COPYING-libltdl"),
-        assetsDir.file("native-licenses/COPYING-talloc"),
-        rootProject.layout.projectDirectory.file(
-            "native/sepolicy/prefix/aarch64-linux-android/lib/libfile_container.a",
-        ),
-        rootProject.layout.projectDirectory.file(
-            "native/wayland/third_party/libxkbcommon/builddir-aarch64/libxkbcommon.a",
-        ),
-    )
-}
+        outputs.dir(assetsDir.dir("xkb"))
+        outputs.dir(jniRoot)
+        outputs.files(
+            assetsDir.file("native-licenses/LICENSE-libsepol"),
+            assetsDir.file("native-licenses/LICENSE-PulseAudio"),
+            assetsDir.file("native-licenses/LGPL-2.1"),
+            assetsDir.file("native-licenses/COPYING-libsndfile"),
+            assetsDir.file("native-licenses/COPYING-libltdl"),
+            assetsDir.file("native-licenses/COPYING-talloc"),
+        )
+    }
+
+val buildNative = registerNativeBuild(
+    "buildNative",
+    releaseAbis,
+    "Builds every release native artifact (all ABIs) and stages them for packaging.",
+)
+val buildNativeDebug = registerNativeBuild(
+    "buildNativeDebug",
+    debugAbis,
+    "Builds only the debug ABI selection and stages it for packaging.",
+)
 
 if (!skipNativeBuild) {
-    tasks.named("preBuild").configure { dependsOn(buildNative) }
+    tasks.configureEach {
+        when (name) {
+            "preDebugBuild" -> dependsOn(buildNativeDebug)
+            "preReleaseBuild" -> dependsOn(buildNative)
+        }
+    }
 }
 
 // ── Release APK post-processing ──────────────────────────────────────
@@ -203,7 +271,7 @@ if (!skipNativeBuild) {
 // rebuilds signatures either way).
 val postprocessReleaseApk = tasks.register<Exec>("postprocessReleaseApk") {
     group = "build"
-    description = "Recompresses, aligns and signs the release APK."
+    description = "Recompresses (Zopfli when available), aligns and signs the release APK."
     dependsOn("packageRelease")
     workingDir = rootProject.projectDir
     val unsignedApk = layout.buildDirectory.file("outputs/apk/release/app-release-unsigned.apk")
@@ -220,9 +288,14 @@ val postprocessReleaseApk = tasks.register<Exec>("postprocessReleaseApk") {
     )
 }
 
+// F-Droid signs the APK itself. Its build must stop at the unsigned
+// package; recompressing and signing locally would produce an unexpected
+// output file (and needs a keystore the build server does not have).
+val skipPostprocess = flag("skipPostprocess")
+
 // The assemble task is created by AGP after this script is evaluated.
 tasks.configureEach {
-    if (name == "assembleRelease") {
+    if (name == "assembleRelease" && !skipPostprocess) {
         finalizedBy(postprocessReleaseApk)
     }
 }
@@ -230,9 +303,7 @@ tasks.configureEach {
 // ── Chrome DevTools frontend assets ──────────────────────────────────
 // tools/devtools pins the official frontend build; its output is generated
 // into src/main/assets/devtools so the runtime bridge can serve it offline.
-val skipDevToolsBuild = providers.gradleProperty("skipDevToolsBuild")
-    .orNull
-    ?.toBoolean() == true
+val skipDevToolsBuild = flag("skipDevToolsBuild")
 val devToolsDir = rootProject.layout.projectDirectory.dir("tools/devtools")
 val appResDir = rootProject.layout.projectDirectory.dir("app/src/main/res")
 
@@ -316,6 +387,9 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
+    // Document-start userscript injection; DOCUMENT_START_SCRIPT exists since
+    // 1.9, so this stays on the version that matches the app's compileSdk.
+    implementation("androidx.webkit:webkit:1.12.1")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")

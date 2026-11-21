@@ -17,4 +17,17 @@ class SftpDatabase(context: Context) : ServerDatabase<SftpServer>(
     override fun sftpServers(): List<SftpServer> = getAll()
 
     override fun sftpServer(host: String): SftpServer? = findByHost(host)
+
+    /** Merge backup rows, keeping the host as identity and overwriting it. */
+    fun restore(servers: List<SftpServer>) {
+        for (server in servers) {
+            writableDatabase.execSQL(
+                "INSERT OR REPLACE INTO servers (host, name, port, username, password, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+                arrayOf(
+                    server.host, server.name, server.port,
+                    server.username, server.password, server.sortOrder,
+                ),
+            )
+        }
+    }
 }

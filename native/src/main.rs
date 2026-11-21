@@ -88,8 +88,18 @@ struct Shared {
     socket_name: String,
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> io::Result<()> {
+/// Startup is deliberately synchronous until the container root is entered.
+///
+/// `unshare(CLONE_NEWNS)` and `chroot` only change the calling thread's
+/// filesystem context; a thread created *before* them keeps the host root and
+/// the host mount namespace for the rest of its life. Tokio runs `tokio::fs`
+/// work (listing, copy, …) on blocking-pool threads, so a pool thread created
+/// early would serve **host** paths from inside a container — the container
+/// root would intermittently list the host `/`. Nothing may spawn a thread
+/// before `enter_chroot`, and the runtime is therefore built only after all
+/// preparation completes. Binding the socket afterwards also guarantees that no
+/// client is served from the pre-chroot state.
+fn main() -> io::Result<()> {
     let (public_key, id) = parse_identity_args()?;
     let socket_name = auth::derive_socket_name(&public_key, &id);
     let chroot_rootfs = parse_value_arg("--chroot");
@@ -143,46 +153,53 @@ async fn main() -> io::Result<()> {
         // Derive the container domain before the chroot: selinuxfs is the host's
         // here, and the image is loaded once per container daemon. A disabled
         // or failed injection caches no exec context, so children stay in the
-        // daemon's domain instead of failing to start.
-        let policy_root = rootfs.clone();
-        match tokio::task::spawn_blocking(move || sepolicy::install(Path::new(&policy_root))).await
-        {
-            Ok(Ok(sepolicy::Apply::Applied)) => {
+        // daemon's domain instead of failing to start. Called on this thread,
+        // never through `spawn_blocking`: that would leave a host-rooted pool
+        // thread behind (see the comment on `main`).
+        match sepolicy::install(Path::new(&rootfs)) {
+            Ok(sepolicy::Apply::Applied) => {
                 eprintln!("[file-daemon] container domain injected")
             }
-            Ok(Ok(sepolicy::Apply::Present)) => {
+            Ok(sepolicy::Apply::Present) => {
                 eprintln!("[file-daemon] container domain present")
             }
-            Ok(Ok(sepolicy::Apply::Disabled)) => {
+            Ok(sepolicy::Apply::Disabled) => {
                 eprintln!("[file-daemon] container domain disabled")
             }
-            Ok(Err(error)) => eprintln!("[file-daemon] container domain failed: {error}"),
-            Err(error) => eprintln!("[file-daemon] container domain task failed: {error}"),
+            Err(error) => eprintln!("[file-daemon] container domain failed: {error}"),
         }
         let binds = parse_bind_args();
         container::enter_chroot(&rootfs, &binds)?;
     }
 
+    // The preflight above owns the process-wide filesystem view; only now may
+    // the event loop exist. The runtime creation itself spawns no thread, and
+    // every pool thread it later creates inherits the container root and mount
+    // namespace.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        let listener = socket::create_abstract_server(&socket_name)?;
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+            let shutdown_handler = request_shutdown as *const () as libc::sighandler_t;
+            libc::signal(libc::SIGTERM, shutdown_handler);
+            libc::signal(libc::SIGHUP, shutdown_handler);
+            libc::signal(libc::SIGINT, shutdown_handler);
+        };
 
-    let listener = socket::create_abstract_server(&socket_name)?;
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-        let shutdown_handler = request_shutdown as *const () as libc::sighandler_t;
-        libc::signal(libc::SIGTERM, shutdown_handler);
-        libc::signal(libc::SIGHUP, shutdown_handler);
-        libc::signal(libc::SIGINT, shutdown_handler);
-    };
+        let shared = Arc::new(Shared {
+            pty_manager: Arc::new(Mutex::new(PtyManager::new())),
+            execs: Arc::new(Mutex::new(ExecManager::default())),
+            handles: Arc::new(Mutex::new(HandleTable::new())),
+            clients: Arc::new(Clients::default()),
+            public_key,
+            socket_name,
+        });
 
-    let shared = Arc::new(Shared {
-        pty_manager: Arc::new(Mutex::new(PtyManager::new())),
-        execs: Arc::new(Mutex::new(ExecManager::default())),
-        handles: Arc::new(Mutex::new(HandleTable::new())),
-        clients: Arc::new(Clients::default()),
-        public_key,
-        socket_name,
-    });
-
-    serve(listener, shared, container_mode).await
+        serve(listener, shared, container_mode).await
+    })
 }
 
 async fn serve(
@@ -205,12 +222,9 @@ async fn serve(
     // so an init that exits immediately is still reaped, and off the runtime
     // thread so metadata + fork/exec never delay accept().
     //
-    // Use a fresh thread, not tokio's blocking pool: the pool may hand back a
-    // thread created before `enter_chroot`. That thread keeps the app's mount
-    // namespace and would run the host `/init`, whose first-stage mounts land
-    // in the app namespace (`/dev` becomes a tmpfs, so `/dev/ptmx` loses its
-    // `ptmx_device` label). A new thread is created after the chroot and shares
-    // the private mount namespace and root.
+    // Use a fresh thread, not tokio's blocking pool: the init spawn must not be
+    // queued behind file I/O, and the daemon's root and private mount namespace
+    // are only shared by threads created after `enter_chroot` (see `main`).
     let init_slot = Arc::new(container::InitSlot::new());
     if container_mode {
         let slot = init_slot.clone();

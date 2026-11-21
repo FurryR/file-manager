@@ -1,0 +1,33 @@
+Categories:
+  - System
+License: GPL-3.0-or-later
+AuthorName: FurryR
+SourceCode: https://github.com/FurryR/file-manager
+IssueTracker: https://github.com/FurryR/file-manager/issues
+RepoType: git
+Repo: https://github.com/FurryR/file-manager.git
+
+Builds:
+  - versionName: 1.0.0
+    versionCode: 10000
+    commit: v1.0.0
+    ndk: 30.0.16248370
+    sudo:
+      - apt-get update
+      - apt-get install -y build-essential gettext gawk rustup nodejs npm meson ninja-build cmake pkg-config m4 bison patch
+    prebuild:
+      - rustup toolchain install nightly-2026-11-20 --profile minimal --component rust-src
+      - rustup default nightly-2026-11-20
+      - rustup target add --toolchain nightly-2026-11-20 aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+    gradle:
+      - "yes"
+    gradleprops:
+      - skipPostprocess
+    scanignore:
+      - gradle/wrapper/gradle-wrapper.jar
+    output: app/build/outputs/apk/release/app-release-unsigned.apk
+    timeout: 10800
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+RequiresRoot: false

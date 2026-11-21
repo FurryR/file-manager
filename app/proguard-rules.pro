@@ -15,6 +15,14 @@
 # commons-net instantiates FTP config/parser classes from string names.
 -keep class org.apache.commons.net.** { *; }
 
+# R8 8.6 miscompiles joni's enum-unboxed REDUCE_TABLE. All static fields are
+# removed and QuantifierNode.<clinit> becomes `throw null`, so the first regex
+# built by the TextMate tokenizer kills the editor thread with
+# ExceptionInInitializerError; reduceNestedQuantifier is corrupted the same
+# way. Keep the engine's enums so R8 cannot unbox them.
+-keep enum org.joni.** { *; }
+-keep enum org.jcodings.** { *; }
+
 # protobuf-javalite reaches generated messages through runtime reflection.
 -keep class io.furryr.file.proto.** { *; }
 
@@ -30,9 +38,22 @@
     public *** clone();
 }
 
+# tm4e deserializes language-configuration JSON through Gson. The model has no
+# direct instantiation site, so R8 optimization makes LanguageConfiguration
+# abstract and drops its no-arg constructor; Gson then fails with "Abstract
+# classes can't be instantiated". Keep the whole model package (a handful of
+# tiny classes) as a reflective entry point.
+-keep class org.eclipse.tm4e.languageconfiguration.internal.model.** { *; }
+
+# Same Gson pattern in sora's grammar list reader: the model has no direct
+# instantiation site and only a non-default constructor, so Gson currently
+# falls back to Unsafe allocation. Keep it from being abstractified too.
+-keep class io.github.rosemoe.sora.langs.textmate.registry.reader.LanguageDefinitionReader$LanguageDefinitionList { *; }
+
 # JNI entry points and native->Kotlin callbacks addressed by name.
 -keep class io.furryr.file.wayland.NativeCompositor { *; }
 -keep class io.furryr.file.pulse.PulseNative { *; }
+-keep class io.furryr.file.adblock.AdBlockNative { *; }
 -keepclassmembers class io.furryr.file.pulse.PulseService {
     public void onSinkData(int);
     public void onSinkIdle();

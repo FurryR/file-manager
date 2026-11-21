@@ -83,7 +83,7 @@
           gradlePackage =
             if pkgs ? gradle_8 then pkgs.gradle_8 else pkgs.gradle;
           jdkPackage = pkgs.jdk17;
-          pythonPackage = pkgs.python3.withPackages (ps: [ ps.pip ]);
+          pythonPackage = pkgs.python3.withPackages (ps: [ ps.pip ps.zopfli ]);
           androidSdkRoot = "${android.androidsdk}/libexec/android-sdk";
           # Must match compileSdk 35; AGP runs this aapt2 instead of the Maven one.
           buildToolsVersion = "35.0.0";
@@ -139,10 +139,14 @@
               export PATH="$CARGO_HOME/bin:$PATH"
               export PATH="${androidSdkRoot}/platform-tools:${buildToolsDir}:$PATH"
 
-              if ! rustup toolchain list | grep -q '^stable '; then
-                rustup toolchain install stable --profile minimal
+              # Keep this pin in sync with rust-toolchain.toml. `build-std`
+              # (Android size optimization) needs nightly plus rust-src.
+              TOOLCHAIN="nightly-2026-11-20"
+              if ! rustup toolchain list | grep -q "^$TOOLCHAIN"; then
+                rustup toolchain install "$TOOLCHAIN" --profile minimal \
+                  --component rust-src
               fi
-              rustup default stable >/dev/null
+              rustup default "$TOOLCHAIN" >/dev/null
 
               echo "Android SDK: $ANDROID_SDK_ROOT"
               echo "Android NDK: $ANDROID_NDK_HOME"

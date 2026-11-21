@@ -7,6 +7,7 @@ This Cargo workspace manages the daemon and all terminal utilities together:
 - `here`: reveal a file or directory in the app's current tab.
 - `agent`: a small, single-file Rust TUI for an OpenAI-compatible Chat Completions API.
 - `hub-client`: shared Protobuf framing, abstract sockets and SCM_RIGHTS transport.
+- `adblock`: JNI bridge around `adblock-rust` for the browser's ad blocker.
 
 Rust subprocess daemon for file operations and command execution. The app starts
 it with `--key <public-key> --id <target-id>`. Each launch has an independent
@@ -29,14 +30,20 @@ bash native/build-android-aarch64.sh
 
 The script stages the daemon as
 `app/src/main/jniLibs/arm64-v8a/libfiledaemon.so` for APK packaging and extraction
-into `nativeLibraryDir`. The utilities keep their original names (`run0`, `here`,
-`agent`) under `app/src/main/executables/lib/arm64-v8a/`; the existing Java-resource
-packaging preserves those names in the APK's `lib/arm64-v8a/` directory. All
-workspace build artifacts and the shared dependency lockfile live under `native/`.
+into `nativeLibraryDir`. The utilities ship as `librun0.so`, `libhere.so` and
+`libagent.so` in the same directory, because Android only extracts `lib*.so`.
+The browser's ad-blocking engine ships as `libadblock.so`.
+`DaemonManager.binDir` recreates the original names (`run0`, `here`, `agent`) as
+symlinks under `filesDir/bin`, and that directory is what shells get on `PATH`.
+All workspace build artifacts and the shared dependency lockfile live under
+`native/`.
 
-The build requires Rust with the `aarch64-linux-android` target, `protoc`, and an
-Android NDK. The script also supplies the NDK C compiler and archiver to the TLS
-dependency used by `agent`.
+The build requires the pinned nightly Rust (`rust-toolchain.toml`, including
+`rust-src`) with the `aarch64-linux-android` target, `protoc`, and an Android
+NDK. The script also supplies the NDK C compiler and archiver to the TLS
+dependency used by `agent`. Release artifacts are size-optimized with
+`-Z build-std`, fat LTO, `opt-level = "z"` and `panic = "immediate-abort"`; the
+linker additionally uses ICF/GC/strip and 16 KiB page alignment.
 
 All utilities start with a shared hub handshake: they open `/` with
 `O_PATH | O_DIRECTORY` and send that descriptor with SCM_RIGHTS. The app matches

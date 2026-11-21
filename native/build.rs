@@ -14,15 +14,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let archive = prefix.join("lib").join("libfile_container.a");
         if !archive.is_file() {
+            let abi = if target.starts_with("aarch64") {
+                "aarch64"
+            } else if target.starts_with("armv7") {
+                "armv7"
+            } else if target.starts_with("i686") {
+                "x86"
+            } else if target.starts_with("x86_64") {
+                "x86_64"
+            } else {
+                "unknown"
+            };
             return Err(format!(
                 "the container policy archive for {target} is missing: {}\n\
-                 run `bash native/build-libsepol.sh {}` first",
-                archive.display(),
-                if target.starts_with("x86_64") {
-                    "x86_64"
-                } else {
-                    "aarch64"
-                }
+                 run `bash native/build-libsepol.sh {abi}` first",
+                archive.display()
             )
             .into());
         }

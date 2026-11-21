@@ -60,6 +60,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import io.furryr.file.R
 import io.furryr.file.Factory
 import io.furryr.file.Renderer
+import io.furryr.file.adblock.AdBlockEngine
 import io.furryr.file.core.OpenIcon
 import io.furryr.file.core.OpenOption
 import io.furryr.file.core.VFile
@@ -72,6 +73,9 @@ import io.furryr.file.ui.util.BrowseAddress
 import io.furryr.file.terminal.TerminalTab
 import io.furryr.file.terminal.WebDevToolsHost
 import io.furryr.file.terminal.WebDevToolsTab
+import io.furryr.file.userscript.UserScriptAttachment
+import io.furryr.file.userscript.UserScriptEngine
+import io.furryr.file.userscript.UserScriptInjector
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -80,6 +84,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONTokener
 import java.io.ByteArrayInputStream
+import java.util.Locale
 
 private const val ASSET_HOST = "file.local"
 private const val DOCUMENT_PATH = "__document__"
@@ -282,8 +287,23 @@ internal class WebRendererSession(
         return ensureView(context)
     }
 
+    /** Written and released on the main thread, read by Chromium's request thread. */
+    @Volatile
     private var webView: WebView? = null
+    /** The view's own context, so the request thread never touches the WebView. */
+    @Volatile
+    private var hostContext: Context? = null
+    /**
+     * Raw address reported by the WebView for the current document. Kept
+     * separate from [address] because `shouldInterceptRequest` runs off the
+     * main thread, where `WebView.getUrl` is a fatal call, and because
+     * [address] is the display spelling (a VFS path for a projected page).
+     */
+    @Volatile
+    private var loadedUrl: String? = null
+    private var userScripts: UserScriptAttachment? = null
     private var darkTheme = true
+    @Volatile
     private var closing = false
 
     /** True once the WebView was released; no view may be rebuilt after that. */
@@ -348,7 +368,10 @@ internal class WebRendererSession(
         setPageProgress(0)
         contentVisible = false
         probing = false
-        webView?.loadUrl(url)
+        webView?.let { view ->
+            ensureUserScriptAttachment(view)
+            view.loadUrl(url)
+        }
     }
 
     /**
@@ -375,13 +398,19 @@ internal class WebRendererSession(
     fun reload() {
         if (closing) return
         // A web tab always owns reload, even before its view is re-attached.
-        webView?.reload() ?: run {
+        val view = webView
+        if (view != null) {
+            ensureUserScriptAttachment(view)
+            view.reload()
+        } else {
             setPageProgress(0)
             contentVisible = false
         }
     }
 
     override fun reset() {
+        userScripts?.detach()
+        userScripts = null
         host = null
         unloadResult?.complete(false)
         unloadResult = null
@@ -448,6 +477,7 @@ internal class WebRendererSession(
 
     internal fun ensureView(context: Context): WebView {
         webView?.let { return it }
+        hostContext = context.applicationContext
         val created = WebView(context).apply {
             settings.apply {
                 javaScriptEnabled = true
@@ -471,8 +501,35 @@ internal class WebRendererSession(
                     // session no longer owns (a released or replaced WebView)
                     // must not read the document.
                     if (closing || view == null || view !== webView) return null
-                    val uri = request?.url ?: return null
-                    if (uri.host != ASSET_HOST) return null
+                    val webRequest = request ?: return null
+                    val uri = webRequest.url
+                    if (uri.host != ASSET_HOST) {
+                        // Only live subresources are advertisements: a top-level
+                        // navigation is the page the user asked for, and a
+                        // projected document already goes through ASSET_HOST.
+                        if (webRequest.isForMainFrame) return null
+                        val scheme = uri.scheme?.lowercase(Locale.ROOT)
+                        if (scheme != "http" && scheme != "https") return null
+                        val headers = webRequest.requestHeaders
+                        val source = (headers["Referer"] ?: headers["referer"])
+                            ?.takeIf { it.isNotBlank() }
+                            ?: loadedUrl.orEmpty()
+                        // This callback runs on Chromium's request thread, where
+                        // any WebView method is fatal; the context is cached at
+                        // view creation for exactly this call.
+                        val context = hostContext ?: return null
+                        if (AdBlockEngine.shouldBlock(
+                                context,
+                                uri.toString(),
+                                source,
+                                resourceType(uri, webRequest),
+                                webRequest.method,
+                            )
+                        ) {
+                            return blockedResponse()
+                        }
+                        return null
+                    }
                     // The body read happens on Chromium's request thread and can
                     // fail (a vanished archive, a provider that went away). The
                     // callback must answer with a response, never throw.
@@ -542,6 +599,7 @@ internal class WebRendererSession(
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                     if (closing || view == null || view !== webView) return
+                    this@WebRendererSession.userScripts?.onPageStarted()
                     updateAddress(url)
                     setPageProgress(0)
                     contentVisible = false
@@ -589,6 +647,8 @@ internal class WebRendererSession(
                     // from the address that was showing.
                     if (view == null || view !== webView) return true
                     webView = null
+                    userScripts?.detach()
+                    userScripts = null
                     unloadResult?.complete(false)
                     unloadResult = null
                     pendingUnload = null
@@ -741,12 +801,31 @@ internal class WebRendererSession(
                 true
             }
             webView = this
+            userScripts?.detach()
+            userScripts = null
+            ensureUserScriptAttachment(this)
             // Keep the renderer resident across tab switches; a killed renderer
             // would make the next page look like a cold start.
             setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
             loadUrl(initialUrl)
         }
         return created
+    }
+
+    /**
+     * Attach the userscript bridge exactly once per WebView. Enabling scripts
+     * after a page is already open takes effect on the next document load.
+     */
+    private fun ensureUserScriptAttachment(view: WebView) {
+        if (closing) return
+        runCatching { UserScriptEngine.refreshIfChanged(view.context) }
+        if (userScripts != null) return
+        userScripts = UserScriptInjector.attach(view.context, view) { url ->
+            val currentHost = host ?: return@attach
+            val file = currentHost.vfs.liveFile(url, referer = view.url).getOrNull()
+                ?: return@attach
+            currentHost.openFile(file)
+        }
     }
 
     internal val currentView: WebView? get() = webView
@@ -786,6 +865,8 @@ internal class WebRendererSession(
     private fun updateAddress(url: String?) {
         // A closing session loads about:blank first; that is not a location.
         if (url == null || closing || unloadResult != null) return
+        // The request thread reads this instead of asking the WebView.
+        loadedUrl = url
         approvedNavigations.clear()
         val next = displayAddress(url)
         if (next == address) return
@@ -883,6 +964,63 @@ internal class WebRendererSession(
             emptyMap<String, String>(),
             ByteArrayInputStream(ByteArray(0)),
         )
+
+    /** An empty 200: the request is answered without fetching the advertiser. */
+    private fun blockedResponse(): WebResourceResponse =
+        WebResourceResponse(
+            "text/plain",
+            "utf-8",
+            200,
+            "OK",
+            emptyMap<String, String>(),
+            ByteArrayInputStream(ByteArray(0)),
+        )
+
+    /**
+     * Best-effort resource type for the filter engine. WebView exposes no type
+     * on [WebResourceRequest], so the Accept header comes first and the URL
+     * extension is the fallback. Unknown resources stay "other" instead of
+     * being guessed into a rule class.
+     */
+    private fun resourceType(uri: Uri, request: WebResourceRequest): String {
+        if (request.isForMainFrame) return "document"
+        val headers = request.requestHeaders
+        // Modern WebView reports the fetch destination; it is more precise
+        // than the Accept header for scripts and fetch requests.
+        val destination = (headers["Sec-Fetch-Dest"] ?: headers["sec-fetch-dest"]).orEmpty()
+        when (destination) {
+            "script" -> return "script"
+            "style" -> return "stylesheet"
+            "image" -> return "image"
+            "font" -> return "font"
+            "iframe", "frame", "document" -> return "subdocument"
+            "audio", "video", "track" -> return "media"
+            "empty" -> return "xmlhttprequest"
+        }
+        val accept = (headers["Accept"] ?: headers["accept"]).orEmpty()
+        when {
+            accept.contains("text/css") -> return "stylesheet"
+            accept.contains("javascript") || accept.contains("ecmascript") -> return "script"
+            accept.contains("image/") -> return "image"
+            accept.contains("font/") || accept.contains("application/font") -> return "font"
+            accept.contains("text/html") -> return "subdocument"
+            accept.contains("video/") || accept.contains("audio/") -> return "media"
+        }
+        val path = uri.path.orEmpty().lowercase(Locale.ROOT)
+        return when {
+            path.endsWith(".js") || path.endsWith(".mjs") -> "script"
+            path.endsWith(".css") -> "stylesheet"
+            path.endsWith(".json") -> "xmlhttprequest"
+            path.endsWith(".png") || path.endsWith(".jpg") || path.endsWith(".jpeg") ||
+                path.endsWith(".gif") || path.endsWith(".webp") || path.endsWith(".svg") ||
+                path.endsWith(".avif") || path.endsWith(".ico") -> "image"
+            path.endsWith(".woff") || path.endsWith(".woff2") || path.endsWith(".ttf") ||
+                path.endsWith(".otf") -> "font"
+            path.endsWith(".mp4") || path.endsWith(".webm") || path.endsWith(".mp3") ||
+                path.endsWith(".m4a") || path.endsWith(".ogg") -> "media"
+            else -> "other"
+        }
+    }
 }
 
 /** View half of a web session; the session holds state and the WebView. */

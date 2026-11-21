@@ -20,6 +20,8 @@ private const val LOCALE_ROOT = "$ASSET_ROOT/core/i18n/locales"
 private const val INSPECTOR_PAGE = "inspector.html"
 private const val SETTINGS_SCRIPT = "__settings.js"
 private const val MODULE_SCRIPT = "<script type=\"module\""
+/** Extensions the sync may have replaced with a `<name>.br` stream. */
+private val BROTLI_EXTENSIONS = setOf("css", "html", "js", "json", "md", "svg", "txt", "xml")
 
 /**
  * Pick the DevTools locale closest to [locale] from the locale data the asset
@@ -29,8 +31,8 @@ private const val MODULE_SCRIPT = "<script type=\"module\""
 private fun matchLocale(assets: AssetManager, locale: Locale): String {
     val staged = runCatching {
         assets.list(LOCALE_ROOT).orEmpty()
-            .filter { it.endsWith(".json") }
-            .map { it.removeSuffix(".json") }
+            .filter { it.endsWith(".json") || it.endsWith(".json.br") }
+            .map { it.removeSuffix(".br").removeSuffix(".json") }
     }.getOrNull().orEmpty()
     val supported = staged.ifEmpty { listOf("en-US") }
     val requested = runCatching {
@@ -170,16 +172,43 @@ internal class DevToolsServer(
             return
         }
         val assetName = "$ASSET_ROOT/$decoded"
-        val bytes = try {
-            val raw = assets.open(assetName).use { it.readBytes() }
-            if (decoded == INSPECTOR_PAGE) injectBootstrap(raw) else raw
+        // The sync stores text assets as `<name>.br` and deletes the original.
+        // inspector.html is the only file patched here, so it stays plain.
+        val (bytes, encoding) = try {
+            if (decoded == INSPECTOR_PAGE) {
+                val raw = assets.open(assetName).use { it.readBytes() }
+                injectBootstrap(raw) to null
+            } else {
+                val compressed = if (isBrotliCandidate(decoded)) {
+                    try {
+                        assets.open("$assetName.br").use { it.readBytes() }
+                    } catch (_: IOException) {
+                        null
+                    }
+                } else {
+                    null
+                }
+                if (compressed != null) {
+                    compressed to "br"
+                } else {
+                    assets.open(assetName).use { it.readBytes() } to null
+                }
+            }
         } catch (_: IOException) {
             writeResponse(output, 404, "Not Found", "text/plain; charset=utf-8", "not found".toByteArray())
             return
         }
         val mime = mimeType(decoded)
         val body = if (request.method == "HEAD") ByteArray(0) else bytes
-        writeResponse(output, 200, "OK", mime, body, contentLength = bytes.size)
+        writeResponse(
+            output,
+            200,
+            "OK",
+            mime,
+            body,
+            contentLength = bytes.size,
+            contentEncoding = encoding,
+        )
     }
 
     /** Load the app settings before the deferred DevTools module executes. */
@@ -321,11 +350,16 @@ internal class DevToolsServer(
         contentType: String,
         body: ByteArray,
         contentLength: Int = body.size,
+        contentEncoding: String? = null,
     ) {
         val header = buildString {
             append("HTTP/1.1 $status $reason\r\n")
             append("Content-Type: $contentType\r\n")
             append("Content-Length: $contentLength\r\n")
+            if (contentEncoding != null) {
+                append("Content-Encoding: $contentEncoding\r\n")
+                append("Vary: Accept-Encoding\r\n")
+            }
             append("Cache-Control: no-cache\r\n")
             append("X-Content-Type-Options: nosniff\r\n")
             append("Connection: close\r\n\r\n")
@@ -334,6 +368,9 @@ internal class DevToolsServer(
         if (body.isNotEmpty()) output.write(body)
         output.flush()
     }
+
+    private fun isBrotliCandidate(path: String): Boolean =
+        path.substringAfterLast('.', "").lowercase(Locale.ROOT) in BROTLI_EXTENSIONS
 
     private fun mimeType(path: String): String {
         return when (path.substringAfterLast('.', "").lowercase(Locale.ROOT)) {

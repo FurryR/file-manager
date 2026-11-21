@@ -20,8 +20,18 @@ import io.furryr.file.core.source.StreamFileSource
 import java.io.File
 import java.util.Locale
 
-/** One system-delivered open: the addresses a tapped file or link asked for. */
-data class OpenRequest(val id: Int, val addresses: List<String>)
+/**
+ * One system-delivered open: the addresses a tapped file or link asked for.
+ *
+ * [newTab] asks the shell to install even the first address in a tab of its
+ * own instead of replacing what the current tab shows (an in-app shortcut such
+ * as "edit this user script" uses it).
+ */
+data class OpenRequest(
+    val id: Int,
+    val addresses: List<String>,
+    val newTab: Boolean = false,
+)
 
 /**
  * System intents that ask this app to show something.

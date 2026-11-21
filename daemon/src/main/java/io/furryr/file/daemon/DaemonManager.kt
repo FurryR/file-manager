@@ -2,17 +2,24 @@ package io.furryr.file.daemon
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.system.Os
 import android.util.Log
 import io.furryr.file.daemon.file.FileService
 import io.furryr.file.daemon.ipc.DaemonConnection
+import io.furryr.file.daemon.process.CommandSpec
 import io.furryr.file.daemon.process.ExecService
 import io.furryr.file.uds.Transport
 import io.furryr.file.uds.UdsClient
 import io.furryr.file.uds.UdsEndpoint
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /** Which daemon a caller wants to talk to. */
@@ -75,6 +82,16 @@ object DaemonManager {
     private const val TAG = "DaemonManager"
     private const val DaemonBinaryName = "libfiledaemon.so"
 
+    /** Packaged library name → command name exposed through [binDir]. */
+    private val NativeUtilities = mapOf(
+        "run0" to "librun0.so",
+        "here" to "libhere.so",
+        "agent" to "libagent.so",
+    )
+
+    /** Adb shell can only search `/data/local/tmp`, not app-private storage. */
+    private const val ShellUtilityDir = "/data/local/tmp/io.furryr.file-bin"
+
     /** Target id the primary daemon socket name is derived from (and the
      *  automatic cgroup name). One launch strategy: `su` when root is
      *  available, otherwise the app UID. */
@@ -134,6 +151,77 @@ object DaemonManager {
     /** Directory holding the packaged native utilities (`run0`, `here`, `agent`). */
     val nativeLibraryDir: String get() = appContext.applicationInfo.nativeLibraryDir
 
+    /**
+     * Directory of original-name symlinks into [nativeLibraryDir]. Android only
+     * extracts `lib*.so`, so `run0`, `here` and `agent` are recreated here on
+     * every process start.
+     */
+    val binDir: String get() = binDirectory.absolutePath
+
+    private val binDirectory: File by lazy { createBinDirectory() }
+
+    private fun createBinDirectory(): File {
+        val dir = File(appContext.filesDir, "bin")
+        dir.mkdirs()
+        for ((name, target) in NativeUtilities) {
+            val link = File(dir, name)
+            val binary = File(nativeLibraryDir, target)
+            if (runCatching { Os.readlink(link.absolutePath) }.getOrNull() == binary.absolutePath) continue
+            runCatching {
+                link.delete()
+                Os.symlink(binary.absolutePath, link.absolutePath)
+            }.onFailure { Log.w(TAG, "Failed to link native utility $name", it) }
+        }
+        return dir
+    }
+
+    /** Set while the primary host daemon runs as the adb shell UID (Shizuku). */
+    @Volatile private var primaryShellUid = false
+
+    @Volatile private var shellBinReady = false
+
+    private val shellScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Directory a spawned host shell can search for `run0`/`here`/`agent`.
+     * The app-private [binDir] is unreachable to the adb shell UID, so a
+     * Shizuku daemon maintains a second original-name link set in
+     * [ShellUtilityDir]; root and app-UID daemons keep using [binDir].
+     */
+    suspend fun utilityDir(): String {
+        withContext(Dispatchers.IO) { connection(DaemonTarget.Host) }
+        if (!primaryShellUid) return binDir
+        return ensureShellBinDir()
+    }
+
+    private suspend fun ensureShellBinDir(): String {
+        if (shellBinReady) return ShellUtilityDir
+        val dir = File(ShellUtilityDir)
+        val script = buildString {
+            append("mkdir -p ").append(shellQuote(dir.absolutePath))
+            for ((name, target) in NativeUtilities) {
+                append(" && ln -sf ")
+                    .append(shellQuote(File(nativeLibraryDir, target).absolutePath))
+                    .append(' ')
+                    .append(shellQuote(File(dir, name).absolutePath))
+            }
+        }
+        val channel = execService(DaemonTarget.Host).spawnPipes(
+            CommandSpec(command = "/system/bin/sh", args = listOf("-c", script)),
+        ).getOrElse {
+            Log.w(TAG, "Cannot create shell utility directory", it)
+            return binDir
+        }
+        val exit = runCatching { channel.waitFor().getOrThrow() }.getOrNull()
+        runCatching { channel.closeProcess() }
+        if (exit != 0) {
+            Log.w(TAG, "Shell utility directory setup exited with $exit")
+            return binDir
+        }
+        shellBinReady = true
+        return ShellUtilityDir
+    }
+
     // ── Configuration ─────────────────────────────────────────────────
 
     @Synchronized
@@ -142,6 +230,7 @@ object DaemonManager {
         // Lift the hidden-API restriction (needed for android.system.Os.recvmsg)
         // before any daemon I/O starts.
         HiddenApi.ensure()
+        binDir
         val nativeLib = File(appContext.applicationInfo.nativeLibraryDir, DaemonBinaryName)
         if (!nativeLib.exists()) {
             Log.w(TAG, "Daemon binary not found at ${nativeLib.absolutePath}")
@@ -331,6 +420,8 @@ object DaemonManager {
             named.clear()
             updateNamedSnapshot()
             rootActive = false
+            primaryShellUid = false
+            shellBinReady = false
             _status.value = DaemonStatus.Idle
             had
         }
@@ -460,12 +551,14 @@ object DaemonManager {
     private fun startPrimaryLocked(): DaemonConnection {
         primary?.let { if (it.isAlive()) return it; it.close(); primary = null }
         rootActive = false
+        shellBinReady = false
         _status.value = DaemonStatus.Connecting
         return try {
             startPrimary().also {
                 primary = it
                 _generation++
                 _status.value = DaemonStatus.Connected
+                if (primaryShellUid) shellScope.launch { ensureShellBinDir() }
             }
         } catch (e: Exception) {
             _status.value = DaemonStatus.Failed(e)
@@ -506,6 +599,7 @@ object DaemonManager {
     private fun startDirectDaemon(id: String): DaemonConnection {
         val identity = DaemonIdentity(id)
         val executable = getExecutable()
+        if (id == HostId) primaryShellUid = false
         Log.i(TAG, "Starting daemon: ${executable.absolutePath} --id ${identity.id}")
         val process = ProcessBuilder(
             executable.absolutePath, "--key", identity.publicKeyHex(), "--id", identity.id,
@@ -517,6 +611,7 @@ object DaemonManager {
     private fun startRootDaemon(): DaemonConnection {
         val identity = DaemonIdentity(HostId)
         val executable = getExecutable()
+        primaryShellUid = false
         val cmd = "export PATH=${shellQuote(daemonPath())}; exec ${shellQuote(executable.absolutePath)} --key ${shellQuote(identity.publicKeyHex())} --id ${shellQuote(identity.id)}"
         Log.i(TAG, "Starting root daemon: $suPath -c $cmd")
         val process = ProcessBuilder(suPath, "-c", cmd)
@@ -529,10 +624,11 @@ object DaemonManager {
     private fun startShizukuDaemon(): DaemonConnection {
         val identity = DaemonIdentity(HostId)
         val executable = getExecutable()
+        primaryShellUid = true
         Log.i(TAG, "Starting daemon via Shizuku: ${executable.absolutePath} --id ${identity.id}")
         val process = shizukuNewProcess(
             arrayOf(executable.absolutePath, "--key", identity.publicKeyHex(), "--id", identity.id),
-            arrayOf("PATH=${daemonPath()}"),
+            arrayOf("PATH=${shellPath()}"),
             appContext.filesDir.absolutePath)
         return connectStarted(identity, process)
     }
@@ -566,7 +662,11 @@ object DaemonManager {
     }
 
     private fun daemonPath(): String =
-        "/system/bin:/system/xbin:/vendor/bin:${appContext.applicationInfo.nativeLibraryDir}"
+        "/system/bin:/system/xbin:/vendor/bin:${binDir}"
+
+    /** Shizuku children run as the adb shell UID, which cannot read [binDir]. */
+    private fun shellPath(): String =
+        "/system/bin:/system/xbin:/vendor/bin:$ShellUtilityDir"
 
     private fun getExecutable(): File = executableFile
         ?: throw IllegalStateException("Daemon binary not installed. Call init() first.")

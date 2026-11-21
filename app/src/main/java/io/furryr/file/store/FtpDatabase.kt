@@ -17,4 +17,17 @@ class FtpDatabase(context: Context) : ServerDatabase<FtpServer>(
     override fun ftpServers(): List<FtpServer> = getAll()
 
     override fun ftpServer(host: String): FtpServer? = findByHost(host)
+
+    /** Merge backup rows, keeping the host as identity and overwriting it. */
+    fun restore(servers: List<FtpServer>) {
+        for (server in servers) {
+            writableDatabase.execSQL(
+                "INSERT OR REPLACE INTO servers (host, name, port, username, password, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+                arrayOf(
+                    server.host, server.name, server.port,
+                    server.username, server.password, server.sortOrder,
+                ),
+            )
+        }
+    }
 }

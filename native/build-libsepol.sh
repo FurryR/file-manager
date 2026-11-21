@@ -10,21 +10,37 @@ set -euo pipefail
 # here and the archive is linked into the one daemon artifact. Rust only sees
 # the C boundary it owns (native/src/sepolicy.rs).
 #
-# Usage: bash native/build-libsepol.sh [aarch64|x86_64]
+# Usage: bash native/build-libsepol.sh [aarch64|armv7|x86|x86_64]
 #
-# Downloads go through gh-proxy.com by default (GFW). Override the mirror with
-# GH_PROXY=<url>, or set GH_PROXY= to fetch from github.com directly.
+# Downloads go through the upstream host by default. Set GH_PROXY to a
+# mirror prefix when the upstream is unreachable (for example
+# GH_PROXY=https://gh-proxy.com/); F-Droid builds should use the default so
+# the source comes from the project's own release archive.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIBSEPOL_VERSION="3.11"
 LIBSEPOL_SHA256="6ac2a91c05243895e69d5ecd182b78e3f90f09f0fed33933f0e026f4ed44cde6"
-GH_PROXY="${GH_PROXY-https://gh-proxy.com}"
+GH_PROXY="${GH_PROXY-}"
 
 ABI="${1:-aarch64}"
 case "$ABI" in
-    aarch64) TRIPLE="aarch64-linux-android" ;;
-    x86_64) TRIPLE="x86_64-linux-android" ;;
-    *) echo "unsupported ABI: $ABI (use aarch64 or x86_64)" >&2; exit 1 ;;
+    aarch64)
+        TRIPLE="aarch64-linux-android"
+        RUST_TRIPLE="aarch64-linux-android"
+        ;;
+    armv7)
+        TRIPLE="armv7a-linux-androideabi"
+        RUST_TRIPLE="armv7-linux-androideabi"
+        ;;
+    x86)
+        TRIPLE="i686-linux-android"
+        RUST_TRIPLE="i686-linux-android"
+        ;;
+    x86_64)
+        TRIPLE="x86_64-linux-android"
+        RUST_TRIPLE="x86_64-linux-android"
+        ;;
+    *) echo "unsupported ABI: $ABI (use aarch64, armv7, x86 or x86_64)" >&2; exit 1 ;;
 esac
 API=26
 
@@ -57,7 +73,7 @@ NM="$TOOLCHAIN/bin/llvm-nm"
 WORK_DIR="${LIBSEPOL_BUILD_DIR:-$ROOT_DIR/cache/native/libsepol-${LIBSEPOL_VERSION}-${ABI}}"
 CACHE_DIR="$ROOT_DIR/cache/file-manager"
 SRC="$WORK_DIR/selinux-$LIBSEPOL_VERSION"
-PREFIX="$ROOT_DIR/native/sepolicy/prefix/$TRIPLE"
+PREFIX="$ROOT_DIR/native/sepolicy/prefix/$RUST_TRIPLE"
 TARBALL="$CACHE_DIR/selinux-$LIBSEPOL_VERSION.tar.gz"
 
 mkdir -p "$WORK_DIR" "$CACHE_DIR"
@@ -74,10 +90,10 @@ if [[ ! -d "$SRC" ]]; then tar -xf "$TARBALL" -C "$WORK_DIR"; fi
 # (libsepol's %.o rule already adds -fPIC). CIL is the policy source language;
 # the daemon edits the binary policydb directly, so its parser and the flex
 # build dependency stay out. Set LIBSEPOL_DISABLE_CIL=n to keep CIL anyway.
-CFLAGS="-O2 -fPIC -ffunction-sections -fdata-sections -fvisibility=hidden"
+CFLAGS="-Oz -fPIC -ffunction-sections -fdata-sections -fvisibility=hidden"
 DISABLE_CIL="${LIBSEPOL_DISABLE_CIL:-y}"
 STAMP="$WORK_DIR/build.stamp"
-STAMP_KEY="$LIBSEPOL_VERSION|$TRIPLE|$CFLAGS|$DISABLE_CIL"
+STAMP_KEY="$LIBSEPOL_VERSION|$RUST_TRIPLE|$CFLAGS|$DISABLE_CIL"
 if [[ ! -f "$STAMP" || "$(<"$STAMP")" != "$STAMP_KEY" ]]; then
     make -C "$SRC/libsepol/src" clean >/dev/null 2>&1 || true
 fi
@@ -94,7 +110,7 @@ cp -R "$SRC/libsepol/include/sepol" "$PREFIX/include/sepol"
 # The daemon links exactly one archive: the container policy shim followed by
 # every libsepol member it may call. Merging them keeps archive order out of
 # the Rust link line.
-"$CC" -std=c11 -O2 -fPIC -fvisibility=hidden -ffunction-sections \
+"$CC" -std=c11 -Oz -fPIC -fvisibility=hidden -ffunction-sections \
     -fdata-sections -Wall -Wextra -Wno-unused-parameter \
     -I"$PREFIX/include" -c "$ROOT_DIR/native/sepolicy/shim.c" \
     -o "$WORK_DIR/shim.o"

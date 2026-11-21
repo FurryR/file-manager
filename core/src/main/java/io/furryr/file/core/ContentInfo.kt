@@ -91,6 +91,9 @@ object ContentTypes {
         register("application/x-xz", "xz")
         register("application/x-bzip2", "bz2")
         register("application/octet-stream", "bin", "so", "dll", "dex", "class")
+        register("font/ttf", "ttf")
+        register("font/otf", "otf")
+        register("font/collection", "ttc")
     }
 
     private val codeMimes = setOf(

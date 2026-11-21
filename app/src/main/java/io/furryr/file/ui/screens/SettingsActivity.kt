@@ -11,8 +11,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
-import android.provider.OpenableColumns
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -67,11 +67,16 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import io.furryr.file.R
 import io.furryr.file.AppLocale
+import io.furryr.file.adblock.AdBlockSettings
+import io.furryr.file.userscript.UserScriptStore
 import io.furryr.file.terminal.SessionManager
 import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.editor.EditorPreferences
+import io.furryr.file.picker.FilePickerActivity
+import io.furryr.file.picker.PickerDocuments
 import io.furryr.file.pulse.PulseManager
 import io.furryr.file.settings.PulseSettings
+import io.furryr.file.settings.SettingsBackup
 import io.furryr.file.ui.theme.FileManagerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -155,6 +160,8 @@ private fun SettingsMainPage(
     var showColorSchemeDialog by remember { mutableStateOf(false) }
     var searchEngine by remember { mutableStateOf(SearchEngines.current(context)) }
     var searchSuggestions by remember { mutableStateOf(SearchSettings.suggestionsEnabled(context)) }
+    var adBlockEnabled by remember { mutableStateOf(AdBlockSettings.isEnabled(context)) }
+    var userScriptCount by remember { mutableStateOf(UserScriptStore.count(context)) }
     var amoledBlack by remember { mutableStateOf(PaletteStore.amoled(context)) }
     var showAboutDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -190,6 +197,8 @@ private fun SettingsMainPage(
 
     LifecycleResumeEffect(Unit) {
         searchEngine = SearchEngines.current(context)
+        adBlockEnabled = AdBlockSettings.isEnabled(context)
+        userScriptCount = UserScriptStore.count(context)
         onPauseOrDispose { }
     }
 
@@ -280,6 +289,24 @@ private fun SettingsMainPage(
                 },
             )
             SettingsDivider()
+            SettingsValueRow(
+                title = stringResource(R.string.settings_adblock),
+                value = stringResource(
+                    if (adBlockEnabled) R.string.adblock_enabled else R.string.adblock_disabled,
+                ),
+                onClick = {
+                    context.startActivity(Intent(context, AdBlockSettingsActivity::class.java))
+                },
+            )
+            SettingsDivider()
+            SettingsValueRow(
+                title = stringResource(R.string.settings_userscripts),
+                value = stringResource(R.string.userscripts_count, userScriptCount),
+                onClick = {
+                    context.startActivity(Intent(context, UserScriptSettingsActivity::class.java))
+                },
+            )
+            SettingsDivider()
 
             SettingsSection(stringResource(R.string.startup))
             SettingsToggleRow(
@@ -365,46 +392,92 @@ private fun SettingsMainPage(
             SessionSettingsItem()
             SettingsDivider()
 
-            val fontPickerLauncher = rememberLauncherForActivityResult(
-                ActivityResultContracts.OpenDocument()
-            ) { uri: Uri? ->
-                if (uri != null) {
-                    scope.launch {
-                        val path = withContext(Dispatchers.IO) {
-                            val displayName = context.contentResolver.query(uri, null, null, null, null)?.use {
-                                if (it.moveToFirst()) it.getString(it.getColumnIndex(OpenableColumns.DISPLAY_NAME)) else null
-                            } ?: "custom_font.ttf"
-                            val dest = File(context.cacheDir, "fonts/$displayName")
-                            dest.parentFile?.mkdirs()
-                            context.contentResolver.openInputStream(uri)?.use { input ->
-                                dest.outputStream().use { output -> input.copyTo(output) }
-                            }
-                            dest.absolutePath
+            fun pickerIntent(
+                action: String,
+                type: String,
+                mimeTypes: Array<String>? = null,
+                title: String? = null,
+            ) = Intent(context, FilePickerActivity::class.java).apply {
+                this.action = action
+                this.type = type
+                mimeTypes?.let { putExtra(Intent.EXTRA_MIME_TYPES, it) }
+                title?.let { putExtra(Intent.EXTRA_TITLE, it) }
+                addCategory(Intent.CATEGORY_OPENABLE)
+            }
+
+            fun storeFont(uri: Uri, editor: Boolean) {
+                scope.launch {
+                    val path = withContext(Dispatchers.IO) {
+                        val displayName = PickerDocuments.pathOf(uri)?.substringAfterLast('/')
+                            ?.takeIf { it.isNotBlank() } ?: "custom_font.ttf"
+                        val dest = if (editor) File(context.cacheDir, "fonts/editor/$displayName")
+                        else File(context.cacheDir, "fonts/$displayName")
+                        dest.parentFile?.mkdirs()
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            dest.outputStream().use { output -> input.copyTo(output) }
                         }
+                        dest.absolutePath
+                    }
+                    if (editor) {
+                        editorFont = path
+                        prefs.edit().putString(EditorPreferences.FONT_KEY, path).apply()
+                    } else {
                         terminalFont = path
                         prefs.edit().putString("terminal_font", path).apply()
                     }
                 }
             }
+
+            val fontPickerLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.StartActivityForResult()
+            ) { result ->
+                result.data?.data?.let { storeFont(it, editor = false) }
+            }
             val editorFontPickerLauncher = rememberLauncherForActivityResult(
-                ActivityResultContracts.OpenDocument()
-            ) { uri: Uri? ->
-                if (uri != null) {
-                    scope.launch {
-                        val path = withContext(Dispatchers.IO) {
-                            val displayName = context.contentResolver.query(uri, null, null, null, null)?.use {
-                                if (it.moveToFirst()) it.getString(it.getColumnIndex(OpenableColumns.DISPLAY_NAME)) else null
-                            } ?: "custom_font.ttf"
-                            val dest = File(context.cacheDir, "fonts/editor/$displayName")
-                            dest.parentFile?.mkdirs()
-                            context.contentResolver.openInputStream(uri)?.use { input ->
-                                dest.outputStream().use { output -> input.copyTo(output) }
-                            }
-                            dest.absolutePath
-                        }
-                        editorFont = path
-                        prefs.edit().putString(EditorPreferences.FONT_KEY, path).apply()
+                ActivityResultContracts.StartActivityForResult()
+            ) { result ->
+                result.data?.data?.let { storeFont(it, editor = true) }
+            }
+            val configImportLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.StartActivityForResult()
+            ) { result ->
+                val uri = result.data?.data ?: return@rememberLauncherForActivityResult
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) {
+                        runCatching {
+                            val text = context.contentResolver.openInputStream(uri)
+                                ?.bufferedReader()
+                                ?.use { it.readText() }
+                                ?: error("Cannot read configuration")
+                            SettingsBackup.import(context, text).getOrThrow()
+                        }.isSuccess
                     }
+                    Toast.makeText(
+                        context,
+                        if (ok) R.string.settings_config_imported else R.string.settings_config_failed,
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    if (ok) (context as? android.app.Activity)?.recreate()
+                }
+            }
+            val configExportLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.StartActivityForResult()
+            ) { result ->
+                val uri = result.data?.data ?: return@rememberLauncherForActivityResult
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) {
+                        runCatching {
+                            val text = SettingsBackup.export(context)
+                            context.contentResolver.openOutputStream(uri, "wt")?.use {
+                                it.write(text.toByteArray())
+                            } ?: error("Cannot write configuration")
+                        }.isSuccess
+                    }
+                    Toast.makeText(
+                        context,
+                        if (ok) R.string.settings_config_exported else R.string.settings_config_failed,
+                        Toast.LENGTH_SHORT,
+                    ).show()
                 }
             }
             SettingsValueRow(
@@ -412,12 +485,10 @@ private fun SettingsMainPage(
                 value = terminalFont.ifBlank { stringResource(R.string.settings_terminal_font_desc) },
                 onClick = {
                     fontPickerLauncher.launch(
-                        arrayOf(
-                            "font/ttf",
-                            "font/otf",
-                            "font/x-ttf",
-                            "application/x-font-ttf",
-                            "application/x-font-opentype",
+                        pickerIntent(
+                            Intent.ACTION_OPEN_DOCUMENT,
+                            "font/*",
+                            arrayOf("font/ttf", "font/otf", "font/collection"),
                         ),
                     )
                 },
@@ -441,12 +512,10 @@ private fun SettingsMainPage(
                 value = editorFont.ifBlank { stringResource(R.string.settings_editor_font_desc) },
                 onClick = {
                     editorFontPickerLauncher.launch(
-                        arrayOf(
-                            "font/ttf",
-                            "font/otf",
-                            "font/x-ttf",
-                            "application/x-font-ttf",
-                            "application/x-font-opentype",
+                        pickerIntent(
+                            Intent.ACTION_OPEN_DOCUMENT,
+                            "font/*",
+                            arrayOf("font/ttf", "font/otf", "font/collection"),
                         ),
                     )
                 },
@@ -463,6 +532,31 @@ private fun SettingsMainPage(
                 value = stringResource(R.string.editor_lsp_settings_desc),
                 onClick = {
                     context.startActivity(Intent(context, LspSettingsActivity::class.java))
+                },
+            )
+            SettingsDivider()
+            SettingsSection(stringResource(R.string.settings_config))
+            SettingsValueRow(
+                title = stringResource(R.string.settings_config_import),
+                value = stringResource(R.string.settings_config_import_desc),
+                onClick = {
+                    configImportLauncher.launch(
+                        pickerIntent(Intent.ACTION_OPEN_DOCUMENT, "application/json"),
+                    )
+                },
+            )
+            SettingsDivider()
+            SettingsValueRow(
+                title = stringResource(R.string.settings_config_export),
+                value = stringResource(R.string.settings_config_export_desc),
+                onClick = {
+                    configExportLauncher.launch(
+                        pickerIntent(
+                            Intent.ACTION_CREATE_DOCUMENT,
+                            "application/json",
+                            title = "file-manager-config.json",
+                        ),
+                    )
                 },
             )
             SettingsDivider()

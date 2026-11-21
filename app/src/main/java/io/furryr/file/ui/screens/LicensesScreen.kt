@@ -78,7 +78,6 @@ private val FALLBACK_LICENSES = listOf(
     LicenseRecord(name = "Smithay", license = "MIT License", url = "https://github.com/Smithay/smithay"),
     LicenseRecord(name = "libxkbcommon", license = "MIT License", url = "https://github.com/xkbcommon/libxkbcommon"),
     LicenseRecord(name = "xkeyboard-config", license = "MIT License", url = "https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config"),
-    LicenseRecord(name = "libepoxy", license = "MIT License", url = "https://github.com/anholt/libepoxy"),
     LicenseRecord(name = "Apache Commons Net", license = "Apache License 2.0", url = "https://commons.apache.org/proper/commons-net/"),
     LicenseRecord(name = "JSch", license = "BSD 3-Clause License", url = "https://github.com/mwiede/jsch"),
     LicenseRecord(name = "Sora Editor / TextMate", license = "GNU LGPL 2.1 or later", url = "https://github.com/Rosemoe/sora-editor/tree/0.23.5"),

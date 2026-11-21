@@ -47,6 +47,9 @@ import kotlin.math.roundToInt
 // re-renders the visible transcript.
 private fun applyTerminalPalette(view: TerminalView, palette: TerminalPalette) {
     val colors = view.mEmulator?.mColors?.mCurrentColors ?: return
+    // A recomposition (for example a file-tab switch) must not repaint through
+    // onScreenUpdated(): Termux snaps the view to the bottom on every call.
+    if (palette.matches(colors)) return
     palette.applyTo(colors)
     view.onScreenUpdated()
 }
@@ -155,7 +158,14 @@ private fun TerminalSurfaceContent(
                 // view. Registration must follow both directions, or the view
                 // stops repainting until the activity (and this factory) runs
                 // again.
-                val listener: (TerminalSession) -> Unit = { terminalView.onScreenUpdated() }
+                // The surface is shared by every terminal tab. Termux's
+                // onScreenUpdated() scrolls the view to the bottom, so output
+                // from a background tab (a full-screen program keeps writing)
+                // would repeatedly yank the tab on screen down. Repaint only
+                // for the session this view is actually showing.
+                val listener: (TerminalSession) -> Unit = { changed ->
+                    if (changed === terminalView.currentSession) terminalView.onScreenUpdated()
+                }
                 SessionManager.addTextChangedListener(listener)
                 wrapper.addOnAttachStateChangeListener(object : OnAttachStateChangeListener {
                     override fun onViewAttachedToWindow(v: View) {

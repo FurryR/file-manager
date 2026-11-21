@@ -19,6 +19,15 @@ class TerminalPalette(
         colors[257] = background
         colors[258] = cursor
     }
+
+    /** True when [colors] already carries this palette; no repaint needed. */
+    fun matches(colors: IntArray): Boolean {
+        if (colors.size < 259 || ansi.size < 16) return false
+        for (index in 0 until 16) {
+            if (colors[index] != ansi[index]) return false
+        }
+        return colors[256] == foreground && colors[257] == background && colors[258] == cursor
+    }
 }
 
 // Well-known terminal themes: the xterm.js default plus the schemes published

@@ -39,6 +39,7 @@ import io.furryr.file.store.LocalLocationStore
 import io.furryr.file.store.LocationStores
 import io.furryr.file.store.LocationsRepository
 import io.furryr.file.store.WebLocationStore
+import io.furryr.file.userscript.UserScriptEngine
 
 private var processInstalled = false
 private var runtimeListenerInstalled = false
@@ -63,6 +64,7 @@ fun ensureProcessServices(context: Context) {
     // registry asks the app to keep its foreground service alive.
     WebTransfers.init { WebTransferService.start(appContext) }
     AgentSettings.install(appContext)
+    runCatching { UserScriptEngine.load(appContext) }
     PulseSettings.install(appContext)
     // Bridge the old per-language command store once. Container/root were
     // workarounds; the new runtime derives both from the file's VFS node.

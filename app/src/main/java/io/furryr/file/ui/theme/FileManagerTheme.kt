@@ -9,6 +9,10 @@ import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.Spring
@@ -19,6 +23,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -113,7 +118,18 @@ fun FileManagerTheme(
     val palette = PaletteStore.current(LocalContext.current)
     val amoled = PaletteStore.amoled(LocalContext.current)
     val targetColors = if (darkTheme) palette.darkColors(amoled) else palette.lightColors()
-    val colors = animatedColorScheme(targetColors)
+    // Animate only the window the user can see. A paused activity (the file
+    // manager sitting behind Settings while its AMOLED switch is toggled) still
+    // observes the shared palette revision, and animating its whole tree per
+    // frame doubles the composition work and steals frames from the visible
+    // window. Paused colours snap to the target instead; they are not on screen
+    // and the next resume shows the final scheme with no pending animation.
+    var resumed by remember { mutableStateOf(false) }
+    LifecycleResumeEffect(Unit) {
+        resumed = true
+        onPauseOrDispose { resumed = false }
+    }
+    val colors = if (resumed) animatedColorScheme(targetColors) else targetColors
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {

@@ -1,4 +1,4 @@
-name: Build debug APK
+name: Build APKs
 
 on:
   push:
@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build Android debug APK
+    name: Build universal and per-ABI APKs
     runs-on: ubuntu-latest
 
     steps:
@@ -37,29 +37,54 @@ jobs:
       - name: Check flake
         run: nix flake check --no-write-lock-file --no-update-lock-file
 
-      - name: Build native artifacts and APK
+      - name: Build universal debug APK
         run: |
           nix develop --command bash -c '
             set -euo pipefail
-            gradle clean :app:assembleDebug --no-daemon
+            gradle clean :app:assembleDebug -Pabi=universal --no-daemon
           '
+
+      - name: Build per-ABI debug APKs
+        run: |
+          set -euo pipefail
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            nix develop --command gradle :app:assembleDebug \
+              -Pabi="$abi" -PskipNativeBuild -PskipDevToolsBuild --no-daemon
+            cp app/build/outputs/apk/debug/app-debug.apk "app-debug-$abi.apk"
+          done
 
       - name: Verify packaged native artifacts
         run: |
           set -euo pipefail
-          apk=app/build/outputs/apk/debug/app-debug.apk
-          test -f "$apk"
-          listing="$(unzip -Z1 "$apk")"
+          universal=app/build/outputs/apk/debug/app-debug.apk
+          test -f "$universal"
+          listing="$(unzip -Z1 "$universal")"
+
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            for entry in \
+              "lib/$abi/libfiledaemon.so" \
+              "lib/$abi/libproot.so" \
+              "lib/$abi/libpulsehost.so" \
+              "lib/$abi/libwayland_compositor.so" \
+              "lib/$abi/libeglshim.so" \
+              "lib/$abi/librun0.so" \
+              "lib/$abi/libhere.so" \
+              "lib/$abi/libagent.so"; do
+              grep -Fxq "$entry" <<< "$listing"
+            done
+
+            per_abi="app-debug-$abi.apk"
+            test -f "$per_abi"
+            per_listing="$(unzip -Z1 "$per_abi")"
+            for entry in \
+              "lib/$abi/libfiledaemon.so" \
+              "lib/$abi/libproot.so" \
+              "lib/$abi/libpulsehost.so"; do
+              grep -Fxq "$entry" <<< "$per_listing"
+            done
+          done
 
           for entry in \
-            lib/arm64-v8a/libfiledaemon.so \
-            lib/arm64-v8a/libproot.so \
-            lib/arm64-v8a/libpulsehost.so \
-            lib/arm64-v8a/libwayland_compositor.so \
-            lib/arm64-v8a/libeglshim.so \
-            lib/arm64-v8a/run0 \
-            lib/arm64-v8a/here \
-            lib/arm64-v8a/agent \
             assets/xkb/rules/evdev \
             assets/xkb/rules/evdev.xml \
             assets/xkb/symbols/us; do
@@ -68,14 +93,22 @@ jobs:
 
           # The daemon must carry the chroot container policy backend; a stale
           # jniLibs binary otherwise ships a terminal with no SELinux injection.
-          unzip -p "$apk" lib/arm64-v8a/libfiledaemon.so \
+          unzip -p "$universal" lib/arm64-v8a/libfiledaemon.so \
             | strings \
             | grep -Fq 'container domain injected'
 
-      - name: Upload debug APK
+      - name: Upload universal APK
         uses: actions/upload-artifact@v7
         with:
-          name: app-debug-${{ github.sha }}
+          name: app-debug-universal-${{ github.sha }}
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload per-ABI APKs
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-debug-abis-${{ github.sha }}
+          path: app-debug-*.apk
           if-no-files-found: error
           retention-days: 14

@@ -41,6 +41,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import io.furryr.file.AppLocale
 import io.furryr.file.R
+import io.furryr.file.lsp.LspCatalog
 import io.furryr.file.lsp.LspConfigStore
 import io.furryr.file.lsp.LspLanguageRule
 import io.furryr.file.lsp.LspOverrideRule
@@ -78,6 +79,13 @@ private fun LspConfigPage(onBack: () -> Unit) {
     var languageEditing by remember { mutableStateOf<LspLanguageRule?>(null) }
     var overrideOpen by remember { mutableStateOf(false) }
     var overrideEditing by remember { mutableStateOf<LspOverrideRule?>(null) }
+    val builtIns = remember { LspCatalog.builtInLanguageRules(context) }
+    val builtInIds = remember(builtIns) { builtIns.mapTo(mutableSetOf()) { it.id } }
+    val configured = remember(config.languages) { config.languages.associateBy { it.id } }
+    val languages = remember(builtIns, config.languages) {
+        builtIns.map { builtIn -> builtIn.withOverride(configured[builtIn.id]) } +
+            config.languages.filterNot { it.id in builtInIds }
+    }
 
     fun store(next: io.furryr.file.lsp.LspUserConfig) {
         config = next
@@ -114,15 +122,9 @@ private fun LspConfigPage(onBack: () -> Unit) {
                     languageOpen = true
                 },
             )
-            if (config.languages.isEmpty()) {
-                Text(
-                    stringResource(R.string.lsp_empty_languages),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(16.dp),
-                )
-            }
-            for (language in config.languages) {
+            for (language in languages) {
+                val builtIn = language.id in builtInIds
+                val overridden = builtIn && language.id in configured
                 RuleRow(
                     title = language.label.ifBlank { language.id },
                     subtitle = listOfNotNull(
@@ -134,9 +136,16 @@ private fun LspConfigPage(onBack: () -> Unit) {
                         languageEditing = language
                         languageOpen = true
                     },
-                    onDelete = {
-                        store(config.copy(languages = config.languages.filterNot { it.id == language.id }))
-                    },
+                    onDelete = if (!builtIn || overridden) {
+                        {
+                            store(
+                                config.copy(
+                                    languages = config.languages.filterNot { it.id == language.id },
+                                ),
+                            )
+                        }
+                    } else null,
+                    deleteLabel = if (builtIn) R.string.lsp_reset else R.string.delete,
                 )
             }
 
@@ -220,7 +229,8 @@ private fun RuleRow(
     title: String,
     subtitle: String,
     onEdit: () -> Unit,
-    onDelete: () -> Unit,
+    onDelete: (() -> Unit)?,
+    deleteLabel: Int = R.string.delete,
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -237,7 +247,9 @@ private fun RuleRow(
             }
         }
         TextButton(onClick = onEdit) { Text(stringResource(R.string.agent_provider_edit)) }
-        TextButton(onClick = onDelete) { Text(stringResource(R.string.delete)) }
+        onDelete?.let { delete ->
+            TextButton(onClick = delete) { Text(stringResource(deleteLabel)) }
+        }
     }
 }
 
@@ -505,6 +517,30 @@ private fun EnabledRow(enabled: Boolean, onChange: (Boolean) -> Unit) {
         Text(stringResource(R.string.lsp_enabled), modifier = Modifier.weight(1f))
         Switch(checked = enabled, onCheckedChange = onChange)
     }
+}
+
+/**
+ * Apply one user rule to a built-in entry exactly like the catalog's JSON
+ * overlay: non-empty fields replace, empty fields inherit, and an explicit
+ * disable wins.
+ */
+private fun LspLanguageRule.withOverride(rule: LspLanguageRule?): LspLanguageRule {
+    if (rule == null) return this
+    return copy(
+        label = rule.label.ifBlank { label },
+        extensions = rule.extensions.ifEmpty { extensions },
+        exactNames = rule.exactNames.ifEmpty { exactNames },
+        markers = rule.markers.ifEmpty { markers },
+        command = rule.command.ifEmpty { command },
+        args = rule.args.ifEmpty { args },
+        workspace = rule.workspace.ifBlank { workspace },
+        rootMode = rule.rootMode.ifBlank { rootMode },
+        enabled = enabled && rule.enabled,
+        lspLanguageIds = rule.lspLanguageIds.ifEmpty { lspLanguageIds },
+        env = rule.env.ifEmpty { env },
+        initializationOptions = rule.initializationOptions ?: initializationOptions,
+        settings = rule.settings ?: settings,
+    )
 }
 
 private fun commandTokens(text: String): List<String> =

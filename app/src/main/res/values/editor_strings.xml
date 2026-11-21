@@ -37,8 +37,7 @@
     <string name="lsp_overrides">Overrides</string>
     <string name="lsp_add_language">Add language</string>
     <string name="lsp_add_override">Add override</string>
-    <string name="lsp_empty_languages">No custom languages. Built-in languages work without configuration.</string>
-    <string name="lsp_empty_overrides">No location overrides.</string>
+    <string name="lsp_empty_overrides">No location overrides</string>
     <string name="lsp_language_id">Language ID</string>
     <string name="lsp_label">Label</string>
     <string name="lsp_extensions">Extensions</string>
@@ -57,6 +56,7 @@
     <string name="lsp_language">Language (optional)</string>
     <string name="lsp_enabled">Enabled</string>
     <string name="lsp_inherit">Inherit</string>
+    <string name="lsp_reset">Reset</string>
     <string name="editor_saving_wait">Wait for the current save to finish.</string>
     <string name="editor_read_only">read-only</string>
 </resources>

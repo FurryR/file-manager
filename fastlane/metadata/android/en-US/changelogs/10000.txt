@@ -1,0 +1,6 @@
+Initial F-Droid release.
+
+Tabbed file manager with local, SAF, FTP, SFTP, SSH, AList and HTTP(S)
+locations, archive views, editor, browser and optional root/Shizuku
+access. Includes the container, Wayland, PulseAudio, AI agent and
+DevTools features.

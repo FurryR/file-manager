@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Builds the modified PRoot binary used by the container daemon.
+# Builds the modified PRoot binary used by the container daemon for every
+# requested Android ABI.
+#
+# Usage: bash native/build-proot.sh [arm64-v8a|armeabi-v7a|x86|x86_64 ...]
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NATIVE_DIR="$ROOT_DIR/native"
-JNI_DIR="$ROOT_DIR/app/src/main/jniLibs/arm64-v8a"
-WORK_DIR="$(mktemp -d /tmp/proot-build-XXXXXX)"
-trap 'rm -rf "$WORK_DIR"' EXIT
-
-echo "==> Building proot for aarch64-linux-android (static with embedded loader)"
+ALL_ABIS=(arm64-v8a armeabi-v7a x86 x86_64)
+if (( $# == 0 )); then
+  ABIS=("${ALL_ABIS[@]}")
+else
+  ABIS=("$@")
+fi
+WORK_ROOT="$(mktemp -d /tmp/proot-build-XXXXXX)"
+trap 'rm -rf "$WORK_ROOT"' EXIT
 
 # --- NDK detection ---
 SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
@@ -21,7 +27,6 @@ if [[ -z "$SDK_ROOT" ]]; then
   fi
 fi
 NDK_ROOT="${ANDROID_NDK_HOME:-}"
-
 if [[ -z "$NDK_ROOT" ]]; then
   if [[ -d "$SDK_ROOT/ndk" ]]; then
     NDK_ROOT="$(ls -d "$SDK_ROOT"/ndk/* | sort -V | tail -n 1)"
@@ -29,56 +34,45 @@ if [[ -z "$NDK_ROOT" ]]; then
     NDK_ROOT="$SDK_ROOT/ndk-bundle"
   fi
 fi
-
 if [[ -z "$NDK_ROOT" || ! -d "$NDK_ROOT" ]]; then
   echo "Android NDK not found. Install it with: sdkmanager 'ndk;30.0.16248370'" >&2
   exit 1
 fi
-
 HOST_TAG="linux-x86_64"
 TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin"
-CC="$TOOLCHAIN/aarch64-linux-android26-clang"
-AR="$TOOLCHAIN/llvm-ar"
-STRIP="$TOOLCHAIN/llvm-strip"
-OBJCOPY="$TOOLCHAIN/llvm-objcopy"
-READELF="$TOOLCHAIN/llvm-readelf"
 
-if [[ ! -x "$CC" ]]; then
-  echo "Android ARM64 clang not found: $CC" >&2
-  exit 1
-fi
+# C-side size flags. PRoot and talloc are pure C, so fat LTO stays entirely
+# inside this build; there is no cross-language bitcode to match.
+SIZE_CFLAGS=(-Oz -ffunction-sections -fdata-sections)
+FAT_LTO=(-flto)
 
-echo "NDK toolchain: $CC"
-
-# --- Prepare sources ---
+# --- Prepare sources once ---
 echo "==> Preparing sources"
 
 PROOT_VERSION="5.1.107.79"
-PROOT_URL="${PROOT_URL-https://gh-proxy.com/https://github.com/termux/proot.git}"
+PROOT_COMMIT="898b4a8494e62e225d23c32713e76201ce7c1561"
+PROOT_URL="${PROOT_URL-https://github.com/termux/proot.git}"
 PROOT_CACHE="$ROOT_DIR/cache/native/proot-$PROOT_VERSION"
-PROOT_SRC="$WORK_DIR/proot"
-TALLOC_SRC="$WORK_DIR/talloc"
-BUILD_DIR="$WORK_DIR/build"
-mkdir -p "$BUILD_DIR"
-OBJ_DIR="$BUILD_DIR/obj"
-mkdir -p "$OBJ_DIR"
+PROOT_SRC="$WORK_ROOT/proot"
+TALLOC_SRC="$WORK_ROOT/talloc"
 
-# Clone once into the project cache; later builds copy the checkout to the
-# temp dir so patch application never dirties the cached source.
 if [[ ! -f "$PROOT_CACHE/src/loader/loader.c" ]]; then
     echo "==> Cloning proot v$PROOT_VERSION"
     rm -rf "$PROOT_CACHE"
     mkdir -p "$(dirname "$PROOT_CACHE")"
     git clone --depth 1 --branch "v$PROOT_VERSION" "$PROOT_URL" "$PROOT_CACHE"
 fi
+if [[ -d "$PROOT_CACHE/.git" ]]; then
+    actual_commit="$(git -C "$PROOT_CACHE" rev-parse HEAD)"
+    if [[ "$actual_commit" != "$PROOT_COMMIT" ]]; then
+        echo "proot v$PROOT_VERSION resolved to $actual_commit, expected $PROOT_COMMIT" >&2
+        exit 1
+    fi
+fi
 cp -a "$PROOT_CACHE/." "$PROOT_SRC/"
 rm -rf "$PROOT_SRC/.git"
 
 PATCH_DIR="$NATIVE_DIR/patches/proot"
-
-# Every patch is required: an unpatched proot has no `--cgroup` emulation and
-# the daemon would silently fall back to weaker container-lifetime guarantees.
-# A missing or failed patch therefore fails the build.
 shopt -s nullglob
 patches=("$PATCH_DIR"/*.patch)
 shopt -u nullglob
@@ -94,7 +88,6 @@ for patch in "${patches[@]}"; do
   fi
 done
 
-# Cache the talloc tarball: the build directory is temporary, the download is not.
 TALLOC_VER="2.4.3"
 TALLOC_SHA256="dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd"
 TALLOC_URL="https://download.samba.org/pub/talloc/talloc-${TALLOC_VER}.tar.gz"
@@ -112,11 +105,58 @@ if [[ ! -f "$TALLOC_CACHE" ]]; then
   mv "$TALLOC_CACHE.part" "$TALLOC_CACHE"
   echo "$TALLOC_SHA256  $TALLOC_CACHE" | sha256sum --check
 fi
-tar xzf "$TALLOC_CACHE" -C "$WORK_DIR"
-mv "$WORK_DIR/talloc-${TALLOC_VER}" "$TALLOC_SRC"
+tar xzf "$TALLOC_CACHE" -C "$WORK_ROOT"
+mv "$WORK_ROOT/talloc-${TALLOC_VER}" "$TALLOC_SRC"
 
-# --- Create minimal build.h ---
-cat > "$BUILD_DIR/build.h" << EOF
+# --- Build each ABI ---
+for abi in "${ABIS[@]}"; do
+  case "$abi" in
+    arm64-v8a)
+      CC_TRIPLE="aarch64-linux-android"
+      OBJCOPY_FORMAT="elf64-littleaarch64"
+      OBJCOPY_ARCH="aarch64"
+      PAGE_FLAGS=(-Wl,-z,max-page-size=16384)
+      ;;
+    armeabi-v7a)
+      CC_TRIPLE="armv7a-linux-androideabi"
+      OBJCOPY_FORMAT="elf32-littlearm"
+      OBJCOPY_ARCH="arm"
+      PAGE_FLAGS=()
+      ;;
+    x86)
+      CC_TRIPLE="i686-linux-android"
+      OBJCOPY_FORMAT="elf32-i386"
+      OBJCOPY_ARCH="i386"
+      PAGE_FLAGS=()
+      ;;
+    x86_64)
+      CC_TRIPLE="x86_64-linux-android"
+      OBJCOPY_FORMAT="elf64-x86-64"
+      OBJCOPY_ARCH="i386:x86-64"
+      PAGE_FLAGS=(-Wl,-z,max-page-size=16384)
+      ;;
+    *)
+      echo "unsupported ABI: $abi" >&2
+      exit 1
+      ;;
+  esac
+
+  CC="$TOOLCHAIN/${CC_TRIPLE}26-clang"
+  AR="$TOOLCHAIN/llvm-ar"
+  STRIP="$TOOLCHAIN/llvm-strip"
+  OBJCOPY="$TOOLCHAIN/llvm-objcopy"
+  READELF="$TOOLCHAIN/llvm-readelf"
+  [[ -x "$CC" ]] || { echo "Android linker not found: $CC" >&2; exit 1; }
+
+  BUILD_DIR="$WORK_ROOT/build-$abi"
+  OBJ_DIR="$BUILD_DIR/obj"
+  JNI_DIR="$ROOT_DIR/app/src/main/jniLibs/$abi"
+  mkdir -p "$BUILD_DIR" "$OBJ_DIR" "$JNI_DIR"
+  echo "==> Building proot for $abi ($CC_TRIPLE)"
+
+  (
+    # --- Create minimal build.h ---
+    cat > "$BUILD_DIR/build.h" << EOF
 #ifndef BUILD_H
 #define BUILD_H
 #define VERSION "$PROOT_VERSION"
@@ -125,8 +165,8 @@ cat > "$BUILD_DIR/build.h" << EOF
 #endif /* BUILD_H */
 EOF
 
-# --- Create minimal replace.h for talloc ---
-cat > "$TALLOC_SRC/replace.h" << 'EOF'
+    # --- Create minimal replace.h for talloc ---
+    cat > "$TALLOC_SRC/replace.h" << 'EOF'
 #ifndef _REPLACE_H_
 #define _REPLACE_H_
 #include <stdio.h>
@@ -163,32 +203,26 @@ cat > "$TALLOC_SRC/replace.h" << 'EOF'
 #endif /* _REPLACE_H_ */
 EOF
 
-# --- Compile talloc ---
-echo "==> Compiling talloc"
-CFLAGS_TALLOC=(-I"$TALLOC_SRC" -Os -fPIC)
-"$CC" "${CFLAGS_TALLOC[@]}" -c "$TALLOC_SRC/talloc.c" -o "$BUILD_DIR/talloc.o"
-"$AR" rcs "$BUILD_DIR/libtalloc.a" "$BUILD_DIR/talloc.o"
+    # --- Compile talloc ---
+    echo "==> Compiling talloc ($abi)"
+    CFLAGS_TALLOC=(-I"$TALLOC_SRC" -fPIC "${SIZE_CFLAGS[@]}" "${FAT_LTO[@]}")
+    "$CC" "${CFLAGS_TALLOC[@]}" -c "$TALLOC_SRC/talloc.c" -o "$BUILD_DIR/talloc.o"
+    "$AR" rcs "$BUILD_DIR/libtalloc.a" "$BUILD_DIR/talloc.o"
 
-# ============================================================
-# 1. Build the loader executable (without loader-info)
-# ============================================================
-echo "==> Building loader executable"
+    # 1. Build the loader executable (without loader-info).
+    echo "==> Building loader executable ($abi)"
+    LOADER_SRC_DIR="$PROOT_SRC/src/loader"
+    LOADER_BIN="$BUILD_DIR/loader_exe"
+    "$CC" -nostdlib -static -ffreestanding -Oz -ffunction-sections -fdata-sections \
+        -I"$PROOT_SRC/src" -I"$BUILD_DIR" \
+        "$LOADER_SRC_DIR/loader.c" \
+        "$LOADER_SRC_DIR/assembly.S" \
+        -o "$LOADER_BIN" -Wl,--gc-sections -Wl,--icf=all \
+        -Wl,-z,noexecstack "${PAGE_FLAGS[@]}"
 
-LOADER_SRC_DIR="$PROOT_SRC/src/loader"
-LOADER_BIN="$BUILD_DIR/loader_exe"
-
-"$CC" -nostdlib -static -ffreestanding -Os \
-    -I"$PROOT_SRC/src" -I"$BUILD_DIR" \
-    "$LOADER_SRC_DIR/loader.c" \
-    "$LOADER_SRC_DIR/assembly.S" \
-    -o "$LOADER_BIN" -Wl,-z,noexecstack
-
-# ============================================================
-# 2. Generate loader-info.c using awk
-# ============================================================
-echo "==> Generating loader-info.c with awk"
-
-cat > "$BUILD_DIR/loader-info.awk" << 'EOF'
+    # 2. Generate loader-info.c using awk.
+    echo "==> Generating loader-info.c with awk ($abi)"
+    cat > "$BUILD_DIR/loader-info.awk" << 'EOF'
 # Note: This file is included only for targets which have pokedata workaround
 /\ypokedata_workaround\y/{pokedata_workaround=strtonum("0x" $2)}
 /\y_start\y/{start=strtonum("0x" $2)}
@@ -197,109 +231,78 @@ END {
 	print "const ssize_t offset_to_pokedata_workaround=" (pokedata_workaround-start) ";"
 }
 EOF
+    "$READELF" -s "$LOADER_BIN" | awk -f "$BUILD_DIR/loader-info.awk" > "$BUILD_DIR/loader-info.c"
+    cat "$BUILD_DIR/loader-info.c"
 
-"$READELF" -s "$LOADER_BIN" | awk -f "$BUILD_DIR/loader-info.awk" > "$BUILD_DIR/loader-info.c"
+    # 3. Convert loader executable to object for embedding.
+    echo "==> Embedding loader into object file ($abi)"
+    cd "$BUILD_DIR"
+    cp loader_exe loader.exe
+    "$OBJCOPY" -I binary -O "$OBJCOPY_FORMAT" -B "$OBJCOPY_ARCH" \
+        loader.exe loader_exe.o
+    LOADER_OBJ="$BUILD_DIR/loader_exe.o"
 
-echo "Generated loader-info.c:"
-cat "$BUILD_DIR/loader-info.c"
+    # 4. Compile loader-info.c for the main program.
+    echo "==> Compiling loader-info for main program ($abi)"
+    "$CC" "${SIZE_CFLAGS[@]}" -I"$BUILD_DIR" -c "$BUILD_DIR/loader-info.c" -o "$BUILD_DIR/loader-info.o"
 
-# ============================================================
-# 3. Convert loader executable to object for embedding
-#    Make sure symbol names are _binary_loader_exe_start/_end
-# ============================================================
-echo "==> Embedding loader into object file"
+    # 5. Compile main proot sources (excluding loader/ and .check_*).
+    echo "==> Compiling proot ($abi)"
+    CFLAGS=(-D_GNU_SOURCE -I"$PROOT_SRC/src" -I"$TALLOC_SRC" -I"$BUILD_DIR" -fPIC "${SIZE_CFLAGS[@]}" "${FAT_LTO[@]}" -Wall -Wno-macro-redefined)
+    FAILED=0
+    SUCCESS=0
+    for src in $(find "$PROOT_SRC/src" -name "*.c" ! -name ".check_*" | sort); do
+        rel="${src#$PROOT_SRC/src/}"
+        if [[ "$rel" == loader/* ]]; then
+            continue
+        fi
+        obj="$OBJ_DIR/${rel%.c}.o"
+        mkdir -p "$(dirname "$obj")"
 
-# Change to BUILD_DIR and copy loader_exe to loader.exe to get clean symbol names
-cd "$BUILD_DIR"
-cp loader_exe loader.exe
-"$OBJCOPY" -I binary -O elf64-littleaarch64 -B aarch64 \
-    loader.exe loader_exe.o
-LOADER_OBJ="$BUILD_DIR/loader_exe.o"
+        EXTRA_FLAGS=()
+        if [[ "$rel" == "extension/ashmem_memfd/ashmem_memfd.c" ]]; then
+            EXTRA_FLAGS=(-include string.h)
+        fi
 
-# ============================================================
-# 4. Compile loader-info.c for main program
-# ============================================================
-echo "==> Compiling loader-info for main program"
-"$CC" -Os -I"$BUILD_DIR" -c "$BUILD_DIR/loader-info.c" -o "$BUILD_DIR/loader-info.o"
-
-# ============================================================
-# 5. Compile main proot sources (excluding loader/ and .check_*)
-# ============================================================
-echo "==> Compiling proot"
-
-CFLAGS=(-D_GNU_SOURCE -I"$PROOT_SRC/src" -I"$TALLOC_SRC" -I"$BUILD_DIR" -Os -fPIC -Wall -Wno-macro-redefined)
-
-cd "$BUILD_DIR" # already there
-
-FAILED=0
-SUCCESS=0
-
-# Find all .c files in src/, but exclude loader/ and any .check_* files
-for src in $(find "$PROOT_SRC/src" -name "*.c" ! -name ".check_*" | sort); do
-    rel="${src#$PROOT_SRC/src/}"
-    # Skip loader/ directory
-    if [[ "$rel" == loader/* ]]; then
-        continue
+        if "$CC" "${CFLAGS[@]}" "${EXTRA_FLAGS[@]}" -c "$src" -o "$obj" 2>/dev/null; then
+            SUCCESS=$((SUCCESS + 1))
+        else
+            FAILED=$((FAILED + 1))
+            echo "  FAIL: $rel" >&2
+            "$CC" "${CFLAGS[@]}" "${EXTRA_FLAGS[@]}" -c "$src" -o "$obj" 2>&1 | head -2 >&2
+        fi
+    done
+    echo "  Compiled: $SUCCESS, Failed: $FAILED"
+    if [[ "$FAILED" -gt 0 ]]; then
+        echo "Compilation errors encountered for $abi" >&2
+        exit 1
     fi
-    obj="$OBJ_DIR/${rel%.c}.o"
-    mkdir -p "$(dirname "$obj")"
+    find "$OBJ_DIR" -name ".check_*.o" -delete 2>/dev/null || true
 
-    EXTRA_FLAGS=()
-    if [[ "$rel" == "extension/ashmem_memfd/ashmem_memfd.c" ]]; then
-        EXTRA_FLAGS=(-include string.h)
-    fi
+    # 6. Link everything together.
+    echo "==> Linking ($abi)"
+    OBJ_FILES=()
+    while IFS= read -r -d '' obj; do
+        OBJ_FILES+=("$obj")
+    done < <(find "$OBJ_DIR" -name "*.o" -print0 | sort -z)
+    OBJ_FILES+=("$BUILD_DIR/loader-info.o")
+    OBJ_FILES+=("$LOADER_OBJ")
+    echo "  Linking ${#OBJ_FILES[@]} objects..."
 
-    if "$CC" "${CFLAGS[@]}" "${EXTRA_FLAGS[@]}" -c "$src" -o "$obj" 2>/dev/null; then
-        SUCCESS=$((SUCCESS + 1))
-    else
-        FAILED=$((FAILED + 1))
-        echo "  FAIL: $rel" >&2
-        "$CC" "${CFLAGS[@]}" "${EXTRA_FLAGS[@]}" -c "$src" -o "$obj" 2>&1 | head -2 >&2
-    fi
+    OUT_BIN="$BUILD_DIR/proot-$abi"
+    "$CC" -static "${OBJ_FILES[@]}" "$BUILD_DIR/libtalloc.a" \
+        -o "$OUT_BIN" -Wl,-z,noexecstack -Wl,--gc-sections -Wl,--icf=all \
+        -Wl,--strip-all "${PAGE_FLAGS[@]}"
+
+    echo "==> Stripping and installing ($abi)"
+    "$STRIP" "$OUT_BIN"
+    cp "$OUT_BIN" "$JNI_DIR/libproot.so"
+  )
+
+  echo "==> Done: $JNI_DIR/libproot.so"
+  file "$JNI_DIR/libproot.so"
+  ls -lh "$JNI_DIR/libproot.so"
 done
-
-echo "  Compiled: $SUCCESS, Failed: $FAILED"
-
-if [[ "$FAILED" -gt 0 ]]; then
-    echo "Compilation errors encountered" >&2
-    exit 1
-fi
-
-# Remove any stray .check_*.o files (just in case)
-find "$OBJ_DIR" -name ".check_*.o" -delete 2>/dev/null || true
-
-# ============================================================
-# 6. Link everything together
-# ============================================================
-echo "==> Linking"
-
-# Collect all object files from OBJ_DIR (main program objects)
-OBJ_FILES=()
-while IFS= read -r -d '' obj; do
-    OBJ_FILES+=("$obj")
-done < <(find "$OBJ_DIR" -name "*.o" -print0 | sort -z)
-
-# Add loader-info.o and embedded loader object
-OBJ_FILES+=("$BUILD_DIR/loader-info.o")
-OBJ_FILES+=("$LOADER_OBJ")
-
-echo "  Linking ${#OBJ_FILES[@]} objects..."
-
-OUT_BIN="$BUILD_DIR/proot-aarch64"
-"$CC" -static "${OBJ_FILES[@]}" "$BUILD_DIR/libtalloc.a" \
-    -o "$OUT_BIN" -Wl,-z,noexecstack
-
-# --- Strip and install ---
-echo "==> Stripping and installing"
-"$STRIP" "$OUT_BIN"
-
-mkdir -p "$JNI_DIR"
-cp "$OUT_BIN" "$JNI_DIR/libproot.so"
 
 mkdir -p "$ROOT_DIR/app/src/main/assets/native-licenses"
 cp "$TALLOC_SRC/LICENSE" "$ROOT_DIR/app/src/main/assets/native-licenses/COPYING-talloc"
-
-echo "==> Done"
-echo "Binary: $JNI_DIR/libproot.so"
-file "$JNI_DIR/libproot.so"
-ls -lh "$JNI_DIR/libproot.so"

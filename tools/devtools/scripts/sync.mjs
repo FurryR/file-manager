@@ -7,8 +7,9 @@
  * the app serves the generated tree from its own loopback DevTools bridge.
  */
 import {cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync} from 'node:fs';
-import {dirname, join, resolve} from 'node:path';
+import {dirname, extname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {brotliCompressSync, constants as zlibConstants} from 'node:zlib';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const project = resolve(here, '..');
@@ -61,12 +62,27 @@ writeFileSync(
       version: manifest.version,
       chrome: manifest.chrome,
       revision,
+      compression: 'brotli',
       locales: [...stagedLocales].sort(),
     },
     null,
     2,
   ) + '\n',
 );
+
+// Text assets brotli-compress well; PNG/AVIF assets are already compressed.
+const COMPRESSIBLE = new Set(['.css', '.html', '.js', '.json', '.md', '.svg', '.txt', '.xml']);
+// The bridge patches inspector.html before serving it, and BUILD_INFO is a
+// human-readable manifest; keep both plain.
+const KEEP_PLAIN = new Set(['inspector.html', 'BUILD_INFO.json']);
+// Even the small issue-description Markdown files add up; the encoder keeps
+// the original whenever Brotli would not actually shrink it.
+const MIN_COMPRESS_BYTES = 0;
+
+// The loopback bridge sends the stored .br bytes with Content-Encoding: br,
+// so the WebView never downloads the uncompressed 16 MiB tree. Only text
+// assets are worth compressing; images are already compressed.
+compressTree(staging);
 
 mkdirSync(dirname(output), {recursive: true});
 rmSync(output, {recursive: true, force: true});
@@ -146,4 +162,49 @@ async function readLocale(locale, revision) {
     console.error(`cannot fetch DevTools locale ${locale}: ${error.message}`);
     return null;
   }
+}
+
+/**
+ * Replace text assets with `<name>.br` and delete the originals.
+ *
+ * `DevToolsServer` resolves a request for `<name>` to `<name>.br`, sends the
+ * stored bytes with `Content-Encoding: br`, and keeps the original MIME type.
+ * Files that do not shrink stay plain.
+ */
+function compressTree(root) {
+  let source = 0;
+  let packed = 0;
+  let count = 0;
+
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, {withFileTypes: true})) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(path);
+        continue;
+      }
+      if (!entry.isFile() || KEEP_PLAIN.has(entry.name)) continue;
+      if (!COMPRESSIBLE.has(extname(entry.name).toLowerCase())) continue;
+      const data = readFileSync(path);
+      if (data.length < MIN_COMPRESS_BYTES) continue;
+      const encoded = brotliCompressSync(data, {
+        params: {
+          [zlibConstants.BROTLI_PARAM_QUALITY]: 11,
+          [zlibConstants.BROTLI_PARAM_LGWIN]: 24,
+          [zlibConstants.BROTLI_PARAM_MODE]: zlibConstants.BROTLI_MODE_TEXT,
+          [zlibConstants.BROTLI_PARAM_SIZE_HINT]: data.length,
+        },
+      });
+      if (encoded.length >= data.length) continue;
+      writeFileSync(`${path}.br`, encoded);
+      rmSync(path);
+      source += data.length;
+      packed += encoded.length;
+      count++;
+    }
+  };
+
+  walk(root);
+  const mib = (value) => (value / (1024 * 1024)).toFixed(2);
+  console.log(`brotli: ${count} files, ${mib(source)} MiB -> ${mib(packed)} MiB`);
 }

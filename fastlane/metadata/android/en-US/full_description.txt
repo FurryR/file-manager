@@ -1,0 +1,26 @@
+File is a file manager for Android. It browses local storage, SAF trees,
+FTP, SFTP, SSH, AList and HTTP(S) locations in one tabbed interface.
+
+It can list and extract zip-compatible archives, edit text files, render
+HTML files, open files with other apps, and share files through a
+document provider. Tabs keep their own history and renderer state, so
+switching tabs does not reload a page or a web view.
+
+Power-user features are optional:
+* Root or Shizuku access for system directories.
+* Linux containers using chroot or proot, with a nested Wayland desktop
+  and PulseAudio.
+* A terminal, an AI agent, an in-app browser with userscripts and
+  ad-blocking lists, and a code editor with language support.
+* Chrome DevTools for WebView debugging.
+
+Root and Shizuku are not required. Without them the app works as a
+normal file manager. Container root filesystems are downloaded only when
+you explicitly create a container. AI requests go only to the
+OpenAI-compatible provider you configure; the app ships no API keys and
+does not send telemetry.
+
+File is free software under the GPL-3.0-or-later. The universal APK
+contains native code for arm64-v8a, armeabi-v7a, x86 and x86_64.
+
+No ads. No tracking. No proprietary services are required.

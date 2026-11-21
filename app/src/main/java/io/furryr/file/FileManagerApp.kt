@@ -336,6 +336,12 @@ fun FileManagerApp(
     LaunchedEffect(drawerState.isClosed) {
         if (drawerState.isClosed) drawerSortMode = false
     }
+    // The drawer and the inline path editor never share the screen: as soon
+    // as the drawer starts opening (menu tap or edge drag) it takes focus
+    // from the field, which restores the path display and drops the scrim.
+    LaunchedEffect(drawerState.targetValue) {
+        if (drawerState.targetValue == DrawerValue.Open) focusManager.clearFocus()
+    }
     val prefs = remember { context.getSharedPreferences("settings", Context.MODE_PRIVATE) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -1419,14 +1425,20 @@ fun FileManagerApp(
 
     /**
      * Open what another app handed over: a tapped file, a picked document or a
-     * link. The first address lands in the current tab, every additional one
-     * gets its own tab; an address the system delivered is not a home row, so
-     * it never outlives the grant that came with the intent.
+     * link. The first address lands in the current tab unless the request asks
+     * for a tab of its own (an in-app shortcut such as "edit this user
+     * script"), every additional one gets its own tab; an address the system
+     * delivered is not a home row, so it never outlives the grant that came
+     * with the intent.
      */
     LaunchedEffect(openRequest?.id) {
         val request = openRequest ?: return@LaunchedEffect
+        // An editor opened from Settings (or another app's open request) can
+        // arrive while this shell still has its drawer open; the target page
+        // must be visible, never covered by the drawer.
+        if (!drawerState.isClosed) drawerState.snapTo(DrawerValue.Closed)
         request.addresses.forEachIndexed { index, address ->
-            if (index > 0) {
+            if (index > 0 || request.newTab) {
                 tabs.add(newHomeTab())
                 selectTab(tabs.lastIndex)
             }
@@ -2055,11 +2067,11 @@ fun FileManagerApp(
         drawerState = drawerState,
         // A WebView consumes horizontal scrolling itself, and the editor uses
         // horizontal gestures for selection, so the open-from-edge gesture
-        // stays off for both. A path edit dims the content from below the top
-        // bar, so its drawer must not open over the scrim either. An already
-        // open drawer keeps the gesture so it can still be swiped shut.
-        gesturesEnabled = !titleEditing &&
-            (activeRenderer?.consumesEdgeGestures != true || drawerState.isOpen),
+        // stays off for both. A path edit does not block the drawer: opening
+        // it takes focus from the field first, which closes the inline editor
+        // and its scrim. An already open drawer keeps the gesture so it can
+        // still be swiped shut.
+        gesturesEnabled = activeRenderer?.consumesEdgeGestures != true || drawerState.isOpen,
         drawerContent = {
             FileDrawerHost(
                 vfs = world.vfs,
@@ -2106,6 +2118,10 @@ fun FileManagerApp(
                 },
                 onSettingsClick = {
                     drawerSortMode = false
+                    // Settings launches its own screens (editor font, scripts
+                    // opened in the editor) and the drawer must not survive
+                    // the trip as an overlay over the returned page.
+                    scope.launch { drawerState.snapTo(DrawerValue.Closed) }
                     context.startActivity(Intent(context, SettingsActivity::class.java))
                 },
                 onContainersChanged = { containerRefreshKey++ },
@@ -2148,8 +2164,10 @@ fun FileManagerApp(
                     onNavigate = ::jumpTo,
                     onSuggestion = ::chooseTitleSuggestion,
                     onEditingChange = { titleEditing = it },
-                    onOpenDrawer = { scope.launch { drawerState.open() } },
-                    drawerEnabled = !titleEditing,
+                    onOpenDrawer = {
+                        focusManager.clearFocus()
+                        scope.launch { drawerState.open() }
+                    },
                     onSettings = {
                         context.startActivity(Intent(context, SettingsActivity::class.java))
                     },

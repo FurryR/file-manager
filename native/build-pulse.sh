@@ -1,30 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# One feature, one .so: PulseAudio + libsndfile + libltdl are static archives.
-# No D-Bus, GLib, session manager, module files or external PulseAudio daemon.
+# One feature, one .so per ABI: PulseAudio + libsndfile + libltdl are static
+# archives. No D-Bus, GLib, session manager, module files or external
+# PulseAudio daemon.
+#
+# Usage: bash native/build-pulse.sh [arm64-v8a|armeabi-v7a|x86|x86_64 ...]
+set -euo pipefail
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST_DIR="$ROOT_DIR/native/pulse"
-WORK_DIR="${PULSE_BUILD_DIR:-$ROOT_DIR/cache/native/pulse-cross-17.0}"
 CACHE_DIR="$ROOT_DIR/cache/file-manager"
-PREFIX="$WORK_DIR/deps"
+ALL_ABIS=(arm64-v8a armeabi-v7a x86 x86_64)
+if (( $# == 0 )); then
+    ABIS=("${ALL_ABIS[@]}")
+else
+    ABIS=("$@")
+fi
+
 SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/.local/share/android}}"
 NDK_ROOT="${ANDROID_NDK_HOME:-}"
 if [[ -z "$NDK_ROOT" ]]; then
     NDK_ROOT="$(find "$SDK_ROOT/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
 fi
 TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64"
-GH_PROXY="${GH_PROXY-https://gh-proxy.com}"
-export CC="$TOOLCHAIN/bin/aarch64-linux-android26-clang"
-export CXX="$TOOLCHAIN/bin/aarch64-linux-android26-clang++"
-export AR="$TOOLCHAIN/bin/llvm-ar"
-export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
-export NM="$TOOLCHAIN/bin/llvm-nm"
-export OBJDUMP="$TOOLCHAIN/bin/llvm-objdump"
-export STRIP="$TOOLCHAIN/bin/llvm-strip"
-export PATH="$HOME/.local/bin:$TOOLCHAIN/bin:$PATH"
-[[ -x "$CC" ]] || { echo "Android API-26 ARM64 compiler not found: $CC" >&2; exit 1; }
-mkdir -p "$WORK_DIR" "$PREFIX" "$CACHE_DIR"
+GH_PROXY="${GH_PROXY-}"
+
+# Every object here is C, so fat LTO can span PulseAudio, libsndfile and
+# libltdl without crossing into Rust bitcode.
+SIZE_CFLAGS="-Oz -ffunction-sections -fdata-sections"
+FAT_LTO="-flto"
+mkdir -p "$CACHE_DIR"
 
 download() {
     local name="$1" url="$2" checksum="$3"
@@ -43,91 +49,163 @@ download libsndfile-1.2.2.tar.gz "$LIBSNDFILE_URL" \
 download libtool-2.4.7.tar.xz https://ftp.gnu.org/gnu/libtool/libtool-2.4.7.tar.xz \
     4f7f217f057ce655ff22559ad221a0fd8ef84ad1fc5fcb6990cecc333aa1635d
 
-if [[ ! -f "$PREFIX/lib/libltdl.a" ]]; then
-    tar -xf "$CACHE_DIR/libtool-2.4.7.tar.xz" -C "$WORK_DIR"
-    mkdir -p "$WORK_DIR/ltdl-build"
-    (
-        cd "$WORK_DIR/ltdl-build"
-        CFLAGS="-Os -fPIC" "$WORK_DIR/libtool-2.4.7/libltdl/configure" \
-            --host=aarch64-linux-android --prefix="$PREFIX" --libdir="$PREFIX/lib" \
-            --disable-shared --enable-static --with-pic --enable-ltdl-install
-        make -j"$(nproc)"
-        make install
-    )
-fi
-if [[ ! -f "$PREFIX/lib/libsndfile.a" ]]; then
-    tar -xf "$CACHE_DIR/libsndfile-1.2.2.tar.gz" -C "$WORK_DIR"
-    cmake -S "$WORK_DIR/libsndfile-1.2.2" -B "$WORK_DIR/sndfile-build" -G Ninja \
-        -DCMAKE_TOOLCHAIN_FILE="$NDK_ROOT/build/cmake/android.toolchain.cmake" \
-        -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 \
-        -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-        -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib \
-        -DBUILD_SHARED_LIBS=OFF -DBUILD_PROGRAMS=OFF -DBUILD_EXAMPLES=OFF \
-        -DBUILD_TESTING=OFF -DENABLE_EXTERNAL_LIBS=OFF -DENABLE_MPEG=OFF
-    cmake --build "$WORK_DIR/sndfile-build" --parallel
-    cmake --install "$WORK_DIR/sndfile-build"
-fi
+for abi in "${ABIS[@]}"; do
+    case "$abi" in
+        arm64-v8a)
+            CC_TRIPLE="aarch64-linux-android"
+            ANDROID_ABI="arm64-v8a"
+            CPU_FAMILY="aarch64"
+            CPU="aarch64"
+            PAGE_FLAGS=(-Wl,-z,max-page-size=16384)
+            WORK_DIR="$ROOT_DIR/cache/native/pulse-cross-17.0"
+            ;;
+        armeabi-v7a)
+            CC_TRIPLE="armv7a-linux-androideabi"
+            ANDROID_ABI="armeabi-v7a"
+            CPU_FAMILY="arm"
+            CPU="armv7"
+            PAGE_FLAGS=()
+            WORK_DIR="$ROOT_DIR/cache/native/pulse-cross-17.0-$abi"
+            ;;
+        x86)
+            CC_TRIPLE="i686-linux-android"
+            ANDROID_ABI="x86"
+            CPU_FAMILY="x86"
+            CPU="i686"
+            PAGE_FLAGS=()
+            WORK_DIR="$ROOT_DIR/cache/native/pulse-cross-17.0-$abi"
+            ;;
+        x86_64)
+            CC_TRIPLE="x86_64-linux-android"
+            ANDROID_ABI="x86_64"
+            CPU_FAMILY="x86_64"
+            CPU="x86_64"
+            PAGE_FLAGS=(-Wl,-z,max-page-size=16384)
+            WORK_DIR="$ROOT_DIR/cache/native/pulse-cross-17.0-$abi"
+            ;;
+        *)
+            echo "unsupported ABI: $abi" >&2
+            exit 1
+            ;;
+    esac
 
-PA_SRC="$WORK_DIR/pulseaudio-17.0"
-PA_BUILD="$WORK_DIR/build"
-if [[ ! -d "$PA_SRC" ]]; then tar -xf "$CACHE_DIR/pulseaudio-17.0.tar.xz" -C "$WORK_DIR"; fi
-python3 "$HOST_DIR/prepare.py" "$PA_SRC"
-cat > "$WORK_DIR/cross.ini" <<EOF
+    PREFIX="$WORK_DIR/deps"
+    export CC="$TOOLCHAIN/bin/${CC_TRIPLE}26-clang"
+    export CXX="$TOOLCHAIN/bin/${CC_TRIPLE}26-clang++"
+    export AR="$TOOLCHAIN/bin/llvm-ar"
+    export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+    export NM="$TOOLCHAIN/bin/llvm-nm"
+    export OBJDUMP="$TOOLCHAIN/bin/llvm-objdump"
+    export STRIP="$TOOLCHAIN/bin/llvm-strip"
+    export PATH="$HOME/.local/bin:$TOOLCHAIN/bin:$PATH"
+    [[ -x "$CC" ]] || { echo "Android compiler not found for $abi: $CC" >&2; exit 1; }
+
+    mkdir -p "$WORK_DIR" "$PREFIX"
+    FLAG_STAMP="$WORK_DIR/cflags.stamp"
+    FLAG_KEY="$SIZE_CFLAGS $FAT_LTO"
+    if [[ ! -f "$FLAG_STAMP" || "$(<"$FLAG_STAMP")" != "$FLAG_KEY" ]]; then
+        rm -f "$PREFIX/lib/libltdl.a" "$PREFIX/lib/libsndfile.a"
+        rm -rf "$WORK_DIR/ltdl-build" "$WORK_DIR/sndfile-build" "$WORK_DIR/build"
+    fi
+    printf '%s\n' "$FLAG_KEY" > "$FLAG_STAMP"
+
+    echo "==> Building audio host for $abi"
+    if [[ ! -f "$PREFIX/lib/libltdl.a" ]]; then
+        if [[ ! -d "$WORK_DIR/libtool-2.4.7" ]]; then
+            tar -xf "$CACHE_DIR/libtool-2.4.7.tar.xz" -C "$WORK_DIR"
+        fi
+        mkdir -p "$WORK_DIR/ltdl-build"
+        (
+            cd "$WORK_DIR/ltdl-build"
+            CFLAGS="$SIZE_CFLAGS -fPIC $FAT_LTO" LDFLAGS="$FAT_LTO" \
+                "$WORK_DIR/libtool-2.4.7/libltdl/configure" \
+                --host="$CC_TRIPLE" --prefix="$PREFIX" --libdir="$PREFIX/lib" \
+                --disable-shared --enable-static --with-pic --enable-ltdl-install
+            make -j"$(nproc)"
+            make install
+        )
+    fi
+    if [[ ! -f "$PREFIX/lib/libsndfile.a" ]]; then
+        if [[ ! -d "$WORK_DIR/libsndfile-1.2.2" ]]; then
+            tar -xf "$CACHE_DIR/libsndfile-1.2.2.tar.gz" -C "$WORK_DIR"
+        fi
+        cmake -S "$WORK_DIR/libsndfile-1.2.2" -B "$WORK_DIR/sndfile-build" -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK_ROOT/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="$ANDROID_ABI" -DANDROID_PLATFORM=android-26 \
+            -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_C_FLAGS="$SIZE_CFLAGS $FAT_LTO" -DCMAKE_CXX_FLAGS="$SIZE_CFLAGS $FAT_LTO" \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib \
+            -DBUILD_SHARED_LIBS=OFF -DBUILD_PROGRAMS=OFF -DBUILD_EXAMPLES=OFF \
+            -DBUILD_TESTING=OFF -DENABLE_EXTERNAL_LIBS=OFF -DENABLE_MPEG=OFF
+        cmake --build "$WORK_DIR/sndfile-build" --parallel
+        cmake --install "$WORK_DIR/sndfile-build"
+    fi
+
+    PA_SRC="$WORK_DIR/pulseaudio-17.0"
+    PA_BUILD="$WORK_DIR/build"
+    if [[ ! -d "$PA_SRC" ]]; then tar -xf "$CACHE_DIR/pulseaudio-17.0.tar.xz" -C "$WORK_DIR"; fi
+    python3 "$HOST_DIR/prepare.py" "$PA_SRC"
+    cat > "$WORK_DIR/cross.ini" <<EOF
 [binaries]
 c = '$CC'
 ar = '$AR'
 strip = '$STRIP'
 pkg-config = '$(command -v pkg-config)'
 [built-in options]
-c_args = ['-Os', '-fPIC', '-ffunction-sections', '-fdata-sections', '-I$PREFIX/include']
-c_link_args = ['-L$PREFIX/lib']
+c_args = ['-Oz', '-flto', '-fPIC', '-ffunction-sections', '-fdata-sections', '-I$PREFIX/include']
+c_link_args = ['-flto', '-L$PREFIX/lib']
 pkg_config_path = ['$PREFIX/lib/pkgconfig']
 [properties]
 pkg_config_libdir = ['$PREFIX/lib/pkgconfig']
 needs_exe_wrapper = true
 [host_machine]
 system = 'android'
-cpu_family = 'aarch64'
-cpu = 'aarch64'
+cpu_family = '$CPU_FAMILY'
+cpu = '$CPU'
 endian = 'little'
 EOF
-SETUP_FLAGS=()
-if [[ -d "$PA_BUILD/meson-private" ]]; then SETUP_FLAGS+=(--reconfigure); fi
-meson setup "$PA_BUILD" "$PA_SRC" --cross-file "$WORK_DIR/cross.ini" \
-    --default-library static --buildtype release "${SETUP_FLAGS[@]}" \
-    -Dauto_features=disabled -Ddatabase=simple -Ddbus=disabled \
-    -Dclient=true -Ddaemon=true -Dtests=false -Ddoxygen=false -Dman=false \
-    -Dadrian-aec=true -Dbashcompletiondir=no -Dzshcompletiondir=no
-ninja -C "$PA_BUILD" src/libpulsecommon-17.0.a src/pulse/libpulse.a \
-    src/pulsecore/libpulsecore-17.0.a src/pulsecore/libprotocol-native.a
+    SETUP_FLAGS=()
+    if [[ -d "$PA_BUILD/meson-private" ]]; then SETUP_FLAGS+=(--reconfigure); fi
+    meson setup "$PA_BUILD" "$PA_SRC" --cross-file "$WORK_DIR/cross.ini" \
+        --default-library static --buildtype release "${SETUP_FLAGS[@]}" \
+        -Dauto_features=disabled -Ddatabase=simple -Ddbus=disabled \
+        -Dclient=true -Ddaemon=true -Dtests=false -Ddoxygen=false -Dman=false \
+        -Dadrian-aec=true -Dbashcompletiondir=no -Dzshcompletiondir=no
+    ninja -C "$PA_BUILD" src/libpulsecommon-17.0.a src/pulse/libpulse.a \
+        src/pulsecore/libpulsecore-17.0.a src/pulsecore/libprotocol-native.a
 
-OUT="$WORK_DIR/out"
-mkdir -p "$OUT"
-"$CC" -shared -Os -fPIC -fvisibility=hidden -ffunction-sections -fdata-sections \
-    -DHAVE_CONFIG_H -D_GNU_SOURCE -D__INCLUDED_FROM_PULSE_AUDIO \
-    -I"$PA_BUILD" -I"$PA_BUILD/src" -I"$PA_SRC/src" -I"$PREFIX/include" \
-    "$HOST_DIR/pulse_host.c" \
-    -Wl,--start-group \
-    "$PA_BUILD/src/pulsecore/libprotocol-native.a" \
-    "$PA_BUILD/src/pulsecore/libpulsecore-17.0.a" \
-    "$PA_BUILD/src/libpulsecommon-17.0.a" "$PA_BUILD/src/pulse/libpulse.a" \
-    "$PREFIX/lib/libsndfile.a" "$PREFIX/lib/libltdl.a" \
-    -Wl,--end-group -Wl,--exclude-libs,ALL -Wl,--gc-sections \
-    -Wl,-z,defs -Wl,-soname,libpulsehost.so \
-    -lm -llog -ldl -o "$OUT/libpulsehost.so"
-"$STRIP" --strip-unneeded "$OUT/libpulsehost.so"
-JNI_DIR="$ROOT_DIR/app/src/main/jniLibs/arm64-v8a"
-mkdir -p "$JNI_DIR"
-cp "$OUT/libpulsehost.so" "$JNI_DIR/libpulsehost.so"
-LICENSE_DIR="$ROOT_DIR/app/src/main/assets/native-licenses"
-mkdir -p "$LICENSE_DIR"
-cp "$PA_SRC/LICENSE" "$LICENSE_DIR/LICENSE-PulseAudio"
-cp "$PA_SRC/LGPL" "$LICENSE_DIR/LGPL-2.1"
-cp "$WORK_DIR/libsndfile-1.2.2/COPYING" "$LICENSE_DIR/COPYING-libsndfile"
-cp "$WORK_DIR/libtool-2.4.7/libltdl/COPYING.LIB" "$LICENSE_DIR/COPYING-libltdl"
-# Retire only the replaced audio artifact, keeping a backup.
-if [[ -f "$JNI_DIR/libpipewirehost.so" ]]; then
-    cp "$JNI_DIR/libpipewirehost.so" "$WORK_DIR/libpipewirehost.so.backup"
-    rm "$JNI_DIR/libpipewirehost.so"
-fi
-echo "Installed single audio library: $JNI_DIR/libpulsehost.so"
+    EXTRA_LIBS=()
+    if [[ "$abi" == "armeabi-v7a" || "$abi" == "x86" ]]; then
+        EXTRA_LIBS=(-latomic)
+    fi
+    OUT="$WORK_DIR/out"
+    mkdir -p "$OUT"
+    "$CC" -shared -Oz -flto -fPIC -fvisibility=hidden -ffunction-sections -fdata-sections \
+        -DHAVE_CONFIG_H -D_GNU_SOURCE -D__INCLUDED_FROM_PULSE_AUDIO \
+        -I"$PA_BUILD" -I"$PA_BUILD/src" -I"$PA_SRC/src" -I"$PREFIX/include" \
+        "$HOST_DIR/pulse_host.c" \
+        -Wl,--start-group \
+        "$PA_BUILD/src/pulsecore/libprotocol-native.a" \
+        "$PA_BUILD/src/pulsecore/libpulsecore-17.0.a" \
+        "$PA_BUILD/src/libpulsecommon-17.0.a" "$PA_BUILD/src/pulse/libpulse.a" \
+        "$PREFIX/lib/libsndfile.a" "$PREFIX/lib/libltdl.a" \
+        -Wl,--end-group -Wl,--exclude-libs,ALL -Wl,--gc-sections -Wl,--icf=all \
+        -Wl,--strip-all -Wl,-z,defs "${PAGE_FLAGS[@]}" \
+        -Wl,-soname,libpulsehost.so \
+        -lm -llog -ldl "${EXTRA_LIBS[@]}" -o "$OUT/libpulsehost.so"
+    "$STRIP" --strip-unneeded "$OUT/libpulsehost.so"
+    JNI_DIR="$ROOT_DIR/app/src/main/jniLibs/$abi"
+    mkdir -p "$JNI_DIR"
+    cp "$OUT/libpulsehost.so" "$JNI_DIR/libpulsehost.so"
+    LICENSE_DIR="$ROOT_DIR/app/src/main/assets/native-licenses"
+    mkdir -p "$LICENSE_DIR"
+    cp "$PA_SRC/LICENSE" "$LICENSE_DIR/LICENSE-PulseAudio"
+    cp "$PA_SRC/LGPL" "$LICENSE_DIR/LGPL-2.1"
+    cp "$WORK_DIR/libsndfile-1.2.2/COPYING" "$LICENSE_DIR/COPYING-libsndfile"
+    cp "$WORK_DIR/libtool-2.4.7/libltdl/COPYING.LIB" "$LICENSE_DIR/COPYING-libltdl"
+    if [[ -f "$JNI_DIR/libpipewirehost.so" ]]; then
+        cp "$JNI_DIR/libpipewirehost.so" "$WORK_DIR/libpipewirehost.so.backup"
+        rm "$JNI_DIR/libpipewirehost.so"
+    fi
+    echo "Installed audio library: $JNI_DIR/libpulsehost.so"
+done

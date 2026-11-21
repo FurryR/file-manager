@@ -9,7 +9,9 @@ platform services and calls the library.
 | Directory | Contents |
 |-----------|----------|
 | `.` (root) | `MainActivity.kt`, `FileManagerApp.kt`, `AppWorld.kt`, `Constants.kt`, `Opener.kt`, `Providers.kt`, `FileManagerApplication.kt` |
-| `agent/` | Agent settings (MCP/model/provider), no terminal code |
+| `adblock/` | `adblock-rust` JNI facade + filter-list metadata (`adblock_settings`) and bodies (`filesDir/adblock/lists`); engine cache in `cacheDir`; settings live in `ui/screens/AdBlockSettingsActivity.kt` |
+| `agent/` | Agent settings (MCP/model/provider) and session JSON files under `filesDir/agent/sessions`; no terminal code |
+| `userscript/` | File-backed user scripts (`filesDir/userscripts`), header parser, match engine, WebView bridge and injector |
 | `crash/` | `CrashReporter.kt` (uncaught handler + pending report) and `CrashActivity.kt` (report screen, copy/share/export/restart) |
 | `devtools/` | Official Chrome DevTools frontend bridge: loopback asset server, CDP WebSocket proxy, WebView target discovery |
 | `terminal/` | Terminal subsystem: `Terminal` tab owner, sheet, PTY `SessionManager`, Termux view/input, tab implementations, DevTools tab |
@@ -23,7 +25,7 @@ platform services and calls the library.
 | `settings/` | `PulseSettings.kt` — app-owned PulseAudio preference store |
 | `store/` | Location stores + `LocationStores` + `LocationsRepository` (all persistence) |
 | `ui/components/` | `BottomToolbar.kt`, `TopBarContent.kt`, `FileDrawer.kt`, `Dialogs.kt`, `ServiceUnavailableState.kt` |
-| `ui/screens/` | `SettingsActivity.kt`, `LspSettingsActivity.kt`, `SearchEngineSettingsActivity.kt`, `LicensesScreen.kt` (reads the generated `assets/licenses.json`), `LicensesActivity` |
+| `ui/screens/` | `SettingsActivity.kt`, `LspSettingsActivity.kt`, `SearchEngineSettingsActivity.kt`, `AdBlockSettingsActivity.kt`, `LicensesScreen.kt` (reads the generated `assets/licenses.json`), `LicensesActivity` |
 | `ui/theme/` | `FileManagerTheme.kt` (Material3 dark/light), `Color.kt` (palettes + AMOLED canvas), `PaletteStore.kt` |
 | `ui/util/` | `Formatters.kt`, `FileIcons.kt`, `FileOpen.kt`, `OperationNotification.kt` |
 | `editor/` | Tab-owned Sora text editor, text codec, TextMate grammars and the editor's LSP adapter |
@@ -53,9 +55,12 @@ platform services and calls the library.
 - **Container provider**: `:container/ContainerProvider.kt` — one provider for all containers
 - **Container daemon launch**: `:container/ContainerDaemonLauncher.kt` — proot/chroot argv
 - **Terminal panel**: `terminal/TerminalSheet.kt` — bottom sheet over `terminal/Terminal.kt`; `RuntimeForegroundService.kt` keeps sessions and container daemons alive
-- **Web DevTools**: `devtools/DevToolsServer.kt` serves the generated frontend from `app/src/main/assets/devtools` and proxies its CDP WebSocket to the abstract `webview_devtools_remote_<pid>` socket; it also injects a bootstrap script that seeds the frontend `ui-theme`/`language` settings from the app theme and locale, and `terminal/WebDevToolsTab.kt` re-applies live theme changes. `devtools/DevToolsTargets.kt` resolves the page target and `terminal/WebDevToolsTab.kt` owns the frontend WebView. The npm pin and asset sync live in `tools/devtools/`; the sync stages one DevTools locale per app `values-*` translation, so a new app language needs no DevTools code change.
+- **Web DevTools**: `devtools/DevToolsServer.kt` serves the generated frontend from `app/src/main/assets/devtools` and proxies its CDP WebSocket to the abstract `webview_devtools_remote_<pid>` socket; it also injects a bootstrap script that seeds the frontend `ui-theme`/`language` settings from the app theme and locale, and `terminal/WebDevToolsTab.kt` re-applies live theme changes. Text assets are staged as Brotli streams (`<name>.br`, served with `Content-Encoding: br`); only `inspector.html` (patched) and `BUILD_INFO.json` stay plain. `devtools/DevToolsTargets.kt` resolves the page target and `terminal/WebDevToolsTab.kt` owns the frontend WebView. The npm pin and asset sync live in `tools/devtools/`; the sync stages one DevTools locale per app `values-*` translation, so a new app language needs no DevTools code change.
 - **Language servers**: `lsp/LspRuntime.kt` + `lsp/LspCatalog.kt` + `lsp/WorkspaceFinder.kt` — built-in `assets/lsp/catalog.json`, user rules in `SharedPreferences("lsp_settings")` through `LspSettingsActivity`; the server runs in the file's own provider namespace, workspace roots come from VFS markers, and there is no installation/status/container UI
 - **Search engines**: `ui/util/SearchEngines.kt` — DuckDuckGo first and by default, fixed Google/Bing/Baidu plus user engines in one `SharedPreferences("search_settings")` JSON object (same shape as LSP user rules); `ui/screens/SearchEngineSettingsActivity.kt` edits them, and `ui/util/PathSuggestions.kt` uses the selected engine's optional suggestion endpoint
+- **Ad blocking**: `adblock/AdBlockEngine.kt` loads the serialized engine from `cacheDir/adblock` (rebuilt when missing), `adblock/AdBlockSettings.kt` owns list URLs/toggles in `adblock_settings` and bodies under `filesDir/adblock/lists` (editable text), `render/WebRenderer.kt` checks live subresources, and `ui/screens/AdBlockSettingsActivity.kt` edits the toggle/lists. The JNI engine lives in `native/adblock/src/lib.rs` (`libadblock.so`).
+- **User scripts**: `userscript/UserScriptStore.kt` owns `filesDir/userscripts` (script bodies, `@require`/`@resource`, GM values) and `userscript_settings` metadata; `UserScriptParser` reads the header, `UserScriptEngine` compiles one in-memory snapshot, `UserScriptInjector` attaches an `androidUserScript` bridge and a document-start bootstrap before the first `loadUrl` (`render/WebRenderer.kt`), and `ui/screens/UserScriptSettingsActivity.kt` installs from a URL or a picked file, and opens a script in the editor. The bootstrap falls back to `onPageStarted` when the WebView lacks `DOCUMENT_START_SCRIPT`.
+- **Agent history**: `agent/AgentSettings.kt` owns `filesDir/agent/sessions/<id>.json`; the hub's `SET_HISTORY` and the agent loop both write the whole wrapper, and `SettingsBackup` copies those files verbatim.
 - **Exec/PTY**: `:daemon/process/ExecService.kt` — `CommandSpec` → `ProcessChannel` (one path for terminal + command exec)
 - **Native daemon entry**: `:daemon/DaemonManager.kt` — starts `libfiledaemon.so` from `nativeLibraryDir`
 - **Add a location store**: implement a `LocationSources.kt` interface in `store/`, wire it through `LocationStores.init` and the matching provider `init()`
@@ -71,6 +76,7 @@ platform services and calls the library.
 - **No `enum` for screens** — uses `private enum class` in Activity files.
 - **SessionManager singleton** — `object`, not DI. Manual wiring via `configure()`.
 - **Native binaries as jniLibs** — `libfiledaemon.so`, `libproot.so` and `libpulsehost.so` in `jniLibs/arm64-v8a/` here.
+- **Storage placement**: structured non-editable state belongs in a SQLite database under `databases/` (locations, settings). Editable or user-supplied text stays as files: user scripts under `filesDir/userscripts`, adblock list bodies under `filesDir/adblock/lists`, AI session JSON under `filesDir/agent/sessions`. Reproducible data (compiled caches, staging, extracted fonts) belongs in `cacheDir/`. `filesDir` otherwise holds path-addressed artifacts: `container/`, `bin/`, `xkb/`, `crash/` and the two HMAC token files. Do not add a new `filesDir` top-level entry without a documented owner.
 
 ## ANTI-PATTERNS
 
@@ -78,6 +84,12 @@ platform services and calls the library.
 - Silent catch (`catch {}`) — only allowed for Shizuku availability checks.
 
 ## TODO - Bug checks
+
+- [ ] `userscript/UserScriptStore.kt` + `ui/screens/UserScriptSettingsActivity.kt`: verify URL/local-file install, the “New script” blank template opening in the editor, duplicate replace, update, delete, per-script enable/disable, `@require`/`@resource` files, the script body under `filesDir/userscripts/scripts`, and clicking a row opening that file in the editor.
+- [ ] `userscript/UserScriptInjector.kt` + `assets/userscript/bootstrap.js` + `render/WebRenderer.kt`: verify document-start execution precedes page scripts, `document-end`/`document-idle`, main-frame-only, fallback injection when `DOCUMENT_START_SCRIPT` is unsupported, detach on tab close/renderer crash, and no double run across tab switches; verify an editor save is picked up after returning to the browser.
+- [ ] `userscript/UserScriptBridge.kt`: verify GM storage/`GM_addStyle`/`GM_xmlhttpRequest` (`@connect` allow and deny), `GM_openInTab`, clipboard, notification, `@require` order and script errors that must not break the page.
+- [ ] `agent/AgentSettings.kt` + `settings/SettingsBackup.kt`: verify session order/titles/usage, new-session file creation, hub `SET_HISTORY`, and export/import with an old backup.
+- [ ] `adblock/AdBlockSettings.kt` + `adblock/AdBlockEngine.kt`: verify the engine cache lives in `cacheDir/adblock`, list bodies live under `filesDir/adblock/lists`, bodies survive update/import/delete, and a cache purge rebuilds blocking.
 
 - [ ] `clipboard/Clipboard.kt` + `picker/PickerDocumentsProvider.kt`: verify copy/move destination folder creation after inlining the removed `VFolder.destinationFolder(name)` (new folder, merge, file collision) and that picker `CREATE_DOCUMENT` with `MIME_TYPE_DIR` still creates the directory and rejects an existing name.
 
@@ -238,4 +250,15 @@ platform services and calls the library.
 - [ ] `ui/util/ErrorText.kt` + `render/FolderRenderer.kt` + `shell/ClipboardController.kt` + `editor/EditorRenderer.kt` + `FileManagerApp.kt`: verify `PresentableException` failures show localized text (permission denied, service not running) in toasts and editor errors, and non-presentable errors keep their message.
 - [ ] `core/.../exception/PresentableException.kt` + `provider/.../remote/SshException.kt` + `ui/util/ErrorText.kt` + `res/values*/remote_strings.xml`: verify SSH failures (host key changed/required, connect/auth, channel, timeout, command, transfer, file changed, cancelled) show localized text in the file error page, toasts and drawer, and `zh`/`en` strings resolve.
 - [ ] `ui/screens/LicensesScreen.kt`: verify the fallback list (generated asset absent) shows GPLv3-or-later for File, GPLv2-or-later for PRoot and the talloc LGPLv3 row.
+- [ ] `ui/screens/SearchEngineSettingsActivity.kt` + `res/values*/strings.xml`: verify the top-bar `+` opens the add-engine dialog, the built-in/custom section headers resolve in all four locales, edit/delete icon buttons appear only on custom engines, and selecting, editing and deleting still persist.
 
+- [ ] `ui/screens/AdBlockSettingsActivity.kt`: verify the `+` menu offers 文件 / URL, 文件 opens the app `FilePickerActivity` (not the system document picker), the picked EasyList/hosts file imports and rebuilds, and URL still opens the add-list dialog in all four locales.
+- [ ] `adblock/AdBlockSettings.kt` + `picker/FilePickerActivity.kt`: verify `importFile` reads a picker document URI from a local, container, SAF and remote folder, keeps the display name, and a cancelled/empty pick leaves the list unchanged.
+- [ ] `ui/screens/SettingsActivity.kt` + `settings/SettingsBackup.kt`: verify the backup now carries `agent_settings` (AI providers/MCP/active sessions), `local_locations`, `web_locations`, SAF/FTP/SFTP/remote location records and every `agent/sessions/<id>.json`, and that importing an older JSON without `locations`/`sessions` still succeeds.
+- [ ] `settings/SettingsBackup.kt` + `store/SafDatabase.kt` + `store/FtpDatabase.kt` + `store/SftpDatabase.kt` + `store/RemoteLocationStore.kt`: verify restore merges by hex id/host/remote id, keeps `saf://hex` addresses and imported order, leaves non-exported locations intact, and a malformed location row is skipped without aborting the import.
+- [ ] `settings/SettingsBackup.kt` + `agent/AgentSettings.kt`: verify imported chat sessions appear in the session manager with titles/messages/usage, active-session pointers resolve, and provider API keys/MCP headers restore on the same install (encrypted prefs are device-bound).
+- [ ] `ui/screens/SettingsActivity.kt` + `settings/SettingsBackup.kt`: verify the Editor import/export rows open the app picker, export writes one JSON file, import merges settings/lsp_settings/search_settings/adblock_settings, recreates Settings, and a malformed or wrong-version file shows the failure toast without changing preferences.
+- [ ] `adblock/AdBlockEngine.kt` + `adblock/AdBlockSettings.kt` + `native/adblock/src/lib.rs` + `render/WebRenderer.kt` + `ui/screens/AdBlockSettingsActivity.kt`: verify the Browse row opens the page, enabling without cached rules downloads the enabled lists, update builds the engine and blocks an ad subresource while the page itself and `ASSET_HOST` resources still load, disabling lets the same request through, importing an EasyList file and a hosts file blocks the matching domains, and a failed update keeps the previous engine working.
+- [ ] `ui/screens/SettingsActivity.kt` + `picker/FilePickerActivity.kt` + `core/.../ContentInfo.kt`: verify terminal and editor font rows launch the app picker, TTF/OTF/TTC files are listed and selectable, the chosen font is copied into `cacheDir/fonts/`, and the editor/terminal reload the new typeface.
+- [ ] `terminal/TerminalViewComposable.kt`: verify output from a background terminal tab (a full-screen program) no longer repaints or scrolls the tab on screen to the bottom, switching terminal/file tabs keeps the visible tab's scroll position, and the active tab still repaints on every write; verify a palette change still repaints the transcript while an unchanged palette skips the repaint.
+- [ ] `ui/theme/TerminalPalette.kt`: verify `matches` accepts the applied palette and rejects every scheme change, so switching schemes still recolours the terminal.

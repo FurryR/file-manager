@@ -180,7 +180,7 @@ class ContainerProvider(
             // /etc/profile.d/hub.sh appends HUB_PATH after they have run.
             val env = PulseManager.environment() + WaylandManager.environment(appContext) + mapOf(
                 "PATH" to ContainerDaemonLauncher.DEFAULT_PATH,
-                "HUB_PATH" to DaemonManager.nativeLibraryDir,
+                "HUB_PATH" to DaemonManager.binDir,
             ) + DaemonManager.hubEnvironment(DaemonTarget.Named(name), terminalId)
             val channel = exec(name).spawn(
                 CommandSpec(

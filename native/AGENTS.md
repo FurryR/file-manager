@@ -13,6 +13,7 @@ native/
 ├── here/src/main.rs # Reveal a path via one O_PATH descriptor sent to the hub
 ├── agent/src/        # Modular ratatui + crossterm terminal AI chat UI
 ├── hub-client/      # Shared hub protocol codegen, socket I/O and SCM_RIGHTS
+├── adblock/         # JNI ad-blocking engine over adblock-rust (libadblock.so)
 ├── wayland/         # Smithay Wayland compositor (libwayland_compositor.so)
 │   ├── src/lib.rs   # run loop, socket bind, Android JNI entry points
 │   ├── src/state.rs # protocol state: xdg-shell, shm, dmabuf, seat, output, fractional scale
@@ -95,6 +96,7 @@ native/
   on the shared connection stalls the draw loop until the hub answers, which is
   the freeze this removed.
 - **Terminal utilities**: `run0/`, `here/`, `agent/`; common wire transport in `hub-client/`
+- **Ad blocking engine**: `adblock/src/lib.rs` — process-wide `RwLock<Option<Engine>>` over `adblock-rust`; Kotlin sends rule text/cache bytes and network-request facts. Build without the crate's `single-thread` feature (Chromium calls from several threads) and parse `RuleTypes::NetworkOnly` (the WebView does not inject cosmetic rules).
 - **Agent UI/network**: ratatui + crossterm UI in `agent/src/{ui,terminal,app}.rs`; chat/models/history/online MCP go through the hub (`agent/src/hub.rs`), local stdio MCP in `agent/src/mcp.rs`. A finished title stream means the hub is gone — local abstract sockets do not drop on their own and the hub never evicts a client, so the agent must not re-subscribe or probe
 
 ## CONVENTIONS
@@ -107,7 +109,8 @@ native/
   device library and never add a Rust binding crate: policy mutation goes
   through the C boundary in `native/sepolicy`, with `src/sepolicy.rs` declaring
   only that ABI.
-- **Single-threaded async** — `tokio::main(flavor = "current_thread")`; concurrency is tasks, not threads
+- **Single-threaded async** — a manually built `current_thread` runtime with `enable_all()` (`main` is a synchronous preflight, then `runtime.block_on(serve(..))`); concurrency is tasks, not threads
+- **The runtime starts after the container root is entered** — `unshare(CLONE_NEWNS)` and `chroot` only change the calling thread's filesystem context; a thread created earlier keeps the host root and host mount namespace, and `tokio::fs` runs on blocking-pool threads. Keep every preflight (reaper, cgroup, SELinux, chroot) synchronous in `main()` and build the Tokio runtime only afterwards, so every pool thread inherits the container root. Never call `spawn_blocking` before `enter_chroot`, and bind the socket only after the preflight: a container listing served from a pre-chroot thread would return the host `/`.
 - **One reaper owns every child** — `reaper::track` returns a `watch::Receiver`
   for the exit code; only the SIGCHLD sweep calls `waitpid(-1)`. Do not add a
   second `waitpid` owner, and do not enumerate `/proc` (rootless Android cannot
@@ -167,7 +170,7 @@ native/
 
 ```bash
 bash build-libsepol.sh           # → native/sepolicy/prefix (static archive linked into the daemon)
-bash build-android-aarch64.sh    # → jniLibs/.../libfiledaemon.so + executables/lib/.../{run0,here,agent}
+bash build-android-aarch64.sh    # → jniLibs libfiledaemon.so + lib{run0,here,agent,adblock}.so
 bash build-proot.sh              # → app/src/main/jniLibs/arm64-v8a/libproot.so
 bash build-xkbcommon.sh aarch64  # → wayland/third_party/libxkbcommon/builddir-aarch64/libxkbcommon.a
 ```
@@ -177,10 +180,28 @@ The Smithay compositor crate also produces
 above first (Smithay's `xkbcommon` dependency links the C library, which the
 NDK does not ship).
 
+Android Rust releases are size-optimized: `rust-toolchain.toml` pins
+`nightly-2026-11-20` with `rust-src`, `native/Cargo.toml` selects
+`opt-level = "z"` / fat LTO / one CGU / `panic = "immediate-abort"`, and
+`build-android-aarch64.sh` passes `-Z build-std=std,panic_abort
+-Z build-std-features=optimize_for_size`. Host cargo commands are not forced
+through `build-std`. `.cargo/config.toml` adds `--icf=all`,
+`--gc-sections`, `--strip-all` and 16 KiB max-page-size for Android links.
+Stable Cargo cannot parse the `cargo-features = ["panic-immediate-abort"]`
+line; use the pinned nightly.
+
+C-side: `build-proot.sh` and `build-pulse.sh` use `-Oz` plus fat LTO across
+their pure-C objects. `build-xkbcommon.sh`, `build-libsepol.sh` and the EGL shim
+use `-Oz` with function/data sections only: the NDK clang (LLVM 21) cannot
+consume Rust's LLVM 23 bitcode, so cross-language LTO is deliberately not
+enabled. The final Rust link still runs `--gc-sections`/`--icf=all`, dropping
+unused C sections. Never add `-flto` to those archives without matching the
+toolchain LLVMs and adding `-C linker-plugin-lto`.
+
 Gradle builds native before packaging: the app `preBuild` task runs
 `scripts/build-native.sh`, which calls every script above in order. Its inputs
 are the native sources/scripts/proto and its outputs are the staged `jniLibs`,
-executables, xkb assets and libsepol/xkbcommon archives, so Gradle skips it
+utility libs, xkb assets and libsepol/xkbcommon archives, so Gradle skips it
 when nothing native changed. Use `-PskipNativeBuild=true` only when reusing
 already staged binaries. A quick check is `strings
 app/src/main/jniLibs/arm64-v8a/libfiledaemon.so | grep 'container domain'`.

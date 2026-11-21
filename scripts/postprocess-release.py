@@ -2,9 +2,12 @@
 """Recompress, align and sign the release APK.
 
 AGP deflates every entry at zlib level 1 and aapt2 stores resources.arsc, so
-the packaged release APK is about 2 MB larger than a level-9 rewrite. The
-rewrite changes every entry offset, which invalidates any signature, so
-recompression, zipalign and apksigner have to run as one post-packaging step.
+the packaged release APK is about 2 MB larger than a level-9 rewrite. With the
+optional Python `zopfli` package installed, deflated entries of at least 1 KiB
+get an exhaustive Zopfli pass instead (zlib level 9 remains the fallback and the
+result is kept only when it is smaller). The rewrite changes every entry
+offset, which invalidates any signature, so recompression, zipalign and
+apksigner have to run as one post-packaging step.
 
 Signing key, in order of precedence:
   1. keystore.properties at the repository root (gitignored):
@@ -29,9 +32,23 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import zlib
 from pathlib import Path
 
+try:
+    from zopfli import zopfli as _zopfli
+except ImportError:  # packaging without the optional Python package
+    _zopfli = None
+
 LEVEL = 9
+# Zopfli is much slower than zlib; below this size the extra entropy search
+# is not worth the build time, so those entries stay on zlib level 9.
+ZOPFLI_MIN_BYTES = int(os.environ.get("APK_ZOPFLI_MIN_BYTES", "1024"))
+ZOPFLI_ITERATIONS = int(os.environ.get("APK_ZOPFLI_ITERATIONS", "25"))
+ZOPFLI_ENABLED = (
+    _zopfli is not None
+    and os.environ.get("APK_ZOPFLI", "1").lower() not in {"0", "false", "no"}
+)
 ROOT = Path(__file__).resolve().parent.parent
 # v1 META-INF files would be stale after the rewrite and apksigner replaces
 # them anyway; dropping them keeps the archive deterministic.
@@ -90,7 +107,76 @@ def target_sdk(apk: Path) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _raw_deflate(data: bytes) -> bytes:
+    """zlib level 9 as a raw deflate stream (the ZIP format's payload)."""
+    compressor = zlib.compressobj(LEVEL, zlib.DEFLATED, -zlib.MAX_WBITS)
+    return compressor.compress(data) + compressor.flush()
+
+
+class _ZopfliCompressor:
+    """A zipfile compressor that buffers and emits one Zopfli raw-deflate blob.
+
+    Python's zipfile expects a streaming `compress`/`flush` pair. Zopfli is
+    one-shot, so writes are collected and encoded at flush time. Entries below
+    `ZOPFLI_MIN_BYTES` fall back to zlib level 9.
+    """
+
+    def __init__(self) -> None:
+        self._chunks: list[bytes] = []
+
+    def compress(self, data: bytes) -> bytes:
+        self._chunks.append(bytes(data))
+        return b""
+
+    def flush(self) -> bytes:
+        data = b"".join(self._chunks)
+        self._chunks.clear()
+        if len(data) < ZOPFLI_MIN_BYTES or _zopfli is None:
+            return _raw_deflate(data)
+        try:
+            # zopfli.zopfli.compress emits a zlib-wrapped stream; ZIP stores the
+            # raw deflate payload (2-byte header + 4-byte Adler-32 removed).
+            wrapped = _zopfli.compress(data, numiterations=ZOPFLI_ITERATIONS)
+            if len(wrapped) >= 6 and (wrapped[0] & 0x0F) == 8:
+                return wrapped[2:-4]
+        except Exception as error:
+            print(f"  zopfli failed, using zlib: {error}", file=sys.stderr)
+        return _raw_deflate(data)
+
+
+if ZOPFLI_ENABLED:
+    # Python 3.14 routes _ZipWriteFile through the module-level helper. Older
+    # interpreters use ZipFile._get_compressor instead; the fallback is only
+    # needed for those environments.
+    if hasattr(zipfile, "_get_compressor"):
+        _ORIGINAL_GET_COMPRESSOR = zipfile._get_compressor
+
+        def _zopfli_get_compressor(compress_type, compresslevel=None):
+            if compress_type == zipfile.ZIP_DEFLATED:
+                return _ZopfliCompressor()
+            return _ORIGINAL_GET_COMPRESSOR(compress_type, compresslevel)
+
+        zipfile._get_compressor = _zopfli_get_compressor
+    else:  # pragma: no cover - legacy Python
+        _OriginalZipFile = zipfile.ZipFile
+
+        class _ZopfliZipFile(_OriginalZipFile):
+            def _get_compressor(self, compress_type=None, compresslevel=None):
+                if compress_type == zipfile.ZIP_DEFLATED:
+                    return _ZopfliCompressor()
+                return super()._get_compressor(compress_type, compresslevel)
+
+        zipfile.ZipFile = _ZopfliZipFile
+
+
 def recompress(source: Path, target: Path, store_arsc: bool) -> None:
+    if ZOPFLI_ENABLED:
+        print(
+            f"  zopfli: entries >= {ZOPFLI_MIN_BYTES} B, {ZOPFLI_ITERATIONS} iterations",
+            flush=True,
+        )
+    else:
+        print("  zopfli: unavailable or disabled; using zlib level 9", flush=True)
     with zipfile.ZipFile(source) as src, zipfile.ZipFile(target, "w") as dst:
         for info in src.infolist():
             if V1_SIGNATURE.match(info.filename):
@@ -99,11 +185,17 @@ def recompress(source: Path, target: Path, store_arsc: bool) -> None:
             # resolves the name back to this same ZipInfo object.
             data = src.read(info.filename)
             # targetSdk 30+ requires an uncompressed resources.arsc for mmap;
-            # below that it is just the largest stored entry.
-            if store_arsc and info.filename == "resources.arsc":
+            # below that it is just the largest stored entry. Brotli assets
+            # (`*.br`) are already compressed, so store them as-is.
+            if (store_arsc and info.filename == "resources.arsc") or info.filename.endswith(".br"):
                 info.compress_type = zipfile.ZIP_STORED
             else:
                 info.compress_type = zipfile.ZIP_DEFLATED
+                if ZOPFLI_ENABLED and info.file_size >= 1 << 20:
+                    print(
+                        f"  zopfli {info.filename} ({info.file_size / 1048576:.1f} MiB)",
+                        flush=True,
+                    )
             dst.writestr(info, data, compresslevel=LEVEL)
 
 

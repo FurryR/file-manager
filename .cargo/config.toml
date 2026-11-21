@@ -1,0 +1,13 @@
+# Android release size flags. `build-std` lives in the native build script,
+# not here: it is nightly-only and would also try to rebuild the host std for
+# ordinary `cargo check`/`cargo run` commands.
+#
+# Profiles cannot live in this file; the release profile (z/1-CGU/fat LTO and
+# `panic = "immediate-abort"`) stays in `native/Cargo.toml`.
+[target.'cfg(target_os = "android")']
+rustflags = [
+    "-C", "link-arg=-Wl,--icf=all",
+    "-C", "link-arg=-Wl,--gc-sections",
+    "-C", "link-arg=-Wl,--strip-all",
+    "-C", "link-arg=-Wl,-z,max-page-size=16384",
+]

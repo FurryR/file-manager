@@ -520,6 +520,13 @@
     },
     {
       "group": "Android / JVM",
+      "name": "androidx.webkit:webkit",
+      "version": "1.12.1",
+      "license": "Apache-2.0",
+      "url": "https://developer.android.com/jetpack/androidx/releases/webkit#1.12.1"
+    },
+    {
+      "group": "Android / JVM",
       "name": "com.github.mwiede:jsch",
       "version": "2.28.5",
       "license": "BSD-3-Clause / ISC",
@@ -709,6 +716,20 @@
     },
     {
       "group": "Rust",
+      "name": "adblock",
+      "version": "0.13.6",
+      "license": "MPL-2.0",
+      "url": "https://github.com/brave/adblock-rust/"
+    },
+    {
+      "group": "Rust",
+      "name": "addr",
+      "version": "0.15.6",
+      "license": "MIT/Apache-2.0",
+      "url": "https://github.com/addr-rs/addr"
+    },
+    {
+      "group": "Rust",
       "name": "aho-corasick",
       "version": "1.1.4",
       "license": "Unlicense OR MIT",
@@ -758,6 +779,13 @@
     },
     {
       "group": "Rust",
+      "name": "arrayvec",
+      "version": "0.7.8",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/bluss/arrayvec"
+    },
+    {
+      "group": "Rust",
       "name": "atomic",
       "version": "0.6.1",
       "license": "Apache-2.0/MIT",
@@ -774,6 +802,13 @@
       "group": "Rust",
       "name": "base64",
       "version": "0.22.1",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/marshallpierce/rust-base64"
+    },
+    {
+      "group": "Rust",
+      "name": "base64",
+      "version": "0.23.1",
       "license": "MIT OR Apache-2.0",
       "url": "https://github.com/marshallpierce/rust-base64"
     },
@@ -808,7 +843,7 @@
     {
       "group": "Rust",
       "name": "bitflags",
-      "version": "2.13.0",
+      "version": "2.13.2",
       "license": "MIT OR Apache-2.0",
       "url": "https://github.com/bitflags/bitflags"
     },
@@ -982,6 +1017,13 @@
     },
     {
       "group": "Rust",
+      "name": "displaydoc",
+      "version": "0.2.7",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/yaahc/displaydoc"
+    },
+    {
+      "group": "Rust",
       "name": "downcast-rs",
       "version": "1.2.1",
       "license": "MIT/Apache-2.0",
@@ -1080,6 +1122,13 @@
     },
     {
       "group": "Rust",
+      "name": "flatbuffers",
+      "version": "25.12.19",
+      "license": "Apache-2.0",
+      "url": "https://github.com/google/flatbuffers"
+    },
+    {
+      "group": "Rust",
       "name": "fnv",
       "version": "1.0.7",
       "license": "Apache-2.0 / MIT",
@@ -1150,10 +1199,73 @@
     },
     {
       "group": "Rust",
+      "name": "icu_collections",
+      "version": "2.4.0",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
+      "name": "icu_locale_core",
+      "version": "2.4.0",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
+      "name": "icu_normalizer",
+      "version": "2.4.0",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
+      "name": "icu_normalizer_data",
+      "version": "2.4.0",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
+      "name": "icu_properties",
+      "version": "2.4.0",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
+      "name": "icu_properties_data",
+      "version": "2.4.0",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
+      "name": "icu_provider",
+      "version": "2.4.0",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
       "name": "ident_case",
       "version": "1.0.1",
       "license": "MIT/Apache-2.0",
       "url": "https://github.com/TedDriggs/ident_case"
+    },
+    {
+      "group": "Rust",
+      "name": "idna",
+      "version": "1.1.0",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/servo/rust-url/"
+    },
+    {
+      "group": "Rust",
+      "name": "idna_adapter",
+      "version": "1.2.2",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/hsivonen/idna_adapter"
     },
     {
       "group": "Rust",
@@ -1269,6 +1381,13 @@
     },
     {
       "group": "Rust",
+      "name": "litemap",
+      "version": "0.8.3",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
       "name": "lock_api",
       "version": "0.4.14",
       "license": "MIT OR Apache-2.0",
@@ -1298,7 +1417,7 @@
     {
       "group": "Rust",
       "name": "memchr",
-      "version": "2.8.2",
+      "version": "2.8.3",
       "license": "Unlicense OR MIT",
       "url": "https://github.com/BurntSushi/memchr"
     },
@@ -1416,6 +1535,13 @@
     },
     {
       "group": "Rust",
+      "name": "percent-encoding",
+      "version": "2.3.2",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/servo/rust-url/"
+    },
+    {
+      "group": "Rust",
       "name": "pest",
       "version": "2.9.5",
       "license": "MIT OR Apache-2.0",
@@ -1500,6 +1626,13 @@
     },
     {
       "group": "Rust",
+      "name": "potential_utf",
+      "version": "0.1.6",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
       "name": "ppv-lite86",
       "version": "0.2.21",
       "license": "MIT OR Apache-2.0",
@@ -1539,6 +1672,20 @@
       "version": "0.13.5",
       "license": "Apache-2.0",
       "url": "https://github.com/tokio-rs/prost"
+    },
+    {
+      "group": "Rust",
+      "name": "psl",
+      "version": "2.1.259",
+      "license": "MIT/Apache-2.0",
+      "url": "https://github.com/addr-rs/psl"
+    },
+    {
+      "group": "Rust",
+      "name": "psl-types",
+      "version": "2.0.11",
+      "license": "MIT/Apache-2.0",
+      "url": "https://github.com/addr-rs/psl-types"
     },
     {
       "group": "Rust",
@@ -1599,23 +1746,30 @@
     {
       "group": "Rust",
       "name": "regex",
-      "version": "1.12.4",
+      "version": "1.13.2",
       "license": "MIT OR Apache-2.0",
       "url": "https://github.com/rust-lang/regex"
     },
     {
       "group": "Rust",
       "name": "regex-automata",
-      "version": "0.4.14",
+      "version": "0.4.19",
       "license": "MIT OR Apache-2.0",
       "url": "https://github.com/rust-lang/regex"
     },
     {
       "group": "Rust",
       "name": "regex-syntax",
-      "version": "0.8.11",
+      "version": "0.8.12",
       "license": "MIT OR Apache-2.0",
       "url": "https://github.com/rust-lang/regex"
+    },
+    {
+      "group": "Rust",
+      "name": "rustc-hash",
+      "version": "2.1.3",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/rust-lang/rustc-hash"
     },
     {
       "group": "Rust",
@@ -1654,29 +1808,36 @@
     },
     {
       "group": "Rust",
+      "name": "seahash",
+      "version": "4.1.0",
+      "license": "MIT",
+      "url": "https://gitlab.redox-os.org/redox-os/seahash"
+    },
+    {
+      "group": "Rust",
       "name": "serde",
-      "version": "1.0.228",
+      "version": "1.0.229",
       "license": "MIT OR Apache-2.0",
       "url": "https://github.com/serde-rs/serde"
     },
     {
       "group": "Rust",
       "name": "serde_core",
-      "version": "1.0.228",
+      "version": "1.0.229",
       "license": "MIT OR Apache-2.0",
       "url": "https://github.com/serde-rs/serde"
     },
     {
       "group": "Rust",
       "name": "serde_derive",
-      "version": "1.0.228",
+      "version": "1.0.229",
       "license": "MIT OR Apache-2.0",
       "url": "https://github.com/serde-rs/serde"
     },
     {
       "group": "Rust",
       "name": "serde_json",
-      "version": "1.0.150",
+      "version": "1.0.154",
       "license": "MIT OR Apache-2.0",
       "url": "https://github.com/serde-rs/json"
     },
@@ -1752,6 +1913,13 @@
     },
     {
       "group": "Rust",
+      "name": "stable_deref_trait",
+      "version": "1.2.1",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://github.com/storyyeller/stable_deref_trait"
+    },
+    {
+      "group": "Rust",
       "name": "static_assertions",
       "version": "1.1.0",
       "license": "MIT OR Apache-2.0",
@@ -1808,6 +1976,13 @@
     },
     {
       "group": "Rust",
+      "name": "synstructure",
+      "version": "0.14.0",
+      "license": "MIT",
+      "url": "https://github.com/mystor/synstructure"
+    },
+    {
+      "group": "Rust",
       "name": "tempfile",
       "version": "3.27.0",
       "license": "MIT OR Apache-2.0",
@@ -1861,6 +2036,13 @@
       "version": "2.0.21",
       "license": "MIT OR Apache-2.0",
       "url": "https://github.com/dtolnay/thiserror"
+    },
+    {
+      "group": "Rust",
+      "name": "tinystr",
+      "version": "0.8.5",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
     },
     {
       "group": "Rust",
@@ -1948,10 +2130,24 @@
     },
     {
       "group": "Rust",
+      "name": "utf8_iter",
+      "version": "1.1.0",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/hsivonen/utf8_iter"
+    },
+    {
+      "group": "Rust",
       "name": "utf8parse",
       "version": "0.2.2",
       "license": "Apache-2.0 OR MIT",
       "url": "https://github.com/alacritty/vte"
+    },
+    {
+      "group": "Rust",
+      "name": "utf_types",
+      "version": "1.0.0",
+      "license": "Apache-2.0 OR MIT",
+      "url": "https://github.com/hsivonen/utf_types"
     },
     {
       "group": "Rust",
@@ -2060,6 +2256,13 @@
     },
     {
       "group": "Rust",
+      "name": "writeable",
+      "version": "0.6.4",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
       "name": "xkbcommon",
       "version": "0.8.0",
       "license": "MIT",
@@ -2074,6 +2277,20 @@
     },
     {
       "group": "Rust",
+      "name": "yoke",
+      "version": "0.8.4",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
+      "name": "yoke-derive",
+      "version": "0.8.4",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
       "name": "zerocopy",
       "version": "0.8.63",
       "license": "BSD-2-Clause OR Apache-2.0 OR MIT",
@@ -2081,10 +2298,45 @@
     },
     {
       "group": "Rust",
+      "name": "zerofrom",
+      "version": "0.1.8",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
+      "name": "zerofrom-derive",
+      "version": "0.1.8",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
       "name": "zeroize",
       "version": "1.9.1",
       "license": "Apache-2.0 OR MIT",
       "url": "https://github.com/RustCrypto/utils"
+    },
+    {
+      "group": "Rust",
+      "name": "zerotrie",
+      "version": "0.2.5",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
+      "name": "zerovec",
+      "version": "0.11.9",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
+    },
+    {
+      "group": "Rust",
+      "name": "zerovec-derive",
+      "version": "0.11.7",
+      "license": "Unicode-3.0",
+      "url": "https://github.com/unicode-org/icu4x"
     },
     {
       "group": "Rust",
@@ -2109,64 +2361,57 @@
     },
     {
       "group": "Native",
-      "name": "libepoxy",
-      "version": null,
-      "license": "MIT",
-      "url": "https://github.com/anholt/libepoxy"
-    },
-    {
-      "group": "Native",
       "name": "libltdl",
-      "version": null,
+      "version": "2.4.7",
       "license": "LGPL-2.1-or-later",
       "url": "https://www.gnu.org/software/libtool/"
     },
     {
       "group": "Native",
       "name": "libsepol",
-      "version": null,
+      "version": "3.11",
       "license": "LGPL-2.1-or-later",
       "url": "https://github.com/SELinuxProject/selinux"
     },
     {
       "group": "Native",
       "name": "libsndfile",
-      "version": null,
+      "version": "1.2.2",
       "license": "LGPL-2.1-or-later",
       "url": "https://libsndfile.github.io/libsndfile/"
     },
     {
       "group": "Native",
       "name": "libxkbcommon",
-      "version": null,
+      "version": "1.11.0",
       "license": "MIT",
       "url": "https://github.com/xkbcommon/libxkbcommon"
     },
     {
       "group": "Native",
       "name": "PRoot",
-      "version": null,
+      "version": "5.1.107.79",
       "license": "GPL-2.0-or-later",
       "url": "https://github.com/termux/proot"
     },
     {
       "group": "Native",
       "name": "PulseAudio",
-      "version": null,
+      "version": "17.0",
       "license": "LGPL-2.1-or-later",
       "url": "https://www.freedesktop.org/wiki/Software/PulseAudio/"
     },
     {
       "group": "Native",
       "name": "talloc",
-      "version": null,
+      "version": "2.4.3",
       "license": "LGPL-3.0-or-later",
       "url": "https://www.samba.org/ftp/talloc/"
     },
     {
       "group": "Native",
       "name": "xkeyboard-config",
-      "version": null,
+      "version": "2.44",
       "license": "MIT",
       "url": "https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config"
     }

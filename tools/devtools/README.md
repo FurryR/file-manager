@@ -33,6 +33,22 @@ frontend revision; downloads are cached under `.locale-cache/`. Adding an app
 language therefore needs no change in this project — the next sync stages its
 DevTools locale and the runtime matches the app locale against the staged set.
 
+## Compression
+
+`npm run sync` brotli-compresses text assets (`*.js`, `*.css`, `*.json`, `*.md`,
+`*.svg`, `*.html`) into `<name>.br` and deletes the originals. Files that would
+not shrink stay plain, and `inspector.html`/`BUILD_INFO.json` are always kept
+plain (`inspector.html` is patched at serve time). `DevToolsServer` resolves a
+request for `<name>` to `<name>.br` and sends it with `Content-Encoding: br`;
+`androidResources.noCompress` and the release post-processor keep those streams
+stored. The generated tree drops from about 16 MiB to about 3 MiB.
+
+The pinned package ships only the prebuilt `dist`, not the DevTools TypeScript
+sources. That bundle is already produced with esbuild/rollup, including
+tree-shaking and minification. Running another tree-shake over the bundled
+output is not useful; a further size cut would need a build from the official
+sources or removing panel chunks (and that removes UI features).
+
 ## Updating
 
 ```bash

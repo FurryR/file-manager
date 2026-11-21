@@ -88,7 +88,8 @@ file-manager/
 │   ├── run0/src/main.rs  # arg parsing + hub protocol + local tty bridge
 │   ├── here/src/main.rs  # reveal a path in the current file-manager tab
 │   ├── agent/src/        # modular ratatui + crossterm terminal AI chat UI
-│   └── hub-client/       # shared hub wire protocol and descriptor transport
+│   ├── hub-client/       # shared hub wire protocol and descriptor transport
+│   └── adblock/src/lib.rs # JNI ad-blocking engine over adblock-rust (libadblock.so)
 ├── proto/               # Protobuf IPC (generated into :daemon)
 │   ├── file_daemon.proto  # daemon protocol
 │   └── hub.proto          # run0 hub attach handshake
@@ -161,8 +162,10 @@ file-manager/
   `ForwardFileProvider`, provider registration and the Android renderer layer
   under `app/.../render/`. It must not implement routing.
 - The in-app DevTools tab uses the **official Chrome DevTools frontend**, not a
-  hand-written JS console. `tools/devtools/` pins the prebuilt frontend and
-  copies it to `app/src/main/assets/devtools`; `app/.../devtools/` serves those
+  hand-written JS console. `tools/devtools/` pins the prebuilt frontend, brotli-
+  compresses its text assets into `<name>.br` while syncing them to
+  `app/src/main/assets/devtools`, and `DevToolsServer` serves those streams with
+  `Content-Encoding: br`; `app/.../devtools/` serves those
   assets from a tokenized `127.0.0.1` server and proxies the frontend's CDP
   WebSocket to the WebView debugging socket
   (`webview_devtools_remote_<pid>`). No new Gradle module and no runtime npm
@@ -338,7 +341,10 @@ file-manager/
 | Archive view | `proxy/.../ArchiveProxy.kt` + `proxy/.../ArchiveFolder.kt` | Core `Proxy` implementation; core knows only `VFile`/`VFolder` |
 | Renderers | `app/.../render/Renderer.kt` | `RendererSession`, `RenderHost`, `RendererContext.opener` (Directory + Web + Editor) |
 | Openers route | `core/.../Proxy.kt` | MIME → `Proxy` registry for `!` address levels; archive implementation lives in `:proxy` |
-| HTML/WebView | `app/.../render/WebRenderer.kt` | `DocumentView`, `HtmlDocument`, `WebContent` |
+| HTML/WebView | `app/.../render/WebRenderer.kt` | `DocumentView`, `HtmlDocument`, `WebContent`; live subresources pass the ad-block check |
+| Ad blocking | `app/.../adblock/AdBlockEngine.kt` + `native/adblock/src/lib.rs` | `adblock-rust` JNI engine, filter-list download/import store |
+| Ad blocking settings | `app/.../ui/screens/AdBlockSettingsActivity.kt` | Browse → Ad blocking: toggle, lists, add from file (app picker) or URL, update |
+| User scripts | `app/.../userscript/UserScriptInjector.kt` | `filesDir/userscripts` bodies, header matcher, document-start bootstrap, GM bridge; settings in `ui/screens/UserScriptSettingsActivity.kt` |
 | Agent archive tools | `agent/.../AgentTools.kt` | `archive_list`/`archive_read`/`archive_copy` via `Vfs.node` |
 | Provider locations | `app/.../store/LocationsRepository.kt` | Location entries + actions for SAF/FTP/SFTP/local/remote |
 | Location stores | `app/.../store/LocationStores.kt` | App-owned SQLite/preferences/encrypted stores passed to providers |
@@ -367,7 +373,7 @@ file-manager/
 | Agent prompt/policy | `agent/.../SystemPrompt.kt` | System prompt + dangerous-path approval rules |
 | Rust agent shell | `native/agent/src/main.rs` | TUI client: prompt input, rendering, approval, local MCP host |
 | Agent MCP | `native/agent/.../mcp.rs` | Local stdio host + hub HTTP proxy for remote servers |
-| Agent sessions | `app/.../agent/AgentSettings.kt` | Session files, titles, active session per terminal |
+| Agent sessions | `app/.../agent/AgentSettings.kt` | Session JSON files, titles, active session per terminal |
 | MCP proxy | `agent/.../McpProxy.kt` | HTTP proxy for online MCP; hub never speaks MCP |
 | Daemon file I/O | `daemon/.../file/FileService.kt` | list/stat/open/copy per target |
 | Container launch | `container/.../ContainerDaemonLauncher.kt` | proot/chroot argv + PulseAudio/Wayland environment; KGSL GPU probe in `ProotRunner` |
@@ -438,7 +444,10 @@ file-manager/
 ## COMMANDS
 
 ```bash
-./gradlew assembleDebug                          # Build APK
+./gradlew assembleDebug                          # Build APK (universal: every ABI)
+./gradlew assembleDebug -Pabi=arm64-v8a          # Build an APK for one ABI only
+./gradlew assembleDebug -Pabi=x86_64             # Build an APK for one ABI only
+./gradlew assembleDebug -Pabi=universal          # Explicit universal build (same as no property)
 ./gradlew :uds:compileDebugKotlin                # Compile the UDS transport layer only
 ./gradlew :daemon:compileDebugKotlin             # Compile daemon communication layer only
 ./gradlew :core:compileKotlin                    # Compile the pure VFS abstraction
@@ -454,6 +463,12 @@ bash native/build-xkbcommon.sh aarch64           # Cross-compile libxkbcommon (r
 bash scripts/fetch-xkbdata.sh                    # xkeyboard-config → app/src/main/assets/xkb (required before packaging)
 adb install -r app/build/outputs/apk/debug/*.apk # Install
 ```
+
+`-Pabi=<abi>` sets `ndk.abiFilters`, so AAR-provided native libraries
+(`libandroidx.graphics.path.so`) follow the same filter and a single-ABI APK
+never carries `lib/<other-abi>/` entries. Omitting it (or passing
+`-Pabi=universal`) keeps every ABI. An IDE deploy build passes the same
+selection as `android.injected.build.abi`, which is read as a fallback.
 
 `./gradlew assembleDebug` now runs `scripts/build-native.sh` through the app
 `preBuild` hook, so Rust changes cannot be left out of the APK. Pass
@@ -483,6 +498,14 @@ Gradle, Cargo or native component; the app ships the generated asset.
   cache fault, not a code fault: rebuild with `./gradlew clean <task>` and the
   same sources compile.
 - Target SDK 28 avoids storage restrictions needed by root features.
+- **Persistent state goes to a database or an editable file, not scattered
+  paths.** Locations and settings use SQLite/preferences; user scripts
+  (`filesDir/userscripts`), adblock list bodies (`filesDir/adblock/lists`) and
+  AI session JSON (`filesDir/agent/sessions`) stay as files so the editor can
+  open them. Reproducible data (adblock engine cache, staging, extracted fonts)
+  goes to `cacheDir`. Other `filesDir` entries are path-addressed artifacts:
+  `container/`, `bin/`, `xkb/`, `crash/` and the picker/share HMAC tokens.
+  Every new `filesDir` top-level entry needs an owner and a reason.
 - `DaemonManager.startHub()` runs the communication hub (bootstrap in
   [`hub/Hub.kt`]): an unauthenticated UDS server with a fresh random
   abstract socket name on every start that speaks
@@ -491,27 +514,32 @@ Gradle, Cargo or native component; the app ships the generated asset.
   later, agents) attach to it; the hub holds the app identity, so it
   authenticates to the daemon on the client's behalf. The `run0` Rust CLI is a
   workspace member (`native/run0/`), alongside `native/here/` and
-  `native/agent/`. All three
-  are staged under `app/src/main/executables/` and packaged through
-  Java resources as `lib/<abi>/{run0,here,agent}` before APK signing. This
-  bypasses AGP's JNI filename filter. The current debuggable build types allow
-  Android to extract this original name into `nativeLibraryDir`; non-debuggable
-  builds do not extract arbitrary executable names. App-spawned shells get
-  `HUB_SOCKET` and `nativeLibraryDir` on `PATH`, so the command is `run0`.
+  `native/agent/`. All three are staged as `lib/<abi>/lib<name>.so`
+  (`librun0.so`, `libhere.so`, `libagent.so`), so Android extracts them into
+  `nativeLibraryDir` for debuggable and release APKs alike.
+  `DaemonManager.binDir` recreates their original names (`run0`, `here`,
+  `agent`) as symlinks in `filesDir/bin` on every process start. App-spawned
+  shells get `HUB_SOCKET` and a utility directory on `PATH`, so the command is
+  `run0`. The app-private directory is reachable by the app-UID and root
+  daemons (and by containers), but the adb shell UID cannot read it: a Shizuku
+  daemon mirrors the same links under `/data/local/tmp/io.furryr.file-bin`
+  (`DaemonManager.utilityDir()`) and exports that directory to its shells
+  instead, while container terminals keep `filesDir/bin` as `HUB_PATH`.
   Kotlin runtime code knows only the generic hub contract and utility directory.
-  Daemon launchers set PATH to the native utility directory plus the target's
+  Daemon launchers set PATH to the symlink directory plus the target's
   standard directories. Target shells retain that PATH while initializing a
   clean user environment. Clients send only
   explicit environment overrides. Container terminals initialize that clean
   environment before `login -p -f root`, preserving the normal login/MOTD
   experience; hub command execution launches the passwd shell directly.
 - Native executables are packaged as **`lib*.so` under `jniLibs/`**
-  (`libfiledaemon.so`, `libproot.so`, `libpulsehost.so`,
-  `libwayland_compositor.so` and its `libeglshim.so` soname bridge) because the Android installer only
-  auto-extracts `lib/<abi>/lib*.so` to `nativeLibraryDir` (debuggable apps also
-  allow other safe filenames). AGP's jniLibs
+  (`libfiledaemon.so`, `libproot.so`, `librun0.so`, `libhere.so`, `libagent.so`,
+  `libpulsehost.so`, `libwayland_compositor.so` and its `libeglshim.so` soname
+  bridge) because the Android installer only
+  auto-extracts `lib/<abi>/lib*.so` to `nativeLibraryDir`. AGP's jniLibs
   pipeline also drops any non-`.so` entry, so the `lib*.so` names are what let
-  the daemon/proot binaries ship and be extracted without a custom staging step.
+  the daemon/proot/utility binaries ship and be extracted without a custom
+  staging step.
 - Build scripts under `native/` copy the compiled binaries into `jniLibs/`.
   Rust release artifacts are built with `strip = "symbols"`
   (`native/Cargo.toml` `[profile.release]`); the symbols were ~0.8 MB of the
@@ -522,16 +550,33 @@ Gradle, Cargo or native component; the app ships the generated asset.
   (path data copied from the Material Icons set), never re-adding the artifact:
   it ships 22k generated classes, about 5 MB of compressed dex.
 - `release` enables R8 shrinking (`isMinifyEnabled` and `isShrinkResources`)
-  but stays `isDebuggable = true`, because only a debuggable APK extracts
-  `lib/<abi>/{run0,here,agent}` into `nativeLibraryDir`. A debuggable build
-  disables R8 optimization and obfuscation, so release savings come from
-  dead-code/resource removal; `app/proguard-rules.pro` keeps the
+  with `isDebuggable = false`; the native utilities ship as `lib*.so` and are
+  reached through `DaemonManager.binDir` symlinks, so extraction no longer
+  depends on debuggability. `app/proguard-rules.pro` keeps the
   reflective surfaces (Shizuku, JSch, commons-net, protobuf, Termux ASM,
   tm4e clone, JNI callbacks) that shrinking would otherwise delete.
+- **Android Rust builds use a pinned nightly and `build-std`.** `rust-toolchain.toml`
+  pins `nightly-2026-11-20` with `rust-src`; `native/Cargo.toml` uses
+  `opt-level = "z"`, fat LTO, one codegen unit and the nightly
+  `panic = "immediate-abort"` strategy; `native/build-android-aarch64.sh` passes
+  `-Z build-std=std,panic_abort -Z build-std-features=optimize_for_size`, and
+  `.cargo/config.toml` adds lld ICF/GC/strip plus 16 KiB max-page-size for
+  Android targets. `build-std` stays on the script's command line so host cargo
+  commands do not rebuild host std. `immediate-abort` means `catch_unwind` in
+  the Wayland and adblock JNI layers can no longer recover a panic: it traps the
+  process. C-side: PRoot and `libpulsehost` are `-Oz` + fat LTO (all C);
+  libxkbcommon, libsepol and the EGL shim are `-Oz` + sections only because
+  NDK clang (LLVM 21) cannot consume rustc's LLVM 23 bitcode. Cross-language
+  LTO would require matching LLVM versions and `-C linker-plugin-lto`.
 - Release packaging ends with `:app:postprocessReleaseApk` (an
   `assembleRelease` finalizer running `scripts/postprocess-release.py`):
-  rewrite every entry at deflate level 9 (AGP uses level 1 and stores
-  `resources.arsc`), `zipalign -p 4`, then `apksigner sign`. The rewrite
+  rewrite every entry with Zopfli when the optional Python `zopfli` module is
+  available (entries below 1 KiB and failures fall back to zlib level 9, and
+  the smaller stream wins), keep `resources.arsc`/DevTools `*.br` stored,
+  `zipalign -p 4`, then `apksigner sign`. The Nix dev shell provides
+  `python3Packages.zopfli`; a local Python without it still builds, just
+  without the extra 3–5% saving. `APK_ZOPFLI=0`, `APK_ZOPFLI_ITERATIONS` and
+  `APK_ZOPFLI_MIN_BYTES` tune the pass. The rewrite
   invalidates signatures, so it has to run after packaging and before
   signing; it saves about 2 MB. The script reads `keystore.properties`
   (gitignored) first, then `ANDROID_KEYSTORE*`, then the debug keystore at
@@ -807,6 +852,12 @@ Gradle, Cargo or native component; the app ships the generated asset.
 - [ ] `agent/.../AgentTools.kt`: verify read/write/copy/glob/exec/list_targets and the three archive tools still execute through the registered tool table.
 - [ ] `hub/.../HubServer.kt` + `hub/.../HubTargets.kt` + `proto/hub.proto`: verify every `Target` consumer reads `id` and exec/location targets still list correctly.
 - [ ] `hub/.../HubAgentOps.kt` + `hub/.../HubExecOps.kt`: verify all non-streaming request categories still return the same replies and descriptors after the dispatch split.
+- [ ] `daemon/.../DaemonManager.kt`: verify `binDir` creates `filesDir/bin/{run0,here,agent}` symlinks on a fresh process, replaces dangling links, and every shell's PATH resolves `run0`/`here`/`agent`.
+- [ ] `hub/.../Hub.kt` + `container/.../ContainerProvider.kt` + `container/.../ContainerDaemonLauncher.kt` + `provider/.../LocalProvider.kt`: verify PATH/HUB_PATH point at `DaemonManager.binDir` and the utilities still execute from host, chroot and proot terminals.
+- [ ] `app/build.gradle.kts` + `native/build-android-aarch64.sh`: verify a non-debuggable release APK extracts `librun0.so`/`libhere.so`/`libagent.so` into `nativeLibraryDir` and they stay executable after AGP jniLibs stripping.
+- [ ] `app/src/main/executables` removal: verify no build, script or docs still expect original-name utilities under `src/main/executables`.
+- [ ] `daemon/.../DaemonManager.kt`: verify `utilityDir()` returns `filesDir/bin` for app-UID/root daemons and creates `/data/local/tmp/io.furryr.file-bin` links through the Shizuku daemon, and that `run0`/`here`/`agent` resolve in a Shizuku host terminal.
+- [ ] `daemon/.../DaemonManager.kt`: verify the trampoline is rebuilt after an app update (`nativeLibraryDir` changes), survives daemon reset, and falls back cleanly when `/data/local/tmp` creation fails.
 
 ## TODO - File picker
 

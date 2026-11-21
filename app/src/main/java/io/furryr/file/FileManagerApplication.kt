@@ -1,6 +1,7 @@
 package io.furryr.file
 
 import android.app.Application
+import io.furryr.file.adblock.AdBlockEngine
 import io.furryr.file.crash.CrashReporter
 import io.furryr.file.picker.PickerTokens
 import java.io.File
@@ -17,5 +18,8 @@ class FileManagerApplication : Application() {
         super.onCreate()
         runCatching { PickerTokens.install(File(filesDir, "picker-token.bin")) }
         CrashReporter.install(this)
+        // Loads the serialized engine on a worker thread; a disabled blocker
+        // starts nothing.
+        AdBlockEngine.install(this)
     }
 }

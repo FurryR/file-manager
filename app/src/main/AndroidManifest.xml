@@ -91,6 +91,18 @@
             android:theme="@style/Theme.FileManager" />
 
         <activity
+            android:name=".ui.screens.AdBlockSettingsActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:exported="false"
+            android:theme="@style/Theme.FileManager" />
+
+        <activity
+            android:name=".ui.screens.UserScriptSettingsActivity"
+            android:enableOnBackInvokedCallback="true"
+            android:exported="false"
+            android:theme="@style/Theme.FileManager" />
+
+        <activity
             android:name=".ui.screens.LicensesActivity"
             android:enableOnBackInvokedCallback="true"
             android:exported="false"

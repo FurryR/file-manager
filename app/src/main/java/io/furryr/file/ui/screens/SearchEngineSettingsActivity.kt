@@ -89,6 +89,14 @@ private fun SearchEnginePage(onBack: () -> Unit) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
                     }
                 },
+                actions = {
+                    IconButton(onClick = {
+                        editing = null
+                        editorOpen = true
+                    }) {
+                        Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.search_engine_add))
+                    }
+                },
             )
         },
     ) { padding ->
@@ -96,40 +104,42 @@ private fun SearchEnginePage(onBack: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .verticalScroll(rememberScrollState()),
+                .verticalScroll(rememberScrollState())
+                .padding(vertical = 8.dp),
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 12.dp),
-            ) {
-                Text(
-                    stringResource(R.string.search_engines_title),
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = {
-                    editing = null
-                    editorOpen = true
-                }) { Text(stringResource(R.string.search_engine_add)) }
-            }
-            for (engine in SearchEngines.builtIns + custom) {
+            SectionHeader(stringResource(R.string.search_engine_builtin))
+            for (engine in SearchEngines.builtIns) {
                 EngineRow(
                     engine = engine,
                     selected = engine.id == selectedId,
-                    editable = !SearchEngines.isBuiltIn(engine.id),
                     onSelect = {
                         SearchEngines.select(context, engine)
                         selectedId = engine.id
                     },
-                    onEdit = {
-                        editing = engine
-                        editorOpen = true
-                    },
-                    onDelete = {
-                        SearchEngines.delete(context, engine.id)
-                        refresh()
-                    },
+                    onEdit = null,
+                    onDelete = null,
                 )
+            }
+            if (custom.isNotEmpty()) {
+                SectionHeader(stringResource(R.string.search_engine_custom))
+                for (engine in custom) {
+                    EngineRow(
+                        engine = engine,
+                        selected = engine.id == selectedId,
+                        onSelect = {
+                            SearchEngines.select(context, engine)
+                            selectedId = engine.id
+                        },
+                        onEdit = {
+                            editing = engine
+                            editorOpen = true
+                        },
+                        onDelete = {
+                            SearchEngines.delete(context, engine.id)
+                            refresh()
+                        },
+                    )
+                }
             }
         }
     }
@@ -148,23 +158,32 @@ private fun SearchEnginePage(onBack: () -> Unit) {
 }
 
 @Composable
+private fun SectionHeader(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+    )
+}
+
+@Composable
 private fun EngineRow(
     engine: SearchEngine,
     selected: Boolean,
-    editable: Boolean,
     onSelect: () -> Unit,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit,
+    onEdit: (() -> Unit)?,
+    onDelete: (() -> Unit)?,
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onSelect)
-            .padding(start = 8.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+            .padding(start = 8.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
     ) {
         RadioButton(selected = selected, onClick = onSelect)
-        Column(modifier = Modifier.weight(1f)) {
+        Column(modifier = Modifier.weight(1f).padding(end = 4.dp)) {
             Text(engine.label, style = MaterialTheme.typography.bodyLarge)
             Text(
                 engine.template,
@@ -174,9 +193,21 @@ private fun EngineRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        if (editable) {
-            TextButton(onClick = onEdit) { Text(stringResource(R.string.agent_provider_edit)) }
-            TextButton(onClick = onDelete) { Text(stringResource(R.string.delete)) }
+        if (onEdit != null && onDelete != null) {
+            IconButton(onClick = onEdit) {
+                Icon(
+                    Icons.Filled.Edit,
+                    contentDescription = stringResource(R.string.agent_provider_edit),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            IconButton(onClick = onDelete) {
+                Icon(
+                    Icons.Filled.Delete,
+                    contentDescription = stringResource(R.string.delete),
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            }
         }
     }
 }

@@ -83,6 +83,31 @@ internal class LspCatalog private constructor(
     /** Languages a user added through settings, for the editor's language picker. */
     fun editorLanguages(): List<LspLanguageSpec> = languages.values.toList()
 
+    /**
+     * The effective language directory as editable settings rows. A language
+     * that owns an inline command becomes one reusable rule, so the settings
+     * page can show built-in defaults and let the user change them.
+     */
+    fun languageRules(): List<LspLanguageRule> = languages.values.map { language ->
+        val server = language.servers.firstOrNull()?.let(servers::get)
+        LspLanguageRule(
+            id = language.id,
+            label = language.label.orEmpty(),
+            extensions = language.extensions,
+            exactNames = language.exactNames,
+            markers = language.markers,
+            command = server?.command.orEmpty(),
+            args = server?.args.orEmpty(),
+            workspace = server?.workspace?.name?.lowercase(Locale.ROOT) ?: "exec",
+            rootMode = server?.rootMode?.name?.lowercase(Locale.ROOT) ?: "nearest",
+            enabled = server?.enabled ?: true,
+            lspLanguageIds = language.lspLanguageIds,
+            env = server?.env.orEmpty(),
+            initializationOptions = server?.initializationOptions,
+            settings = server?.settings,
+        )
+    }
+
     companion object {
         /** A user-created marker file is the explicit, stateless workspace root. */
         const val ROOT_MARKER = ".lsp-root"
@@ -91,18 +116,33 @@ internal class LspCatalog private constructor(
         private const val BUILTIN = "lsp/catalog.json"
 
         fun load(context: Context): LspCatalog {
-            val builtin = runCatching {
-                context.assets.open(BUILTIN).bufferedReader().use { JSONObject(it.readText()) }
-            }.getOrElse {
-                Log.d(TAG, "Built-in language catalog unavailable", it)
-                JSONObject()
-            }
+            val builtin = readBuiltin(context)
             val user = LspConfigStore.json(context)
             val merged = if (user == null) builtin else merge(builtin, user)
             return runCatching { parse(merged) }.getOrElse {
                 Log.d(TAG, "Ignoring invalid language server catalog", it)
                 LspCatalog(emptyMap(), emptyMap(), emptyList())
             }
+        }
+
+        /**
+         * Built-in languages only, before the user overlay. The settings page
+         * lists them with their default commands and saves an edit as an
+         * ordinary user rule, so built-ins stay editable without a separate
+         * override shape.
+         */
+        fun builtInLanguageRules(context: Context): List<LspLanguageRule> = runCatching {
+            parse(readBuiltin(context)).languageRules()
+        }.getOrElse {
+            Log.d(TAG, "Built-in language catalog unavailable", it)
+            emptyList()
+        }
+
+        private fun readBuiltin(context: Context): JSONObject = runCatching {
+            context.assets.open(BUILTIN).bufferedReader().use { JSONObject(it.readText()) }
+        }.getOrElse {
+            Log.d(TAG, "Built-in language catalog unavailable", it)
+            JSONObject()
         }
 
         private fun parse(root: JSONObject): LspCatalog {

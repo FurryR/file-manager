@@ -14,6 +14,8 @@ fn main() {
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let (builddir, abi) = match arch.as_str() {
         "aarch64" => ("builddir-aarch64", "arm64-v8a"),
+        "arm" => ("builddir-armv7", "armeabi-v7a"),
+        "x86" => ("builddir-x86", "x86"),
         "x86_64" => ("builddir-x86_64", "x86_64"),
         other => panic!("unsupported android target arch for xkbcommon: {other}"),
     };
@@ -44,8 +46,15 @@ fn main() {
     let status = std::process::Command::new(compiler.path())
         .arg("-shared")
         .arg("-fPIC")
-        .arg("-O2")
+        .arg("-Oz")
+        .arg("-fvisibility=hidden")
+        .arg("-ffunction-sections")
+        .arg("-fdata-sections")
         .arg("-Wl,-soname,libEGL.so.1")
+        .arg("-Wl,--gc-sections")
+        .arg("-Wl,--icf=all")
+        .arg("-Wl,--strip-all")
+        .arg("-Wl,-z,max-page-size=16384")
         .arg("-o")
         .arg(&shim)
         .arg(manifest.join("native/egl_shim.c"))

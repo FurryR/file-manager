@@ -111,7 +111,7 @@ class LocalProvider(private val appContext: Context? = null) : FileProvider, Exe
             val path = innerPath(cwd.path)
             val private = isAppPrivate(path)
             val env = (if (private) emptyMap() else DaemonManager.hubEnvironment(DaemonTarget.Host, terminalId)) +
-                mapOf("PATH" to "$HOST_SHELL_PATH:${DaemonManager.nativeLibraryDir}")
+                mapOf("PATH" to "$HOST_SHELL_PATH:${DaemonManager.utilityDir()}")
             val channel = exec(path).spawn(
                 CommandSpec(
                     command = "/system/bin/sh",

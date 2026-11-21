@@ -1,10 +1,21 @@
+# Nightly-only panic strategy used by the release profile below.
+cargo-features = ["panic-immediate-abort"]
+
 [workspace]
-members = ["run0", "here", "agent", "hub-client", "wayland"]
+members = ["run0", "here", "agent", "hub-client", "wayland", "adblock"]
 resolver = "2"
 
 # The APK ships these binaries; their symbols are ~5 MB uncompressed and
-# nothing in the app consumes them (tombstones are the only loss).
+# nothing in the app consumes them (tombstones are the only loss). z/1-CGU/fat
+# LTO are for package size; `build-android-aarch64.sh` additionally passes
+# -Z build-std (this profile requires the rebuilt std).
 [profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+# `immediate-abort` replaces the old `panic_immediate_abort` std feature on
+# current nightlies: panics become a trap with no unwinding or message.
+panic = "immediate-abort"
 strip = "symbols"
 
 [package]

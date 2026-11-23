@@ -25,6 +25,9 @@ import io.furryr.file.core.VNode
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.core.source.OpenMode
 import io.furryr.file.daemon.source.FdFileSource
+import io.furryr.file.store.LocalLocationStore
+import io.furryr.file.store.LocationStores
+import io.furryr.file.store.RemoteLocationStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -63,19 +66,24 @@ class PickerDocumentsProvider : DocumentsProvider() {
 
     override fun queryRoots(projection: Array<out String>?): Cursor {
         val columns = projection ?: DEFAULT_ROOT_PROJECTION
-        val cursor = MatrixCursor(columns, 1)
-        val row = cursor.newRow()
-        val rootId = PickerTokens.issue(PickerDoc("app", "rw", "/"))
-        for (column in columns) {
-            when (column) {
-                DocumentsContract.Root.COLUMN_ROOT_ID -> row.add("vfs")
-                Document.COLUMN_DOCUMENT_ID -> row.add(rootId)
-                DocumentsContract.Root.COLUMN_TITLE -> row.add(context?.getString(R.string.app_name).orEmpty())
-                Document.COLUMN_FLAGS -> row.add(DocumentsContract.Root.FLAG_SUPPORTS_CREATE)
-                Document.COLUMN_ICON -> row.add(R.mipmap.ic_launcher)
-                DocumentsContract.Root.COLUMN_MIME_TYPES -> row.add("*/*")
-                DocumentsContract.Root.COLUMN_SUMMARY -> row.add(context?.getString(R.string.picker_roots).orEmpty())
-                else -> row.add(null)
+        val roots = locationRoots()
+        val cursor = MatrixCursor(columns, roots.size)
+        for (root in roots) {
+            val row = cursor.newRow()
+            val rootId = PickerTokens.issue(PickerDoc(FileWorlds.defaultId, root.access, root.path))
+            for (column in columns) {
+                when (column) {
+                    DocumentsContract.Root.COLUMN_ROOT_ID -> row.add(root.id)
+                    Document.COLUMN_DOCUMENT_ID -> row.add(rootId)
+                    DocumentsContract.Root.COLUMN_TITLE -> row.add(root.title)
+                    Document.COLUMN_FLAGS -> row.add(
+                        if (root.writable) DocumentsContract.Root.FLAG_SUPPORTS_CREATE else 0,
+                    )
+                    Document.COLUMN_ICON -> row.add(R.mipmap.ic_launcher)
+                    DocumentsContract.Root.COLUMN_MIME_TYPES -> row.add("*/*")
+                    DocumentsContract.Root.COLUMN_SUMMARY -> row.add(root.summary)
+                    else -> row.add(null)
+                }
             }
         }
         return cursor
@@ -89,6 +97,81 @@ class PickerDocumentsProvider : DocumentsProvider() {
         query: String,
         projection: Array<out String>?,
     ): Cursor = emptyCursor(projection)
+
+    /** One DocumentsUI root: a stored location, not a child of the local tree. */
+    private data class RootSpec(
+        val id: String,
+        val title: String,
+        val summary: String,
+        val path: String,
+        val writable: Boolean,
+    ) {
+        val access: String get() = if (writable) "rw" else "r"
+    }
+
+    /**
+     * DocumentsUI's drawer lists only the roots this provider reports, while
+     * the in-app picker draws every stored location itself. Report them here
+     * too, so a caller that reaches the system picker can browse remote
+     * connections instead of only the local `/` tree.
+     */
+    private fun locationRoots(): List<RootSpec> {
+        val roots = mutableListOf(
+            RootSpec(
+                id = "vfs",
+                title = context?.getString(R.string.app_name).orEmpty(),
+                summary = context?.getString(R.string.picker_roots).orEmpty(),
+                path = "/",
+                writable = true,
+            ),
+        )
+        LocalLocationStore.all().forEach { location ->
+            roots += RootSpec(
+                id = "local:${location.id}",
+                title = location.name.ifBlank { location.path },
+                summary = location.path,
+                path = location.path,
+                writable = true,
+            )
+        }
+        LocationStores.safLocations().forEach { location ->
+            roots += RootSpec(
+                id = "saf:${location.hexId}",
+                title = location.name.ifBlank { location.treeUri },
+                summary = location.treeUri,
+                path = Path.of("saf", segments = listOf(location.hexId)).toString(),
+                writable = true,
+            )
+        }
+        LocationStores.ftpServers().forEach { server ->
+            roots += RootSpec(
+                id = "ftp:${server.host}",
+                title = server.name.ifBlank { server.host },
+                summary = "ftp://${server.host}/",
+                path = "ftp://${server.host}/",
+                writable = true,
+            )
+        }
+        LocationStores.sftpServers().forEach { server ->
+            roots += RootSpec(
+                id = "sftp:${server.host}",
+                title = server.name.ifBlank { server.host },
+                summary = "sftp://${server.host}/",
+                path = "sftp://${server.host}/",
+                writable = true,
+            )
+        }
+        RemoteLocationStore.all().forEach { location ->
+            roots += RootSpec(
+                id = "remote:${location.id}",
+                title = location.name.ifBlank { location.uri },
+                summary = location.uri,
+                path = location.entryUri,
+                writable = true,
+            )
+        }
+        return roots
+    }
 
     // ── Documents ───────────────────────────────────────────────────
 
@@ -130,8 +213,11 @@ class PickerDocumentsProvider : DocumentsProvider() {
         val parent = PickerTokens.verify(parentDocumentId) ?: return false
         val child = PickerTokens.verify(documentId) ?: return false
         if (parent.worldId != child.worldId) return false
-        if (parent.path == "/") return child.path.startsWith("/") && child.path != "/"
-        return child.path.startsWith("${parent.path}/")
+        // A location root may be written with a trailing slash (`saf:///<hex>`,
+        // `ftp://host/`); compare segments, not raw prefixes.
+        val prefix = parent.path.trimEnd('/')
+        if (prefix.isEmpty()) return child.path.startsWith("/") && child.path != "/"
+        return child.path.startsWith("$prefix/")
     }
 
     // ── Mutation ────────────────────────────────────────────────────

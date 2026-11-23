@@ -351,6 +351,15 @@ object ContainerManager {
     /** The shared containers directory (rootfs parents live here). */
     fun containersDir(context: Context): File = getContainersDir(context)
 
+    /**
+     * Cache directory id for a container name, shared by launch and cleanup.
+     * The proot runtime directories and the cache sweep must agree on this
+     * mapping, so it has one implementation.
+     */
+    fun runtimeId(name: String): String = name.map { c ->
+        if (c.isLetterOrDigit() || c == '-' || c == '_') c else '_'
+    }.joinToString("").ifEmpty { "container" }
+
     private fun getContainersDir(context: Context): File =
         File(context.filesDir, CONTAINERS_DIR)
 

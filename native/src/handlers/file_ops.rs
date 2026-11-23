@@ -2,7 +2,9 @@ use tokio::fs::File;
 
 use crate::copy;
 use crate::list;
-use crate::proto::Response;
+use crate::proto::{
+    AccountsRequest, Response, SetModeRequest, SetOwnerRequest, SetTimesRequest,
+};
 
 use super::util::{error_response, ok_response};
 
@@ -59,5 +61,40 @@ pub(super) async fn create_dir(req_id: u64, path: String) -> Response {
     match tokio::fs::create_dir(list::maybe_android_data_path(&path)).await {
         Ok(()) => ok_response(req_id),
         Err(error) => error_response(req_id, error),
+    }
+}
+
+pub(super) fn set_mode(req_id: u64, req: SetModeRequest) -> Response {
+    match list::set_mode(&req.path, req.mode, req.apply_files, req.apply_dirs) {
+        Ok(()) => ok_response(req_id),
+        Err(error) => error_response(req_id, error),
+    }
+}
+
+pub(super) fn set_owner(req_id: u64, req: SetOwnerRequest) -> Response {
+    match list::set_owner(&req.path, req.uid, req.gid, req.apply_files, req.apply_dirs) {
+        Ok(()) => ok_response(req_id),
+        Err(error) => error_response(req_id, error),
+    }
+}
+
+pub(super) fn set_times(req_id: u64, req: SetTimesRequest) -> Response {
+    match list::set_times(
+        &req.path,
+        req.modified_at_ms,
+        req.apply_files,
+        req.apply_dirs,
+    ) {
+        Ok(()) => ok_response(req_id),
+        Err(error) => error_response(req_id, error),
+    }
+}
+
+pub(super) fn accounts(req_id: u64, _req: AccountsRequest) -> Response {
+    Response {
+        id: req_id,
+        ok: true,
+        accounts: Some(list::accounts()),
+        ..Response::default()
     }
 }

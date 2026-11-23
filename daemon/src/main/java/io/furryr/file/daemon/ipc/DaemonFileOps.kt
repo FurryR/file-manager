@@ -3,6 +3,8 @@ package io.furryr.file.daemon.ipc
 import io.furryr.file.core.model.CopyProgress
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
+import io.furryr.file.core.SystemAccount
+import io.furryr.file.core.SystemAccounts
 import io.furryr.file.core.source.FileSource
 import io.furryr.file.daemon.source.FdFileSource
 import io.furryr.file.daemon.source.HandleFileSource
@@ -18,6 +20,10 @@ import io.furryr.file.proto.OpenHandleRequest
 import io.furryr.file.proto.RenameRequest
 import io.furryr.file.proto.Request
 import io.furryr.file.proto.SeekHandleRequest
+import io.furryr.file.proto.SetModeRequest
+import io.furryr.file.proto.SetOwnerRequest
+import io.furryr.file.proto.SetTimesRequest
+import io.furryr.file.proto.AccountsRequest
 import io.furryr.file.proto.StatRequest
 import io.furryr.file.proto.TruncateHandleRequest
 import kotlinx.coroutines.flow.Flow
@@ -31,7 +37,9 @@ fun DaemonConnection.listFiles(path: String): Result<List<FileEntry>> = runCatch
         FileEntry(
             name = entry.name, path = entry.path, isDirectory = entry.isDirectory,
             modifiedAt = entry.modifiedAtMs, isSymlink = entry.isSymlink,
-            realPath = entry.realPath, mode = entry.mode, size = entry.size
+            realPath = entry.realPath, mode = entry.mode, size = entry.size,
+            uid = entry.uid.toInt(), gid = entry.gid.toInt(),
+            owner = entry.owner, group = entry.group,
         )
     }.sortedWith(compareByDescending<FileEntry> { it.isDirectory }.thenBy { it.name.lowercase() })
 }
@@ -70,6 +78,63 @@ fun DaemonConnection.deleteEntry(path: String): Result<Unit> = runCatching {
     request(Request.newBuilder()
         .setDelete(DeleteRequest.newBuilder().setPath(path))
         .build())
+}
+
+fun DaemonConnection.setMode(
+    path: String,
+    mode: Int,
+    applyFiles: Boolean,
+    applyDirs: Boolean,
+): Result<Unit> = runCatching {
+    request(Request.newBuilder()
+        .setSetMode(SetModeRequest.newBuilder()
+            .setPath(path)
+            .setMode(mode)
+            .setApplyFiles(applyFiles)
+            .setApplyDirs(applyDirs))
+        .build())
+}
+
+fun DaemonConnection.setOwner(
+    path: String,
+    uid: Int,
+    gid: Int,
+    applyFiles: Boolean,
+    applyDirs: Boolean,
+): Result<Unit> = runCatching {
+    request(Request.newBuilder()
+        .setSetOwner(SetOwnerRequest.newBuilder()
+            .setPath(path)
+            .setUid(uid)
+            .setGid(gid)
+            .setApplyFiles(applyFiles)
+            .setApplyDirs(applyDirs))
+        .build())
+}
+
+fun DaemonConnection.setTimes(
+    path: String,
+    modifiedAt: Long,
+    applyFiles: Boolean,
+    applyDirs: Boolean,
+): Result<Unit> = runCatching {
+    request(Request.newBuilder()
+        .setSetTimes(SetTimesRequest.newBuilder()
+            .setPath(path)
+            .setModifiedAtMs(modifiedAt)
+            .setApplyFiles(applyFiles)
+            .setApplyDirs(applyDirs))
+        .build())
+}
+
+fun DaemonConnection.accounts(): Result<SystemAccounts> = runCatching {
+    val resp = request(Request.newBuilder()
+        .setAccounts(AccountsRequest.getDefaultInstance())
+        .build()).response
+    SystemAccounts(
+        users = resp.accounts.usersList.map { SystemAccount(it.id.toInt(), it.name) },
+        groups = resp.accounts.groupsList.map { SystemAccount(it.id.toInt(), it.name) },
+    )
 }
 
 // ── Copy with progress ─────────────────────────────────────────

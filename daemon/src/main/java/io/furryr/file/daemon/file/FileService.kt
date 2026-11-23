@@ -36,6 +36,30 @@ class FileService internal constructor(private val resolve: () -> DaemonConnecti
 
     suspend fun rename(path: String, newName: String): Result<Unit> = resolve().renameEntry(path, newName)
 
+    suspend fun setMode(
+        path: String,
+        mode: Int,
+        applyFiles: Boolean,
+        applyDirs: Boolean,
+    ): Result<Unit> = resolve().setMode(path, mode, applyFiles, applyDirs)
+
+    suspend fun setOwner(
+        path: String,
+        uid: Int,
+        gid: Int,
+        applyFiles: Boolean,
+        applyDirs: Boolean,
+    ): Result<Unit> = resolve().setOwner(path, uid, gid, applyFiles, applyDirs)
+
+    suspend fun setTimes(
+        path: String,
+        modifiedAt: Long,
+        applyFiles: Boolean,
+        applyDirs: Boolean,
+    ): Result<Unit> = resolve().setTimes(path, modifiedAt, applyFiles, applyDirs)
+
+    suspend fun accounts(): Result<io.furryr.file.core.SystemAccounts> = resolve().accounts()
+
     suspend fun open(path: String, mode: OpenMode): Result<FileSource> = runCatching {
         openDaemonSource(path, mode) { resolve() }
     }

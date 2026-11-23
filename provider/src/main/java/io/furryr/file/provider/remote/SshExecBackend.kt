@@ -1,6 +1,8 @@
 package io.furryr.file.provider.remote
 
 import com.jcraft.jsch.ChannelExec
+import io.furryr.file.core.SystemAccount
+import io.furryr.file.core.SystemAccounts
 import io.furryr.file.core.source.FileSource
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -119,6 +121,117 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         invalidate(location.id)
     }
 
+    fun setMode(path: String, mode: Int, applyFiles: Boolean, applyDirs: Boolean) {
+        val p = quote(path)
+        val m = (mode and 0xFFF).toString(8)
+        val files = if (applyFiles) {
+            "find \"${'$'}p\" -type f -exec chmod $m {} + || exit 70"
+        } else {
+            ":"
+        }
+        val dirs = if (applyDirs) {
+            "find \"${'$'}p\" -type d -exec chmod $m {} + || exit 70"
+        } else {
+            ":"
+        }
+        control("""
+            p=$p
+            if [ -d "${'$'}p" ]; then $files; $dirs; fi
+            chmod $m "${'$'}p" || exit 70
+        """.trimIndent())
+        invalidate(location.id)
+    }
+
+    fun setOwner(path: String, uid: Int, gid: Int, applyFiles: Boolean, applyDirs: Boolean) {
+        require(uid >= 0 || gid >= 0) { "Select an owner or a group" }
+        val spec = when {
+            uid >= 0 && gid >= 0 -> "$uid:$gid"
+            uid >= 0 -> "$uid"
+            else -> ":$gid"
+        }
+        val p = quote(path)
+        val o = quote(spec)
+        val files = if (applyFiles) {
+            "find \"${'$'}p\" -type f -exec chown \"${'$'}o\" {} + || exit 70"
+        } else {
+            ":"
+        }
+        val dirs = if (applyDirs) {
+            "find \"${'$'}p\" -type d -exec chown \"${'$'}o\" {} + || exit 70"
+        } else {
+            ":"
+        }
+        control("""
+            p=$p
+            o=$o
+            if [ -d "${'$'}p" ]; then $files; $dirs; fi
+            chown "${'$'}o" "${'$'}p" || exit 70
+        """.trimIndent())
+        invalidate(location.id)
+    }
+
+    fun setModifiedTime(
+        path: String,
+        modifiedAt: Long,
+        applyFiles: Boolean,
+        applyDirs: Boolean,
+    ) {
+        val seconds = modifiedAt / 1000
+        val p = quote(path)
+        val files = if (applyFiles) {
+            "find \"${'$'}p\" -type f -exec sh -c 'for f do touch -d \"@$seconds\" \"\$f\" 2>/dev/null || { [ -n \"\$stamp\" ] && touch -t \"\$stamp\" \"\$f\"; } || exit 70; done' sh {} + || exit 70"
+        } else {
+            ":"
+        }
+        val dirs = if (applyDirs) {
+            "find \"${'$'}p\" -type d -exec sh -c 'for f do touch -d \"@$seconds\" \"\$f\" 2>/dev/null || { [ -n \"\$stamp\" ] && touch -t \"\$stamp\" \"\$f\"; } || exit 70; done' sh {} + || exit 70"
+        } else {
+            ":"
+        }
+        control("""
+            p=$p
+            stamp=${'$'}(date -r $seconds +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$seconds" +%Y%m%d%H%M.%S 2>/dev/null) || stamp=
+            export stamp
+            touch -d "@$seconds" "${'$'}p" 2>/dev/null || { [ -n "${'$'}stamp" ] && touch -t "${'$'}stamp" "${'$'}p"; } || exit 70
+            if [ -d "${'$'}p" ]; then $files; $dirs; fi
+        """.trimIndent())
+        invalidate(location.id)
+    }
+
+    fun accounts(): SystemAccounts {
+        val fields = capture("""
+            printf 'U\0'
+            { cat /etc/passwd 2>/dev/null || getent passwd 2>/dev/null; } | while IFS=: read -r n x i rest; do
+                [ -n "${'$'}n" ] && printf '%s\0%s\0' "${'$'}n" "${'$'}i"
+            done
+            printf 'G\0'
+            { cat /etc/group 2>/dev/null || getent group 2>/dev/null; } | while IFS=: read -r n x i rest; do
+                [ -n "${'$'}n" ] && printf '%s\0%s\0' "${'$'}n" "${'$'}i"
+            done
+        """.trimIndent()).toString(Charsets.UTF_8).split('\u0000')
+        val users = mutableListOf<SystemAccount>()
+        val groups = mutableListOf<SystemAccount>()
+        var target = users
+        var index = 0
+        while (index < fields.size) {
+            val field = fields[index]
+            when (field) {
+                "" -> Unit
+                "U" -> target = users
+                "G" -> target = groups
+                else -> {
+                    val id = fields.getOrNull(index + 1)?.toIntOrNull()
+                    if (id != null && field.isNotEmpty()) {
+                        target += SystemAccount(id, field)
+                    }
+                    index++
+                }
+            }
+            index++
+        }
+        return SystemAccounts(users = users, groups = groups)
+    }
+
     override fun prepareReplacement(original: String, replacement: String) {
         control(metadataScript(mutablePath(original), mutablePath(replacement)))
         invalidate(location.id)
@@ -170,7 +283,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         if [ -w "${'$'}p" ] && [ -x "${'$'}p" ]; then w=y; fi
         d=${'$'}(LC_ALL=C df -Pk "${'$'}p" 2>/dev/null | tail -n 1)
         set -- ${'$'}d
-        printf 'P/\000d\000%s\000%s\000%s\000' "${'$'}{2:-0}" "${'$'}{4:-0}" "${'$'}w"
+        printf 'P/\000d\000%s\000%s\000%s\000-\000-\000-\000-\000-\000' "${'$'}{2:-0}" "${'$'}{4:-0}" "${'$'}w"
     """.trimIndent()
 
     private fun probe(path: String): Probe {
@@ -431,10 +544,10 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         if (bytes.isEmpty()) return emptyList()
         require(bytes.last() == 0.toByte()) { "Incomplete SSH metadata response" }
         val fields = bytes.toString(Charsets.UTF_8).split('\u0000').dropLast(1)
-        require(fields.size % 5 == 0) { "Invalid SSH metadata response; a login script may be writing to stdout" }
-        val entries = ArrayList<RemoteEntry>(fields.size / 5)
+        require(fields.size % 10 == 0) { "Invalid SSH metadata response; a login script may be writing to stdout" }
+        val entries = ArrayList<RemoteEntry>(fields.size / 10)
         var dirProbe: Probe? = null
-        fields.chunked(5).forEach { values ->
+        fields.chunked(10).forEach { values ->
             if (values[0] == "P/") {
                 // Trailer record for the listed directory itself: its write
                 // access and volume capacity were already gathered for free.
@@ -453,8 +566,20 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
                 return@forEach
             }
             require(values[1] in setOf("d", "f") && values[4] in setOf("y", "n")) { "Invalid SSH metadata fields" }
-            entries += RemoteEntry(values[0], values[1] == "d", values[2].toLong(), values[3].toLong() * 1000,
-                values[4] == "y", if (values[1] == "d") 0x41ED else 0x81A4)
+            val isDirectory = values[1] == "d"
+            val permissions = values[5].toIntOrNull(8) ?: 0
+            entries += RemoteEntry(
+                name = values[0],
+                isDirectory = isDirectory,
+                size = values[2].toLong(),
+                modifiedAt = values[3].toLong() * 1000,
+                isSymlink = values[4] == "y",
+                mode = (if (isDirectory) 0x4000 else 0x8000) or permissions,
+                uid = values[6].toIntOrNull() ?: -1,
+                gid = values[7].toIntOrNull() ?: -1,
+                owner = values[8],
+                group = values[9],
+            )
         }
         dirProbe?.let { storeProbe(location.id + '\u0000' + path, it) }
         return entries
@@ -521,13 +646,24 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         private fun quote(value: String): String { require('\u0000' !in value); return "'" + value.replace("'", "'\\''") + "'" }
         private val METADATA = """
             for p do
-                v=${'$'}(stat -c '%s %Y' -- "${'$'}p" 2>/dev/null) || v=${'$'}(stat -f '%z %m' "${'$'}p") || exit 70
-                set -- ${'$'}v
-                [ "${'$'}#" -eq 2 ] || exit 70
+                v=${'$'}(stat -c '%s %Y %a %u %g %U %G' -- "${'$'}p" 2>/dev/null)
+                if [ -n "${'$'}v" ]; then
+                    set -- ${'$'}v
+                    [ "${'$'}#" -eq 7 ] || exit 70
+                    sz=${'$'}1; mt=${'$'}2; mo=${'$'}3; ui=${'$'}4; gi=${'$'}5; un=${'$'}6; gn=${'$'}7
+                else
+                    b=${'$'}(stat -f '%z %m %Lp %u %g' "${'$'}p" 2>/dev/null) || exit 70
+                    set -- ${'$'}b
+                    [ "${'$'}#" -eq 5 ] || exit 70
+                    sz=${'$'}1; mt=${'$'}2; mo=${'$'}3; ui=${'$'}4; gi=${'$'}5
+                    un=${'$'}(id -nu "${'$'}ui" 2>/dev/null) || un=${'$'}ui
+                    gn=${'$'}(id -ng "${'$'}gi" 2>/dev/null) || gn=${'$'}gi
+                fi
                 k=f; if [ -d "${'$'}p" ] && [ ! -L "${'$'}p" ]; then k=d; fi
                 l=n; [ ! -L "${'$'}p" ] || l=y
                 n=${'$'}{p##*/}; [ -n "${'$'}n" ] || n=/
-                printf '%s\000%s\000%s\000%s\000%s\000' "${'$'}n" "${'$'}k" "${'$'}1" "${'$'}2" "${'$'}l"
+                printf '%s\000%s\000%s\000%s\000%s\000%s\000%s\000%s\000%s\000%s\000' \
+                    "${'$'}n" "${'$'}k" "${'$'}sz" "${'$'}mt" "${'$'}l" "${'$'}mo" "${'$'}ui" "${'$'}gi" "${'$'}un" "${'$'}gn"
             done
         """.trimIndent()
     }

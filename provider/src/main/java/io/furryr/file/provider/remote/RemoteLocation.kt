@@ -73,6 +73,7 @@ data class RemoteLocation(
 internal data class RemoteEntry(
     val name: String, val isDirectory: Boolean, val size: Long = 0,
     val modifiedAt: Long = 0, val isSymlink: Boolean = false, val mode: Int = 0,
+    val uid: Int = -1, val gid: Int = -1, val owner: String = "", val group: String = "",
 )
 
 /** Capacity of the filesystem volume that holds a remote path. */

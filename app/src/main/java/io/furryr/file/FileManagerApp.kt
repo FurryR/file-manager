@@ -223,6 +223,7 @@ fun FileManagerApp(
 
     // Context menu & file operations state
     var showEntryInfo by remember { mutableStateOf<FileEntry?>(null) }
+    var propertiesNode by remember { mutableStateOf<VNode?>(null) }
 
     var operationProgress by remember { mutableStateOf<OperationProgress?>(null) }
     var operationJob by remember { mutableStateOf<Job?>(null) }
@@ -1196,6 +1197,12 @@ fun FileManagerApp(
 
             override fun requestProperties(entry: FileEntry) {
                 showEntryInfo = entry
+                propertiesNode = null
+                scope.launch {
+                    propertiesNode = withContext(Dispatchers.IO) {
+                        world.vfs.node(entry.path).getOrNull()
+                    }
+                }
             }
 
             override fun putOnClipboard(entries: List<ClipboardEntry>, action: ClipboardAction) {
@@ -2256,7 +2263,12 @@ fun FileManagerApp(
 
     EntryInfoOverlay(
         entry = showEntryInfo,
-        onDismiss = { showEntryInfo = null },
+        node = propertiesNode,
+        onDismiss = {
+            showEntryInfo = null
+            propertiesNode = null
+        },
+        onChanged = { refreshFileList() },
     )
 
     val operationClipboard = ClipboardStore.state

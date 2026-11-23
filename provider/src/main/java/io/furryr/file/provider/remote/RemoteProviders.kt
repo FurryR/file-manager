@@ -9,6 +9,8 @@ import io.furryr.file.core.source.OpenMode
 import io.furryr.file.core.source.SeekableCacheFileSource
 import io.furryr.file.core.DirectoryCapabilities
 import io.furryr.file.core.FileProvider
+import io.furryr.file.core.MetadataProvider
+import io.furryr.file.core.SystemAccounts
 import io.furryr.file.provider.terminal.ExecProvider
 import io.furryr.file.provider.terminal.SshTerminalProcess
 import io.furryr.file.provider.terminal.TerminalProcess
@@ -49,7 +51,7 @@ private class RemoteProvider(
     private val cacheDir: File,
     private val kind: RemoteKind,
     private val locations: RemoteLocationSource,
-) : FileProvider, ExecProvider {
+) : FileProvider, ExecProvider, MetadataProvider {
     override val schemes: Set<String> get() = setOf(kind.scheme)
     override val label get() = if (kind == RemoteKind.ALIST) "AList" else "SSH commands"
     override val features = setOf(ProviderFeature.LIST, ProviderFeature.STAT, ProviderFeature.OPEN,
@@ -74,7 +76,8 @@ private class RemoteProvider(
             backend(location).list(remote).map { entry ->
                 validName(entry.name)
                 FileEntry(entry.name, "${kind.scheme}://${location.pathAuthority}${remote.trimEnd('/')}/${entry.name}",
-                    entry.isDirectory, entry.modifiedAt, entry.isSymlink, mode = entry.mode, size = entry.size)
+                    entry.isDirectory, entry.modifiedAt, entry.isSymlink, mode = entry.mode, size = entry.size,
+                    uid = entry.uid, gid = entry.gid, owner = entry.owner, group = entry.group)
             }
         }
     }
@@ -102,6 +105,52 @@ private class RemoteProvider(
     }
     override suspend fun rename(path: String, newName: String): Result<Unit> = io {
         val (location, remote) = resolve(path); backend(location).rename(mutablePath(remote), validName(newName))
+    }
+
+    override suspend fun setMode(
+        path: String,
+        mode: Int,
+        applyFiles: Boolean,
+        applyDirs: Boolean,
+    ): Result<Unit> = io {
+        val (location, remote) = resolve(path)
+        require(kind == RemoteKind.SSH) { "Metadata editing is only available over SSH" }
+        (backend(location) as SshExecBackend).setMode(
+            mutablePath(remote), mode, applyFiles, applyDirs,
+        )
+    }
+
+    override suspend fun setOwner(
+        path: String,
+        uid: Int,
+        gid: Int,
+        applyFiles: Boolean,
+        applyDirs: Boolean,
+    ): Result<Unit> = io {
+        val (location, remote) = resolve(path)
+        require(kind == RemoteKind.SSH) { "Metadata editing is only available over SSH" }
+        (backend(location) as SshExecBackend).setOwner(
+            mutablePath(remote), uid, gid, applyFiles, applyDirs,
+        )
+    }
+
+    override suspend fun setModifiedTime(
+        path: String,
+        modifiedAt: Long,
+        applyFiles: Boolean,
+        applyDirs: Boolean,
+    ): Result<Unit> = io {
+        val (location, remote) = resolve(path)
+        require(kind == RemoteKind.SSH) { "Metadata editing is only available over SSH" }
+        (backend(location) as SshExecBackend).setModifiedTime(
+            mutablePath(remote), modifiedAt, applyFiles, applyDirs,
+        )
+    }
+
+    override suspend fun accounts(path: String): Result<SystemAccounts> = io {
+        if (kind != RemoteKind.SSH) return@io SystemAccounts()
+        val (location, _) = resolve(path)
+        (backend(location) as SshExecBackend).accounts()
     }
     override suspend fun prepareReplacement(original: String, replacement: String): Result<Unit> = io {
         val (location, source) = resolve(original)

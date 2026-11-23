@@ -20,6 +20,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
 import io.furryr.file.R
+import io.furryr.file.core.VNode
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.isHomePath
 import io.furryr.file.model.FileTab
@@ -28,7 +29,7 @@ import io.furryr.file.render.TerminalFactory
 import io.furryr.file.shell.ShellModal
 import io.furryr.file.terminal.TerminalSheet
 import io.furryr.file.terminal.TerminalTab
-import io.furryr.file.ui.components.EntryInfoDialog
+import io.furryr.file.ui.components.EntryPropertiesDialog
 import io.furryr.file.ui.components.OperationProgressDialog
 import io.furryr.file.ui.components.PageRow
 import io.furryr.file.ui.components.PageSheet
@@ -118,10 +119,17 @@ internal fun ContainerErrorOverlay(
 @Composable
 internal fun EntryInfoOverlay(
     entry: FileEntry?,
+    node: VNode?,
     onDismiss: () -> Unit,
+    onChanged: () -> Unit,
 ) {
     if (entry == null) return
-    EntryInfoDialog(entry = entry, onDismiss = onDismiss)
+    EntryPropertiesDialog(
+        entry = entry,
+        node = node,
+        onDismiss = onDismiss,
+        onChanged = onChanged,
+    )
 }
 
 @Composable

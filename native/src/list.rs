@@ -1,13 +1,14 @@
 use std::ffi::CString;
 use std::io;
 use std::mem;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 use tokio::fs;
 
-use crate::proto::{FileEntry, Stat};
+use crate::proto::{Account, Accounts, FileEntry, Stat};
 
 /// True when the daemon runs inside a container (chroot/proot). Container paths
 /// are real paths in the container, so the Android `/Android/data` UID trick
@@ -47,6 +48,8 @@ pub async fn list_files(path: &str) -> io::Result<Vec<FileEntry>> {
             .unwrap_or(0);
         let mode = metadata.permissions().mode();
         let size = metadata.len();
+        let uid = metadata.uid();
+        let gid = metadata.gid();
         let real_path = if is_symlink {
             std::fs::read_link(entry.path())
                 .map(|p| p.to_string_lossy().into_owned())
@@ -63,6 +66,10 @@ pub async fn list_files(path: &str) -> io::Result<Vec<FileEntry>> {
             real_path,
             mode,
             size: size as i64,
+            uid,
+            gid,
+            owner: user_name(uid),
+            group: group_name(gid),
         });
     }
     Ok(result)
@@ -112,4 +119,177 @@ pub fn maybe_android_data_path(path: &str) -> String {
         return path.to_string();
     }
     path.replace("/Android/data", "/Android/\u{200b}data")
+}
+
+/// Change the permission bits of [path], in the same way a recursive `chmod`
+/// would, without following symlinks.
+pub fn set_mode(path: &str, mode: u32, apply_files: bool, apply_dirs: bool) -> io::Result<()> {
+    let target = maybe_android_data_path(path);
+    set_mode_one(Path::new(&target), mode)?;
+    walk_children(Path::new(&target), apply_files, apply_dirs, &|child, _| {
+        set_mode_one(child, mode)
+    })
+}
+
+fn set_mode_one(path: &Path, mode: u32) -> io::Result<()> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+/// Change owner and group; -1 keeps the current id. Mirrors `chown -R`.
+pub fn set_owner(
+    path: &str,
+    uid: i32,
+    gid: i32,
+    apply_files: bool,
+    apply_dirs: bool,
+) -> io::Result<()> {
+    let target = maybe_android_data_path(path);
+    set_owner_one(Path::new(&target), uid, gid)?;
+    walk_children(Path::new(&target), apply_files, apply_dirs, &|child, _| {
+        set_owner_one(child, uid, gid)
+    })
+}
+
+fn set_owner_one(path: &Path, uid: i32, gid: i32) -> io::Result<()> {
+    let cpath = CString::new(path.as_os_str().as_bytes())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let rc = unsafe { libc::chown(cpath.as_ptr(), uid as libc::uid_t, gid as libc::gid_t) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Set access and modification time; the UI only exposes the latter, so both
+/// carry the requested value. Mirrors `touch -d`.
+pub fn set_times(
+    path: &str,
+    modified_at_ms: i64,
+    apply_files: bool,
+    apply_dirs: bool,
+) -> io::Result<()> {
+    let target = maybe_android_data_path(path);
+    set_times_one(Path::new(&target), modified_at_ms)?;
+    walk_children(Path::new(&target), apply_files, apply_dirs, &|child, _| {
+        set_times_one(child, modified_at_ms)
+    })
+}
+
+fn set_times_one(path: &Path, modified_at_ms: i64) -> io::Result<()> {
+    let seconds = modified_at_ms.div_euclid(1000);
+    let nanos = modified_at_ms.rem_euclid(1000) * 1_000_000;
+    let times = [
+        libc::timespec { tv_sec: seconds as libc::time_t, tv_nsec: nanos as libc::c_long },
+        libc::timespec { tv_sec: seconds as libc::time_t, tv_nsec: nanos as libc::c_long },
+    ];
+    let cpath = CString::new(path.as_os_str().as_bytes())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, cpath.as_ptr(), times.as_ptr(), 0) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Visit every descendant that the recursive operation is asked to touch.
+/// Symlinks are skipped so a link target outside the tree is never changed.
+fn walk_children(
+    root: &Path,
+    apply_files: bool,
+    apply_dirs: bool,
+    apply: &dyn Fn(&Path, bool) -> io::Result<()>,
+) -> io::Result<()> {
+    if !root.is_dir() || (!apply_files && !apply_dirs) {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        let is_dir = metadata.is_dir();
+        if is_dir {
+            if apply_dirs {
+                apply(&path, true)?;
+            }
+            walk_children(&path, apply_files, apply_dirs, apply)?;
+        } else if apply_files {
+            apply(&path, false)?;
+        }
+    }
+    Ok(())
+}
+
+fn user_name(uid: u32) -> String {
+    unsafe {
+        let mut pwd: libc::passwd = mem::zeroed();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let mut buffer = vec![0 as libc::c_char; 1024];
+        let rc = libc::getpwuid_r(
+            uid,
+            &mut pwd,
+            buffer.as_mut_ptr(),
+            buffer.len() as libc::size_t,
+            &mut result,
+        );
+        if rc == 0 && !result.is_null() && !pwd.pw_name.is_null() {
+            return std::ffi::CStr::from_ptr(pwd.pw_name)
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    uid.to_string()
+}
+
+fn group_name(gid: u32) -> String {
+    unsafe {
+        let mut grp: libc::group = mem::zeroed();
+        let mut result: *mut libc::group = std::ptr::null_mut();
+        let mut buffer = vec![0 as libc::c_char; 1024];
+        let rc = libc::getgrgid_r(
+            gid,
+            &mut grp,
+            buffer.as_mut_ptr(),
+            buffer.len() as libc::size_t,
+            &mut result,
+        );
+        if rc == 0 && !result.is_null() && !grp.gr_name.is_null() {
+            return std::ffi::CStr::from_ptr(grp.gr_name)
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    gid.to_string()
+}
+
+/// Every user and group the daemon can see. Android hosts usually expose only
+/// `/system/etc/passwd`; containers carry the full `/etc/passwd` and
+/// `/etc/group`, so the same request serves both.
+pub fn accounts() -> Accounts {
+    Accounts {
+        users: read_accounts("/etc/passwd", "/system/etc/passwd"),
+        groups: read_accounts("/etc/group", "/system/etc/group"),
+    }
+}
+
+fn read_accounts(primary: &str, fallback: &str) -> Vec<Account> {
+    let raw = std::fs::read_to_string(primary)
+        .or_else(|_| std::fs::read_to_string(fallback))
+        .unwrap_or_default();
+    raw.lines()
+        .filter_map(|line| {
+            let mut fields = line.split(':');
+            let name = fields.next()?.trim();
+            let _password = fields.next()?;
+            let id = fields.next()?.trim().parse::<u32>().ok()?;
+            if name.is_empty() {
+                return None;
+            }
+            Some(Account { id, name: name.to_string() })
+        })
+        .collect()
 }

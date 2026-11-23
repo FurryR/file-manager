@@ -37,6 +37,10 @@ message Request {
     SignalPtyRequest signal_pty = 32;
     WaitExecRequest wait_exec = 33;
     CloseExecRequest close_exec = 34;
+    SetModeRequest set_mode = 35;
+    SetOwnerRequest set_owner = 36;
+    SetTimesRequest set_times = 37;
+    AccountsRequest accounts = 38;
   }
 }
 
@@ -144,6 +148,7 @@ message Response {
   optional ExecResponse exec = 16;
   optional ServerHello server_hello = 17;
   optional ExecStreamResponse exec_stream = 18;
+  optional Accounts accounts = 19;
 }
 
 // Non-PTY command execution. With [pipes] unset it runs to completion and
@@ -191,6 +196,44 @@ message FileEntry {
   string real_path = 6;
   uint32 mode = 7;
   int64 size = 8;
+  uint32 uid = 9;
+  uint32 gid = 10;
+  string owner = 11;
+  string group = 12;
+}
+
+message SetModeRequest {
+  string path = 1;
+  uint32 mode = 2;
+  bool apply_files = 3;
+  bool apply_dirs = 4;
+}
+
+message SetOwnerRequest {
+  string path = 1;
+  int32 uid = 2;
+  int32 gid = 3;
+  bool apply_files = 4;
+  bool apply_dirs = 5;
+}
+
+message SetTimesRequest {
+  string path = 1;
+  int64 modified_at_ms = 2;
+  bool apply_files = 3;
+  bool apply_dirs = 4;
+}
+
+message AccountsRequest {}
+
+message Account {
+  uint32 id = 1;
+  string name = 2;
+}
+
+message Accounts {
+  repeated Account users = 1;
+  repeated Account groups = 2;
 }
 
 message Stat {

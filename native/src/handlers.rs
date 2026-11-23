@@ -9,8 +9,8 @@ use crate::exec::ExecManager;
 use crate::handles::HandleTable;
 use crate::proto::request::Command;
 use crate::proto::{
-    CreateDirRequest, CreateFileRequest, DeleteRequest, ExecRequest, ListRequest, RenameRequest,
-    Request, Response, StatRequest,
+    CreateDirRequest, CreateFileRequest, DeleteRequest, ExecRequest, ListRequest,
+    RenameRequest, Request, Response, StatRequest,
 };
 use crate::protocol::OutboundResponse;
 use crate::pty::PtyManager;
@@ -73,6 +73,18 @@ pub async fn handle_streaming(
             let _ = tx.send(OutboundResponse::plain(
                 file_ops::create_dir(req_id, path).await,
             ));
+        }
+        Some(Command::SetMode(req)) => {
+            let _ = tx.send(OutboundResponse::plain(file_ops::set_mode(req_id, req)));
+        }
+        Some(Command::SetOwner(req)) => {
+            let _ = tx.send(OutboundResponse::plain(file_ops::set_owner(req_id, req)));
+        }
+        Some(Command::SetTimes(req)) => {
+            let _ = tx.send(OutboundResponse::plain(file_ops::set_times(req_id, req)));
+        }
+        Some(Command::Accounts(req)) => {
+            let _ = tx.send(OutboundResponse::plain(file_ops::accounts(req_id, req)));
         }
         Some(Command::Copy(req)) => {
             close_unexpected_fd(attached_fd);

@@ -18,11 +18,14 @@ import io.furryr.file.clipboard.ClipboardSink
 import io.furryr.file.clipboard.ClipboardStore
 import io.furryr.file.core.DirectoryStats
 import io.furryr.file.core.Path
+import io.furryr.file.core.VFile
 import io.furryr.file.core.VFolder
 import io.furryr.file.core.Vfs
 import io.furryr.file.core.model.FileEntry
+import io.furryr.file.home.Bookmarks
 import io.furryr.file.home.HomeEntry
 import io.furryr.file.home.HomeEntryKind
+import io.furryr.file.home.HomeStore
 import io.furryr.file.isHomePath
 import io.furryr.file.model.PageKind
 import io.furryr.file.model.summary
@@ -615,6 +618,15 @@ internal class FolderSessionView(
                 val selected = listing.selectedEntries
                 val batch = selected.ifEmpty { listOf(entry) }
                 val readOnly = renderer.isReadOnly()
+                // Reading the revision subscribes this menu to bookmark edits.
+                HomeStore.revision()
+                val bookmarkEntry = HomeEntry(
+                    kind = if (entry.isDirectory) HomeEntryKind.FOLDER else HomeEntryKind.FILE,
+                    location = entry.path,
+                    title = entry.name,
+                    detail = entry.path,
+                )
+                val bookmarked = Bookmarks.isBookmarked(bookmarkEntry)
                 ContextMenu(
                     entry = entry,
                     onDismiss = { renderer.menuEntry = null },
@@ -642,6 +654,20 @@ internal class FolderSessionView(
                         host.requestShare(listing.clipboardEntries(batch))
                         renderer.menuEntry = null
                     },
+                    onOpenWith = {
+                        renderer.menuEntry = null
+                        scope.launch {
+                            val node = withContext(Dispatchers.IO) {
+                                host.vfs.node(entry.path).getOrNull()
+                            } as? VFile ?: return@launch
+                            host.open(host.opener.chooser(node))
+                        }
+                    },
+                    onBookmark = {
+                        renderer.menuEntry = null
+                        Bookmarks.toggle(bookmarkEntry)
+                    },
+                    bookmarked = bookmarked,
                     canCopy = true,
                     canMove = !readOnly,
                     canShare = batch.all { !it.isDirectory },

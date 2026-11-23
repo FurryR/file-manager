@@ -290,10 +290,6 @@ object ProotRunner {
         return dir
     }
 
-    private fun runtimePath(context: Context, container: Container): File {
-        val id = container.name.map { c ->
-            if (c.isLetterOrDigit() || c == '-' || c == '_') c else '_'
-        }.joinToString("").ifEmpty { "container" }
-        return File(context.cacheDir, "container/$id")
-    }
+    private fun runtimePath(context: Context, container: Container): File =
+        File(context.cacheDir, "container/${ContainerManager.runtimeId(container.name)}")
 }

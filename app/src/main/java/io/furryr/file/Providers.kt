@@ -3,6 +3,7 @@ package io.furryr.file
 import android.content.Context
 import io.furryr.file.agent.AgentEnvironment
 import io.furryr.file.agent.AgentSettings
+import io.furryr.file.cache.CacheJanitor
 import io.furryr.file.container.ContainerDaemonLauncher
 import io.furryr.file.container.ContainerProvider
 import io.furryr.file.container.ContainerRuntime
@@ -99,6 +100,11 @@ fun ensureProcessServices(context: Context) {
         }
     }
     processInstalled = true
+    // Reclaim staging files and container runtime dirs left by a killed
+    // process, a deleted container or a rename. Cache-only, background thread.
+    Thread {
+        runCatching { CacheJanitor.sweep(appContext) }
+    }.apply { isDaemon = true }.start()
     // A persisted document URI names a world that may not be live yet. Rebuild
     // it from the persisted locations instead of failing the read.
     FileWorlds.factory = { id -> buildAppWorld(appContext, id, manager = id == "app") }

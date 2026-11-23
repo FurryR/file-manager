@@ -34,7 +34,7 @@ private const val HOST_SHELL_PATH =
  * All work is delegated to [FileService]; the provider only maps it onto the
  * [FileProvider] contract.
  */
-class LocalProvider(private val appContext: Context? = null) : FileProvider, ExecProvider, HostPathProvider {
+class LocalProvider(private val appContext: Context? = null) : FileProvider, ExecProvider, HostPathProvider, MetadataProvider {
     private fun isAppPrivate(path: String): Boolean {
         val context = appContext ?: return false
         val target = File(path).absoluteFile
@@ -88,6 +88,30 @@ class LocalProvider(private val appContext: Context? = null) : FileProvider, Exe
     override suspend fun rename(path: String, newName: String): Result<Unit> = files(path).rename(path, newName)
 
     override suspend fun open(path: String, mode: OpenMode): Result<FileSource> = files(path).open(path, mode)
+
+    override suspend fun setMode(
+        path: String,
+        mode: Int,
+        applyFiles: Boolean,
+        applyDirs: Boolean,
+    ): Result<Unit> = files(path).setMode(path, mode, applyFiles, applyDirs)
+
+    override suspend fun setOwner(
+        path: String,
+        uid: Int,
+        gid: Int,
+        applyFiles: Boolean,
+        applyDirs: Boolean,
+    ): Result<Unit> = files(path).setOwner(path, uid, gid, applyFiles, applyDirs)
+
+    override suspend fun setModifiedTime(
+        path: String,
+        modifiedAt: Long,
+        applyFiles: Boolean,
+        applyDirs: Boolean,
+    ): Result<Unit> = files(path).setTimes(path, modifiedAt, applyFiles, applyDirs)
+
+    override suspend fun accounts(path: String): Result<SystemAccounts> = files(path).accounts()
 
     override fun copy(from: String, to: String, isCopy: Boolean): Flow<CopyProgress> {
         if (isAppPrivate(from) == isAppPrivate(to)) return files(from).copy(from, to, isCopy)

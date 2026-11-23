@@ -10,4 +10,8 @@ data class FileEntry(
     val realPath: String = "",
     val mode: Int = 0,
     val size: Long = 0L,
+    val uid: Int = -1,
+    val gid: Int = -1,
+    val owner: String = "",
+    val group: String = "",
 )

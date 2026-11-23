@@ -174,4 +174,7 @@ class Opener(private val files: FileWorld) {
         options = options,
         error = error,
     )
+
+    /** The open-with chooser for [file], even when a MIME factory claims it. */
+    fun chooser(file: VFile): Renderer = generic(file, null)
 }

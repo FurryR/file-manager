@@ -2,17 +2,13 @@ package io.furryr.file.render
 
 import android.content.Context
 import io.furryr.file.ui.icons.Icons
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
 import io.furryr.file.R
-import io.furryr.file.home.Bookmarks
 import io.furryr.file.home.HomeEntry
 import io.furryr.file.home.HomeStore
 import io.furryr.file.isHomePath
-import io.furryr.file.ui.screens.HomeScreen
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -34,7 +30,7 @@ object HomePageState : PageState()
 
 /**
  * Home as a normal renderer. It has no loading, refresh or history of its own:
- * the tab owns Back/Forward like it does for a page, and [HomeScreen] only
+ * the tab owns Back/Forward like it does for a page, and [HomeRenderer] only
  * draws the projected state.
  */
 internal class HomeRendererSession(
@@ -168,30 +164,5 @@ internal class HomeRendererSession(
     override fun reset() {
         host = null
         cancelOpening()
-    }
-}
-
-/** View half of the Home session. */
-internal class HomeSessionView(
-    private val session: HomeRendererSession,
-) : SessionView {
-    @Composable
-    override fun Content(host: RendererContext, darkTheme: Boolean, modifier: Modifier) {
-        session.useHost(host)
-        val state = session.view()
-        HomeScreen(
-            recent = state.recent,
-            bookmarks = state.bookmarks,
-            onOpen = session::open,
-            onToggleBookmark = { entry -> Bookmarks.toggle(entry) },
-            onRemoveRecent = { entry -> Bookmarks.removeRecent(entry) },
-            onRemoveBookmark = { entry -> Bookmarks.remove(entry) },
-            onClearRecent = { Bookmarks.clearRecent() },
-            onClearBookmarks = { Bookmarks.clearBookmarks() },
-            opening = state.opening,
-            onCancelOpening = session::cancelOpening,
-            filter = session.filterText,
-            modifier = modifier,
-        )
     }
 }

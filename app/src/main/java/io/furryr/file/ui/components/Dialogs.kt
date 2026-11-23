@@ -180,6 +180,9 @@ fun ContextMenu(
     onDelete: () -> Unit,
     onProperties: () -> Unit,
     onShare: () -> Unit,
+    onOpenWith: () -> Unit,
+    onBookmark: () -> Unit,
+    bookmarked: Boolean = false,
     canCopy: Boolean = true,
     canMove: Boolean = true,
     canShare: Boolean = true,
@@ -212,6 +215,21 @@ fun ContextMenu(
                 Row(Modifier.fillMaxWidth()) {
                     ActionRow(stringResource(R.string.properties), Icons.Default.Info, onProperties, Modifier.weight(1f))
                     ActionRow(stringResource(R.string.share), Icons.Default.Share, onClick = onShare, modifier = Modifier.weight(1f), enabled = canShare)
+                }
+                Row(Modifier.fillMaxWidth()) {
+                    ActionRow(
+                        stringResource(R.string.open_with_title),
+                        Icons.AutoMirrored.Filled.OpenInNew,
+                        onOpenWith,
+                        Modifier.weight(1f),
+                        enabled = !entry.isDirectory,
+                    )
+                    ActionRow(
+                        stringResource(if (bookmarked) R.string.bookmark_remove else R.string.bookmark_add),
+                        if (bookmarked) Icons.Default.Star else Icons.Default.StarBorder,
+                        onBookmark,
+                        Modifier.weight(1f),
+                    )
                 }
             }
         }

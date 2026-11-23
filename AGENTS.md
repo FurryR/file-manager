@@ -790,6 +790,9 @@ Gradle, Cargo or native component; the app ships the generated asset.
 
 ## TODO - Bug checks
 
+- [ ] `proto/file_daemon.proto` + `daemon/.../DaemonFileOps.kt` + `daemon/.../FileService.kt` + `core/.../MetadataProvider.kt` + `native/src/list.rs`: verify the new `FileEntry` owner/group/uid/gid fields, `SetMode`/`SetOwner`/`SetTimes` rpc round trips (including both recursive flags and a failing child), and the `Accounts` reply on host and container daemons.
+- [ ] `provider/.../remote/SshExecBackend.kt` + `provider/.../remote/RemoteProviders.kt`: verify SSH metadata fields, remote `chmod`/`chown`/`touch` recursion and remote `/etc/passwd` + `/etc/group` account search.
+
 - [ ] `core/.../Folder.kt`: verify `Folder.child` rejects a missing name with `NodeNotFoundException` (providers returning `exists=false`) and that copy/move destination creation, typed-address navigation and rename/delete target lookup still behave on local/SAF/FTP/SFTP/SSH/AList/container targets.
 - [ ] `core/.../VNode.kt` + `core/.../NodeOps.kt` + `app/.../clipboard/Clipboard.kt` + `app/.../picker/PickerDocumentsProvider.kt`: verify folder copy/move and picker directory creation after removing `VFolder.destinationFolder(name)` — new destination folder, merge into an existing folder, existing file collision, and missing-child creation on local/SAF/FTP/SFTP/SSH/AList/container targets.
 
@@ -1079,6 +1082,7 @@ Philosophy for every remaining phase:
 - [ ] `core/.../Path.kt` + `app/.../FileManagerApp.kt`: make `parent()` and `navigate("..")` agree at a host root (`container://alpine`, `saf://hex`); verify Up reaches the scheme root.
 - [ ] `core/.../NodeOps.kt`: stop treating every `Vfs.node` failure as "destination missing"; verify permission/transport errors surface instead of creating or overwriting a file.
 - [ ] `agent/.../SystemPrompt.kt`: stop using the hub `ReadFileRequest` proto for a local `/etc/issue` read; use the agent file API.
+- [ ] `container/.../ContainerManager.kt` + `container/.../ProotRunner.kt` + `app/.../cache/CacheJanitor.kt`: verify `runtimeId` maps letters/digits/`-`/`_` unchanged and every other character to `_` (empty → `container`), so an existing container's proot runtime dir is the one the cache sweep keeps; check a container name with spaces, dots, unicode and a renamed container's old runtime dir.
 
 ## NOTICE
 

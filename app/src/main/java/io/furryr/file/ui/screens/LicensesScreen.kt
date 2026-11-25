@@ -42,11 +42,11 @@ private fun loadGeneratedLicenses(context: Context): List<LicenseRecord> = runCa
             val row = rows.getJSONObject(index)
             add(
                 LicenseRecord(
-                    group = row.optString("group").takeIf { it.isNotBlank() },
+                    group = row.optString("group").takeUnless { row.isNull("group") || it.isBlank() },
                     name = row.optString("name"),
-                    version = row.optString("version").takeIf { it.isNotBlank() },
+                    version = row.optString("version").takeUnless { row.isNull("version") || it.isBlank() || it == "null" },
                     license = row.optString("license").ifBlank { "Unknown" },
-                    url = row.optString("url").takeIf { it.isNotBlank() },
+                    url = row.optString("url").takeUnless { row.isNull("url") || it.isBlank() },
                 ),
             )
         }
@@ -55,7 +55,7 @@ private fun loadGeneratedLicenses(context: Context): List<LicenseRecord> = runCa
 
 /** Shown only when the generated asset is absent (for example in a bare IDE checkout). */
 private val FALLBACK_LICENSES = listOf(
-    LicenseRecord(name = "File", license = "GNU GPLv3 or later", url = "https://www.gnu.org/licenses/gpl-3.0.html"),
+    LicenseRecord(name = "File", license = "GPL-3.0-only", url = "https://www.gnu.org/licenses/gpl-3.0.html"),
     LicenseRecord(name = "AndroidX Activity", license = "Apache License 2.0", url = "https://developer.android.com/jetpack/androidx/releases/activity"),
     LicenseRecord(name = "AndroidX Compose", license = "Apache License 2.0", url = "https://developer.android.com/jetpack/compose"),
     LicenseRecord(name = "AndroidX Lifecycle", license = "Apache License 2.0", url = "https://developer.android.com/jetpack/androidx/releases/lifecycle"),
@@ -87,8 +87,13 @@ private val FALLBACK_LICENSES = listOf(
 @Composable
 fun LicensesScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val generated = remember { loadGeneratedLicenses(context) }
-    val rows = generated.ifEmpty { FALLBACK_LICENSES }
+    val rows = remember(context) {
+        @Suppress("DEPRECATION")
+        val version = context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        loadGeneratedLicenses(context).ifEmpty { FALLBACK_LICENSES }.map { entry ->
+            if (entry.name == "File") entry.copy(version = version) else entry
+        }
+    }
     val sections = remember(rows) {
         val order = listOf("Android / JVM", "Rust", "Bundled web", "Native")
         rows.groupBy { it.group }

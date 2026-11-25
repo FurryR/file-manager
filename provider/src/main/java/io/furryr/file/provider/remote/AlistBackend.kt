@@ -1,6 +1,7 @@
 package io.furryr.file.provider.remote
 
 import android.net.Uri
+import io.furryr.file.core.model.FileEntry
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -12,12 +13,12 @@ import java.time.OffsetDateTime
 import java.util.concurrent.ConcurrentHashMap
 
 /** AList v3 API: https://alistgo.com/guide/api/fs.html and /guide/api/auth.html. */
-internal class AlistBackend(private val location: RemoteLocation) : RemoteBackend {
+internal class AlistBackend(private val location: AlistLocation) {
     private val base = location.endpoint.trimEnd('/')
     private val authId = listOf(location.id, location.endpoint, location.username, location.password)
 
-    override fun list(path: String): List<RemoteEntry> {
-        val entries = linkedMapOf<String, RemoteEntry>()
+    fun list(path: String): List<FileEntry> {
+        val entries = linkedMapOf<String, FileEntry>()
         var page = 1
         while (true) {
             interrupted()
@@ -38,18 +39,18 @@ internal class AlistBackend(private val location: RemoteLocation) : RemoteBacken
         }
         return entries.values.toList()
     }
-    override fun canWrite(path: String): Boolean = listPage(path, 1, 1).optBoolean("write", false)
+    fun canWrite(path: String): Boolean = listPage(path, 1, 1).optBoolean("write", false)
     private fun listPage(path: String, page: Int, count: Int): JSONObject = api("/api/fs/list",
         JSONObject().put("path", path).put("password", location.directoryPassword)
             .put("page", page).put("per_page", count).put("refresh", page == 1)).getJSONObject("data")
 
-    override fun stat(path: String): RemoteEntry? {
-        if (path == "/") { listPage(path, 1, 1); return RemoteEntry("/", true) }
+    fun stat(path: String): FileEntry? {
+        if (path == "/") { listPage(path, 1, 1); return FileEntry("/", "/", true, 0) }
         // v3 storage drivers often use code 500 for not-found. Listing the
         // parent distinguishes absence from permission/network/driver errors.
         return list(parentPath(path)).firstOrNull { it.name == path.substringAfterLast('/') }
     }
-    override fun download(path: String, destination: File) {
+    fun download(path: String, destination: File) {
         val data = api("/api/fs/get", JSONObject().put("path", path).put("password", location.directoryPassword)).getJSONObject("data")
         require(!data.getBoolean("is_dir")) { "Cannot download a directory" }
         var url = URL(data.getString("raw_url"))
@@ -74,20 +75,20 @@ internal class AlistBackend(private val location: RemoteLocation) : RemoteBacken
             } finally { connection.disconnect() }
         }
     }
-    override fun upload(path: String, source: File) { put(mutablePath(path), source, overwrite = true) }
-    override fun createFile(path: String) {
+    fun upload(path: String, source: File) { put(mutablePath(path), source, overwrite = true) }
+    fun createFile(path: String) {
         if (stat(path) != null) throw IOException("An entry with this name already exists")
         put(mutablePath(path), null, overwrite = false)
     }
-    override fun createDirectory(path: String) {
+    fun createDirectory(path: String) {
         if (stat(path) != null) throw IOException("An entry with this name already exists")
         api("/api/fs/mkdir", JSONObject().put("path", mutablePath(path)))
     }
-    override fun delete(path: String) {
+    fun delete(path: String) {
         mutablePath(path)
         api("/api/fs/remove", JSONObject().put("dir", parentPath(path)).put("names", JSONArray().put(path.substringAfterLast('/'))))
     }
-    override fun rename(path: String, newName: String) {
+    fun rename(path: String, newName: String) {
         mutablePath(path); validName(newName)
         if (stat(parentPath(path).trimEnd('/') + "/" + newName) != null) throw IOException("The destination already exists")
         api("/api/fs/rename", JSONObject().put("path", path).put("name", newName))
@@ -164,11 +165,16 @@ internal class AlistBackend(private val location: RemoteLocation) : RemoteBacken
         }
         return json
     }
-    private fun entry(value: JSONObject) = RemoteEntry(value.getString("name"), value.getBoolean("is_dir"),
-        value.optLong("size"), value.optString("modified").takeIf { it.isNotEmpty() }?.let {
+    private fun entry(value: JSONObject) = FileEntry(
+        name = value.getString("name"),
+        path = value.getString("name"),
+        isDirectory = value.getBoolean("is_dir"),
+        modifiedAt = value.optString("modified").takeIf { it.isNotEmpty() }?.let {
             try { OffsetDateTime.parse(it).toInstant().toEpochMilli() }
             catch (error: java.time.format.DateTimeParseException) { android.util.Log.d("AList", "Unrecognized remote timestamp", error); 0L }
-        } ?: 0)
+        } ?: 0,
+        size = value.optLong("size"),
+    )
     private fun connection(url: URL, method: String) = (url.openConnection() as HttpURLConnection).apply {
         requestMethod = method; connectTimeout = 30_000; readTimeout = 60_000
         instanceFollowRedirects = false

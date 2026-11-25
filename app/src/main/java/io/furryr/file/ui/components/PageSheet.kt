@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -20,7 +21,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
-import io.furryr.file.ui.icons.Icons
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -44,7 +44,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.furryr.file.R
 import io.furryr.file.model.Page
-import io.furryr.file.model.PageKind
+import io.furryr.file.model.PageIcon
 
 /**
  * One rendered row of the per-tab page sheet. The page model carries identity
@@ -170,17 +170,19 @@ fun PageSheet(
                                         .clickable { onSelect(row) }
                                         .padding(horizontal = 20.dp, vertical = 12.dp),
                                 ) {
-                                    Icon(
-                                        imageVector = when {
-                                            row.current -> Icons.Default.Check
-                                            row.page.kind == PageKind.PAGE -> Icons.Default.Language
-                                            row.page.kind == PageKind.FILE -> Icons.Default.Description
-                                            else -> Icons.Default.Folder
-                                        },
-                                        contentDescription = null,
-                                        tint = if (row.current) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
+                                    when (val icon = row.page.icon) {
+                                        is PageIcon.Vector -> Icon(
+                                            imageVector = icon.image,
+                                            contentDescription = null,
+                                            tint = if (row.current) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                        is PageIcon.Bitmap -> Image(
+                                            bitmap = icon.image,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(24.dp),
+                                        )
+                                    }
                                     Spacer(Modifier.width(14.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(

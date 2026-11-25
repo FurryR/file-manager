@@ -1,6 +1,8 @@
 package io.furryr.file.ui.components
 
+import android.content.Context
 import android.widget.Toast
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -37,12 +40,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.graphics.drawable.toBitmap
 import io.furryr.file.R
 import io.furryr.file.core.MetadataProvider
 import io.furryr.file.core.Path
@@ -50,6 +57,7 @@ import io.furryr.file.core.SystemAccount
 import io.furryr.file.core.SystemAccounts
 import io.furryr.file.core.VNode
 import io.furryr.file.core.model.FileEntry
+import io.furryr.file.provider.LocalProvider
 import io.furryr.file.ui.icons.Icons
 import io.furryr.file.ui.util.formatModifiedTime
 import io.furryr.file.ui.util.formatPermissions
@@ -74,6 +82,24 @@ private fun groupText(entry: FileEntry): String =
 
 private fun parentText(entry: FileEntry): String =
     runCatching { Path.parse(entry.path).parent()?.toString().orEmpty() }.getOrDefault("")
+
+/** A local uid/gid whose application label and package icon are addressable. */
+private fun appAccount(
+    context: Context,
+    id: Int,
+    name: String,
+    local: Boolean,
+): SystemAccount {
+    if (!local) return SystemAccount(id, name)
+    val packageName = context.packageManager.getPackagesForUid(id)?.firstOrNull()
+        ?: return SystemAccount(id, name)
+    val label = runCatching {
+        context.packageManager.getApplicationLabel(
+            context.packageManager.getApplicationInfo(packageName, 0),
+        ).toString()
+    }.getOrDefault("")
+    return SystemAccount(id, name, label, packageName)
+}
 
 /**
  * The entry properties sheet. Read-side facts come from [entry]; write-side
@@ -182,10 +208,6 @@ fun EntryPropertiesDialog(
                         null
                     },
                 )
-                if (!entry.isDirectory) {
-                    PropertyValueRow(stringResource(R.string.properties_file_count), "1")
-                    PropertyValueRow(stringResource(R.string.properties_folder_count), "0")
-                }
             }
         },
         confirmButton = {
@@ -196,6 +218,7 @@ fun EntryPropertiesDialog(
     if (showTime) {
         ModifiedTimeDialog(
             modifiedAt = modifiedAt,
+            showApplyScope = entry.isDirectory,
             onDismiss = { showTime = false },
             onConfirm = { value, applyFiles, applyDirs ->
                 showTime = false
@@ -222,6 +245,7 @@ fun EntryPropertiesDialog(
     if (showMode) {
         ModeDialog(
             mode = mode,
+            showApplyScope = entry.isDirectory,
             onDismiss = { showMode = false },
             onConfirm = { value, applyFiles, applyDirs ->
                 showMode = false
@@ -247,20 +271,21 @@ fun EntryPropertiesDialog(
 
     if (showOwner) {
         val known = accounts ?: SystemAccounts()
-        val users = remember(known, owner, uid) {
+        val local = node?.provider is LocalProvider
+        val users = remember(known, owner, uid, local) {
             if (known.users.any { it.id == uid }) {
                 known.users
             } else if (owner.isNotBlank()) {
-                known.users + SystemAccount(uid, owner)
+                known.users + appAccount(context, uid, owner, local)
             } else {
                 known.users
             }
         }
-        val groups = remember(known, group, gid) {
+        val groups = remember(known, group, gid, local) {
             if (known.groups.any { it.id == gid }) {
                 known.groups
             } else if (group.isNotBlank()) {
-                known.groups + SystemAccount(gid, group)
+                known.groups + appAccount(context, gid, group, local)
             } else {
                 known.groups
             }
@@ -272,6 +297,7 @@ fun EntryPropertiesDialog(
             gid = gid,
             users = users,
             groups = groups,
+            showApplyScope = entry.isDirectory,
             onDismiss = { showOwner = false },
             onConfirm = { newUid, newGid, newOwner, newGroup, applyFiles, applyDirs ->
                 showOwner = false
@@ -332,11 +358,6 @@ private fun PropertyRow(
         Text(
             value.ifEmpty { "-" },
             style = MaterialTheme.typography.bodyMedium,
-            color = if (onClick != null) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.onSurface
-            },
             modifier = Modifier
                 .weight(1f)
                 .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
@@ -370,6 +391,7 @@ private fun ApplyScopeRow(
 @Composable
 private fun ModifiedTimeDialog(
     modifiedAt: Long,
+    showApplyScope: Boolean,
     onDismiss: () -> Unit,
     onConfirm: (Long, Boolean, Boolean) -> Unit,
 ) {
@@ -409,7 +431,9 @@ private fun ModifiedTimeDialog(
                     ),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                ApplyScopeRow(applyFiles, applyDirs, { applyFiles = it }, { applyDirs = it })
+                if (showApplyScope) {
+                    ApplyScopeRow(applyFiles, applyDirs, { applyFiles = it }, { applyDirs = it })
+                }
             }
         },
         confirmButton = {
@@ -435,6 +459,7 @@ private fun ModifiedTimeDialog(
 @Composable
 private fun ModeDialog(
     mode: Int,
+    showApplyScope: Boolean,
     onDismiss: () -> Unit,
     onConfirm: (Int, Boolean, Boolean) -> Unit,
 ) {
@@ -482,7 +507,9 @@ private fun ModeDialog(
                     ModeCheck(stringResource(R.string.properties_sticky), 0x200, ::bit, ::toggle)
                 }
                 Spacer(Modifier.height(4.dp))
-                ApplyScopeRow(applyFiles, applyDirs, { applyFiles = it }, { applyDirs = it })
+                if (showApplyScope) {
+                    ApplyScopeRow(applyFiles, applyDirs, { applyFiles = it }, { applyDirs = it })
+                }
             }
         },
         confirmButton = {
@@ -553,6 +580,7 @@ private fun OwnerDialog(
     gid: Int,
     users: List<SystemAccount>,
     groups: List<SystemAccount>,
+    showApplyScope: Boolean,
     onDismiss: () -> Unit,
     onConfirm: (Int, Int, String, String, Boolean, Boolean) -> Unit,
 ) {
@@ -573,13 +601,17 @@ private fun OwnerDialog(
                 PropertyRow(
                     stringResource(R.string.properties_owner),
                     pickedOwner.ifBlank { "-" },
-                ) { showUsers = true }
+                    onClick = { showUsers = true },
+                )
                 PropertyRow(
                     stringResource(R.string.properties_group),
                     pickedGroup.ifBlank { "-" },
-                ) { showGroups = true }
-                Spacer(Modifier.height(4.dp))
-                ApplyScopeRow(applyFiles, applyDirs, { applyFiles = it }, { applyDirs = it })
+                    onClick = { showGroups = true },
+                )
+                if (showApplyScope) {
+                    Spacer(Modifier.height(4.dp))
+                    ApplyScopeRow(applyFiles, applyDirs, { applyFiles = it }, { applyDirs = it })
+                }
             }
         },
         confirmButton = {
@@ -610,6 +642,7 @@ private fun OwnerDialog(
             title = stringResource(R.string.properties_owner),
             accounts = users,
             selectedId = pickedUid,
+            defaultIcon = Icons.Default.Person,
             onPick = {
                 pickedUid = it.id
                 pickedOwner = it.name
@@ -622,6 +655,7 @@ private fun OwnerDialog(
             title = stringResource(R.string.properties_group),
             accounts = groups,
             selectedId = pickedGid,
+            defaultIcon = Icons.Default.Group,
             onPick = {
                 pickedGid = it.id
                 pickedGroup = it.name
@@ -636,6 +670,7 @@ private fun AccountPickerDialog(
     title: String,
     accounts: List<SystemAccount>,
     selectedId: Int,
+    defaultIcon: ImageVector,
     onPick: (SystemAccount) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -647,7 +682,9 @@ private fun AccountPickerDialog(
         accounts
     } else {
         accounts.filter {
-            it.name.contains(query.trim(), ignoreCase = true) || it.id.toString() == query.trim()
+            it.name.contains(query.trim(), ignoreCase = true) ||
+                it.description.contains(query.trim(), ignoreCase = true) ||
+                it.id.toString() == query.trim()
         }
     }
 
@@ -704,7 +741,7 @@ private fun AccountPickerDialog(
                                     selected = account.id
                                     onPick(account)
                                 }
-                                .padding(vertical = 4.dp),
+                                .padding(vertical = 6.dp),
                         ) {
                             RadioButton(
                                 selected = selected == account.id,
@@ -713,10 +750,30 @@ private fun AccountPickerDialog(
                                     onPick(account)
                                 },
                             )
-                            Text(account.name, modifier = Modifier.weight(1f))
+                            Spacer(Modifier.width(8.dp))
+                            AccountIcon(account, defaultIcon)
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    account.name,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (account.description.isNotBlank()) {
+                                    Text(
+                                        account.description,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.width(12.dp))
                             Text(
                                 account.id.toString(),
-                                style = MaterialTheme.typography.bodySmall,
+                                style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
@@ -728,4 +785,32 @@ private fun AccountPickerDialog(
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.ok)) }
         },
     )
+}
+
+@Composable
+private fun AccountIcon(account: SystemAccount, defaultIcon: ImageVector) {
+    val context = LocalContext.current
+    val bitmap = remember(account.icon) {
+        if (account.icon.isBlank()) {
+            null
+        } else {
+            runCatching {
+                context.packageManager.getApplicationIcon(account.icon).toBitmap(48, 48)
+            }.getOrNull()
+        }
+    }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = null,
+            modifier = Modifier.size(32.dp),
+        )
+    } else {
+        Icon(
+            defaultIcon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(28.dp),
+        )
+    }
 }

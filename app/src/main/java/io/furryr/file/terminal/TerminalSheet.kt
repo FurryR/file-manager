@@ -413,18 +413,6 @@ fun TerminalSheet(
                         }
                     }
 
-                    // A DevTools body owns the whole surface, so only its left
-                    // edge opens the tab drawer; panels use horizontal drags.
-                    if (!drawerGesture) {
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.CenterStart)
-                                .fillMaxHeight()
-                                .width(24.dp)
-                                .then(drawerDrag),
-                        )
-                    }
-
                     // Overlay to dismiss drawer when tapping right half
                     if (showDrawer) {
                         Box(

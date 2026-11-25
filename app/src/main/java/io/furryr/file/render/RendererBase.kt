@@ -5,7 +5,7 @@ import io.furryr.file.clipboard.ClipboardSink
 import io.furryr.file.core.DirectoryStats
 import io.furryr.file.core.VFolder
 import io.furryr.file.core.model.FileEntry
-import io.furryr.file.model.PageKind
+import io.furryr.file.model.PageIcon
 
 /**
  * Base for every session renderer. The optional state is the only durable
@@ -19,7 +19,7 @@ abstract class RendererBase<S : PageState>(
 
     /** Address and role this renderer contributes to its Page. */
     abstract val pagePath: String
-    abstract val pageKind: PageKind
+    abstract val pageIcon: PageIcon
 
     private val sessionDelegate = lazy { createSession(initialState) }
     protected val session: PageSession<S> get() = sessionDelegate.value

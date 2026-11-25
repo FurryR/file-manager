@@ -22,7 +22,7 @@ import java.util.UUID
  * and cannot kill the shared shell. Streaming transfers (upload, file read)
  * keep their own dedicated channels; this one is for short metadata commands.
  */
-internal class SshControl(private val location: RemoteLocation) {
+internal class SshControl(private val location: SshLocation) {
     private val lock = Any()
     private var lease: SshLease? = null
     private var channel: ChannelExec? = null
@@ -209,7 +209,7 @@ internal object SshControls {
     private val controls = HashMap<String, SshControl>()
 
     @Synchronized
-    fun get(location: RemoteLocation): SshControl =
+    fun get(location: SshLocation): SshControl =
         controls.getOrPut(location.id) { SshControl(location) }
 
     @Synchronized fun close(id: String) {

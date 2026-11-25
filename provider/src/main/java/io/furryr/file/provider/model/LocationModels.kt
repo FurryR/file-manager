@@ -14,8 +14,10 @@ data class FtpServer(
     val name: String,
     val port: Int,
     val username: String,
+    /** Resolved from [identityId] by the app-owned source; never persisted inline. */
     val password: String,
     val sortOrder: Int,
+    val identityId: String = "",
 )
 
 /** A persisted SFTP server entry. */
@@ -24,8 +26,10 @@ data class SftpServer(
     val name: String,
     val port: Int,
     val username: String,
+    /** Resolved from [identityId] by the app-owned source; never persisted inline. */
     val password: String,
     val sortOrder: Int,
+    val identityId: String = "",
 )
 
 /** A persisted absolute local filesystem path. */

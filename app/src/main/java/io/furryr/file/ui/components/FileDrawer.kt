@@ -71,9 +71,9 @@ import androidx.compose.ui.unit.dp
 import io.furryr.file.container.ContainerManager
 import io.furryr.file.store.LocationsRepository
 import io.furryr.file.provider.ProviderSchemes
-import io.furryr.file.provider.remote.RemoteKind
 import io.furryr.file.provider.remote.RemoteLocation
 import io.furryr.file.provider.remote.SshHostKeyApprovalRequired
+import io.furryr.file.provider.remote.SshLocation
 import kotlin.math.abs
 import io.furryr.file.provider.model.SafLocation
 import io.furryr.file.provider.model.LocalLocation
@@ -302,7 +302,7 @@ fun FileDrawer(
             // Connection failures are already rendered by the file list at the
             // target path; only the host-key prompt still needs a dialog.
             LocationsRepository.verifyRemote(location).onFailure { failure ->
-                if (failure is SshHostKeyApprovalRequired) {
+                if (location is SshLocation && failure is SshHostKeyApprovalRequired) {
                     remoteApproval = RemoteHostApproval(location, failure)
                 }
             }
@@ -766,11 +766,9 @@ fun FileDrawer(
                             Box(modifier = Modifier.fillMaxWidth()) {
                                 RemoteLocationItem(
                                     name = location.name,
-                                    detail = if (location.kind == RemoteKind.ALIST) {
-                                        "AList · ${location.endpoint}"
-                                    } else {
-                                        "SSH · ${location.username}@${location.host}:${location.port}"
-                                    },
+                                    detail = location.subtitle(),
+                                    icon = RemoteProtocols.of(location.scheme)?.icon ?: Icons.Default.Cloud,
+                                    iconUrl = location.iconUrl(),
                                     onClick = { openRemote(location) },
                                     onLongClick = { if (allowEdit) remoteContextMenuTarget = location.id },
                                     sortMode = sortMode,
@@ -1029,6 +1027,28 @@ fun FileDrawer(
                     )
                 }
                 if (3 !in collapsedGroups) {
+                    item(key = "_tool_apps") {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                context.startActivity(Intent(context, InstalledAppsActivity::class.java))
+                            }.padding(horizontal = 20.dp, vertical = 12.dp),
+                        ) {
+                            Icon(Icons.Default.Android, contentDescription = null)
+                            Spacer(Modifier.width(16.dp))
+                            Column {
+                                Text(
+                                    stringResource(R.string.installed_apps),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                                Text(
+                                    stringResource(R.string.drawer_tool_apps_desc),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
                     item(key = "_tool_wayland") {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,

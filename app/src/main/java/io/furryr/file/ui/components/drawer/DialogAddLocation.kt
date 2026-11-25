@@ -67,8 +67,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.furryr.file.container.ContainerManager
+import io.furryr.file.store.IdentityRepository
+import io.furryr.file.store.LocationStores
 import io.furryr.file.store.LocationsRepository
-import io.furryr.file.provider.remote.RemoteKind
 import io.furryr.file.provider.remote.RemoteLocation
 import io.furryr.file.provider.remote.SshHostKeyApprovalRequired
 import io.furryr.file.provider.remote.SshHostKeyChangedException
@@ -90,6 +91,8 @@ internal fun AddLocationDialog(
     onUseExternalStorage: () -> Unit,
     onConfirm: (LocationAddress) -> Unit,
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var path by remember { mutableStateOf("") }
     var address by remember { mutableStateOf(LocationAddress()) }
     var invalid by remember { mutableStateOf(false) }
@@ -159,21 +162,16 @@ internal fun AddLocationDialog(
                     )
                     OutlinedTextField(address.port?.toString().orEmpty(), { updateRemote(address.copy(port = it.toIntOrNull())) }, label = { Text(stringResource(R.string.ftp_port_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(address.username, { updateRemote(address.copy(username = it)) }, label = { Text(stringResource(R.string.ftp_username_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(address.password, { updateRemote(address.copy(password = it)) }, label = { Text(stringResource(R.string.ftp_password_label)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    IdentitySelector(
+                        selectedId = address.identityId,
+                        allowKey = RemoteProtocols.of(address.scheme)?.showsPrivateKey == true,
+                    ) {
+                        updateRemote(address.copy(identityId = it, password = "", privateKey = "", passphrase = ""))
+                    }
                     OutlinedTextField(address.path, { updateRemote(address.copy(path = it)) }, label = { Text(stringResource(R.string.remote_base_path)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     if (RemoteProtocols.of(address.scheme)?.showsToken == true) {
                         OutlinedTextField(address.token, { updateRemote(address.copy(token = it)) }, label = { Text(stringResource(R.string.remote_token)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                         OutlinedTextField(address.directoryPassword, { updateRemote(address.copy(directoryPassword = it)) }, label = { Text(stringResource(R.string.remote_directory_password)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    }
-                    if (RemoteProtocols.of(address.scheme)?.showsPrivateKey == true) {
-                        OutlinedTextField(
-                            address.privateKey,
-                            { updateRemote(address.copy(privateKey = it)) },
-                            label = { Text(stringResource(R.string.remote_private_key)) },
-                            maxLines = 5,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        OutlinedTextField(address.passphrase, { updateRemote(address.copy(passphrase = it)) }, label = { Text(stringResource(R.string.remote_passphrase)) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     }
                 }
                 if (invalid) Text(stringResource(R.string.location_invalid), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -195,7 +193,36 @@ internal fun AddLocationDialog(
                     val parsed = LocationAddressParser.parse(path)
                     val missingHost = parsed != null && (parsed.isRemote || parsed.isWeb) && parsed.host.isBlank()
                     val missingSshUser = parsed != null && RemoteProtocols.of(parsed.scheme)?.requiresUsername == true && parsed.username.isBlank()
-                    if (parsed == null || missingHost || missingSshUser) invalid = true else onConfirm(parsed)
+                    if (parsed == null || missingHost || missingSshUser) {
+                        invalid = true
+                    } else {
+                        val candidate = address.copy(
+                            scheme = parsed.scheme, host = parsed.host, port = parsed.port,
+                            username = parsed.username, password = "", path = parsed.path,
+                        )
+                        // A typed `user:password@host` URL is still one credential:
+                        // fold it into an identity instead of persisting it inline.
+                        if (candidate.isRemote && candidate.identityId.isBlank() &&
+                            parsed.password.isNotBlank()
+                        ) {
+                            scope.launch {
+                                try {
+                                    val identity = withContext(Dispatchers.IO) {
+                                        LocationStores.init(context)
+                                        IdentityRepository.ensure(
+                                            name = candidate.username.ifBlank { candidate.host },
+                                            password = parsed.password,
+                                        )
+                                    }
+                                    onConfirm(candidate.copy(identityId = identity.id))
+                                } catch (failure: Exception) {
+                                    invalid = true
+                                }
+                            }
+                        } else {
+                            onConfirm(candidate)
+                        }
+                    }
                 }) { Text(stringResource(R.string.confirm)) }
             }
         },

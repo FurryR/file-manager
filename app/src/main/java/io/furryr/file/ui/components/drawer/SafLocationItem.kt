@@ -68,7 +68,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.furryr.file.container.ContainerManager
 import io.furryr.file.store.LocationsRepository
-import io.furryr.file.provider.remote.RemoteKind
 import io.furryr.file.provider.remote.RemoteLocation
 import io.furryr.file.provider.remote.SshHostKeyApprovalRequired
 import io.furryr.file.provider.remote.SshHostKeyChangedException

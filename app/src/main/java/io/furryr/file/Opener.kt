@@ -11,6 +11,7 @@ import io.furryr.file.core.VNode
 import io.furryr.file.render.FolderPageState
 import io.furryr.file.render.FolderRenderer
 import io.furryr.file.render.GenericRenderer
+import io.furryr.file.render.ErrorRenderer
 import io.furryr.file.render.HomeRenderer
 import io.furryr.file.render.RendererBase
 import io.furryr.file.isHomePath
@@ -28,7 +29,7 @@ interface Factory {
     /** Icon and localized name the generic loader shows for this method. */
     val option: OpenOption
 
-    /** Build the page for [file]. A failure is shown by the generic loader. */
+    /** Build the page for [file]. A failure is shown as an error page. */
     suspend fun create(file: VFile): Result<Renderer>
 }
 
@@ -44,7 +45,7 @@ interface Factory {
  *
  * A folder is not a format: it always becomes the one directory renderer. A
  * file whose MIME has no entry goes to the fallback factory, and a factory that
- * fails becomes a [GenericRenderer] carrying the error.
+ * fails becomes an error page; only an unclaimed format opens [GenericRenderer].
  */
 class Opener(private val files: FileWorld) {
     private data class Entry(
@@ -132,10 +133,16 @@ class Opener(private val files: FileWorld) {
     private suspend fun routeFile(file: VFile, mimeHint: MimeType?): Renderer {
         // Resolve MIME once. The caller's facts win; otherwise the file answers
         // from metadata and its name. Neither path reads the body.
-        val mime = ContentTypes.normalizeMime(mimeHint)
-            ?.takeUnless(ContentTypes::isGenericMime)
-            ?: file.stat().getOrNull()?.mime
-            ?: "text/html".takeIf { file.liveAddress != null }
+        val mime = try {
+            ContentTypes.normalizeMime(mimeHint)
+                ?.takeUnless(ContentTypes::isGenericMime)
+                ?: file.stat().getOrThrow().mime
+                ?: "text/html".takeIf { file.liveAddress != null }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            return ErrorRenderer(file.path.toString(), error)
+        }
 
         // A structural view is not a renderer: the core proxy owns the file →
         // folder step, so an archive is registered once, not in this table.
@@ -145,7 +152,7 @@ class Opener(private val files: FileWorld) {
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
-                generic(file, error.message)
+                ErrorRenderer(file.path.toString(), error)
             }
         }
 
@@ -159,13 +166,13 @@ class Opener(private val files: FileWorld) {
                 onSuccess = { it },
                 onFailure = { error ->
                     if (error is CancellationException) throw error
-                    generic(file, error.message)
+                    ErrorRenderer(file.path.toString(), error)
                 },
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
-            generic(file, error.message)
+            ErrorRenderer(file.path.toString(), error)
         }
     }
 
@@ -174,6 +181,11 @@ class Opener(private val files: FileWorld) {
         options = options,
         error = error,
     )
+
+    /** The registered archive view, used without routing the file as a folder. */
+    suspend fun archive(file: VFile): Result<VFolder> =
+        files.proxies.forMime("application/zip")?.open(file)
+            ?: Result.failure(IllegalStateException("No archive view registered"))
 
     /** The open-with chooser for [file], even when a MIME factory claims it. */
     fun chooser(file: VFile): Renderer = generic(file, null)

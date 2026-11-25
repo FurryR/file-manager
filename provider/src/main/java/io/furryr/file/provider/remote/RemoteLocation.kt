@@ -1,114 +1,48 @@
 package io.furryr.file.provider.remote
 
-import io.furryr.file.core.source.FileSource
-import java.io.File
 import java.io.IOException
-import java.io.InputStream
-import java.net.URI
-import java.util.UUID
 
-enum class RemoteKind(val scheme: String) { ALIST("alist"), SSH("ssh") }
+/**
+ * A stored remote connection. Only identity and the address contract are
+ * shared; credentials and protocol facts belong to the concrete type.
+ */
+sealed interface RemoteLocation {
+    val id: String
+    val name: String
+    val basePath: String
+    val sortOrder: Int
 
-data class RemoteLocation(
-    val id: String = UUID.randomUUID().toString(),
-    val name: String = "",
-    val kind: RemoteKind = RemoteKind.ALIST,
-    val basePath: String = "/",
-    val endpoint: String = "",
-    val host: String = "",
-    val port: Int = 22,
-    val username: String = "",
-    val password: String = "",
-    val privateKey: String = "",
-    val passphrase: String = "",
-    val token: String = "",
-    val directoryPassword: String = "",
-    val hostKey: String = "",
-    val sortOrder: Int = 0,
-) {
-    /**
-     * Authority used in URIs and provider routing.
-     *
-     * SSH connections use `user@host` (plus `:port` when it is not 22) so paths
-     * stay readable in the UI and in agent tool calls. AList keeps the stored
-     * connection id because the server has no user-qualified address.
-     */
+    /** Protocol scheme; the provider that owns this connection registers it. */
+    val scheme: String
+
+    /** Authority used in URIs and provider routing. */
     val pathAuthority: String
-        get() = when (kind) {
-            RemoteKind.ALIST -> id
-            RemoteKind.SSH -> buildString {
-                append(username).append('@')
-                // IPv6 literals need brackets in a URI authority, otherwise the
-                // address colons read as a port separator.
-                if (':' in host) append('[').append(host).append(']') else append(host)
-                if (port != 22) append(':').append(port)
-            }
-        }
 
-    val uri: String get() = "${kind.scheme}://$pathAuthority${normalizeRemotePath(basePath)}"
+    /** Address of the connection with its configured base path. */
+    val uri: String
 
-    /**
-     * Entry point when the connection is opened. SSH starts at the server root:
-     * the configured base path is a default directory, not the connection root.
-     */
+    /** Address opened when the connection is selected. */
     val entryUri: String
-        get() = if (kind == RemoteKind.SSH) "${kind.scheme}://$pathAuthority/"
-        else uri
 
-    fun validate() {
-        require(id.matches(Regex("[a-zA-Z0-9-]+")) && name.isNotBlank()) { "A connection name is required" }
-        require(basePath.startsWith('/') && '\u0000' !in basePath) { "The starting directory must be an absolute path" }
-        if (kind == RemoteKind.ALIST) {
-            val url = URI(endpoint)
-            require(url.scheme in setOf("http", "https") && !url.host.isNullOrBlank() &&
-                url.rawUserInfo == null && url.rawQuery == null && url.rawFragment == null) { "Invalid AList server URL" }
-        } else {
-            require(host.isNotBlank() && host.none { it.isWhitespace() || it == '/' || it == '\u0000' } &&
-                port in 1..65535 && username.isNotBlank()) { "SSH host, port and username are required" }
-        }
-    }
-    override fun toString(): String = "RemoteLocation($id, ${kind.scheme})"
+    fun validate()
+
+    /** Drawer row subtitle. */
+    fun subtitle(): String
+
+    /** Drawer icon; null when the protocol has no site icon. */
+    fun iconUrl(): String? = null
+
+    /** Name shown for the connection row at its protocol root. */
+    fun rootEntryName(): String
+
+    fun withName(name: String): RemoteLocation
+    fun withSortOrder(sortOrder: Int): RemoteLocation
 }
 
-internal data class RemoteEntry(
-    val name: String, val isDirectory: Boolean, val size: Long = 0,
-    val modifiedAt: Long = 0, val isSymlink: Boolean = false, val mode: Int = 0,
-    val uid: Int = -1, val gid: Int = -1, val owner: String = "", val group: String = "",
-)
-
-/** Capacity of the filesystem volume that holds a remote path. */
-internal data class RemoteSpace(val totalBytes: Long, val usableBytes: Long)
-
-internal interface RemoteBackend {
-    fun list(path: String): List<RemoteEntry>
-    fun stat(path: String): RemoteEntry?
-    fun download(path: String, destination: File)
-    fun upload(path: String, source: File)
-    fun createFile(path: String)
-    fun createDirectory(path: String)
-    fun delete(path: String)
-    fun rename(path: String, newName: String)
-    fun prepareReplacement(original: String, replacement: String) = Unit
-    fun canWrite(path: String): Boolean = true
-
-    /** Remaining capacity of the filesystem backing [path]; null when the backend cannot report it. */
-    fun space(path: String): RemoteSpace? = null
-
-    /** True when reads/writes can stream through live channels instead of staged cache files. */
-    val streams: Boolean get() = false
-
-    /** Sequential reader for [path]; only valid when [streams] is true. */
-    fun openRead(path: String, size: Long): FileSource =
-        throw UnsupportedOperationException("Backend cannot stream reads")
-
-    /** Stream exactly [length] bytes from [source] into [path]; only valid when [streams] is true. */
-    fun uploadStream(path: String, source: InputStream, length: Long): Unit =
-        throw UnsupportedOperationException("Backend cannot stream writes")
-}
-
-internal fun backend(location: RemoteLocation): RemoteBackend = when (location.kind) {
-    RemoteKind.ALIST -> AlistBackend(location)
-    RemoteKind.SSH -> SshExecBackend(location)
+/** Protocol schemes the app treats as stored remote connections. */
+object RemoteSchemes {
+    const val ALIST = "alist"
+    const val SSH = "ssh"
 }
 
 internal fun normalizeRemotePath(path: String): String {

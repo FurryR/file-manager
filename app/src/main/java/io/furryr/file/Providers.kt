@@ -155,6 +155,7 @@ fun buildAppWorld(context: Context, id: String, manager: Boolean): AppWorld {
 
         val editor = EditorFactory(files, appContext.getString(R.string.open_with_editor))
         val web = WebFactory(files, appContext.getString(R.string.open_with_browser))
+        opener.register("application/vnd.android.package-archive", ApkOpener(appContext.getString(R.string.apk_info)))
         opener.register("text/html", web)
         opener.register("application/xhtml+xml", web)
         for (mime in ContentTypes.mimes) {

@@ -66,5 +66,5 @@ Submission notes and the `fdroiddata` metadata draft live in
 
 ## License
 
-GPL-3.0-or-later. Third-party licenses are listed in `licenses/native.json`,
+GPL-3.0-only. Third-party licenses are listed in `licenses/native.json`,
 `app/src/main/assets/licenses.json` and `app/src/main/assets/native-licenses/`.

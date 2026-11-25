@@ -6,7 +6,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import io.furryr.file.model.PageKind
+import io.furryr.file.model.PageIcon
+import io.furryr.file.ui.icons.Icons
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -38,7 +39,7 @@ internal class ErrorRenderer(
     private var failure by mutableStateOf(failure)
 
     override val pagePath: String = path
-    override val pageKind: PageKind = PageKind.PAGE
+    override val pageIcon: PageIcon get() = PageIcon.Vector(Icons.Default.Language)
 
     override fun createSession(state: ErrorPageState?): PageSession<ErrorPageState> =
         ErrorRendererSession(path, locationPage, state)

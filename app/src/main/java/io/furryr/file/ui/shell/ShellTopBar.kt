@@ -34,7 +34,6 @@ import io.furryr.file.R
 import io.furryr.file.core.DirectoryStats
 import io.furryr.file.model.FileTab
 import io.furryr.file.model.OperationProgress
-import io.furryr.file.model.PageKind
 import io.furryr.file.provider.web.WebTransfers
 import io.furryr.file.render.NodeAddress
 import io.furryr.file.render.RendererBase

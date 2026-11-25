@@ -57,9 +57,7 @@ private fun <T> ioOnResume(initial: T, load: () -> T): T {
 internal fun AgentSettingsItem() {
     val context = LocalContext.current
     val provider = ioOnResume<String?>(initial = null) {
-        AgentSettings.activeProvider(context)?.let {
-            if (providerUsesFixedUrl(it)) it.name else "${it.name} · ${it.baseUrl}"
-        } ?: context.getString(R.string.agent_settings_desc)
+        context.getString(R.string.agent_providers_count, AgentSettings.providers(context).size)
     }
     Column(
         modifier = Modifier

@@ -384,6 +384,19 @@ private fun SettingsMainPage(
                 onClick = { showDockerHubKeyDialog = true },
             )
             SettingsDivider()
+            SettingsSection(stringResource(R.string.settings_remote))
+            SettingsValueRow(
+                title = stringResource(R.string.ssh_keys),
+                value = stringResource(R.string.ssh_keys_desc),
+                onClick = { context.startActivity(Intent(context, SshKeysActivity::class.java)) },
+            )
+            SettingsDivider()
+            SettingsValueRow(
+                title = stringResource(R.string.ssh_trusted_hosts),
+                value = stringResource(R.string.ssh_trusted_hosts_desc),
+                onClick = { context.startActivity(Intent(context, SshTrustedHostsActivity::class.java)) },
+            )
+            SettingsDivider()
             SettingsSection(stringResource(R.string.settings_terminal))
             AgentSettingsItem()
             SettingsDivider()
@@ -482,7 +495,8 @@ private fun SettingsMainPage(
             }
             SettingsValueRow(
                 title = stringResource(R.string.settings_terminal_font),
-                value = terminalFont.ifBlank { stringResource(R.string.settings_terminal_font_desc) },
+                value = terminalFont.substringAfterLast('/').substringBeforeLast('.')
+                    .ifBlank { stringResource(R.string.settings_terminal_font_desc) },
                 onClick = {
                     fontPickerLauncher.launch(
                         pickerIntent(
@@ -509,7 +523,8 @@ private fun SettingsMainPage(
             SettingsSection(stringResource(R.string.settings_editor))
             SettingsValueRow(
                 title = stringResource(R.string.settings_editor_font),
-                value = editorFont.ifBlank { stringResource(R.string.settings_editor_font_desc) },
+                value = editorFont.substringAfterLast('/').substringBeforeLast('.')
+                    .ifBlank { stringResource(R.string.settings_editor_font_desc) },
                 onClick = {
                     editorFontPickerLauncher.launch(
                         pickerIntent(
@@ -878,4 +893,3 @@ private fun TerminalSchemeSwatches(scheme: TerminalScheme) {
         }
     }
 }
-

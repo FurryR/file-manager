@@ -12,6 +12,9 @@ import io.furryr.file.ui.icons.Icons
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import io.furryr.file.R
+import io.furryr.file.container.ContainerUris
+import io.furryr.file.model.PageIcon
+import io.furryr.file.provider.ProviderSchemes
 import io.furryr.file.clipboard.ClipboardAction
 import io.furryr.file.clipboard.ClipboardState
 import io.furryr.file.clipboard.ClipboardSink
@@ -27,7 +30,6 @@ import io.furryr.file.home.HomeEntry
 import io.furryr.file.home.HomeEntryKind
 import io.furryr.file.home.HomeStore
 import io.furryr.file.isHomePath
-import io.furryr.file.model.PageKind
 import io.furryr.file.model.summary
 import io.furryr.file.provider.terminal.ExecProvider
 import io.furryr.file.terminal.TermuxTerminalTab
@@ -86,6 +88,18 @@ private fun String.pathLabel(): String? {
     val parsed = runCatching { Path.parse(this) }.getOrNull()
     return parsed?.name?.takeIf { it.isNotBlank() }
         ?: substringAfterLast('/').ifBlank { this }
+}
+
+/** Local volume labels change only presentation, never a node's address. */
+internal fun localFolderTitle(context: Context, path: Path): String? {
+    if (path.isViewed || (path.scheme != null && path.scheme != "file")) return null
+    val segments = path.segmentList
+    return when {
+        segments.isEmpty() -> context.getString(R.string.nav_root)
+        segments.size == 3 && segments[0] == "storage" && segments[1] == "emulated" &&
+            segments[2].isNotEmpty() && segments[2].all(Char::isDigit) -> context.getString(R.string.picker_root)
+        else -> null
+    }
 }
 
 /**
@@ -197,7 +211,12 @@ class FolderRenderer(
 ) : RendererBase<FolderPageState>(initialState), SelectCapabilities {
     val state: FolderPageState get() = folderSession.state
     override val pagePath: String get() = state.path.toString()
-    override val pageKind: PageKind = PageKind.LOCATION
+    override val pageIcon: PageIcon
+        get() = PageIcon.Vector(when (val scheme = state.path.scheme) {
+            ContainerUris.SCHEME -> Icons.Default.DesktopWindows
+            null -> Icons.Default.Folder
+            else -> if (scheme in ProviderSchemes.remote) Icons.Default.Cloud else Icons.Default.Folder
+        })
 
     override val entries: List<FileEntry> get() = listing.entries
     override val selectedEntries: List<FileEntry> get() = listing.selectedEntries
@@ -290,6 +309,10 @@ class FolderRenderer(
         // Reset both before the new body commits, so no stale overlay or
         // entrance animation survives the transition.
         closeFilter()
+        host.context?.let { context ->
+            localFolderTitle(context, state.path)?.let { state.title = it }
+        }
+        host.submitTitle(title)
         listing.finishAnimation()
         listing.lockSelection(ClipboardStore.state.inTransfer)
         host.commit { h, dark, modifier ->
@@ -307,7 +330,7 @@ class FolderRenderer(
     override fun bookmarkEntry(): HomeEntry? {
         val path = listing.loadedPath ?: state.path.toString()
         if (path.isBlank() || isHomePath(path)) return null
-        val label = state.title?.takeIf { it.isNotBlank() }
+        val label = title?.takeIf { it.isNotBlank() }
             ?: state.path.name
             ?: path
         return HomeEntry(HomeEntryKind.FOLDER, path, label, path)
@@ -316,8 +339,8 @@ class FolderRenderer(
     override val title: String?
         get() {
             val shown = folderSession.host?.folderView()
-            return state.folder?.name?.takeIf { it.isNotBlank() }
-                ?: state.title?.takeIf { it.isNotBlank() }
+            return state.title?.takeIf { it.isNotBlank() }
+                ?: state.folder?.name?.takeIf { it.isNotBlank() }
                 ?: shown?.path?.pathLabel()
                 ?: state.path.toString().pathLabel()
         }
@@ -623,7 +646,7 @@ internal class FolderSessionView(
                 val bookmarkEntry = HomeEntry(
                     kind = if (entry.isDirectory) HomeEntryKind.FOLDER else HomeEntryKind.FILE,
                     location = entry.path,
-                    title = entry.name,
+                    title = if (entry.isDirectory) localFolderTitle(context, Path.parse(entry.path)) ?: entry.name else entry.name,
                     detail = entry.path,
                 )
                 val bookmarked = Bookmarks.isBookmarked(bookmarkEntry)

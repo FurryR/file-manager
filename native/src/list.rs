@@ -289,7 +289,12 @@ fn read_accounts(primary: &str, fallback: &str) -> Vec<Account> {
             if name.is_empty() {
                 return None;
             }
-            Some(Account { id, name: name.to_string() })
+            Some(Account {
+                id,
+                name: name.to_string(),
+                description: String::new(),
+                icon: String::new(),
+            })
         })
         .collect()
 }

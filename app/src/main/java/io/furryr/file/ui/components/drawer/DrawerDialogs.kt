@@ -270,8 +270,8 @@ internal fun DrawerDialogs(
             initialPort = 21,
             title = stringResource(R.string.ftp_add_title),
             onDismiss = { showAddFtpDialog = false },
-            onConfirm = { host, name, port, username, password ->
-                onAddFtp(host, name, port, username, password)
+            onConfirm = { host, name, port, username, identityId ->
+                onAddFtp(host, name, port, username, identityId)
                 showAddFtpDialog = false
             },
         )
@@ -286,11 +286,11 @@ internal fun DrawerDialogs(
                 initialHost = server.host,
                 initialPort = server.port,
                 initialUsername = server.username,
-                initialPassword = server.password,
+                initialIdentityId = server.identityId,
                 title = stringResource(R.string.ftp_edit_title),
                 onDismiss = { ftpEditTarget = null },
-                onConfirm = { host, name, port, username, password ->
-                    onFtpSave(oldHost, host, name, port, username, password)
+                onConfirm = { host, name, port, username, identityId ->
+                    onFtpSave(oldHost, host, name, port, username, identityId)
                     ftpEditTarget = null
                 },
             )
@@ -327,8 +327,8 @@ internal fun DrawerDialogs(
             initialPort = 22,
             title = stringResource(R.string.sftp_add_title),
             onDismiss = { showAddSftpDialog = false },
-            onConfirm = { host, name, port, username, password ->
-                onAddSftp(host, name, port, username, password)
+            onConfirm = { host, name, port, username, identityId ->
+                onAddSftp(host, name, port, username, identityId)
                 showAddSftpDialog = false
             },
         )
@@ -343,11 +343,11 @@ internal fun DrawerDialogs(
                 initialHost = server.host,
                 initialPort = server.port,
                 initialUsername = server.username,
-                initialPassword = server.password,
+                initialIdentityId = server.identityId,
                 title = stringResource(R.string.sftp_edit_title),
                 onDismiss = { sftpEditTarget = null },
-                onConfirm = { host, name, port, username, password ->
-                    onSftpSave(oldHost, host, name, port, username, password)
+                onConfirm = { host, name, port, username, identityId ->
+                    onSftpSave(oldHost, host, name, port, username, identityId)
                     sftpEditTarget = null
                 },
             )
@@ -494,13 +494,18 @@ internal fun DrawerDialogs(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        val trusted = pending.location.copy(hostKey = pending.key.keyBase64)
                         remoteApproval = null
                         scope.launch {
                             val saved = withContext(Dispatchers.IO) {
-                                runCatching { LocationsRepository.updateRemote(trusted) }
+                                runCatching {
+                                    io.furryr.file.store.RemoteLocationStore.trustHost(
+                                        io.furryr.file.store.RemoteLocationStore.TrustedHost(
+                                            pending.location.host, pending.location.port, pending.key.keyBase64,
+                                        ),
+                                    )
+                                }
                             }
-                            saved.onSuccess { openRemote(trusted) }.onFailure {
+                            saved.onSuccess { openRemote(pending.location) }.onFailure {
                                 Toast.makeText(
                                     context,
                                     context.errorText(it, R.string.remote_store_error),
@@ -542,11 +547,11 @@ internal fun DrawerDialogs(
                 val handled = RemoteProtocols.add(
                     address,
                     object : RemoteProtocolTarget {
-                        override fun ftp(host: String, name: String, port: Int, username: String, password: String) =
-                            onAddFtp(host, name, port, username, password)
+                        override fun ftp(host: String, name: String, port: Int, username: String, identityId: String) =
+                            onAddFtp(host, name, port, username, identityId)
 
-                        override fun sftp(host: String, name: String, port: Int, username: String, password: String) =
-                            onAddSftp(host, name, port, username, password)
+                        override fun sftp(host: String, name: String, port: Int, username: String, identityId: String) =
+                            onAddSftp(host, name, port, username, identityId)
 
                         override fun remote(location: RemoteLocation) = onAddRemote(location)
 

@@ -15,8 +15,8 @@ import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.DefaultPath
 import io.furryr.file.ui.util.formatSize
 
-
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -50,7 +50,6 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,7 +68,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.furryr.file.container.ContainerManager
 import io.furryr.file.store.LocationsRepository
-import io.furryr.file.provider.remote.RemoteKind
 import io.furryr.file.provider.remote.RemoteLocation
 import io.furryr.file.provider.remote.SshHostKeyApprovalRequired
 import io.furryr.file.provider.remote.SshHostKeyChangedException
@@ -80,9 +78,7 @@ import io.furryr.file.provider.model.FtpServer
 import io.furryr.file.provider.model.SftpServer
 import io.furryr.file.model.LocationAddress
 import io.furryr.file.model.LocationAddressParser
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -97,7 +93,10 @@ internal fun RemoteLocationItem(
     dragOffsetDp: Float = 0f,
     dragHandleModifier: Modifier = Modifier,
     icon: ImageVector = Icons.Default.Cloud,
+    /** Site icon supplied by the connection protocol; null falls back to [icon]. */
+    iconUrl: String? = null,
 ) {
+    val favicon = rememberFavicon(iconUrl)
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -109,11 +108,19 @@ internal fun RemoteLocationItem(
             )
             .padding(horizontal = 20.dp, vertical = 8.dp),
     ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            modifier = Modifier.width(24.dp)
-        )
+        if (favicon != null) {
+            Image(
+                bitmap = favicon,
+                contentDescription = null,
+                modifier = Modifier.size(24.dp),
+            )
+        } else {
+            Icon(
+                icon,
+                contentDescription = null,
+                modifier = Modifier.width(24.dp)
+            )
+        }
         Spacer(Modifier.width(16.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -147,3 +154,4 @@ internal fun RemoteLocationItem(
         }
     }
 }
+

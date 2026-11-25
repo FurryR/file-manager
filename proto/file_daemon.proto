@@ -229,6 +229,9 @@ message AccountsRequest {}
 message Account {
   uint32 id = 1;
   string name = 2;
+  string description = 3;
+  // Platform icon key; Android package names are resolved to app icons.
+  string icon = 4;
 }
 
 message Accounts {

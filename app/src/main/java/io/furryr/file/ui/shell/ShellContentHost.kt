@@ -18,7 +18,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import io.furryr.file.R
 import io.furryr.file.model.FileTab
-import io.furryr.file.model.PageKind
 import io.furryr.file.render.RendererBase
 import io.furryr.file.render.RendererContent
 import io.furryr.file.shell.ShellModal

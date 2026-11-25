@@ -1,7 +1,9 @@
 package io.furryr.file.daemon.file
 
 import io.furryr.file.daemon.ipc.*
+import io.furryr.file.core.SystemAccounts
 import io.furryr.file.core.model.CopyProgress
+import io.furryr.file.daemon.DaemonManager
 import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
 import io.furryr.file.daemon.source.FdFileSource
@@ -22,7 +24,10 @@ import kotlinx.coroutines.flow.flowOn
  * Paths are daemon-native (container-absolute for container targets); URI
  * prefixing is the caller provider's job.
  */
-class FileService internal constructor(private val resolve: () -> DaemonConnection) {
+class FileService internal constructor(
+    private val resolve: () -> DaemonConnection,
+    private val appAccounts: Boolean = false,
+) {
 
     suspend fun list(path: String): Result<List<FileEntry>> = resolve().listFiles(path)
 
@@ -58,7 +63,9 @@ class FileService internal constructor(private val resolve: () -> DaemonConnecti
         applyDirs: Boolean,
     ): Result<Unit> = resolve().setTimes(path, modifiedAt, applyFiles, applyDirs)
 
-    suspend fun accounts(): Result<io.furryr.file.core.SystemAccounts> = resolve().accounts()
+    suspend fun accounts(): Result<SystemAccounts> = resolve().accounts().map { accounts ->
+        if (appAccounts) DaemonManager.mergeInstalledAccounts(accounts) else accounts
+    }
 
     suspend fun open(path: String, mode: OpenMode): Result<FileSource> = runCatching {
         openDaemonSource(path, mode) { resolve() }

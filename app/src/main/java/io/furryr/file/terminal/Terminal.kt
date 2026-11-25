@@ -82,6 +82,13 @@ internal object Terminal {
     }
 
     fun open(tab: TerminalTab) {
+        // A tab whose body is per-page (DevTools) is opened again to focus it,
+        // not to start a second connection to the same target.
+        val existing = tabs.firstOrNull { it.id == tab.id }
+        if (existing != null) {
+            switchTo(existing)
+            return
+        }
         tabs += tab
         switchTo(tab)
     }

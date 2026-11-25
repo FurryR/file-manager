@@ -5,7 +5,8 @@ import io.furryr.file.Renderer
 import io.furryr.file.core.OpenIcon
 import io.furryr.file.core.OpenOption
 import io.furryr.file.core.VFile
-import io.furryr.file.model.PageKind
+import io.furryr.file.model.PageIcon
+import io.furryr.file.ui.icons.Icons
 import io.furryr.file.render.PageSession
 import io.furryr.file.render.PageState
 import io.furryr.file.render.RendererBase
@@ -45,7 +46,7 @@ internal class PickerSelectFactory(
 /** A placeholder renderer: the factory already recorded the selection. */
 private class PickerSelectRenderer : RendererBase<PageState>(null) {
     override val pagePath: String = "picker://"
-    override val pageKind: PageKind = PageKind.PAGE
+    override val pageIcon: PageIcon get() = PageIcon.Vector(Icons.Default.Language)
 
     override fun createSession(state: PageState?): PageSession<PageState> =
         object : PageSession<PageState>(null) {

@@ -13,9 +13,11 @@ import io.furryr.file.provider.model.LocalLocation
 import io.furryr.file.provider.model.SafLocation
 import io.furryr.file.provider.model.SftpServer
 import io.furryr.file.provider.model.WebLocation
-import io.furryr.file.provider.remote.RemoteKind
 import io.furryr.file.provider.remote.RemoteLocation
 import io.furryr.file.provider.remote.RemoteProviders
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * App-facing facade over every persisted location (local paths, SAF trees,
@@ -129,12 +131,12 @@ object LocationsRepository {
 
     fun ftpServers(): List<FtpServer> = LocationStores.ftpServers()
 
-    fun insertFtp(host: String, name: String, port: Int, username: String, password: String) =
-        LocationStores.ftp.insert(host, name, port, username, password)
+    fun insertFtp(host: String, name: String, port: Int, username: String, identityId: String) =
+        LocationStores.ftp.insert(host, name, port, username, identityId)
 
     fun updateFtp(
-        host: String, newHost: String, name: String, port: Int, username: String, password: String,
-    ) = LocationStores.ftp.update(host, newHost, name, port, username, password)
+        host: String, newHost: String, name: String, port: Int, username: String, identityId: String,
+    ) = LocationStores.ftp.update(host, newHost, name, port, username, identityId)
 
     fun deleteFtp(host: String) = LocationStores.ftp.delete(host)
 
@@ -144,12 +146,12 @@ object LocationsRepository {
 
     fun sftpServers(): List<SftpServer> = LocationStores.sftpServers()
 
-    fun insertSftp(host: String, name: String, port: Int, username: String, password: String) =
-        LocationStores.sftp.insert(host, name, port, username, password)
+    fun insertSftp(host: String, name: String, port: Int, username: String, identityId: String) =
+        LocationStores.sftp.insert(host, name, port, username, identityId)
 
     fun updateSftp(
-        host: String, newHost: String, name: String, port: Int, username: String, password: String,
-    ) = LocationStores.sftp.update(host, newHost, name, port, username, password)
+        host: String, newHost: String, name: String, port: Int, username: String, identityId: String,
+    ) = LocationStores.sftp.update(host, newHost, name, port, username, identityId)
 
     fun deleteSftp(host: String) = LocationStores.sftp.delete(host)
 
@@ -162,7 +164,7 @@ object LocationsRepository {
     fun insertRemote(location: RemoteLocation) = RemoteLocationStore.put(location)
 
     fun updateRemote(location: RemoteLocation) {
-        if (location.kind == RemoteKind.SSH) RemoteProviders.forget(location.id)
+        RemoteProviders.forget(location.id)
         RemoteLocationStore.put(location)
     }
 
@@ -173,7 +175,15 @@ object LocationsRepository {
 
     fun reorderRemote(ids: List<String>) = RemoteLocationStore.reorder(ids)
 
-    suspend fun verifyRemote(location: RemoteLocation): Result<Unit> = RemoteProviders.verify(location)
+    suspend fun verifyRemote(location: RemoteLocation): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            RemoteProviders.verify(RemoteLocationStore.remoteLocations().first { it.id == location.id })
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            Result.failure(failure)
+        }
+    }
 
     // ── Built-in kinds ──────────────────────────────────────────────
 
@@ -278,18 +288,14 @@ object LocationsRepository {
 
         override fun records(context: Context): List<LocationRecord> {
             return RemoteLocationStore.all().mapNotNull { location ->
-                val provider = vfs.provider(location.kind.scheme)
+                val provider = vfs.provider(location.scheme)
                     ?: return@mapNotNull null
                 LocationRecord(
                     id = location.id,
                     title = location.name,
-                    subtitle = if (location.kind == io.furryr.file.provider.remote.RemoteKind.SSH) {
-                        "ssh://${location.pathAuthority}"
-                    } else {
-                        "${location.kind.scheme}://${location.endpoint}"
-                    },
+                    subtitle = location.subtitle(),
                     root = location.entryUri,
-                    kind = location.kind.scheme,
+                    kind = location.scheme,
                     provider = provider,
                 )
             }
@@ -297,7 +303,7 @@ object LocationsRepository {
 
         override fun rename(id: String, name: String): Result<Unit> = runCatching {
             val location = RemoteLocationStore.find(id)
-            updateRemote(location.copy(name = name))
+            updateRemote(location.withName(name))
         }
 
         override fun delete(id: String): Result<Unit> = runCatching { deleteRemote(id) }

@@ -189,7 +189,6 @@ fun FileManagerApp(
     /** The Home page's title/path bar before its renderer is first built. */
     fun homePage(): Page = Page(
         path = HomePath,
-        kind = PageKind.LOCATION,
         location = true,
         title = context.getString(R.string.home_title),
         pathInfo = RendererPath(
@@ -349,7 +348,11 @@ fun FileManagerApp(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { }
 
-    fun currentTab(): FileTab = tabs[selectedTabIndex]
+    // Resolve the active tab from the live id, never from the index captured
+    // by an earlier composition: an effect that adds/selects a tab and then
+    // opens an address in it must not land in the previous tab (or index).
+    fun currentTab(): FileTab =
+        tabs.firstOrNull { it.id == activeTabId.value } ?: tabs.first()
 
     // Navigations in flight are per tab. A slow remote probe must stay with the
     // tab that started it: switching tabs neither drops the pending location
@@ -852,7 +855,7 @@ fun FileManagerApp(
         if (folder.addressable) {
             recordHome(HomeEntryKind.FOLDER, folder.path.toString(), folder.name, folder.path.toString())
         }
-        val page = Page(path = folder.path.toString(), kind = PageKind.LOCATION, location = true)
+        val page = Page(path = folder.path.toString(), location = true)
         if (tabId == currentTab().id) {
             highlightPath = null
             highlightDirectory = null
@@ -885,9 +888,9 @@ fun FileManagerApp(
     fun rendererPage(renderer: RendererBase<*>): Page {
         val page = Page(
             path = renderer.pagePath,
-            kind = renderer.pageKind,
             location = renderer.isLocationRenderer,
             title = renderer.title,
+            icon = renderer.pageIcon,
         )
         page.renderer = renderer
         return page
@@ -905,7 +908,6 @@ fun FileManagerApp(
     fun openInNewTab(from: FileTab, renderer: RendererBase<*>) {
         val base = if (isHomePath(from.path)) homePage() else Page(
             path = from.path,
-            kind = PageKind.LOCATION,
             location = true,
             // Until the base location's renderer reports, the strip keeps the
             // title the calling tab last gave that location.
@@ -1024,6 +1026,11 @@ fun FileManagerApp(
                 pageOf(pageId)?.title = title
             }
 
+            override fun updatePageIcon(icon: PageIcon) {
+                val pageId = boundPageId ?: return
+                pageOf(pageId)?.icon = icon
+            }
+
             override fun open(
                 renderer: RendererBase<*>,
                 mode: OpenMode,
@@ -1040,6 +1047,16 @@ fun FileManagerApp(
                     return
                 }
                 val page = rendererPage(renderer)
+                // A renderer that has not committed yet is provisional: replace
+                // it in place. Replacing the committed location instead would
+                // make the directory disappear under the popup that opened this
+                // renderer.
+                val pendingTab = boundPending()
+                if (pendingTab != null) {
+                    pendingTab.currentPage.close()
+                    pendingNavigations[tab.id] = pendingTab.replacedCurrent(page)
+                    return
+                }
                 clearModals(tab.id)
                 cancelPending(tab.id)
                 // A location can only be replaced by another location. An
@@ -1092,7 +1109,6 @@ fun FileManagerApp(
                     if (current.path == address) return
                     val moved = current.renderer ?: return
                     current.path = address
-                    current.kind = PageKind.PAGE
                     current.title = null
                     pendingNavigations[id] = pending
                     return
@@ -1108,7 +1124,6 @@ fun FileManagerApp(
                 // stop is replaced in place, not pushed.
                 if (replacePrevious != null && current.path == replacePrevious) {
                     current.path = address
-                    current.kind = PageKind.PAGE
                     current.title = null
                     return
                 }
@@ -1125,12 +1140,13 @@ fun FileManagerApp(
                     current.renderer = null
                     target.close()
                     target.renderer = moved
+                    target.icon = moved.pageIcon
                     replaceTab(
                         titled.movedTo(known),
                     )
                     return
                 }
-                val next = Page(path = address, kind = PageKind.PAGE)
+                val next = Page(path = address, icon = moved.pageIcon)
                 current.renderer = null
                 next.renderer = moved
                 replaceTab(titled.appended(next))
@@ -1431,6 +1447,20 @@ fun FileManagerApp(
     }
 
     /**
+     * Drawer rows are addresses like any other open, but a remote provider can
+     * take seconds to resolve. Run them under the shell's opening indicator so
+     * the current page is covered instead of looking frozen.
+     */
+    fun openAddressTracked(
+        address: String,
+        tabId: String = currentTab().id,
+        recordHome: Boolean = true,
+    ) {
+        if (guardRenderer(tabId) { openAddressTracked(address, tabId, recordHome) }) return
+        trackNodeOpen(tabId) { openAddressNow(address, tabId, recordHome) }
+    }
+
+    /**
      * Open what another app handed over: a tapped file, a picked document or a
      * link. The first address lands in the current tab unless the request asks
      * for a tab of its own (an in-app shortcut such as "edit this user
@@ -1449,6 +1479,9 @@ fun FileManagerApp(
                 tabs.add(newHomeTab())
                 selectTab(tabs.lastIndex)
             }
+            // The tab that will receive this address, captured after the add:
+            // the open runs in a coroutine and must not follow a later switch.
+            val tabId = currentTab().id
             val document = withContext(Dispatchers.IO) { IncomingOpen.document(context, address) }
             if (document != null) {
                 openVFileFn(
@@ -1458,7 +1491,7 @@ fun FileManagerApp(
                     false, true, index == 0 && request.addresses.size == 1,
                 )
             } else {
-                openAddress(address, recordHome = false)
+                openAddress(address, tabId = tabId, recordHome = false)
             }
         }
     }
@@ -1609,7 +1642,6 @@ fun FileManagerApp(
                         // A stop recorded as a file/page can turn out to be a
                         // folder after the fact; the directory renderer takes it.
                         if (tab.currentPage.id == stop.id) {
-                            stop.kind = PageKind.LOCATION
                             stop.location = true
                             stop.title = null
                             if (tab.path != stop.path) tab.copy(path = stop.path) else tab
@@ -1646,6 +1678,7 @@ fun FileManagerApp(
             current.renderer = null
             target.close()
             target.renderer = session
+            target.icon = session.pageIcon
             replaceTab(tab.movedTo(index))
             return
         }
@@ -2110,11 +2143,11 @@ fun FileManagerApp(
                     }
                 },
                 onNavigate = { address ->
-                    openAddress(address)
+                    openAddressTracked(address)
                     scope.launch { drawerState.close() }
                 },
                 onOpenAddress = { url ->
-                    openAddress(url)
+                    openAddressTracked(url)
                     scope.launch { drawerState.close() }
                 },
                 onAddSaf = {

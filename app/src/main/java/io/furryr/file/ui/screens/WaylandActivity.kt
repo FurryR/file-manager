@@ -5,11 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.padding
-import io.furryr.file.ui.icons.Icons
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -20,14 +16,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import io.furryr.file.ui.theme.FileManagerTheme
-import io.furryr.file.R
 import io.furryr.file.wayland.WaylandManager
 import io.furryr.file.wayland.WaylandView
 import kotlinx.coroutines.Dispatchers
@@ -73,7 +66,6 @@ class WaylandActivity : ComponentActivity() {
     private fun ViewerContent() {
         var prepared by remember { mutableStateOf(false) }
         var error by remember { mutableStateOf<String?>(null) }
-        var view by remember { mutableStateOf<WaylandView?>(null) }
         LaunchedEffect(Unit) {
             runCatching {
                 withContext(Dispatchers.IO) { WaylandManager.ensureHost(this@WaylandActivity) }
@@ -97,16 +89,9 @@ class WaylandActivity : ComponentActivity() {
         }
         Box(modifier = Modifier.fillMaxSize()) {
             AndroidView(
-                factory = { context -> WaylandView(context).also { view = it } },
-                onRelease = { view = null },
+                factory = { context -> WaylandView(context) },
                 modifier = Modifier.fillMaxSize(),
             )
-            FloatingActionButton(
-                onClick = { view?.toggleKeyboard() },
-                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-            ) {
-                Icon(Icons.Default.Keyboard, contentDescription = stringResource(R.string.wayland_toggle_keyboard))
-            }
         }
     }
 }

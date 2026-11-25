@@ -15,6 +15,7 @@ data class LocationAddress(
     val directoryPassword: String = "",
     val privateKey: String = "",
     val passphrase: String = "",
+    val identityId: String = "",
     /** Full URL for a web location; [path] stays the filesystem form. */
     val url: String = "",
 ) {

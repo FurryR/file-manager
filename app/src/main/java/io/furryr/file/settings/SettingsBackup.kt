@@ -4,8 +4,11 @@ import android.content.Context
 import io.furryr.file.provider.model.FtpServer
 import io.furryr.file.provider.model.SafLocation
 import io.furryr.file.provider.model.SftpServer
-import io.furryr.file.provider.remote.RemoteKind
+import io.furryr.file.provider.remote.AlistLocation
 import io.furryr.file.provider.remote.RemoteLocation
+import io.furryr.file.provider.remote.RemoteSchemes
+import io.furryr.file.provider.remote.SshLocation
+import io.furryr.file.store.IdentityRepository
 import io.furryr.file.store.LocationStores
 import io.furryr.file.store.RemoteLocationStore
 import org.json.JSONArray
@@ -118,8 +121,41 @@ object SettingsBackup {
         .put("remote", JSONArray().apply {
             for (item in RemoteLocationStore.all()) put(remoteJson(item))
         })
+        .put("identities", JSONArray().apply {
+            for (identity in IdentityRepository.identities()) put(JSONObject()
+                .put("id", identity.id).put("name", identity.name)
+                .put("password", identity.password)
+                .put("private_key", identity.privateKey).put("passphrase", identity.passphrase))
+        })
+        .put("ssh_hosts", JSONArray().apply {
+            for (host in RemoteLocationStore.trustedHosts()) put(JSONObject()
+                .put("host", host.host).put("port", host.port).put("key", host.key))
+        })
 
     private fun importLocations(locations: JSONObject) {
+        // An older backup calls identities "ssh_keys"; accept both names.
+        val identities = locations.optJSONArray("identities") ?: locations.optJSONArray("ssh_keys")
+        identities?.let { rows ->
+            for (i in 0 until rows.length()) {
+                val row = rows.getJSONObject(i)
+                RemoteLocationStore.putIdentity(RemoteLocationStore.Identity(
+                    id = row.getString("id"), name = row.getString("name"),
+                    password = row.optString("password"),
+                    privateKey = row.optString("private_key"), passphrase = row.optString("passphrase"),
+                ))
+            }
+        }
+        locations.optJSONArray("ssh_hosts")?.let { rows ->
+            for (i in 0 until rows.length()) {
+                val row = rows.getJSONObject(i)
+                val host = RemoteLocationStore.TrustedHost(row.getString("host"), row.getInt("port"), row.getString("key"))
+                val saved = RemoteLocationStore.trustedHosts().firstOrNull {
+                    it.host.equals(host.host, true) && it.port == host.port
+                }
+                require(saved == null || saved.key == host.key) { "Conflicting SSH host keys for ${host.host}:${host.port}" }
+                RemoteLocationStore.trustHost(host)
+            }
+        }
         locations.optJSONArray("saf")?.let { rows ->
             val restored = mutableListOf<SafLocation>()
             for (index in 0 until rows.length()) {
@@ -152,6 +188,7 @@ object SettingsBackup {
                         username = row.optString("username"),
                         password = row.optString("password"),
                         sortOrder = row.optInt("sort_order", index),
+                        identityId = row.optString("identity_id"),
                     ),
                 )
             }
@@ -171,11 +208,15 @@ object SettingsBackup {
                         username = row.optString("username"),
                         password = row.optString("password"),
                         sortOrder = row.optInt("sort_order", index),
+                        identityId = row.optString("identity_id"),
                     ),
                 )
             }
             if (restored.isNotEmpty()) LocationStores.sftp.restore(restored)
         }
+        // An old backup's FTP/SFTP rows carry an inline password; fold it into
+        // an identity like the on-device migration does.
+        LocationStores.migrateServerIdentities()
         locations.optJSONArray("remote")?.let { rows ->
             val ids = mutableListOf<String>()
             for (index in 0 until rows.length()) {
@@ -193,6 +234,7 @@ object SettingsBackup {
         .put("port", item.port)
         .put("username", item.username)
         .put("password", item.password)
+        .put("identity_id", item.identityId)
         .put("sort_order", item.sortOrder)
 
     private fun serverJson(item: SftpServer): JSONObject = JSONObject()
@@ -201,42 +243,57 @@ object SettingsBackup {
         .put("port", item.port)
         .put("username", item.username)
         .put("password", item.password)
+        .put("identity_id", item.identityId)
         .put("sort_order", item.sortOrder)
 
-    private fun remoteJson(item: RemoteLocation): JSONObject = JSONObject()
-        .put("id", item.id)
-        .put("name", item.name)
-        .put("kind", item.kind.name)
-        .put("base_path", item.basePath)
-        .put("endpoint", item.endpoint)
-        .put("host", item.host)
-        .put("port", item.port)
-        .put("username", item.username)
-        .put("password", item.password)
-        .put("private_key", item.privateKey)
-        .put("passphrase", item.passphrase)
-        .put("token", item.token)
-        .put("directory_password", item.directoryPassword)
-        .put("host_key", item.hostKey)
-        .put("sort_order", item.sortOrder)
+    private fun remoteJson(item: RemoteLocation): JSONObject = JSONObject().apply {
+        put("id", item.id)
+        put("name", item.name)
+        put("scheme", item.scheme)
+        put("base_path", item.basePath)
+        put("sort_order", item.sortOrder)
+        when (item) {
+            is AlistLocation -> {
+                put("endpoint", item.endpoint)
+                put("username", item.username)
+                put("token", item.token)
+                put("directory_password", item.directoryPassword)
+                put("identity_id", item.identityId)
+            }
+            is SshLocation -> {
+                put("host", item.host)
+                put("port", item.port)
+                put("username", item.username)
+                put("identity_id", item.identityId)
+            }
+        }
+    }
 
-    private fun remote(row: JSONObject, index: Int): RemoteLocation = RemoteLocation(
-        id = row.getString("id"),
-        name = row.getString("name"),
-        kind = RemoteKind.valueOf(row.getString("kind")),
-        basePath = row.optString("base_path", "/"),
-        endpoint = row.optString("endpoint"),
-        host = row.optString("host"),
-        port = row.optInt("port", 22),
-        username = row.optString("username"),
-        password = row.optString("password"),
-        privateKey = row.optString("private_key"),
-        passphrase = row.optString("passphrase"),
-        token = row.optString("token"),
-        directoryPassword = row.optString("directory_password"),
-        hostKey = row.optString("host_key"),
-        sortOrder = row.optInt("sort_order", index),
-    )
+    private fun remote(row: JSONObject, index: Int): RemoteLocation {
+        val id = row.getString("id")
+        val name = row.getString("name")
+        val basePath = row.optString("base_path", "/")
+        val sortOrder = row.optInt("sort_order", index)
+        return when (row.getString("scheme")) {
+            RemoteSchemes.ALIST -> AlistLocation(
+                id = id, name = name, basePath = basePath, sortOrder = sortOrder,
+                endpoint = row.optString("endpoint"), username = row.optString("username"),
+                password = row.optString("password"), token = row.optString("token"),
+                directoryPassword = row.optString("directory_password"),
+                identityId = row.optString("identity_id"),
+            )
+            RemoteSchemes.SSH -> SshLocation(
+                id = id, name = name, basePath = basePath, sortOrder = sortOrder,
+                host = row.optString("host"), port = row.optInt("port", 22),
+                username = row.optString("username"), password = row.optString("password"),
+                privateKey = row.optString("private_key"), passphrase = row.optString("passphrase"),
+                hostKey = row.optString("host_key"),
+                identityId = row.optString("identity_id")
+                    .ifBlank { row.optString("private_key_id") },
+            )
+            else -> error("Unknown remote scheme")
+        }
+    }
 
     private fun encode(value: Any?): JSONObject = when (value) {
         is Boolean -> JSONObject().put("type", "boolean").put("value", value)

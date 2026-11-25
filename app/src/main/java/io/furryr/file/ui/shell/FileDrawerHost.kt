@@ -217,10 +217,10 @@ internal fun FileDrawerHost(
         },
         ftpLocations = locations.ftpLocations,
         ftpRefreshKey = locations.ftpRefreshKey,
-        onAddFtp = { host, name, port, username, password ->
+        onAddFtp = { host, name, port, username, identityId ->
             scope.launch {
                 val result = withContext(Dispatchers.IO) {
-                    runCatching { LocationsRepository.insertFtp(host, name, port, username, password) }
+                    runCatching { LocationsRepository.insertFtp(host, name, port, username, identityId) }
                 }
                 Toast.makeText(
                     context,
@@ -231,10 +231,10 @@ internal fun FileDrawerHost(
                 locations.refreshFtp()
             }
         },
-        onFtpSave = { oldHost, newHost, name, port, username, password ->
+        onFtpSave = { oldHost, newHost, name, port, username, identityId ->
             scope.launch {
                 val result = withContext(Dispatchers.IO) {
-                    runCatching { LocationsRepository.updateFtp(oldHost, newHost, name, port, username, password) }
+                    runCatching { LocationsRepository.updateFtp(oldHost, newHost, name, port, username, identityId) }
                 }
                 Toast.makeText(
                     context,
@@ -268,10 +268,10 @@ internal fun FileDrawerHost(
         },
         sftpLocations = locations.sftpLocations,
         sftpRefreshKey = locations.sftpRefreshKey,
-        onAddSftp = { host, name, port, username, password ->
+        onAddSftp = { host, name, port, username, identityId ->
             scope.launch {
                 val result = withContext(Dispatchers.IO) {
-                    runCatching { LocationsRepository.insertSftp(host, name, port, username, password) }
+                    runCatching { LocationsRepository.insertSftp(host, name, port, username, identityId) }
                 }
                 Toast.makeText(
                     context,
@@ -282,10 +282,10 @@ internal fun FileDrawerHost(
                 locations.refreshSftp()
             }
         },
-        onSftpSave = { oldHost, newHost, name, port, username, password ->
+        onSftpSave = { oldHost, newHost, name, port, username, identityId ->
             scope.launch {
                 val result = withContext(Dispatchers.IO) {
-                    runCatching { LocationsRepository.updateSftp(oldHost, newHost, name, port, username, password) }
+                    runCatching { LocationsRepository.updateSftp(oldHost, newHost, name, port, username, identityId) }
                 }
                 Toast.makeText(
                     context,

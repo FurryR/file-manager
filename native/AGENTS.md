@@ -221,6 +221,7 @@ GPL-2.0-or-later, and the generated `libproot.so` statically links talloc
 
 ## TODO - Bug checks
 
+- [ ] `src/list.rs` + `build.rs` + `proto/file_daemon.proto`: verify the new `Account.description`/`Account.icon` fields compile and stay empty from native passwd parsing; the host's installed-app rows are merged in `:daemon`, not the native daemon, and a proto edit reruns the Rust build script.
 - [ ] `src/list.rs` + `proto/file_daemon.proto`: verify `FileEntry` owner/group/uid/gid fields, recursive `chmod`/`chown`/`utimensat` with each apply flag, symlinks skipped, and `/etc/passwd` + `/system/etc/passwd` fallback for accounts.
 
 - [ ] `src/sepolicy.rs` + `sepolicy/shim.c`: verify a chroot container started from a second root solution (or with a second rootfs label) gets its transition/entry point even though `file_container` already exists, that `/bin/login` (including a busybox symlink) runs instead of returning `Permission denied`, that a container shell can `fork`/`signal` and that `run0`/the terminal can receive a pty fd from the daemon, that a Wayland client's `wl_shm` pool reaches the app (no `wl_shm#4.create_pool` failure), that a relaunch with nothing new logs `container domain present` and does not load the policy, and that a changed root label/base logs `container domain injected` once.

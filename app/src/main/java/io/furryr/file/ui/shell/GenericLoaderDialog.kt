@@ -47,6 +47,7 @@ private fun iconOf(icon: OpenIcon): ImageVector = when (icon) {
     OpenIcon.ARCHIVE -> Icons.Default.Archive
     OpenIcon.PAGE -> Icons.Default.Language
     OpenIcon.EDITOR -> Icons.Default.Edit
+    OpenIcon.APK -> Icons.Default.Android
     OpenIcon.SYSTEM -> Icons.AutoMirrored.Filled.OpenInNew
     OpenIcon.GENERIC -> Icons.AutoMirrored.Filled.InsertDriveFile
 }

@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.util.Log
+import android.view.MotionEvent
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
@@ -52,6 +54,7 @@ import io.furryr.file.devtools.DevToolsServer
 import io.furryr.file.devtools.DevToolsTargets
 import java.util.UUID
 import kotlin.coroutines.resume
+import kotlin.math.abs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -87,11 +90,16 @@ internal interface WebDevToolsHost {
  */
 internal class WebDevToolsTab(
     private val host: WebDevToolsHost,
-    private val label: String,
+    private val label: () -> String,
 ) : TerminalTab {
     override val id: String = UUID.randomUUID().toString()
-    override val title: String get() =
-        if (host.devToolsAlive) label else "$label (closed)"
+    override val title: String get() {
+        val base = label()
+        return if (host.devToolsAlive) base else "$base (closed)"
+    }
+
+    /** True once the tab ended; the page must build a fresh one. */
+    internal val isDisposed: Boolean get() = disposed
 
     private var server: DevToolsServer? = null
     private var inspectorUrl by mutableStateOf<String?>(null)
@@ -107,6 +115,11 @@ internal class WebDevToolsTab(
     /** Invalidates an attach that was in flight when the host went away. */
     private var attachEpoch = 0
     private var disposed = false
+    /**
+     * Opens the shell's terminal drawer. Stored from the last [enter] context
+     * because the gesture lives in the WebView's own touch stream.
+     */
+    private var openDrawer: (() -> Unit)? = null
     /**
      * Own coroutine so the tab unloads itself when its page is gone, even if
      * the terminal sheet is hidden or another tab is active.
@@ -130,6 +143,7 @@ internal class WebDevToolsTab(
         // No body for a dead page; Terminal discards the tab because enter
         // returned without committing.
         if (!host.devToolsAlive) return
+        openDrawer = ctx::requestOpenDrawer
         ctx.commit { enabled, modifier -> DevToolsBody(enabled, modifier) }
     }
 
@@ -145,6 +159,7 @@ internal class WebDevToolsTab(
 
     override fun dispose() {
         disposed = true
+        openDrawer = null
         lifecycle.cancel()
         closeResources()
     }
@@ -267,7 +282,7 @@ internal class WebDevToolsTab(
             AndroidView(
                 modifier = modifier.fillMaxSize().clipToBounds(),
                 factory = { context ->
-                    FrameLayout(context).apply {
+                    DrawerEdgeLayout(context) { openDrawer?.invoke() }.apply {
                         clipChildren = true
                         setBackgroundColor(surface)
                     }
@@ -474,5 +489,48 @@ internal class WebDevToolsTab(
             }
         }
     }
+}
 
+/**
+ * Holder for the DevTools WebView.
+ *
+ * A WebView frontend consumes touch events, and Compose cannot observe them.
+ * The holder sees the whole subtree in [dispatchTouchEvent] before the
+ * Chromium view does; a long right drag opens the terminal tab drawer, the
+ * same gesture a Termux tab uses.
+ */
+private class DrawerEdgeLayout(
+    context: Context,
+    private val onOpenDrawer: () -> Unit,
+) : FrameLayout(context) {
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+    private val drawerThreshold = 48 * resources.displayMetrics.density
+    private var tracking = false
+    private var triggered = false
+    private var startX = 0f
+    private var startY = 0f
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                tracking = true
+                triggered = false
+                startX = event.x
+                startY = event.y
+            }
+            MotionEvent.ACTION_MOVE -> if (tracking && !triggered) {
+                val dx = event.x - startX
+                val dy = event.y - startY
+                if (dx > drawerThreshold && dx > abs(dy) * 1.5f) {
+                    triggered = true
+                    tracking = false
+                    onOpenDrawer()
+                } else if (dx < -touchSlop || abs(dy) > touchSlop * 2) {
+                    tracking = false
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> tracking = false
+        }
+        return super.dispatchTouchEvent(event)
+    }
 }

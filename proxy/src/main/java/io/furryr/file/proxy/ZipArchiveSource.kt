@@ -97,7 +97,15 @@ class ZipArchiveSource private constructor(
         if (header.size < 30 || u32(header, 0) != LOCAL_SIG) {
             error("invalid local header for $full")
         }
-        val dataOffset = info.localHeaderOffset + 30 + u16(header, 26) + u16(header, 28)
+        val nameExtra = u16(header, 26) + u16(header, 28)
+        // Consume the variable part in the same sequential position so the
+        // entry's first read continues instead of jumping (and reopening a
+        // remote channel) to dataOffset.
+        if (nameExtra > 0) {
+            val rest = readAt(info.localHeaderOffset + 30, nameExtra)
+            if (rest.size < nameExtra) error("truncated local header for $full")
+        }
+        val dataOffset = info.localHeaderOffset + 30 + nameExtra
         return ZipEntrySource(
             archive = this,
             dataOffset = dataOffset,

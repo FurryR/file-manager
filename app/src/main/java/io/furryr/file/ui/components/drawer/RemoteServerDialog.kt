@@ -68,7 +68,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.furryr.file.container.ContainerManager
 import io.furryr.file.store.LocationsRepository
-import io.furryr.file.provider.remote.RemoteKind
 import io.furryr.file.provider.remote.RemoteLocation
 import io.furryr.file.provider.remote.SshHostKeyApprovalRequired
 import io.furryr.file.provider.remote.SshHostKeyChangedException
@@ -90,16 +89,16 @@ internal fun RemoteServerDialog(
     initialHost: String = "",
     initialPort: Int = 21,
     initialUsername: String = "",
-    initialPassword: String = "",
+    initialIdentityId: String = "",
     title: String,
     onDismiss: () -> Unit,
-    onConfirm: (host: String, name: String, port: Int, username: String, password: String) -> Unit,
+    onConfirm: (host: String, name: String, port: Int, username: String, identityId: String) -> Unit,
 ) {
     var name by remember { mutableStateOf(initialName) }
     var host by remember { mutableStateOf(initialHost) }
     var port by remember { mutableStateOf(initialPort.toString()) }
     var username by remember { mutableStateOf(initialUsername) }
-    var password by remember { mutableStateOf(initialPassword) }
+    var identityId by remember { mutableStateOf(initialIdentityId) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -137,13 +136,7 @@ internal fun RemoteServerDialog(
                     label = { Text(stringResource(R.string.ftp_username_label)) },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = { password = it },
-                    singleLine = true,
-                    label = { Text(stringResource(R.string.ftp_password_label)) },
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                IdentitySelector(identityId, allowKey = false) { identityId = it }
             }
         },
         confirmButton = {
@@ -154,7 +147,7 @@ internal fun RemoteServerDialog(
                         name.ifBlank { host.trim() },
                         port.toIntOrNull() ?: 21,
                         username,
-                        password,
+                        identityId,
                     )
                 },
                 enabled = host.isNotBlank(),

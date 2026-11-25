@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.system.Os
 import android.util.Log
+import io.furryr.file.core.SystemAccount
+import io.furryr.file.core.SystemAccounts
 import io.furryr.file.daemon.file.FileService
 import io.furryr.file.daemon.ipc.DaemonConnection
 import io.furryr.file.daemon.process.CommandSpec
@@ -488,14 +490,45 @@ object DaemonManager {
     // ── Service facades ───────────────────────────────────────────────
 
     fun fileService(target: DaemonTarget = DaemonTarget.Host): FileService =
-        FileService { connection(target) }
+        FileService({ connection(target) }, appAccounts = target == DaemonTarget.Host)
 
     /**
      * File service for app-private storage. A root or Shizuku host daemon may
      * not be able to read `filesDir`; this connection always runs as the app
      * UID and is intentionally absent from [targetCatalog] and the hub.
      */
-    fun appFileService(): FileService = FileService { appConnection() }
+    fun appFileService(): FileService = FileService({ appConnection() }, appAccounts = true)
+
+    /**
+     * Android's passwd files do not list application accounts, so the daemon
+     * answers with root/system only. Installed packages are the source of the
+     * app uids, and their labels/package names let the picker show the app.
+     */
+    internal fun mergeInstalledAccounts(accounts: SystemAccounts): SystemAccounts {
+        if (!::appContext.isInitialized) return accounts
+        val manager = appContext.packageManager
+        val users = mutableListOf<SystemAccount>()
+        val groups = mutableListOf<SystemAccount>()
+        val seen = mutableSetOf<Int>()
+        for (info in manager.getInstalledPackages(0)) {
+            val app = info.applicationInfo ?: continue
+            val uid = app.uid
+            if (!seen.add(uid)) continue
+            val label = runCatching {
+                manager.getApplicationLabel(app).toString()
+            }.getOrDefault("")
+            users += SystemAccount(uid, info.packageName, label, info.packageName)
+            groups += SystemAccount(uid, info.packageName, label, info.packageName)
+        }
+        fun merge(base: List<SystemAccount>, extra: List<SystemAccount>): List<SystemAccount> {
+            val ids = base.mapTo(mutableSetOf()) { it.id }
+            return base + extra.filter { ids.add(it.id) }
+        }
+        return SystemAccounts(
+            users = merge(accounts.users, users),
+            groups = merge(accounts.groups, groups),
+        )
+    }
 
     /** Exec facade for app-private storage; same internal app-UID daemon. */
     fun appExecService(): ExecService = ExecService(resolve = { appConnection() })

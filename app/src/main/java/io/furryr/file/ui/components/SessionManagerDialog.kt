@@ -1,5 +1,6 @@
 package io.furryr.file.ui.components
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -31,7 +32,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -41,22 +41,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import io.furryr.file.R
-import io.furryr.file.container.ContainerUris
 import io.furryr.file.model.FileTab
-import io.furryr.file.model.LocationAddressParser
-import io.furryr.file.model.PageKind
+import io.furryr.file.model.PageIcon
 
 /** Assumed two-line row pitch, used to give the list a bounded height. */
 private val RowHeight = 54.dp
 private val MaxListHeight = 340.dp
-
-/** Leading icon for a tab, mirroring what kind of location it shows. */
-private fun sessionIcon(tab: FileTab): ImageVector = when {
-    tab.currentPage.kind == PageKind.PAGE -> Icons.Default.Language
-    ContainerUris.isContainer(tab.path) -> Icons.Default.DesktopWindows
-    LocationAddressParser.parse(tab.path)?.isRemote == true -> Icons.Default.Cloud
-    else -> Icons.Default.Folder
-}
 
 /** Secondary line: where the tab actually points. */
 private fun sessionDetail(tab: FileTab): String = tab.currentPage.path
@@ -178,13 +168,20 @@ fun SessionManagerDialog(
                             }
                             .padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
                     ) {
-                        Icon(
-                            imageVector = sessionIcon(tab),
-                            contentDescription = null,
-                            tint = if (selected) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(end = 12.dp).size(20.dp),
-                        )
+                        when (val icon = tab.currentPage.icon) {
+                            is PageIcon.Vector -> Icon(
+                                imageVector = icon.image,
+                                contentDescription = null,
+                                tint = if (selected) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(end = 12.dp).size(20.dp),
+                            )
+                            is PageIcon.Bitmap -> Image(
+                                bitmap = icon.image,
+                                contentDescription = null,
+                                modifier = Modifier.padding(end = 12.dp).size(20.dp),
+                            )
+                        }
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = tab.title,

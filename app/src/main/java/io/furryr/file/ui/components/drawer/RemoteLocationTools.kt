@@ -68,9 +68,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.furryr.file.container.ContainerManager
 import io.furryr.file.store.LocationsRepository
-import io.furryr.file.provider.remote.RemoteKind
-import io.furryr.file.provider.remote.RemoteLocation
 import io.furryr.file.provider.remote.SshHostKeyApprovalRequired
+import io.furryr.file.provider.remote.SshLocation
 import io.furryr.file.provider.remote.SshHostKeyChangedException
 import kotlin.math.abs
 import io.furryr.file.provider.model.SafLocation
@@ -84,42 +83,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 
-internal fun remoteLocationFrom(address: LocationAddress, kind: RemoteKind): RemoteLocation {
-    val host = address.host.trim().trimEnd('/')
-    val name = address.name.ifBlank { host }
-    return if (kind == RemoteKind.ALIST) {
-        val endpoint = if (host.startsWith("http://") || host.startsWith("https://")) {
-            host
-        } else {
-            val port = address.port?.takeIf { it > 0 && it != 443 }
-            "https://$host" + if (port == null) "" else ":$port"
-        }
-        RemoteLocation(
-            name = name,
-            kind = kind,
-            basePath = address.path,
-            endpoint = endpoint,
-            username = address.username,
-            password = address.password,
-            token = address.token,
-            directoryPassword = address.directoryPassword,
-        )
-    } else {
-        RemoteLocation(
-            name = name,
-            kind = kind,
-            basePath = address.path,
-            host = host,
-            port = address.port ?: 22,
-            username = address.username,
-            password = address.password,
-            privateKey = address.privateKey,
-            passphrase = address.passphrase,
-        )
-    }
-}
-
 internal data class RemoteHostApproval(
-    val location: RemoteLocation,
+    val location: SshLocation,
     val key: SshHostKeyApprovalRequired,
 )

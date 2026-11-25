@@ -9,6 +9,7 @@ enum class OpenIcon {
     ARCHIVE,
     PAGE,
     EDITOR,
+    APK,
     SYSTEM,
     GENERIC,
 }

@@ -1,7 +1,18 @@
 package io.furryr.file.core
 
-/** One account a backend can resolve an owner or group id to. */
-data class SystemAccount(val id: Int, val name: String)
+/**
+ * One account a backend can resolve an owner or group id to.
+ *
+ * [description] is optional detail shown below the name. [icon] is a platform
+ * icon key; for Android package names the UI loads that application icon.
+ * An empty icon selects the UI's default Material icon.
+ */
+data class SystemAccount(
+    val id: Int,
+    val name: String,
+    val description: String = "",
+    val icon: String = "",
+)
 
 /** Users and groups a backend published for its own filesystem namespace. */
 data class SystemAccounts(

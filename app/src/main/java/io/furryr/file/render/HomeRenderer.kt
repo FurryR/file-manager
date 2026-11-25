@@ -52,11 +52,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.furryr.file.R
+import io.furryr.file.model.PageIcon
 import io.furryr.file.home.Bookmarks
 import io.furryr.file.home.HomeEntry
 import io.furryr.file.home.HomeEntryKind
 import io.furryr.file.home.HomeStore
-import io.furryr.file.model.PageKind
 import io.furryr.file.ui.components.OpeningOverlay
 import io.furryr.file.ui.icons.Icons
 import kotlinx.coroutines.launch
@@ -67,7 +67,7 @@ class HomeRenderer(
 ) : RendererBase<HomePageState>(initialState) {
     val state: HomePageState get() = homeSession.state
     override val pagePath: String = "home://"
-    override val pageKind: PageKind = PageKind.LOCATION
+    override val pageIcon: PageIcon get() = PageIcon.Vector(Icons.Default.Folder)
 
     private val homeSession: HomeRendererSession get() = session as HomeRendererSession
 
@@ -211,7 +211,8 @@ internal class HomeSessionView(
         if (clearBookmarksPrompt) {
             AlertDialog(
                 onDismissRequest = { clearBookmarksPrompt = false },
-                title = { Text(stringResource(R.string.home_clear_bookmarks_confirm)) },
+                title = { Text(stringResource(R.string.warning)) },
+                text = { Text(stringResource(R.string.home_clear_bookmarks_confirm)) },
                 confirmButton = {
                     TextButton(
                         onClick = {
@@ -234,7 +235,8 @@ internal class HomeSessionView(
         if (clearRecentPrompt) {
             AlertDialog(
                 onDismissRequest = { clearRecentPrompt = false },
-                title = { Text(stringResource(R.string.home_clear_recent_confirm)) },
+                title = { Text(stringResource(R.string.warning)) },
+                text = { Text(stringResource(R.string.home_clear_recent_confirm)) },
                 confirmButton = {
                     TextButton(
                         onClick = {
@@ -397,7 +399,9 @@ private fun HomeRow(
         Spacer(Modifier.width(14.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = entry.title,
+                text = if (entry.kind == HomeEntryKind.FOLDER) {
+                    localFolderTitle(androidx.compose.ui.platform.LocalContext.current, io.furryr.file.core.Path.parse(entry.location)) ?: entry.title
+                } else entry.title,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyLarge,

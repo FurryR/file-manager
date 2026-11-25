@@ -3,24 +3,21 @@ import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import io.furryr.file.R
 import io.furryr.file.isHomePath
+import io.furryr.file.ui.icons.Icons
 import io.furryr.file.ui.util.BrowseAddress
 import io.furryr.file.ui.util.formatSize
 import io.furryr.file.core.DirectoryStats
 import io.furryr.file.core.Path
 import io.furryr.file.core.VFolder
 
-/** What a page points at. */
-enum class PageKind {
-    /** A directory or Home: the tab's own location. */
-    LOCATION,
-
-    /** A document drawn over its folder (the editor). */
-    FILE,
-
-    /** A page drawn over its folder (a live URL or a stored HTML file). */
-    PAGE,
+/** The exact leading image a renderer supplies for one page. */
+sealed interface PageIcon {
+    data class Vector(val image: ImageVector) : PageIcon
+    data class Bitmap(val image: ImageBitmap) : PageIcon
 }
 
 /**
@@ -34,12 +31,12 @@ class Page(
     val id: String = java.util.UUID.randomUUID().toString(),
     /** Vfs address or page URL this page shows. */
     path: String,
-    /** Icon kind only; never a navigation decision. */
-    kind: PageKind = PageKind.LOCATION,
     /** Structural stop: the tab's location, not an overlay page. */
     location: Boolean = false,
     title: String? = null,
     pathInfo: io.furryr.file.render.RendererPath? = null,
+    /** Exact icon supplied when the page is minted; the UI never infers it. */
+    icon: PageIcon = PageIcon.Vector(Icons.Default.Folder),
 ) {
     /**
      * Address fields are mutable so a page keeps its identity when the page it
@@ -48,9 +45,10 @@ class Page(
      */
     var path: String by mutableStateOf(path)
 
-    var kind: PageKind by mutableStateOf(kind)
-
     var location: Boolean by mutableStateOf(location)
+
+    /** Kept after the renderer moves on, so a history row keeps its icon. */
+    var icon: PageIcon by mutableStateOf(icon)
 
     /** Last title a renderer reported; kept after the session is gone. */
     var title: String? by mutableStateOf(title)

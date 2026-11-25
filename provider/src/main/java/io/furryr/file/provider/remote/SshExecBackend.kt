@@ -2,6 +2,7 @@ package io.furryr.file.provider.remote
 
 import com.jcraft.jsch.ChannelExec
 import io.furryr.file.core.SystemAccount
+import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.SystemAccounts
 import io.furryr.file.core.source.FileSource
 import java.io.ByteArrayOutputStream
@@ -18,10 +19,10 @@ class SshHostKeyChangedException(val fingerprint: String) :
     IOException("SSH host key changed. Connection blocked; verify the server with its administrator. New fingerprint: $fingerprint")
 
 /** File operations and AI exec use pooled sessions; terminals own theirs. */
-internal class SshExecBackend(private val location: RemoteLocation) : RemoteBackend {
-    override val streams: Boolean get() = true
+internal class SshExecBackend(private val location: SshLocation) {
+    val streams: Boolean get() = true
 
-    override fun list(path: String): List<RemoteEntry> {
+    fun list(path: String): List<FileEntry> {
         // The listing and its directory probe share one control-channel command:
         // a folder tap is one round trip, and stat/canWrite/space then read the
         // probe from the cache.
@@ -32,10 +33,10 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
     // single round trip. Directory browsing asks for the same path through
     // stat/canWrite/space, so caching the probe keeps a folder tap to one exec
     // instead of a full parent listing plus two extra commands.
-    override fun stat(path: String): RemoteEntry? = probe(path).entry
-    override fun canWrite(path: String): Boolean = probe(path).canWrite
-    override fun space(path: String): RemoteSpace? = probe(path).space
-    override fun download(path: String, destination: File) {
+    fun stat(path: String): FileEntry? = probe(path).entry
+    fun canWrite(path: String): Boolean = probe(path).canWrite
+    fun space(path: String): Pair<Long, Long>? = probe(path).space
+    fun download(path: String, destination: File) {
         openRead(path, stat(path)?.size ?: 0).use { source ->
             destination.outputStream().use { output ->
                 var offset = 0L
@@ -49,28 +50,127 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         }
     }
     /**
-     * Live reader straight from `tail` on the server. Nothing is staged
-     * locally, so callers see bytes (and progress) while they transfer.
-     * Repositioning reopens the pipe at the requested offset.
+     * Positional read source straight from the server. Small and random reads
+     * (zip index, APK headers) use one pooled-worker chunk request each; a
+     * sequential run gets a 1 MiB read-ahead so sixteen 64 KiB reads share one
+     * round trip, and a long run upgrades to a live `tail` pipe.
      */
-    override fun openRead(path: String, size: Long): FileSource {
+    fun openRead(path: String, size: Long): FileSource = SshWorkerSource(location, path, size)
+
+    /**
+     * Bulk hand-off: once a consumer has read sequentially past [UPGRADE_BYTES],
+     * a live `tail` pipe beats per-chunk commands. It holds its own lease so a
+     * slow consumer cannot stall the shared read workers.
+     */
+    private fun openStream(path: String, size: Long, start: Long): SshSeekableStream {
         val marker = "FMRAW-${UUID.randomUUID()}\n"
-        // A live read may stall for as long as its consumer does, so it holds a
-        // leased session for its whole lifetime; the pool dials another one
-        // when every session is busy.
         val lease = SshConnections.open(location)
         return try {
-            SshSeekableStream(lease, path, size, marker)
+            SshSeekableStream(lease, path, size, marker, start)
         } catch (failure: Throwable) {
             lease.close()
             throw failure
         }
     }
-    override fun upload(path: String, source: File) {
+
+    /**
+     * Positional read source over a pooled [SshWorker]. Small and random reads
+     * (zip index, APK headers) use one chunk request each; a sequential run gets
+     * a 1 MiB read-ahead so sixteen 64 KiB reads share one round trip, and a
+     * long run upgrades to the streaming pipe.
+     */
+    private inner class SshWorkerSource(
+        private val location: SshLocation,
+        private val path: String,
+        override val size: Long,
+    ) : FileSource() {
+        override val readable: Boolean get() = true
+        override val writable: Boolean get() = false
+        override val seekable: Boolean get() = true
+        override val absolutePath: String? = null
+
+        private var worker: SshWorker? = SshWorkers.acquire(location)
+        private var stream: SshSeekableStream? = null
+        private var buffer = ByteArray(0)
+        private var bufferStart = 0L
+        private var position = 0L
+        private var sequential = 0L
+        private var closed = false
+
+        @Synchronized
+        override fun readAt(offset: Long, len: Int): ByteArray {
+            check(!closed) { "SSH file stream is closed" }
+            require(offset >= 0 && len >= 0)
+            if (len == 0 || offset >= size) return ByteArray(0)
+            stream?.let { return it.readAt(offset, len) }
+            if (sequential >= UPGRADE_BYTES && offset == position) {
+                val live = openStream(path, size, offset)
+                stream = live
+                releaseWorker()
+                buffer = ByteArray(0)
+                return live.readAt(offset, len)
+            }
+            val previous = position
+            val fromLong = offset - bufferStart
+            val covered = buffer.isNotEmpty() && fromLong >= 0 &&
+                fromLong + len <= buffer.size
+            var from = if (covered) fromLong.toInt() else 0
+            if (!covered) {
+                val contiguous = offset == previous && sequential > 0
+                val wanted = minOf(if (contiguous) CHUNK.toLong() else len.toLong(), size - offset)
+                    .coerceAtLeast(1)
+                val current = worker ?: SshWorkers.acquire(location).also { worker = it }
+                buffer = current.read(path, offset, wanted.toInt())
+                bufferStart = offset
+                from = 0
+            }
+            val count = minOf(len, buffer.size - from).coerceAtLeast(0)
+            val result = buffer.copyOfRange(from, from + count)
+            position = offset + count
+            sequential = if (offset == previous) sequential + count else count.toLong()
+            return result
+        }
+
+        @Synchronized
+        override fun seek(position: Long) {
+            check(!closed) { "SSH file stream is closed" }
+            require(position >= 0)
+            stream?.let { it.seek(position); return }
+            this.position = position
+            sequential = 0
+            if (position < bufferStart || position > bufferStart + buffer.size) {
+                buffer = ByteArray(0)
+                bufferStart = position
+            }
+        }
+
+        override fun writeAt(offset: Long, data: ByteArray) =
+            throw UnsupportedOperationException("SSH file stream is read-only")
+
+        override fun truncate(newSize: Long) =
+            throw UnsupportedOperationException("SSH file stream is read-only")
+
+        @Synchronized
+        override fun close() {
+            if (closed) return
+            closed = true
+            runCatching { stream?.close() }
+            stream = null
+            releaseWorker()
+            buffer = ByteArray(0)
+        }
+
+        private fun releaseWorker() {
+            val current = worker ?: return
+            worker = null
+            runCatching { SshWorkers.release(location, current) }
+        }
+    }
+    fun upload(path: String, source: File) {
         mutablePath(path)
         source.inputStream().use { uploadStream(path, it, source.length()) }
     }
-    override fun uploadStream(path: String, source: InputStream, length: Long) {
+    fun uploadStream(path: String, source: InputStream, length: Long) {
         mutablePath(path)
         // The sender may stall on a slow source or a paused copy, so it must
         // not share a session with directory browsing.
@@ -102,20 +202,20 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
             trap - 0 HUP INT TERM
         """.trimIndent()
     }
-    override fun createFile(path: String) {
+    fun createFile(path: String) {
         mutablePath(path)
         control("[ ! -e ${quote(path)} ] && [ ! -L ${quote(path)} ] || exit 46\n(set -C; : > ${quote(path)})")
         invalidate(location.id)
     }
-    override fun createDirectory(path: String) {
+    fun createDirectory(path: String) {
         control("mkdir -- ${quote(mutablePath(path))}")
         invalidate(location.id)
     }
-    override fun delete(path: String) {
+    fun delete(path: String) {
         control("rm -rf -- ${quote(mutablePath(path))}")
         invalidate(location.id)
     }
-    override fun rename(path: String, newName: String) {
+    fun rename(path: String, newName: String) {
         val destination = parentPath(mutablePath(path)).trimEnd('/') + "/" + validName(newName)
         control("[ ! -e ${quote(destination)} ] && [ ! -L ${quote(destination)} ] || exit 46\nmv -- ${quote(path)} ${quote(destination)}")
         invalidate(location.id)
@@ -232,7 +332,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         return SystemAccounts(users = users, groups = groups)
     }
 
-    override fun prepareReplacement(original: String, replacement: String) {
+    fun prepareReplacement(original: String, replacement: String) {
         control(metadataScript(mutablePath(original), mutablePath(replacement)))
         invalidate(location.id)
     }
@@ -278,7 +378,11 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
     private fun listScript(path: String): String = """
         p=${quote(path)}
         [ -d "${'$'}p" ] || exit 45
-        find "${'$'}p" -mindepth 1 -maxdepth 1 -exec sh -c ${quote(METADATA)} sh {} +
+        if find "${'$'}p" -mindepth 1 -maxdepth 1 -printf '' >/dev/null 2>&1; then
+            find "${'$'}p" -mindepth 1 -maxdepth 1 -printf '%f\0%Y\0%s\0%T@\0%y\0%m\0%U\0%G\0%u\0%g\0'
+        else
+            find "${'$'}p" -mindepth 1 -maxdepth 1 -exec sh -c ${quote(METADATA)} sh {} +
+        fi
         w=n
         if [ -w "${'$'}p" ] && [ -x "${'$'}p" ]; then w=y; fi
         d=${'$'}(LC_ALL=C df -Pk "${'$'}p" 2>/dev/null | tail -n 1)
@@ -387,6 +491,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         private val path: String,
         override val size: Long,
         private val markerText: String,
+        start: Long = 0L,
     ) : FileSource() {
         override val readable: Boolean get() = true
         override val writable: Boolean get() = false
@@ -402,7 +507,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
         @Volatile private var closed = false
 
         init {
-            openAt(0)
+            openAt(start)
         }
 
         @Synchronized
@@ -540,12 +645,12 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
     }
     private object Discard : OutputStream() { override fun write(value: Int) = Unit; override fun write(bytes: ByteArray, offset: Int, length: Int) = Unit }
 
-    private fun parseListing(path: String, bytes: ByteArray): List<RemoteEntry> {
+    private fun parseListing(path: String, bytes: ByteArray): List<FileEntry> {
         if (bytes.isEmpty()) return emptyList()
         require(bytes.last() == 0.toByte()) { "Incomplete SSH metadata response" }
         val fields = bytes.toString(Charsets.UTF_8).split('\u0000').dropLast(1)
         require(fields.size % 10 == 0) { "Invalid SSH metadata response; a login script may be writing to stdout" }
-        val entries = ArrayList<RemoteEntry>(fields.size / 10)
+        val entries = ArrayList<FileEntry>(fields.size / 10)
         var dirProbe: Probe? = null
         fields.chunked(10).forEach { values ->
             if (values[0] == "P/") {
@@ -554,26 +659,32 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
                 val blocks = values[2].toLongOrNull() ?: 0
                 val available = values[3].toLongOrNull() ?: 0
                 dirProbe = Probe(
-                    entry = RemoteEntry(
+                    entry = FileEntry(
                         name = path.substringAfterLast('/').ifEmpty { "/" },
+                        path = "",
                         isDirectory = true,
+                        modifiedAt = 0,
                         mode = 0x41ED,
                     ),
                     canWrite = values[4] == "y",
-                    space = if (blocks > 0) RemoteSpace(blocks * 1024, available * 1024) else null,
+                    space = if (blocks > 0) (blocks * 1024) to (available * 1024) else null,
                     at = System.currentTimeMillis(),
                 )
                 return@forEach
             }
-            require(values[1] in setOf("d", "f") && values[4] in setOf("y", "n")) { "Invalid SSH metadata fields" }
+            require(
+                values[1] in setOf("d", "f", "l", "N", "b", "c", "p", "s", "D") &&
+                    values[4] in setOf("y", "n", "l", "f", "d", "b", "c", "p", "s", "D"),
+            ) { "Invalid SSH metadata fields" }
             val isDirectory = values[1] == "d"
             val permissions = values[5].toIntOrNull(8) ?: 0
-            entries += RemoteEntry(
+            entries += FileEntry(
                 name = values[0],
+                path = "",
                 isDirectory = isDirectory,
                 size = values[2].toLong(),
-                modifiedAt = values[3].toLong() * 1000,
-                isSymlink = values[4] == "y",
+                modifiedAt = (values[3].substringBefore('.').toLongOrNull() ?: 0L) * 1000,
+                isSymlink = values[4] == "y" || values[4] == "l",
                 mode = (if (isDirectory) 0x4000 else 0x8000) or permissions,
                 uid = values[6].toIntOrNull() ?: -1,
                 gid = values[7].toIntOrNull() ?: -1,
@@ -586,12 +697,14 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
     }
     companion object {
         private const val PROBE_TTL_MS = 3_000L
+        private const val CHUNK = 1024 * 1024
+        private const val UPGRADE_BYTES = 4L * 1024 * 1024
         private val probes = HashMap<String, Probe>()
 
         private data class Probe(
-            val entry: RemoteEntry?,
+            val entry: FileEntry?,
             val canWrite: Boolean,
-            val space: RemoteSpace?,
+            val space: Pair<Long, Long>?,
             val at: Long,
         )
 
@@ -626,8 +739,9 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
             require(size != null && modified != null) {
                 "Invalid SSH metadata response; a login script may be writing to stdout"
             }
-            val entry = RemoteEntry(
+            val entry = FileEntry(
                 name = path.substringAfterLast('/').ifEmpty { "/" },
+                path = "",
                 isDirectory = isDirectory,
                 size = size,
                 modifiedAt = modified * 1000,
@@ -635,10 +749,7 @@ internal class SshExecBackend(private val location: RemoteLocation) : RemoteBack
                 mode = if (isDirectory) 0x41ED else 0x81A4,
             )
             val space = if (fields.size >= 10 && fields[7] == "S") {
-                RemoteSpace(
-                    totalBytes = fields[8].toLong() * 1024,
-                    usableBytes = fields[9].toLong() * 1024,
-                )
+                (fields[8].toLong() * 1024) to (fields[9].toLong() * 1024)
             } else null
             return Probe(entry, fields[6] == "y", space, now)
         }

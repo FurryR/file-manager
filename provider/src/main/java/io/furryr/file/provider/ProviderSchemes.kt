@@ -1,6 +1,6 @@
 package io.furryr.file.provider
 
-import io.furryr.file.provider.remote.RemoteKind
+import io.furryr.file.provider.remote.RemoteSchemes
 
 /**
  * The schemes the app treats as remote storage or web locations.
@@ -15,7 +15,7 @@ object ProviderSchemes {
     const val HTTP = "http"
     const val HTTPS = "https"
 
-    private val remoteSchemes = linkedSetOf(FTP, SFTP, RemoteKind.ALIST.scheme, RemoteKind.SSH.scheme)
+    private val remoteSchemes = linkedSetOf(FTP, SFTP, RemoteSchemes.ALIST, RemoteSchemes.SSH)
     private val webSchemes = linkedSetOf(HTTP, HTTPS)
 
     /** Locations that persist credentials and appear in the network group. */

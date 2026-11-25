@@ -16,6 +16,10 @@ import io.furryr.file.provider.remote.RemoteLocation
  *
  * Libraries receive this object through their narrow source interfaces; only
  * the app opens the SQLite databases and encrypted files behind them.
+ *
+ * FTP/SFTP rows store only an identity reference. This facade resolves the
+ * password for the provider and folds legacy inline passwords into identities
+ * once, so a provider never reads the identity store.
  */
 object LocationStores :
     SafLocationSource,
@@ -41,22 +45,56 @@ object LocationStores :
         sftp = SftpDatabase(context.applicationContext)
         RemoteLocationStore.init(context.applicationContext)
         DocumentTreeStore.init(context.applicationContext)
+        migrateServerIdentities()
         initialized = true
+    }
+
+    /** Fold legacy inline FTP/SFTP passwords into shared password identities. */
+    @Synchronized
+    fun migrateServerIdentities() {
+        ftp.getAll().forEach { server ->
+            if (server.identityId.isBlank() && server.password.isNotBlank()) {
+                val identity = IdentityRepository.ensure(
+                    name = server.name.ifBlank { server.host },
+                    password = server.password,
+                )
+                ftp.setIdentity(server.host, identity.id)
+            }
+        }
+        sftp.getAll().forEach { server ->
+            if (server.identityId.isBlank() && server.password.isNotBlank()) {
+                val identity = IdentityRepository.ensure(
+                    name = server.name.ifBlank { server.host },
+                    password = server.password,
+                )
+                sftp.setIdentity(server.host, identity.id)
+            }
+        }
     }
 
     override fun safLocations(): List<SafLocation> = saf.getAll()
 
     override fun safLocation(hexId: String): SafLocation? = saf.findByHexId(hexId)
 
-    override fun ftpServers(): List<FtpServer> = ftp.getAll()
+    override fun ftpServers(): List<FtpServer> = ftp.getAll().map { it.withResolvedPassword() }
 
-    override fun ftpServer(host: String): FtpServer? = ftp.findByHost(host)
+    override fun ftpServer(host: String): FtpServer? = ftp.findByHost(host)?.withResolvedPassword()
 
-    override fun sftpServers(): List<SftpServer> = sftp.getAll()
+    override fun sftpServers(): List<SftpServer> = sftp.getAll().map { it.withResolvedPassword() }
 
-    override fun sftpServer(host: String): SftpServer? = sftp.findByHost(host)
+    override fun sftpServer(host: String): SftpServer? = sftp.findByHost(host)?.withResolvedPassword()
 
-    override fun remoteLocations(): List<RemoteLocation> = RemoteLocationStore.all()
+    override fun remoteLocations(): List<RemoteLocation> = RemoteLocationStore.remoteLocations()
 
     override fun documentTree(id: String): String? = DocumentTreeStore.documentTree(id)
+
+    private fun FtpServer.withResolvedPassword(): FtpServer = copy(
+        password = if (identityId.isBlank()) password
+        else RemoteLocationStore.identityPassword(identityId),
+    )
+
+    private fun SftpServer.withResolvedPassword(): SftpServer = copy(
+        password = if (identityId.isBlank()) password
+        else RemoteLocationStore.identityPassword(identityId),
+    )
 }

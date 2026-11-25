@@ -18,7 +18,7 @@ import io.furryr.file.core.model.FileEntry
 import io.furryr.file.core.model.ProviderStat
 import io.furryr.file.home.Bookmarks
 import io.furryr.file.home.HomeEntry
-import io.furryr.file.model.PageKind
+import io.furryr.file.model.PageIcon
 import io.furryr.file.terminal.TerminalTab
 import io.furryr.file.terminal.TermuxTerminalTab
 import kotlinx.coroutines.CoroutineScope
@@ -153,6 +153,9 @@ interface RendererContext {
 
     /** Cache the renderer's tab title on its page. */
     fun submitTitle(title: String?) {}
+
+    /** Replace the page icon after loading reported a better image. */
+    fun updatePageIcon(icon: PageIcon) {}
 
     /** Android context for renderers that hand off outside the app. */
     val context: Context? get() = null

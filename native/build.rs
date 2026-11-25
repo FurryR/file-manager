@@ -1,4 +1,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The proto lives outside this crate; without this, the explicit
+    // rerun-if-changed directives below stop cargo from watching it.
+    println!("cargo:rerun-if-changed=../proto/file_daemon.proto");
     prost_build::compile_protos(&["../proto/file_daemon.proto"], &["../proto"])?;
 
     // libsepol is cross-compiled by `native/build-libsepol.sh` and linked

@@ -17,7 +17,7 @@ import java.security.MessageDigest
  * [SshLease]s, so callers always release them again. A dead session is replaced
  * once per open before the caller observes the failure.
  */
-internal class SshConnection(private val location: RemoteLocation) {
+internal class SshConnection(private val location: SshLocation) {
     private var session: Session? = null
 
     fun acquire(): Session = synchronized(this) {
@@ -63,7 +63,7 @@ internal class SshConnection(private val location: RemoteLocation) {
         session = null
     }
 
-    private fun connect(location: RemoteLocation): Session {
+    private fun connect(location: SshLocation): Session {
         val jsch = JSch()
         val repository = PinnedHostKey(location.hostKey)
         jsch.setHostKeyRepository(repository)
@@ -137,7 +137,7 @@ internal class SshConnection(private val location: RemoteLocation) {
 }
 
 /** Identity of a connection: editing host, user or credentials retires the pool. */
-private fun connectionSignature(location: RemoteLocation): String = listOf(
+private fun connectionSignature(location: SshLocation): String = listOf(
     location.host, location.port.toString(), location.username,
     location.password, location.privateKey, location.passphrase, location.hostKey,
 ).joinToString("\u0000")
@@ -173,9 +173,6 @@ internal class SshLease internal constructor(
  * terminal sessions are destroyed when the terminal closes.
  */
 internal object SshConnections {
-    /** Upper bound for recycled sessions; past it leases share the least busy. */
-    private const val MAX_REUSED = 6
-
     private class Slot(val connection: SshConnection, var transient: Boolean) {
         var busy = 0
     }
@@ -187,20 +184,11 @@ internal object SshConnections {
     private val entries = HashMap<String, Entry>()
 
     /** Lease for a file operation; the session stays pooled after [SshLease.close]. */
-    fun open(location: RemoteLocation): SshLease {
+    fun open(location: SshLocation): SshLease {
         val entry = entry(location)
         val slot = synchronized(entry) {
-            val reusable = entry.slots.filter { !it.transient }
-            val chosen = reusable.firstOrNull { it.busy == 0 } ?: run {
-                if (reusable.size < MAX_REUSED) {
-                    Slot(SshConnection(location), transient = false).also { entry.slots.add(it) }
-                } else {
-                    // Every pooled session is busy: share the least loaded one
-                    // instead of blocking; only isolation degrades.
-                    reusable.minByOrNull { it.busy }
-                        ?: Slot(SshConnection(location), transient = false).also { entry.slots.add(it) }
-                }
-            }
+            val chosen = entry.slots.firstOrNull { !it.transient && it.busy == 0 }
+                ?: Slot(SshConnection(location), transient = false).also { entry.slots.add(it) }
             chosen.busy++
             chosen
         }
@@ -212,7 +200,7 @@ internal object SshConnections {
      * exit. An already-warm idle session is reused so a terminal opens without
      * a fresh handshake, and it is dropped instead of recycled afterwards.
      */
-    fun terminal(location: RemoteLocation): SshLease {
+    fun terminal(location: SshLocation): SshLease {
         val entry = entry(location)
         val slot = synchronized(entry) {
             (entry.slots.firstOrNull { it.busy == 0 }
@@ -234,7 +222,7 @@ internal object SshConnections {
         entries.clear()
     }
 
-    @Synchronized private fun entry(location: RemoteLocation): Entry {
+    @Synchronized private fun entry(location: SshLocation): Entry {
         val signature = connectionSignature(location)
         entries[location.id]?.takeIf { it.signature == signature }?.let { return it }
         entries.remove(location.id)?.let { closeEntry(it) }

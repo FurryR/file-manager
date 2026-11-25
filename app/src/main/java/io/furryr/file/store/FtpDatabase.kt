@@ -8,8 +8,16 @@ class FtpDatabase(context: Context) : ServerDatabase<FtpServer>(
     context = context,
     name = "ftp_servers.db",
     defaultPort = 21,
-    mapper = { host, name, port, username, password, sortOrder ->
-        FtpServer(host, name, port, username, password, sortOrder)
+    mapper = { host, name, port, username, password, identityId, sortOrder ->
+        FtpServer(
+            host = host,
+            name = name,
+            port = port,
+            username = username,
+            password = password,
+            sortOrder = sortOrder,
+            identityId = identityId,
+        )
     },
     nameOf = { it.name },
 ), FtpServerSource {
@@ -22,10 +30,10 @@ class FtpDatabase(context: Context) : ServerDatabase<FtpServer>(
     fun restore(servers: List<FtpServer>) {
         for (server in servers) {
             writableDatabase.execSQL(
-                "INSERT OR REPLACE INTO servers (host, name, port, username, password, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO servers (host, name, port, username, password, identity_id, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 arrayOf(
                     server.host, server.name, server.port,
-                    server.username, server.password, server.sortOrder,
+                    server.username, server.password, server.identityId, server.sortOrder,
                 ),
             )
         }

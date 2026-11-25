@@ -49,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -68,7 +69,7 @@ import io.furryr.file.core.model.ProviderStat
 import io.furryr.file.core.runCatchingCancellable
 import io.furryr.file.home.HomeEntry
 import io.furryr.file.home.HomeEntryKind
-import io.furryr.file.model.PageKind
+import io.furryr.file.model.PageIcon
 import io.furryr.file.ui.util.BrowseAddress
 import io.furryr.file.terminal.TerminalTab
 import io.furryr.file.terminal.WebDevToolsHost
@@ -148,6 +149,9 @@ internal class WebRendererSession(
     val isRemote: Boolean get() = liveBase != null
     override val isLive: Boolean get() = isRemote
     override val webAddress: String? get() = address
+
+    var pageIcon by mutableStateOf<PageIcon>(PageIcon.Vector(Icons.Default.Language))
+        private set
     override val title: String? get() =
         titleState ?: document.file.name.takeIf { it.isNotBlank() }
 
@@ -177,9 +181,22 @@ internal class WebRendererSession(
             }
             return RenderCapabilities(
                 up = up,
-                terminal = TerminalFactory { WebDevToolsTab(this, "DevTools") },
+                terminal = TerminalFactory {
+                    devToolsTab?.takeUnless { it.isDisposed }
+                        ?: WebDevToolsTab(this) { devToolsLabel() }.also { devToolsTab = it }
+                },
             )
         }
+
+    /** One DevTools tab per page: its frontend owns the only CDP connection. */
+    private var devToolsTab: WebDevToolsTab? = null
+
+    private fun devToolsLabel(): String {
+        val page = pageTitle?.takeIf { it.isNotBlank() }
+            ?: document.file.name?.takeIf { it.isNotBlank() }
+            ?: address
+        return "DevTools · $page"
+    }
 
     override fun bookmarkEntry(): HomeEntry? {
         val location = address.takeIf { it.isNotBlank() } ?: return null
@@ -600,6 +617,8 @@ internal class WebRendererSession(
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                     if (closing || view == null || view !== webView) return
                     this@WebRendererSession.userScripts?.onPageStarted()
+                    pageIcon = PageIcon.Vector(Icons.Default.Language)
+                    host?.updatePageIcon(pageIcon)
                     updateAddress(url)
                     setPageProgress(0)
                     contentVisible = false
@@ -664,6 +683,12 @@ internal class WebRendererSession(
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                     if (closing || view == null || view !== webView) return
                     setPageProgress(if (newProgress >= 100) null else newProgress)
+                }
+
+                override fun onReceivedIcon(view: WebView?, icon: android.graphics.Bitmap?) {
+                    if (closing || view == null || view !== webView || icon == null) return
+                    pageIcon = PageIcon.Bitmap(icon.asImageBitmap())
+                    host?.updatePageIcon(pageIcon)
                 }
 
                 override fun onReceivedTitle(view: WebView?, title: String?) {
@@ -1263,7 +1288,7 @@ class WebRenderer(
 ) : RendererBase<WebPageState>(initialState) {
     val state: WebPageState get() = webSession.state
     override val pagePath: String get() = state.address
-    override val pageKind: PageKind = PageKind.PAGE
+    override val pageIcon: PageIcon get() = webSession.pageIcon
 
     private val webSession: WebRendererSession get() = session as WebRendererSession
 

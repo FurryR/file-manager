@@ -24,6 +24,7 @@ import android.text.InputType
 class WaylandView(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
     private var attachedSurface: Surface? = null
     private var composing = ""
+    private var keyboardGesture = false
     /** True when the focused client enabled zwp_text_input_v3 (GTK/Qt widgets). */
     private var textInputActive = false
     private val imm get() = context.getSystemService(InputMethodManager::class.java)
@@ -205,6 +206,27 @@ class WaylandView(context: Context) : SurfaceView(context), SurfaceHolder.Callba
                     NativeCompositor.nativePointerButton(button, true, event.eventTime)
                 MotionEvent.ACTION_UP ->
                     NativeCompositor.nativePointerButton(button, false, event.eventTime)
+            }
+            return true
+        }
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) keyboardGesture = false
+        if (!keyboardGesture && event.actionMasked == MotionEvent.ACTION_POINTER_DOWN && event.pointerCount == 3) {
+            // Retire the two touches already sent to the client before taking
+            // ownership of the gesture. Suppress it until every finger is up.
+            repeat(event.pointerCount) { i ->
+                if (i != event.actionIndex) {
+                    NativeCompositor.nativeTouch(
+                        MotionEvent.ACTION_CANCEL, event.getPointerId(i),
+                        event.getX(i), event.getY(i), event.eventTime,
+                    )
+                }
+            }
+            keyboardGesture = true
+            post { showKeyboard() }
+        }
+        if (keyboardGesture) {
+            if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                keyboardGesture = false
             }
             return true
         }

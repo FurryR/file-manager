@@ -132,8 +132,12 @@ fun DaemonConnection.accounts(): Result<SystemAccounts> = runCatching {
         .setAccounts(AccountsRequest.getDefaultInstance())
         .build()).response
     SystemAccounts(
-        users = resp.accounts.usersList.map { SystemAccount(it.id.toInt(), it.name) },
-        groups = resp.accounts.groupsList.map { SystemAccount(it.id.toInt(), it.name) },
+        users = resp.accounts.usersList.map {
+            SystemAccount(it.id.toInt(), it.name, it.description, it.icon)
+        },
+        groups = resp.accounts.groupsList.map {
+            SystemAccount(it.id.toInt(), it.name, it.description, it.icon)
+        },
     )
 }
 

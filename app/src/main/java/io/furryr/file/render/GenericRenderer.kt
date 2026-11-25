@@ -8,7 +8,8 @@ import io.furryr.file.core.OpenIcon
 import io.furryr.file.core.OpenOption
 import io.furryr.file.core.VFile
 import io.furryr.file.core.model.FileEntry
-import io.furryr.file.model.PageKind
+import io.furryr.file.model.PageIcon
+import io.furryr.file.ui.icons.Icons
 import io.furryr.file.ui.shell.GenericLoaderDialog
 import io.furryr.file.ui.util.openFile
 import kotlinx.coroutines.Dispatchers
@@ -51,7 +52,7 @@ internal class GenericRenderer(
 ) : RendererBase<GenericPageState>(initialState) {
     val state: GenericPageState get() = genericSession.state
     override val pagePath: String = file.path.toString()
-    override val pageKind: PageKind = PageKind.FILE
+    override val pageIcon: PageIcon get() = PageIcon.Vector(Icons.Default.Description)
 
     private val genericSession: GenericRendererSession get() = session as GenericRendererSession
 

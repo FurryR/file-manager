@@ -107,15 +107,14 @@ object SshTerminals {
         this.locations = locations
     }
 
-    fun find(id: String): RemoteLocation {
-        val sshLocations = locations.remoteLocations().filter { it.kind == RemoteKind.SSH }
+    fun find(id: String): SshLocation {
+        val sshLocations = locations.remoteLocations().filterIsInstance<SshLocation>()
         return (sshLocations.firstOrNull { it.id == id }
             ?: sshLocations.firstOrNull { it.pathAuthority == id }
             ?: error("Remote connection no longer exists; edit the location"))
     }
 
-    fun open(location: RemoteLocation, startPath: String?, rows: Int, cols: Int): SshShell {
-        require(location.kind == RemoteKind.SSH) { "Remote connection is not SSH" }
+    fun open(location: SshLocation, startPath: String?, rows: Int, cols: Int): SshShell {
         val lease = SshConnections.terminal(location)
         try {
             val channel = lease.connection.open("shell") { shell: ChannelShell ->

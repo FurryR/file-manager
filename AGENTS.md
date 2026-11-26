@@ -1107,6 +1107,7 @@ Philosophy for every remaining phase:
 - [ ] `provider/.../remote/SshExecBackend.kt`: verify the GNU `find -printf` listing branch (type, symlink target type, mode, uid/gid, owner/group names, `%T@` seconds) and the BSD fallback on a server without `-printf`, including a large directory, hidden files, spaces and unicode names.
 - [ ] `proxy/.../ZipArchiveSource.kt`: verify reading the local header name/extra keeps the first entry read sequential (no extra channel reopen) for local, SSH worker and streaming sources, and that a truncated header still reports an error.
 - [ ] `provider/.../remote/SshConnection.kt`: verify the removed session cap — every busy pool dials another session with no upper bound, idle sessions are still reused, `forget`/`disconnect` close all of them, and server `MaxSessions`/fd limits are not exhausted by many concurrent SSH opens or previews.
+- [ ] `provider/.../remote/SshWorker.kt`: verify on a real server that sequential and random 1 MiB worker reads after the first chunk no longer stall (blocking payload read replaced the `available()` poll), that cancellation still breaks a read out of the pipe via `InterruptedIOException`, and that a truncated reply (fewer bytes than the `R <id> <count>` header) ends when the channel/session dies; the old per-read 120 s idle timeout no longer applies to the payload.
 
 ## NOTICE
 

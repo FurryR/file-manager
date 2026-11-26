@@ -2,6 +2,7 @@ package io.furryr.file.provider.remote
 
 import com.jcraft.jsch.ChannelExec
 import java.io.InputStream
+import java.io.InterruptedIOException
 import java.io.OutputStream
 import kotlin.math.min
 
@@ -124,19 +125,24 @@ internal class SshWorker(private val location: SshLocation) {
     private fun readBytes(input: InputStream, length: Int): ByteArray {
         val out = ByteArray(length)
         var filled = 0
-        var lastActivity = System.nanoTime()
         while (filled < length) {
             if (Thread.currentThread().isInterrupted) throw SshException(SshError.CANCELLED)
+            // JSch hands the channel data to a JDK pipe. Its writer only wakes
+            // up when a reader blocks inside the pipe; polling available() with
+            // a sleep lets the kernel-sized pipe fill, and every full buffer then
+            // costs the writer's one-second wait timeout. That is the "second
+            // block never arrives" stall. A blocking read drains promptly, and
+            // an interrupt still breaks it (InterruptedIOException).
             val available = input.available()
-            if (available <= 0) {
-                if (System.nanoTime() - lastActivity > TIMEOUT_NS) throw SshException(SshError.TIMEOUT)
-                Thread.sleep(2)
-                continue
+            val wanted = if (available > 0) min(available, length - filled) else 1
+            val read = try {
+                input.read(out, filled, wanted)
+            } catch (failure: InterruptedIOException) {
+                Thread.currentThread().interrupt()
+                throw SshException(SshError.CANCELLED, cause = failure)
             }
-            val read = input.read(out, filled, min(available, length - filled))
             if (read < 0) throw SshException(SshError.CHANNEL)
             filled += read
-            lastActivity = System.nanoTime()
         }
         return out
     }
